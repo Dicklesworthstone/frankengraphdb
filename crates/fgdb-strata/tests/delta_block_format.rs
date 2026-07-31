@@ -18,9 +18,10 @@
 
 use fgdb_delta_types::RelationId;
 use fgdb_strata::{
-    AdjacencyEntry, BLOCK_FORMAT_V1, BLOCK_MAGIC, BlockError, MAX_BLOCK_ENTRIES, decode_block,
-    encode_block, scan_neighbours,
+    AdjacencyEntry, BLOCK_FORMAT_V1, BLOCK_MAGIC, BlockError, MAX_BLOCK_ENTRIES, block_id,
+    decode_block, encode_block, read_block, scan_neighbours,
 };
+use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{CommitSeq, VId};
 
 const REL: RelationId = RelationId(1);
@@ -376,5 +377,136 @@ fn an_empty_block_is_valid() {
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(1)).expect("scans"),
         Vec::<VId>::new()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Block identity
+// ---------------------------------------------------------------------------
+
+const K_OID: [u8; 32] = [0x5a; 32];
+
+fn namespace() -> DatabaseSecurityNamespaceId {
+    DatabaseSecurityNamespaceId([0x77; 32])
+}
+
+/// Identity is a function of the CONTENT: the same block always has the same id,
+/// and any different block has a different one.
+#[test]
+fn identity_is_derived_from_content() {
+    let a = encode_block(&sample()).expect("encodes");
+    assert_eq!(
+        block_id(&K_OID, namespace(), &a),
+        block_id(&K_OID, namespace(), &a),
+        "identity must be a function, not a fresh value"
+    );
+
+    let mut other = sample();
+    other[2].created_at = CommitSeq(4);
+    let b = encode_block(&other).expect("encodes");
+    assert_ne!(
+        block_id(&K_OID, namespace(), &a),
+        block_id(&K_OID, namespace(), &b),
+        "one changed sequence must change the identity"
+    );
+}
+
+/// Identity is SCOPED to the database's key and security namespace, so the same
+/// bytes in two databases are two different objects.
+///
+/// This is what makes it §5.1's logical object id rather than a bare content hash:
+/// an identity that ignored the namespace would let one database's block be named
+/// — and therefore fetched — by another's root.
+#[test]
+fn identity_is_scoped_to_the_database() {
+    let bytes = encode_block(&sample()).expect("encodes");
+    let mine = block_id(&K_OID, namespace(), &bytes);
+
+    assert_ne!(
+        mine,
+        block_id(&[0x11; 32], namespace(), &bytes),
+        "a different key is a different object"
+    );
+    assert_ne!(
+        mine,
+        block_id(&K_OID, DatabaseSecurityNamespaceId([0x22; 32]), &bytes),
+        "a different security namespace is a different object"
+    );
+}
+
+/// `read_block` returns the entries when the bytes ARE the block asked for.
+#[test]
+fn read_block_accepts_the_block_it_names() {
+    let entries = sample();
+    let bytes = encode_block(&entries).expect("encodes");
+    let id = block_id(&K_OID, namespace(), &bytes);
+    assert_eq!(
+        read_block(&K_OID, namespace(), &bytes, id).expect("reads"),
+        entries
+    );
+}
+
+/// THE LOAD-BEARING LAW: well-formed bytes that are the WRONG BLOCK are refused.
+///
+/// Every other refusal in this file is about malformed bytes. This one is about
+/// bytes that decode perfectly and are simply not what was asked for — the failure
+/// a content-addressed store exists to prevent, and the only one that is silent
+/// without this check. A partition root naming a block must be able to prove the
+/// bytes it found are that block rather than trusting the path they came from.
+#[test]
+fn read_block_refuses_a_different_block() {
+    let mine = encode_block(&sample()).expect("encodes");
+    let mut other_entries = sample();
+    other_entries[0].created_at = CommitSeq(9);
+    let other = encode_block(&other_entries).expect("encodes");
+
+    let expected = block_id(&K_OID, namespace(), &mine);
+    let actual = block_id(&K_OID, namespace(), &other);
+    assert_eq!(
+        read_block(&K_OID, namespace(), &other, expected),
+        Err(BlockError::IdentityMismatch { expected, actual }),
+        "a well-formed block that is not the requested one must be refused"
+    );
+    // And it is refused BEFORE decoding: the wrong block here is perfectly valid.
+    assert!(decode_block(&other).is_ok());
+}
+
+/// Identity is checked before the contents are interpreted, so damaged bytes that
+/// are also the wrong block report the identity failure rather than a parse error.
+///
+/// The order matters for the diagnostic: "you fetched the wrong object" sends an
+/// operator somewhere completely different from "this object is corrupt".
+#[test]
+fn identity_is_checked_before_the_contents() {
+    let bytes = encode_block(&sample()).expect("encodes");
+    let id = block_id(&K_OID, namespace(), &bytes);
+
+    let mut damaged = bytes.clone();
+    damaged.truncate(damaged.len() - 1);
+    assert!(
+        matches!(
+            read_block(&K_OID, namespace(), &damaged, id),
+            Err(BlockError::IdentityMismatch { .. })
+        ),
+        "truncated bytes are a different object before they are a short read"
+    );
+}
+
+/// An identity naming a block still gets the DECODER's laws: matching bytes that
+/// are internally malformed are refused, not blessed by their identity.
+///
+/// Identity says "these are the bytes you asked for"; it says nothing about
+/// whether those bytes are a lawful block. A reader that stopped at the identity
+/// check would accept an out-of-order block whose id happened to be requested —
+/// which is exactly how a forged root would smuggle one in.
+#[test]
+fn a_matching_identity_does_not_excuse_a_malformed_block() {
+    let entries = sample();
+    let forged = encode_forged(&[entries[1], entries[0], entries[2]]);
+    let id = block_id(&K_OID, namespace(), &forged);
+    assert_eq!(
+        read_block(&K_OID, namespace(), &forged, id),
+        Err(BlockError::NonCanonicalOrder { at: 1 }),
+        "identity is not a substitute for the decoder's laws"
     );
 }

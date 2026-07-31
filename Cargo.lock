@@ -603,6 +603,7 @@ dependencies = [
 name = "fgdb-strata"
 version = "0.0.1"
 dependencies = [
+ "fgdb-crypto",
  "fgdb-delta-types",
  "fgdb-types",
 ]

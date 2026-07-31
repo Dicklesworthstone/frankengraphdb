@@ -37,6 +37,7 @@
 #![forbid(unsafe_code)]
 
 use fgdb_delta_types::RelationId;
+use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, VId};
 
 /// `FGSB` — FrankenGraph Strata Block.
@@ -115,6 +116,16 @@ pub enum BlockError {
     CreatedAtZero { at: usize },
     /// More entries than this build will materialize from one block.
     ImplausibleEntryCount { declared: u32 },
+    /// The bytes are not the block that was asked for.
+    ///
+    /// Distinct from every other arm here: those say the bytes are malformed,
+    /// this says they are well-formed and WRONG. A content-addressed store that
+    /// returned a different object than the one named would be silent, which is
+    /// the one failure worse than refusing.
+    IdentityMismatch {
+        expected: ObjectId,
+        actual: ObjectId,
+    },
 }
 
 impl core::fmt::Display for BlockError {
@@ -145,6 +156,10 @@ impl core::fmt::Display for BlockError {
             Self::CreatedAtZero { at } => {
                 write!(f, "entry {at} claims creation at the empty stream")
             }
+            Self::IdentityMismatch { expected, actual } => write!(
+                f,
+                "these bytes are block {actual:?}, not the requested {expected:?}"
+            ),
             Self::ImplausibleEntryCount { declared } => {
                 write!(
                     f,
@@ -328,4 +343,60 @@ pub fn scan_neighbours(
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Block identity
+// ---------------------------------------------------------------------------
+
+/// The content identity of an encoded block.
+///
+/// **DERIVED, NEVER ACCEPTED**, which is the rule every durable object in this
+/// codebase follows: a caller cannot name one block and store another. It is
+/// §5.1's keyed `logical_object_id` over the block's canonical bytes, the same
+/// function Chronicle's capsules use — not a private hash — so a block is a
+/// logical object in the same sense everything else is, scoped to its database's
+/// key and security namespace rather than globally guessable.
+///
+/// The identity is over the CANONICAL bytes, so it inherits canonicality: two
+/// encoders that disagree about order produce different bytes and therefore
+/// different identities, and there is no way to have one identity name two
+/// contents.
+///
+/// SUBSET NOTE (doctrine 7): this is the ObjectId step of §5.1 and only that step.
+/// A block is not sealed, so it has no CiphertextId, no EncodingId, and no
+/// erasure coding — sealing it into a capsule is a later slice, and the pipeline's
+/// remaining stages arrive with it rather than being approximated here.
+pub fn block_id(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+) -> ObjectId {
+    // Empty canonical header, payload is the block: the same shape
+    // `IdentifiedObject::new` uses for a capsule's plaintext. The block's own
+    // magic already separates it from any other payload with equal bytes.
+    ObjectId(fgdb_crypto::logical_object_id(k_oid, &namespace.0, &[], bytes).0)
+}
+
+/// Decode a block that must be the one named by `expected`.
+///
+/// The identity is checked BEFORE the contents are interpreted, because the
+/// question "are these the bytes I asked for" is not answerable from a decoded
+/// value: a block that decodes cleanly and is the wrong block is exactly the
+/// failure a content-addressed store exists to prevent, and it is silent.
+///
+/// This is the read path a partition root will use once one exists — a root names
+/// a block by identity, and the reader must be able to prove the bytes it found
+/// are that block rather than trusting the path it read them from.
+pub fn read_block(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: ObjectId,
+) -> Result<Vec<AdjacencyEntry>, BlockError> {
+    let actual = block_id(k_oid, namespace, bytes);
+    if actual != expected {
+        return Err(BlockError::IdentityMismatch { expected, actual });
+    }
+    decode_block(bytes)
 }

@@ -5,6 +5,11 @@ edition = "2024"
 description = "Strata (B2): the graph-structured LSM. This activation lands tier one's durable artifact — the canonical delta-block format: a sorted, versioned adjacency run with an exact byte layout, a fail-closed decoder, and snapshot-visible scans read from the encoded form. Sealing, compressed CSR runs, archived anchors and the stable-ID directory are not here; bead fgdb-w3-tier-d-ctj."
 publish = false
 
+# §5.1's keyed logical object identity, so a block is content-addressed the same
+# way every other durable object is rather than by a private hash.
+[dependencies.fgdb-crypto]
+path = "../fgdb-crypto"
+
 [dependencies.fgdb-types]
 path = "../fgdb-types"
 
