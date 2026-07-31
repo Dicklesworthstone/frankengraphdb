@@ -62,6 +62,14 @@ const PUBLICATION_LOCK_FILE: &str = ".block-publication.lock";
 /// can become canonical.
 const PUBLICATION_STAGING_FILE: &str = ".block-publication.staging";
 
+/// The largest persisted Strata object this store will materialize.
+///
+/// A block entry occupies 56 bytes, so 64 bytes per admitted entry leaves room
+/// for the block header and is also comfortably above the smaller root-format
+/// maximum. The bound follows the format's cardinality ceiling instead of being
+/// an unrelated process-local allocation policy.
+const MAX_STORED_OBJECT_BYTES: u64 = (crate::MAX_BLOCK_ENTRIES as u64) * 64;
+
 /// Creation-only crash instants that distinguish inode durability from
 /// namespace durability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +155,11 @@ struct BlockPublicationPermit {
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),
+    /// A persisted object exceeds the finite byte ceiling this store can read.
+    ObjectTooLarge {
+        limit: u64,
+        observed: u64,
+    },
     /// The bytes at the block's path are not the block that path names.
     ///
     /// Damage, or a store that was written by something that did not derive the
@@ -179,6 +192,10 @@ impl core::fmt::Display for StoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(error) => write!(f, "block store io: {error}"),
+            Self::ObjectTooLarge { limit, observed } => write!(
+                f,
+                "stored object has at least {observed} bytes, above the {limit}-byte limit"
+            ),
             Self::IdentityMismatch { expected, actual } => write!(
                 f,
                 "the bytes stored for {expected:?} are actually {actual:?}"
@@ -198,6 +215,29 @@ impl From<std::io::Error> for StoreError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
     }
+}
+
+fn ensure_size_within_limit(observed: u64, limit: u64) -> Result<(), StoreError> {
+    if observed > limit {
+        return Err(StoreError::ObjectTooLarge { limit, observed });
+    }
+    Ok(())
+}
+
+fn read_bounded(file: &mut File, limit: u64) -> Result<Vec<u8>, StoreError> {
+    ensure_size_within_limit(file.metadata()?.len(), limit)?;
+
+    let mut bytes = Vec::new();
+    {
+        // Metadata is only an early refusal, not authority: the inode could grow
+        // after it was read. One extra byte distinguishes the exact ceiling from
+        // an over-limit stream without ever materializing the unbounded tail.
+        let mut bounded = file.take(limit.saturating_add(1));
+        bounded.read_to_end(&mut bytes)?;
+    }
+    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    ensure_size_within_limit(observed, limit)?;
+    Ok(bytes)
 }
 
 /// A directory of content-addressed Strata blocks.
@@ -374,6 +414,9 @@ impl BlockStore {
         before_lock: impl FnOnce(),
         after_staging_sync: impl FnOnce(),
     ) -> Result<ObjectId, StoreError> {
+        let offered_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        ensure_size_within_limit(offered_len, MAX_STORED_OBJECT_BYTES)?;
+
         let id = block_id(&self.k_oid, self.namespace, bytes);
         let path = self.path(id);
 
@@ -393,9 +436,11 @@ impl BlockStore {
                     )
                     .into());
                 }
-                let mut existing = Vec::new();
                 let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
-                file.read_to_end(&mut existing)?;
+                if file.metadata()?.len() != offered_len {
+                    return Err(StoreError::Collision { block_id: id });
+                }
+                let existing = read_bounded(&mut file, offered_len)?;
                 if existing != bytes {
                     return Err(StoreError::Collision { block_id: id });
                 }
@@ -479,16 +524,7 @@ impl BlockStore {
     /// the expected path — the exact failure content-addressing exists to prevent,
     /// and the one that is silent.
     pub fn get(&self, id: ObjectId) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
-        let mut bytes = Vec::new();
-        File::open(self.path(id))?.read_to_end(&mut bytes)?;
-
-        let actual = block_id(&self.k_oid, self.namespace, &bytes);
-        if actual != id {
-            return Err(StoreError::IdentityMismatch {
-                expected: id,
-                actual,
-            });
-        }
+        let bytes = self.get_bytes(id)?;
         decode_block(&bytes).map_err(StoreError::Malformed)
     }
 
@@ -497,8 +533,8 @@ impl BlockStore {
     /// For a caller that needs the bytes themselves — sealing into a capsule,
     /// copying to a replica — and must not pay to decode them.
     pub fn get_bytes(&self, id: ObjectId) -> Result<Vec<u8>, StoreError> {
-        let mut bytes = Vec::new();
-        File::open(self.path(id))?.read_to_end(&mut bytes)?;
+        let mut file = File::open(self.path(id))?;
+        let bytes = read_bounded(&mut file, MAX_STORED_OBJECT_BYTES)?;
         let actual = block_id(&self.k_oid, self.namespace, &bytes);
         if actual != id {
             return Err(StoreError::IdentityMismatch {
@@ -575,11 +611,15 @@ impl BlockStore {
 
 #[cfg(test)]
 mod durability_tests {
-    use super::{BlockStore, PUBLICATION_STAGING_FILE, StoreError, run_ordered_creation_barrier};
+    use super::{
+        BlockStore, MAX_STORED_OBJECT_BYTES, PUBLICATION_STAGING_FILE, StoreError, read_bounded,
+        run_ordered_creation_barrier,
+    };
     use asupersync::lab::run_async_under_lab;
     use fgdb_types::context::{CommitCx, PurposeContexts};
     use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
     use std::cell::RefCell;
+    use std::fs::File;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, mpsc::sync_channel};
     use std::thread::JoinHandle;
@@ -609,6 +649,42 @@ mod durability_tests {
             "lab invariant violation: {report:?}"
         );
         output
+    }
+
+    #[test]
+    fn persisted_object_reads_refuse_the_limit_plus_one_byte() {
+        let dir = scratch_dir("bounded-read");
+        let path = dir.join("object");
+        std::fs::write(&path, [1, 2, 3]).expect("fixture");
+        let mut file = File::open(path).expect("open fixture");
+
+        assert!(matches!(
+            read_bounded(&mut file, 2),
+            Err(StoreError::ObjectTooLarge {
+                limit: 2,
+                observed: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn oversized_canonical_inode_is_refused_before_identity_materialization() {
+        let dir = scratch_dir("oversized-canonical-inode");
+        under_lab(48, move |cx| {
+            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            let id = ObjectId([0x48; 32]);
+            let file = File::create(store.path(id)).expect("create sparse fixture");
+            file.set_len(MAX_STORED_OBJECT_BYTES + 1)
+                .expect("extend sparse fixture");
+
+            assert!(matches!(
+                store.get_bytes(id),
+                Err(StoreError::ObjectTooLarge {
+                    limit: MAX_STORED_OBJECT_BYTES,
+                    observed
+                }) if observed == MAX_STORED_OBJECT_BYTES + 1
+            ));
+        });
     }
 
     #[test]
