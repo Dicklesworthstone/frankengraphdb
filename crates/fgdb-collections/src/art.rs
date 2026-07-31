@@ -1014,24 +1014,9 @@ impl<'region, V> Node<'region, V> {
     }
 
     fn remove(&mut self, scope: &'region RegionScope, cx: &QueryCx, remaining: &[u8]) -> Option<V> {
-        // Iterative two-pass removal. The recursive form spent one native
-        // frame per level on the way down and per level on the unwind;
-        // attacker-steered key divergence made that a stack-overflow abort
-        // (fgdb-6k8q). The unwind is safe to flatten because of two
-        // representation invariants, both maintained by this file:
-        //
-        //   1. Before any removal, every inner node holds an entry OR at
-        //      least two children (splits create entry-or-two-children
-        //      parents; every completed removal recompresses eagerly).
-        //   2. Recompressing a node mutates only that node — its parent
-        //      keeps the same child count at the same edge.
-        //
-        // So on the unwind path every ancestor's recompress check is a
-        // no-op, the empty-child edge drop can happen only at the target's
-        // parent, and the only frames that can do real work are the target
-        // and its parent.
-
-        // Pass 1: descend to the node whose entry the key names.
+        // Iterative removal. The recursive form spent one native frame per
+        // level on both descent and unwind; attacker-steered key divergence
+        // made that a stack-overflow abort (fgdb-6k8q).
         let mut current = &mut *self;
         let mut rest = remaining;
         loop {
@@ -1054,38 +1039,58 @@ impl<'region, V> Node<'region, V> {
             return Some(removed);
         }
 
-        // Pass 2: the target became empty, so its parent drops the edge and
-        // recompresses. Re-descending reaches the same parent: pass 1 took
-        // an entry and (above) changed no prefix or edge on the path. The
-        // target is identified exactly — it is the child whose prefix
-        // consumes the last offered byte.
-        let mut parent = &mut *self;
+        // Prefix growth during recompression is intentionally best-effort.
+        // A prior allocator refusal can therefore leave several valid unary,
+        // entry-less ancestors on this path. When the descendant mapping is
+        // later removed, more than its immediate parent may become empty.
+        // Re-descend after each edge removal so the unwind needs neither a
+        // recursive call stack nor fallible path scratch. Every successful
+        // pass removes one non-root node, and every such node consumes an
+        // incoming key byte, so the original key length is a hard bound.
+        for _ in 0..remaining.len() {
+            if !self.prune_one_empty_child_on_path(scope, cx, remaining) {
+                break;
+            }
+        }
+        Some(removed)
+    }
+
+    fn prune_one_empty_child_on_path(
+        &mut self,
+        scope: &'region RegionScope,
+        cx: &QueryCx,
+        remaining: &[u8],
+    ) -> bool {
+        let mut current = self;
         let mut rest = remaining;
         loop {
-            rest = &rest[parent.prefix.len()..];
+            if !rest.starts_with(current.prefix.as_slice()) {
+                return false;
+            }
+            rest = &rest[current.prefix.len()..];
             if rest.is_empty() {
-                // The target was the root itself; there is no edge to drop.
-                return Some(removed);
+                // The named node is the root; its owner clears it after the
+                // logical removal returns.
+                return false;
             }
+
             let edge = rest[0];
-            let offered = &rest[1..];
-            let is_target = match parent.children.get(edge) {
-                Some(child) => offered.len() == child.prefix.len(),
-                None => unreachable!("pass 1 descended this exact edge"),
-            };
-            if is_target {
-                let child = parent.children.get(edge).expect("edge from pass 1");
-                debug_assert!(offered.starts_with(child.prefix.as_slice()));
-                debug_assert!(child.entry.is_none() && child.children.len() == 0);
-                let _ = parent.children.remove(scope, cx, edge);
-                parent.recompress_unary_best_effort(scope, cx);
-                return Some(removed);
+            rest = &rest[1..];
+            let child_is_empty = current
+                .children
+                .get(edge)
+                .is_some_and(|child| child.entry.is_none() && child.children.len() == 0);
+            if child_is_empty {
+                let removed = current.children.remove(scope, cx, edge);
+                debug_assert!(removed.is_some(), "the empty child was just observed");
+                current.recompress_unary_best_effort(scope, cx);
+                return true;
             }
-            rest = offered;
-            parent = match parent.children.get_mut(edge) {
-                Some(child) => child,
-                None => unreachable!("pass 1 descended this exact edge"),
+
+            let Some(child) = current.children.get_mut(edge) else {
+                return false;
             };
+            current = child;
         }
     }
 
@@ -2048,6 +2053,71 @@ mod tests {
         );
         assert_eq!(tree.remove(&cx, b"prefix-\xff"), Ok(Some(7)));
         assert!(tree.is_empty());
+        assert_eq!(tree.node_kind_histogram(), NodeKindHistogram::default());
+    }
+
+    /// fgdb-art-fallible-recompress-unwind-qtxx: optional prefix growth may
+    /// be refused after a logical deletion, leaving a valid unary node in the
+    /// path. A later deletion below that node must still unwind every newly
+    /// empty ancestor rather than stopping at the target's immediate parent.
+    #[test]
+    fn allocator_refusal_does_not_strand_empty_unary_ancestors() {
+        const LIVE_BUDGET: usize = 1 << 20;
+        let scope = RegionScope::with_capacity(LIVE_BUDGET, LIVE_BUDGET, 4 * LIVE_BUDGET);
+        let cx = query_cx();
+        let mut tree = AdaptiveRadixTree::new_in(&scope);
+        let branched_key = |edge, suffix| {
+            let mut key = Vec::with_capacity(98);
+            key.push(b'x');
+            key.extend(std::iter::repeat_n(b'a', 32));
+            key.push(edge);
+            key.extend(std::iter::repeat_n(suffix, 64));
+            key
+        };
+        let removed_first = branched_key(0, b'b');
+        let removed_second = branched_key(1, b'c');
+
+        assert_eq!(tree.insert(&cx, &removed_first, 1), Ok(None));
+        assert_eq!(tree.insert(&cx, &removed_second, 2), Ok(None));
+        assert_eq!(tree.insert(&cx, b"y", 3), Ok(None));
+
+        let x_branch = tree
+            .root
+            .as_ref()
+            .and_then(|root| root.children.get(b'x'))
+            .expect("the shared x branch exists");
+        assert_eq!(x_branch.children.len(), 2);
+        let survivor = x_branch
+            .children
+            .get(1)
+            .expect("the second divergent key is present");
+        let combined_len = x_branch.prefix.len() + 1 + survivor.prefix.len();
+        assert!(x_branch.prefix.capacity() < combined_len);
+
+        let pressure_bytes = LIVE_BUDGET
+            .checked_sub(scope.live_bytes())
+            .expect("the fixture stays within its live budget");
+        assert!(pressure_bytes > 0);
+        let _pressure = RegionVec::<u8>::with_capacity_in(&scope, &cx, pressure_bytes)
+            .expect("fill the remaining live-byte budget exactly");
+        assert_eq!(scope.live_bytes(), LIVE_BUDGET);
+
+        assert_eq!(tree.remove(&cx, &removed_first), Ok(Some(1)));
+        let x_branch = tree
+            .root
+            .as_ref()
+            .and_then(|root| root.children.get(b'x'))
+            .expect("allocator refusal keeps the unary x branch");
+        assert!(x_branch.entry.is_none());
+        assert_eq!(x_branch.children.len(), 1);
+
+        assert_eq!(tree.remove(&cx, &removed_second), Ok(Some(2)));
+        let root = tree.root.as_ref().expect("the y mapping remains");
+        assert!(root.children.get(b'x').is_none());
+        assert_eq!(owned_entries(&tree), vec![(b"y".to_vec(), 3)]);
+
+        assert_eq!(tree.remove(&cx, b"y"), Ok(Some(3)));
+        assert!(tree.root.is_none());
         assert_eq!(tree.node_kind_histogram(), NodeKindHistogram::default());
     }
 
