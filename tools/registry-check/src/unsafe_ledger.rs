@@ -2181,6 +2181,16 @@ fn workspace_unsafe_lint_level(workspace: &crate::toml::Table) -> Option<String>
     }
 }
 
+// SPELLING BOUNDARY, pinned by test: Cargo also accepts
+// `unsafe_code = { level = "forbid", priority = 0 }`, but that is an inline
+// table and this crate's TOML reader deliberately excludes inline tables
+// ("outside the registry subset"). The level/priority form therefore never
+// reaches this function: the manifest fails CLOSED as
+// `workspace_manifest_unparseable` — the safe direction, with a message
+// that says no boundary claim can be made. u9zp's relation — identical
+// spellings, one verdict — binds every spelling the parser can read; the
+// subset boundary itself is the documented exception, not a silent one.
+
 /// The workspace member roster, resolved through the one reader the appendix-A
 /// checker already uses so the two cannot drift apart.
 fn resolve_members(root: &Path, workspace: &crate::toml::Table) -> Result<Vec<PathBuf>, String> {
@@ -3934,6 +3944,24 @@ mod tests {
                 "this manifest does not forbid unsafe_code: {manifest:?}"
             );
         }
+    }
+
+    /// THE SPELLING BOUNDARY, pinned so nobody "fixes" it naively: Cargo
+    /// accepts the level/priority inline-table form, but this crate's TOML
+    /// reader deliberately excludes inline tables, so that spelling fails
+    /// CLOSED as unparseable — the safe direction, and a message that says
+    /// no boundary claim can be made. u9zp's relation binds every spelling
+    /// the parser can read; this is the documented exception.
+    #[test]
+    fn the_inline_table_form_fails_closed_as_unparseable() {
+        let outcome = crate::toml::parse(
+            "[workspace]\n[workspace.lints.rust]\nunsafe_code = { level = \"forbid\" }\n",
+        );
+        assert!(
+            outcome.is_err(),
+            "the inline-table form is outside the registry subset and must not \
+             silently read as either forbid or not-forbid"
+        );
     }
 
     /// The mutation proof, against the REAL manifest rather than a fixture.
