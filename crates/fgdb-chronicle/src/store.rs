@@ -141,6 +141,9 @@ impl RootStore {
             RootSelection::Selected { slot, .. } | RootSelection::IdenticalPair { slot } => {
                 Ok(*slot)
             }
+            RootSelection::MalformedFile { len } => {
+                Err(StoreError::MalformedFile { len: len as u64 })
+            }
             RootSelection::NoCredibleSlot { .. } => Err(StoreError::NoCredibleRoot),
             RootSelection::DivergentPair { generation } => {
                 Err(StoreError::DivergentPair { generation })
@@ -166,6 +169,9 @@ impl RootStore {
             // An identical pair occupies both slots equally; writing either is
             // safe because the other still holds the same authenticated state.
             RootSelection::IdenticalPair { slot } => (slot.slot_generation, 0),
+            RootSelection::MalformedFile { len } => {
+                return Err(StoreError::MalformedFile { len: len as u64 });
+            }
             RootSelection::NoCredibleSlot { .. } => return Err(StoreError::NoCredibleRoot),
             RootSelection::DivergentPair { generation } => {
                 return Err(StoreError::DivergentPair { generation });
@@ -230,6 +236,9 @@ impl RootStore {
         match self.recover()? {
             RootSelection::Selected { index, .. } => Ok(index),
             RootSelection::IdenticalPair { .. } => Ok(0),
+            RootSelection::MalformedFile { len } => {
+                Err(StoreError::MalformedFile { len: len as u64 })
+            }
             RootSelection::NoCredibleSlot { .. } => Err(StoreError::NoCredibleRoot),
             RootSelection::DivergentPair { generation } => {
                 Err(StoreError::DivergentPair { generation })

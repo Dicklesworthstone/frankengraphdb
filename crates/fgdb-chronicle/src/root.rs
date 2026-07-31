@@ -376,6 +376,10 @@ fn tear_checksum(preceding: &[u8]) -> Digest {
 /// Which slot recovery selected, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootSelection {
+    /// The root file is not exactly two fixed slots long. Slot credibility is
+    /// irrelevant when the containing durable format is truncated or has
+    /// trailing bytes.
+    MalformedFile { len: usize },
     /// Exactly one credible slot, or one strictly newer than the other.
     Selected {
         slot: Box<RootSlot>,
@@ -407,6 +411,11 @@ pub enum RootSelection {
 /// Takes the whole file so the caller cannot accidentally compare a slot with
 /// itself, and so the offsets stay this module's business.
 pub fn select_root(file_bytes: &[u8]) -> RootSelection {
+    if file_bytes.len() != ROOT_FILE_LEN {
+        return RootSelection::MalformedFile {
+            len: file_bytes.len(),
+        };
+    }
     let read = |offset: usize| -> Result<RootSlot, SlotError> {
         file_bytes
             .get(offset..offset + SLOT_LEN)

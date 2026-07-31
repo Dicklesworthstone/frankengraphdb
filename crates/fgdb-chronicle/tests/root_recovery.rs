@@ -242,11 +242,30 @@ fn no_credible_slot_fails_closed() {
         }
     );
 
-    // A file that is not even two slots long.
-    assert!(matches!(
+    assert_eq!(
         select_root(&[0u8; 100]),
-        RootSelection::NoCredibleSlot { .. }
-    ));
+        RootSelection::MalformedFile { len: 100 }
+    );
+}
+
+#[test]
+fn whole_file_length_is_validated_before_slot_credibility() {
+    let one_valid_slot = slot(1, 1).serialize();
+    assert_eq!(
+        select_root(&one_valid_slot),
+        RootSelection::MalformedFile { len: 4096 },
+        "a credible first slot must not disguise a truncated root file"
+    );
+
+    let mut trailing_byte = root_file(Some(one_valid_slot), Some(one_valid_slot));
+    trailing_byte.push(0);
+    assert_eq!(
+        select_root(&trailing_byte),
+        RootSelection::MalformedFile {
+            len: ROOT_FILE_LEN + 1,
+        },
+        "bytes after the fixed two-slot format must not be ignored"
+    );
 }
 
 /// Unknown framing is rejected, never guessed at: a foreign magic or a
