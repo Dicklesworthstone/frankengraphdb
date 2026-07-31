@@ -33,9 +33,9 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_025_645;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_026_112;
 pub const APPENDIX_SHA256: &str =
-    "74369512ac477bc7ec913b67c06612d516f495841f83737913859c1307ba5719";
+    "34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3719;
@@ -5394,8 +5394,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1964,
         end_line: 1999,
         line_count: 36,
-        byte_count: 19_488,
-        sha256: "1d9f07d6ccc7c5feb548224d9e5f38ef216143c1dfd63f95ebcf6e84907b76c6",
+        byte_count: 19_955,
+        sha256: "2dc0d868704073d0c16cc31efecdf29f200b0d808e0d6ae48cfe9caa74ec5267",
     },
     SlicePin {
         ordinal: 13,
@@ -6991,11 +6991,104 @@ pub fn verify_source(catalog: &Catalog, source: &[u8]) -> Vec<Violation> {
             "ordered slice bytes do not reconstruct the complete Appendix bytes",
         ));
     }
+    if let Ok(appendix_text) = std::str::from_utf8(appendix) {
+        out.extend(resource_bucket_contract_violations(appendix_text));
+    }
     if let Some(structural_census) = verify_structural_source_census(catalog, appendix, &mut out) {
         verify_reference_source_census(catalog, source, &structural_census, &mut out);
     }
 
     sort_violations(&mut out);
+    out
+}
+
+/// Freeze the class-preserving resource-bucket erratum at the normative source.
+///
+/// The old five-field bucket could not satisfy both of its own laws: once a
+/// maintenance reservation became a classless committed charge, recovery and
+/// later transitions could neither bill it to the protected reserve nor prove
+/// that ordinary capacity remained untouched. Source-byte pins alone cannot
+/// distinguish a deliberate repair from a deliberate regression, so this
+/// semantic check remains independent of those pins and must reject the old
+/// representation even if every manifest hash is refreshed around it.
+fn resource_bucket_contract_violations(appendix: &str) -> Vec<Violation> {
+    const SUBJECT: &str = "a12:ResourceLedgerState.resource-bucket-class";
+    const PREFIX: &str = "`ResourceLedgerState` is ";
+    const FIELDS: &str = "Each bucket is the class-preserving canonical `{hard_limit,protected_maintenance_reserve,ordinary_reserved,maintenance_reserved,ordinary_committed,maintenance_committed}`.";
+    const OLD_FIELDS: &str = "Each bucket is `{hard_limit,protected_maintenance_reserve,ordinary_reserved,maintenance_reserved,committed}`.";
+    const ORDINARY_LAW: &str = "ordinary use satisfies `ordinary_committed+ordinary_reserved <= hard_limit-protected_maintenance_reserve`";
+    const MAINTENANCE_LAW: &str = "registered maintenance satisfies `maintenance_committed+maintenance_reserved <= protected_maintenance_reserve`";
+    const TOTAL_LAW: &str = "total use satisfies `ordinary_committed+ordinary_reserved+maintenance_committed+maintenance_reserved <= hard_limit`";
+    const TRANSITION_LAW: &str = "Reserve, Charge, Adjust, Transfer, Release, and Expire preserve `resource_class` unchanged";
+    const PERSISTENCE_LAW: &str =
+        "canonical bucket encoding and recovery preserve the two committed lanes";
+    const CLASSLESS_REJECTION: &str = "a classless `committed` field is invalid";
+
+    let paragraphs: Vec<&str> = appendix
+        .lines()
+        .filter(|line| line.starts_with(PREFIX))
+        .collect();
+    if !paragraphs.len().eq(&1) {
+        return vec![Violation::new(
+            "resource_bucket_contract_cardinality",
+            SUBJECT,
+            format!(
+                "expected exactly one ResourceLedgerState contract paragraph, found {}",
+                paragraphs.len()
+            ),
+        )];
+    }
+    let paragraph = paragraphs[0];
+    let mut out = Vec::new();
+
+    if paragraph.contains(OLD_FIELDS) {
+        out.push(Violation::new(
+            "resource_bucket_classless_shape",
+            SUBJECT,
+            "the contradictory five-field bucket with one classless committed lane is forbidden",
+        ));
+    }
+    for (code, required, message) in [
+        (
+            "resource_bucket_class_fields_missing",
+            FIELDS,
+            "the canonical bucket must carry separate ordinary and maintenance committed lanes",
+        ),
+        (
+            "resource_bucket_ordinary_law_missing",
+            ORDINARY_LAW,
+            "ordinary committed and reserved usage must share only the non-maintenance band",
+        ),
+        (
+            "resource_bucket_maintenance_law_missing",
+            MAINTENANCE_LAW,
+            "maintenance committed and reserved usage must share only the protected reserve",
+        ),
+        (
+            "resource_bucket_total_law_missing",
+            TOTAL_LAW,
+            "the two class laws must retain the explicit total hard-limit backstop",
+        ),
+        (
+            "resource_bucket_transition_class_missing",
+            TRANSITION_LAW,
+            "reserve, charge, adjust, transfer, release, and expire must preserve resource_class",
+        ),
+        (
+            "resource_bucket_persistence_class_missing",
+            PERSISTENCE_LAW,
+            "canonical encoding and recovery must preserve both committed lanes",
+        ),
+        (
+            "resource_bucket_classless_rejection_missing",
+            CLASSLESS_REJECTION,
+            "the normative decoder contract must reject classless committed bucket state",
+        ),
+    ] {
+        if !paragraph.contains(required) {
+            out.push(Violation::new(code, SUBJECT, message));
+        }
+    }
     out
 }
 
@@ -14610,6 +14703,95 @@ mod binding_contract_tests {
 
     const TARGET_ROW_ID: &str = "a01:bootstrap-frame:root-slot";
     const TARGET_SOURCE_KEY: &str = "top|RootSlot";
+
+    fn committed_resource_bucket_paragraph() -> &'static str {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ))
+        .lines()
+        .find(|line| line.starts_with("`ResourceLedgerState` is "))
+        .expect("the committed plan carries ResourceLedgerState")
+    }
+
+    #[test]
+    fn resource_bucket_contract_is_class_preserving() {
+        let paragraph = committed_resource_bucket_paragraph();
+        let violations = resource_bucket_contract_violations(paragraph);
+        assert!(
+            violations.is_empty(),
+            "the committed resource-bucket contract must be class preserving: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn resource_bucket_checker_rejects_the_old_classless_five_field_law() {
+        let old = "`ResourceLedgerState` is `{format_version}`. Each bucket is `{hard_limit,protected_maintenance_reserve,ordinary_reserved,maintenance_reserved,committed}`. All arithmetic is checked; ordinary use satisfies `committed+ordinary_reserved <= hard_limit-protected_reserve`, and registered maintenance consumes only its named reserve.";
+        let violations = resource_bucket_contract_violations(old);
+        let codes: BTreeSet<&str> = violations
+            .iter()
+            .map(|violation| violation.code.as_str())
+            .collect();
+        assert!(codes.contains("resource_bucket_classless_shape"));
+        assert!(codes.contains("resource_bucket_class_fields_missing"));
+        assert!(codes.contains("resource_bucket_ordinary_law_missing"));
+        assert!(codes.contains("resource_bucket_maintenance_law_missing"));
+    }
+
+    #[test]
+    fn every_resource_bucket_class_clause_is_mutation_sensitive() {
+        let paragraph = committed_resource_bucket_paragraph();
+        for (needle, replacement, expected_code) in [
+            (
+                "ordinary_committed,maintenance_committed",
+                "committed",
+                "resource_bucket_class_fields_missing",
+            ),
+            (
+                "ordinary use satisfies `ordinary_committed+ordinary_reserved <= hard_limit-protected_maintenance_reserve`",
+                "ordinary capacity is checked",
+                "resource_bucket_ordinary_law_missing",
+            ),
+            (
+                "registered maintenance satisfies `maintenance_committed+maintenance_reserved <= protected_maintenance_reserve`",
+                "registered maintenance capacity is checked",
+                "resource_bucket_maintenance_law_missing",
+            ),
+            (
+                "total use satisfies `ordinary_committed+ordinary_reserved+maintenance_committed+maintenance_reserved <= hard_limit`",
+                "total capacity is checked",
+                "resource_bucket_total_law_missing",
+            ),
+            (
+                "Reserve, Charge, Adjust, Transfer, Release, and Expire preserve `resource_class` unchanged",
+                "transitions may rewrite resource_class",
+                "resource_bucket_transition_class_missing",
+            ),
+            (
+                "canonical bucket encoding and recovery preserve the two committed lanes",
+                "canonical bucket encoding is implementation-defined",
+                "resource_bucket_persistence_class_missing",
+            ),
+            (
+                "a classless `committed` field is invalid",
+                "classless committed fields are accepted",
+                "resource_bucket_classless_rejection_missing",
+            ),
+        ] {
+            assert!(
+                paragraph.contains(needle),
+                "mutation fixture must find {needle:?} in the committed paragraph"
+            );
+            let mutated = paragraph.replacen(needle, replacement, 1);
+            let violations = resource_bucket_contract_violations(&mutated);
+            assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation.code.eq(expected_code)),
+                "removing {needle:?} must emit {expected_code}, found {violations:?}"
+            );
+        }
+    }
 
     #[test]
     fn cargo_package_identity_ignores_unrelated_full_toml_syntax() {

@@ -312,8 +312,8 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"start_line":1388' \
     '"end_line":2728' \
     '"line_count":1341' \
-    '"byte_count":1025645' \
-    '"sha256":"74369512ac477bc7ec913b67c06612d516f495841f83737913859c1307ba5719"' \
+    '"byte_count":1026112' \
+    '"sha256":"34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab"' \
     '"outcome":"pass"'; then
   ok "Appendix A exact source manifest is pinned"
 else

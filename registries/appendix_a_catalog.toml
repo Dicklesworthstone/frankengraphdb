@@ -27,8 +27,8 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1025645
-sha256 = "74369512ac477bc7ec913b67c06612d516f495841f83737913859c1307ba5719"
+byte_count = 1026112
+sha256 = "34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
@@ -381,8 +381,8 @@ title = "Appendix A exact catalog: Checkpoint, retention, constraint, and resour
 start_line = 1964
 end_line = 1999
 line_count = 36
-byte_count = 19488
-sha256 = "1d9f07d6ccc7c5feb548224d9e5f38ef216143c1dfd63f95ebcf6e84907b76c6"
+byte_count = 19955
+sha256 = "2dc0d868704073d0c16cc31efecdf29f200b0d808e0d6ae48cfe9caa74ec5267"
 predecessor = "a11"
 successor = "a13"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -396,7 +396,7 @@ union_candidate_ids_sha256 = "47ef8363cef302008330cc2df005be7f590e5cd49d3fb74ebc
 arm_candidate_count = 62
 arm_candidate_ids_sha256 = "8532eb0b7a649b985b5a18f571e49fda97ebcb6b86c202e50aa316c18c1ad30d"
 ambiguity_count = 174
-ambiguity_ids_sha256 = "6990ce75d0be066b19207c7062cdccf80a35a7385172be51211247dce16ab864"
+ambiguity_ids_sha256 = "c86fc171fb65a80dd21bc7623cfc0e5fb4b33a770ea1e027cda651aa37e1e0f6"
 
 [[slice]]
 ordinal = 13

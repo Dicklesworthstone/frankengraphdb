@@ -7256,7 +7256,7 @@ mod tests {
         // is a re-measurement rather than a re-pin.
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "74369512ac477bc7ec913b67c06612d516f495841f83737913859c1307ba5719",
+            "34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab",
             "the two-union population was measured on a different Appendix A source"
         );
 
