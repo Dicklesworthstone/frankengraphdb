@@ -2805,6 +2805,8 @@ pub fn region_vec_contract_violations(text: &str) -> Vec<&'static str> {
                     "chunk",
                     "]",
                     ".",
+                    "data",
+                    ".",
                     "as_mut_ptr",
                     "(",
                     ")",

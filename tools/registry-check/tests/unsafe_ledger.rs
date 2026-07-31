@@ -1371,7 +1371,7 @@ fn allocator_pointer_provenance_regressions_turn_the_contract_red() {
     let one_byte_retag = REGION_VEC_SOURCE.replacen(
         "let Some(pointer) = NonNull::new(pointer) else {",
         "let Some(pointer) = Some(NonNull::from(\n\
-             &mut region.chunks[slot.chunk][slot.start],\n\
+             &mut region.chunks[slot.chunk].data[slot.start],\n\
          )) else {",
         1,
     );
