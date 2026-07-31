@@ -768,6 +768,20 @@ impl<'region, V> Children<'region, V> {
         let edge = self.only_child_ref()?.0;
         self.remove(scope, cx, edge).map(|node| (edge, node))
     }
+
+    fn detach_all_for_drop(&mut self, pending: &mut Vec<Node<'region, V>>) {
+        let nodes = match self {
+            Self::Node4 { nodes, .. }
+            | Self::Node16 { nodes, .. }
+            | Self::Node48 { nodes, .. }
+            | Self::Node256 { nodes, .. } => nodes,
+        };
+        for slot in nodes.as_mut_slice() {
+            if let Some(child) = slot.take() {
+                pending.push(child);
+            }
+        }
+    }
 }
 
 impl<'region, V> Entry<'region, V> {
@@ -1431,6 +1445,22 @@ impl<'region, V> AdaptiveRadixTree<'region, V> {
     }
 }
 
+impl<V> Drop for AdaptiveRadixTree<'_, V> {
+    fn drop(&mut self) {
+        // `Node` owns its descendants by value, so ordinary drop glue spends
+        // one native frame per ART level. Detach each frontier before its
+        // parent falls out of scope and let a heap-backed worklist carry the
+        // data-dependent depth instead.
+        let Some(root) = self.root.take() else {
+            return;
+        };
+        let mut pending = vec![root];
+        while let Some(mut node) = pending.pop() {
+            node.children.detach_all_for_drop(&mut pending);
+        }
+    }
+}
+
 impl<V: fmt::Debug> fmt::Debug for AdaptiveRadixTree<'_, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
@@ -2090,6 +2120,34 @@ mod tests {
             .expect("spawn")
             .join()
             .expect("deep-tree thread must not abort or panic");
+    }
+
+    /// fgdb-art-iterative-drop-36vj: dropping a populated tree is itself a
+    /// depth-dependent walk. The descent regression above empties both trees
+    /// before thread exit, so it cannot distinguish recursive drop glue.
+    #[test]
+    fn deep_nonempty_tree_drop_does_not_spend_native_stack() {
+        const DEPTH: usize = 6_000;
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let scope = test_scope();
+                let cx = query_cx();
+                let mut tree = AdaptiveRadixTree::new_in(&scope);
+                let mut key = Vec::with_capacity(DEPTH);
+                for depth in 0..DEPTH {
+                    key.push(0);
+                    assert_eq!(tree.insert(&cx, &key, depth as u64), Ok(None));
+                }
+                assert_eq!(tree.len(), DEPTH);
+
+                // The tree must still contain its worst-case chain here. The
+                // pre-fix destructor recursively dropped one Node per level.
+                drop(tree);
+            })
+            .expect("spawn deep ART drop worker")
+            .join()
+            .expect("deep ART drop worker must not panic");
     }
 
     #[test]
