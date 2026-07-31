@@ -329,13 +329,14 @@ struct ArmValuePayloadPin<'a> {
 
 /// Parse the complete-payload pin out of an `arm_value` `encoding_context`.
 ///
-/// `None` means no pin prefix is present at all (the
-/// `arm_value_payload_pin_missing` case). `Some(Err(()))` means the row
-/// advertises the pin but breaks its closed spelling — truncated name,
-/// missing infix, wrong digest length, non-hex, an unterminated `)`, or a
-/// repeated pin marker — which must fail closed rather than be skipped the way
-/// a prose claim would be. `Some(Ok(pin))` is one well-formed pin; agreement
-/// with the resolved registered arm is the caller's check.
+/// `None` means the row advertises nothing — no pin prefix and no digest
+/// infix (the `arm_value_payload_pin_missing` case). `Some(Err(()))` means
+/// the row advertises the pin but breaks its closed spelling — truncated
+/// name, missing infix, wrong digest length, non-hex, an unterminated `)`,
+/// an infix with no prefix at all, or a repetition at either level of the
+/// spelling — which must fail closed rather than be skipped the way a prose
+/// claim would be. `Some(Ok(pin))` is one well-formed pin; agreement with
+/// the resolved registered arm is the caller's check.
 fn parse_arm_value_payload_pin(
     encoding_context: &str,
 ) -> Option<Result<ArmValuePayloadPin<'_>, ()>> {
