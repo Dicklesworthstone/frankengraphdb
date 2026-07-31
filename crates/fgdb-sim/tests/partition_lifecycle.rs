@@ -133,7 +133,7 @@ fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<Del
 
 /// PHASE 1 — write a history through the real durable commit path.
 fn commit_a_history(dir: &Path, cx: &CommitCx) {
-    let mut coordinator = CommitCoordinator::open(dir, keys()).expect("open");
+    let mut coordinator = CommitCoordinator::open(cx, dir, keys()).expect("open");
     commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]);
     commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2), edge(11, 1, 3)]);
 
@@ -155,12 +155,19 @@ fn commit_a_history(dir: &Path, cx: &CommitCx) {
         }],
     );
     commit_rows(&mut coordinator, cx, vec![edge(12, 2, 3)]);
+
+    // RE-CREATE the retired adjacency under a fresh edge identity. This is what
+    // makes the partition span more than one block: a key's second version cannot
+    // share a block with its first, so the writer is forced to seal. Without it the
+    // whole history fits in one block and the multi-block path — the one that
+    // needs the root, the merge, and the supersede rule — is never exercised.
+    commit_rows(&mut coordinator, cx, vec![edge(13, 1, 2)]);
 }
 
 /// PHASE 2 — recover the stream, build the partition, persist it, and return ONLY
 /// the root identity. Everything else goes out of scope.
 fn build_and_persist(dir: &Path, cx: &CommitCx) -> ObjectId {
-    let reopened = CommitCoordinator::open(dir, keys()).expect("reopen");
+    let reopened = CommitCoordinator::open(cx, dir, keys()).expect("reopen");
     let mut writer = BlockWriter::new(GRAPH, BRANCH, 0);
     let mut frontier = CommitSeq(0);
 
@@ -181,7 +188,7 @@ fn build_and_persist(dir: &Path, cx: &CommitCx) -> ObjectId {
     }
 
     let (root, blocks) = writer.publish(KEYS, frontier).expect("publishes");
-    let store = BlockStore::open(dir, K_OID, NAMESPACE).expect("store opens");
+    let store = BlockStore::open(cx, dir, K_OID, NAMESPACE).expect("store opens");
     for block in &blocks {
         store.put(cx, &block.bytes).expect("stores a block");
     }
@@ -190,11 +197,9 @@ fn build_and_persist(dir: &Path, cx: &CommitCx) -> ObjectId {
 
 /// What the oracle says the durable stream implies, at its frontier.
 fn oracle_answer(dir: &Path, cx: &CommitCx, source: u128) -> (Vec<VId>, CommitSeq) {
-    let reopened = CommitCoordinator::open(dir, keys()).expect("reopen");
+    let reopened = CommitCoordinator::open(cx, dir, keys()).expect("reopen");
     let database = replay(cx, &reopened).expect("replays").database;
-    let frontier = database
-        .applied_through(GRAPH, BRANCH)
-        .expect("a frontier");
+    let frontier = database.applied_through(GRAPH, BRANCH).expect("a frontier");
     let graph = database.graph(GRAPH, BRANCH).expect("materialized");
     (graph.neighbours(VId(source), REL), frontier)
 }
@@ -209,7 +214,7 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
 
         // NOTHING survives from the phases above except the path and this id —
         // exactly what a restarted process would hold.
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("store opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
         let (root, blocks) = store.reopen(root_id).expect("the partition reopens");
 
         for source in [1u128, 2, 3] {
@@ -221,12 +226,19 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
             );
         }
 
-        // The fixture is non-trivial in both directions, or agreement is cheap.
+        // The fixture is non-trivial in both directions, or agreement is cheap:
+        // 1->2 was created, deleted, and re-created under a new edge identity, so
+        // the adjacency is live again by a DIFFERENT version than the one that died.
         let (v1, _) = oracle_answer(&dir, cx, 1);
-        assert_eq!(v1, vec![VId(3)], "edge 10 was deleted, edge 11 survives");
+        assert_eq!(v1, vec![VId(2), VId(3)]);
         let (v2, _) = oracle_answer(&dir, cx, 2);
         assert_eq!(v2, vec![VId(3)]);
-        assert!(root.blocks.len() >= 2, "and it spans more than one block");
+        assert!(
+            root.blocks.len() >= 2,
+            "the re-creation must have forced a seal, or the multi-block path is \
+             never exercised: {} block(s)",
+            root.blocks.len()
+        );
     });
 }
 
@@ -246,7 +258,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
         let (_, frontier) = oracle_answer(&dir, cx, 1);
 
         let compacted_root_id = {
-            let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("store opens");
+            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
             let (root, blocks) = store.reopen(root_id).expect("reopens");
             let result = compact(&blocks, frontier);
             assert!(
@@ -278,11 +290,13 @@ fn a_compacted_partition_still_agrees_after_reopening() {
                 published_at: frontier,
                 blocks: references,
             };
-            store.put_root(cx, &compacted).expect("stores the compacted root")
+            store
+                .put_root(cx, &compacted)
+                .expect("stores the compacted root")
         };
 
         // A fresh handle, the compacted root identity, and nothing else.
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("store opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
         let (_, blocks) = store.reopen(compacted_root_id).expect("reopens");
         for source in [1u128, 2, 3] {
             let (expected, _) = oracle_answer(&dir, cx, source);
