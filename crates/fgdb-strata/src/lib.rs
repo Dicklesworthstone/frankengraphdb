@@ -36,6 +36,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod root;
+
 use fgdb_delta_types::RelationId;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, VId};
