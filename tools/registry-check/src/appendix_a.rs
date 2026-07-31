@@ -7591,6 +7591,24 @@ fn verify_ordinary_union_source_contracts(
                     "ordinary union arm must exactly match its source parent, token, and normalized payload hash",
                 ));
             }
+            let expected_arm_tag = match source_arm.source_ordinals.as_slice() {
+                [source_ordinal] => source_ordinal
+                    .checked_add(1)
+                    .and_then(|ordinal| i64::try_from(ordinal).ok()),
+                _ => None,
+            };
+            let arm_tag_matches_source =
+                expected_arm_tag.is_some_and(|expected| expected.cmp(&arm.arm_tag).is_eq());
+            if !arm_tag_matches_source {
+                out.push(Violation::new(
+                    "source_union_arm_tag_mismatch",
+                    &arm_target.row_id,
+                    format!(
+                        "ordinary union arm tag {} must equal its unique zero-based source ordinal plus one; observed source ordinals {:?}",
+                        arm.arm_tag, source_arm.source_ordinals
+                    ),
+                ));
+            }
             if arm_target.definition_status == "complete" {
                 match annotation_by_target.get(arm_projection.row_id.as_str()).copied() {
                     Some(annotation)
@@ -15094,6 +15112,7 @@ name = "Probe"
             },
             payload_sha256s: Vec::new(),
             payload_conflict: false,
+            source_ordinals: vec![0],
             locations: Vec::new(),
         }
     }
