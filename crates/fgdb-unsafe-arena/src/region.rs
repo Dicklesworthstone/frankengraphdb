@@ -869,8 +869,7 @@ impl RegionAlloc for Region {
                 // `len > chunk_bytes` (checked above) fully decides
                 // BlockLargerThanChunk BEFORE any allocation happens.
                 let base_pad =
-                    (MAX_BLOCK_ALIGN - (chunk.as_ptr().addr() % MAX_BLOCK_ALIGN))
-                        % MAX_BLOCK_ALIGN;
+                    (MAX_BLOCK_ALIGN - (chunk.as_ptr().addr() % MAX_BLOCK_ALIGN)) % MAX_BLOCK_ALIGN;
                 debug_assert!(
                     base_pad + self.chunk_bytes <= accepted,
                     "the window must fit its chunk: {base_pad} + {} <= {accepted}",
@@ -1852,11 +1851,13 @@ mod tests {
             );
             assert_eq!(audit.blocks_live_at_end, 1);
             // The resident side of the ledger: one 128-byte chunk held both
-            // blocks, the first block's alignment pad is under its alignment,
-            // and the peak never exceeded the configured limit.
+            // blocks; under the canonical window the first block needs no
+            // placement pad, so the chunk's fixed 63-byte alignment prologue
+            // is the only padding charged, and the resident peak is the
+            // window plus that prologue — 191, deterministically.
             assert_eq!(audit.chunks_allocated, 1);
-            assert_eq!(audit.peak_resident_bytes, 128);
-            assert!(audit.alignment_padding_bytes < 8);
+            assert_eq!(audit.peak_resident_bytes, 191);
+            assert_eq!(audit.alignment_padding_bytes, 63);
             assert!(audit.peak_resident_bytes <= 4096);
         }
     }
@@ -1879,7 +1880,8 @@ mod tests {
 
     #[test]
     fn the_budget_is_enforced_and_release_returns_it() {
-        let mut region = Region::with_capacity(64, 96, 128);
+        // Resident sizing: two chunks of (64 window + 63 prologue) = 254.
+        let mut region = Region::with_capacity(64, 96, 254);
         let a = region.alloc_block(64, 1).expect("a");
         assert!(matches!(
             region.alloc_block(64, 1),
@@ -1965,18 +1967,19 @@ mod tests {
         // The hole this contract closes: released ranges are never reused, so
         // under allocate/release churn the live budget stays open while chunk
         // capacity grows without bound. The resident limit is what refuses,
-        // and it refuses before anything mutates.
-        let mut region = Region::with_capacity(64, 96, 128);
+        // and it refuses before anything mutates. Two chunks of (64 window +
+        // 63 prologue) fit exactly: 254.
+        let mut region = Region::with_capacity(64, 96, 254);
         let first = region.alloc_block(64, 1).expect("first");
         assert_eq!(region.release(first), Ok(64));
         let second = region.alloc_block(64, 1).expect("second: a fresh chunk");
         assert_eq!(region.release(second), Ok(64));
         // Under the pinned toolchain `try_reserve_exact` records exactly the
-        // requested capacity, so the accepted charge equals `chunk_bytes`.
-        // If that implementation detail ever moves, this assertion turns red
-        // on purpose: the accounting changed meaningfully and the audit
-        // contract must be re-examined, not quietly re-baselined.
-        assert_eq!(region.resident_bytes(), 128);
+        // requested capacity, so the accepted charge equals the window plus
+        // its fixed prologue. If that implementation detail ever moves, this
+        // assertion turns red on purpose: the accounting changed meaningfully
+        // and the audit contract must be re-examined, not quietly re-baselined.
+        assert_eq!(region.resident_bytes(), 254);
         assert_eq!(region.live_bytes(), 0);
 
         let before = (
@@ -1988,7 +1991,7 @@ mod tests {
         assert!(matches!(
             region.alloc_block(64, 1),
             Err(ArenaError::ResidentLimitExceeded {
-                requested: 64,
+                requested: 127,
                 remaining: 0
             })
         ));
@@ -2009,7 +2012,64 @@ mod tests {
         let audit = region.close();
         assert!(audit.balanced());
         assert_eq!(audit.chunks_allocated, 2);
-        assert_eq!(audit.peak_resident_bytes, 128);
+        assert_eq!(audit.peak_resident_bytes, 254);
+    }
+
+    #[test]
+    fn fit_decisions_are_heap_history_independent() {
+        // fgdb-owje — THE regression lock. Pre-fix, placement pads derived
+        // from the runtime base address, so this exact sequence produced
+        // different fit decisions, chunk counts, and padding charges
+        // depending on what the heap had done before. Under the canonical
+        // window every observable DECISION is a function of the sequence
+        // alone. Raw addresses legitimately differ (the heap is the heap);
+        // outcomes, alignment geometry, and accounting may not.
+        let run = |prelude_bytes: usize| {
+            // Move the heap's subsequent chunk bases without touching the
+            // region: the prelude is alive for the whole run.
+            let _prelude = vec![0xA5u8; prelude_bytes];
+            let mut region = Region::with_capacity(512, 4096, 1 << 20);
+            let mut outcomes = Vec::new();
+            for (len, align) in [
+                (100usize, 64usize),
+                (200, 32),
+                (120, 64),
+                (300, 64),
+                (412, 64),
+                (500, 64),
+            ] {
+                let outcome = region.alloc_block(len, align).map(|handle| {
+                    region.block(handle).expect("live").as_ptr().addr() % MAX_BLOCK_ALIGN
+                });
+                outcomes.push(outcome);
+            }
+            let audit = region.close();
+            (
+                outcomes,
+                audit.chunks_allocated,
+                audit.alignment_padding_bytes,
+                audit.peak_resident_bytes,
+            )
+        };
+
+        let a = run(0);
+        let b = run(24);
+        let c = run(4096);
+        let d = run(65_536);
+        assert_eq!(a, b, "heap prelude 24 moved a fit decision or the ledger");
+        assert_eq!(b, c, "heap prelude 4096 moved a fit decision or the ledger");
+        assert_eq!(
+            c, d,
+            "heap prelude 65536 moved a fit decision or the ledger"
+        );
+        // And pin the exact deterministic ledger so the window itself cannot
+        // silently change shape: four chunks, prologue 63 each, placement
+        // pads 28+56 — the pads computed for placements that did NOT fit are
+        // never charged, because they never happened.
+        let (_, chunks, padding, peak) = a;
+        assert_eq!(chunks, 4);
+        assert_eq!(padding, 63 * 4 + (28 + 56));
+        assert_eq!(peak, 4 * (512 + 63));
     }
 
     #[test]
@@ -2019,22 +2079,28 @@ mod tests {
         let b = region.alloc_block(8, MAX_BLOCK_ALIGN).expect("b");
         let address_a = region.block(a).expect("a live").as_ptr().addr();
         let address_b = region.block(b).expect("b live").as_ptr().addr();
+        // Under the canonical window BOTH addresses are 64-aligned by
+        // construction — the pre-fix form of this pin passed only when the
+        // heap happened to agree (fgdb-owje).
+        assert_eq!(address_a % MAX_BLOCK_ALIGN, 0);
         assert_eq!(address_b % MAX_BLOCK_ALIGN, 0);
-        // `a` needs no padding at align 1, so the exact pad before `b` is
-        // observable from the two addresses.
+        // `a` needs no padding at align 1, so the exact placement pad before
+        // `b` is observable from the two addresses — and it is deterministic.
         let expected_pad = address_b - (address_a + 8);
-        assert!(expected_pad < MAX_BLOCK_ALIGN);
-        assert_eq!(region.alignment_padding_bytes(), expected_pad as u64);
+        assert_eq!(expected_pad, 56);
+        // The deterministic charge: the chunk's fixed 63-byte prologue plus
+        // the exact placement pad.
+        assert_eq!(region.alignment_padding_bytes(), 63 + expected_pad as u64);
         // Padding lives inside charged chunk capacity: part of the resident
         // footprint, never part of live bytes.
         assert_eq!(region.live_bytes(), 16);
-        assert_eq!(region.resident_bytes(), 256);
+        assert_eq!(region.resident_bytes(), 319);
         assert!(16 + expected_pad <= region.resident_bytes());
 
         let audit = region.close();
         assert!(audit.balanced());
-        assert_eq!(audit.alignment_padding_bytes, expected_pad as u64);
+        assert_eq!(audit.alignment_padding_bytes, 63 + expected_pad as u64);
         assert_eq!(audit.chunks_allocated, 1);
-        assert_eq!(audit.peak_resident_bytes, 256);
+        assert_eq!(audit.peak_resident_bytes, 319);
     }
 }
