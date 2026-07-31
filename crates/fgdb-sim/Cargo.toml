@@ -14,4 +14,9 @@ fgdb-chronicle = { path = "../fgdb-chronicle" }
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-reference = { path = "../fgdb-reference" }
+# The verification layer is where an engine tier and the oracle may both be
+# visible — §15.2 keeps them apart inside fgdb-reference precisely so the
+# differential cannot be gutted by code sharing, and this is the crate the plan
+# names for running it.
+fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }

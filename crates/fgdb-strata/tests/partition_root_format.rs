@@ -461,3 +461,221 @@ fn an_empty_root_is_valid() {
         Vec::<Vec<AdjacencyEntry>>::new()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Merging across blocks: tombstone supersede
+// ---------------------------------------------------------------------------
+//
+// A block is immutable, so retiring an entry created in an EARLIER block cannot
+// edit that block. The later block carries an entry for the same key whose
+// interval states the retirement, and it supersedes. That choice is made in
+// `merge_neighbours` and its rationale is recorded there; these laws are what
+// hold the implementation to it.
+
+/// A RETIREMENT IN A LATER BLOCK hides an edge created in an earlier one.
+///
+/// The whole point of the tombstone model, and unrepresentable within one block:
+/// block A says the edge is live forever, block B says it ended at 5, and the
+/// merged answer must be B's.
+#[test]
+fn a_later_block_retires_an_earlier_blocks_edge() {
+    let early = vec![entry(1, 2, 1, None)];
+    let late = vec![entry(1, 2, 1, Some(5))];
+
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(
+            &[early.clone(), late.clone()],
+            fgdb_types::VId(1),
+            REL,
+            CommitSeq(4)
+        )
+        .expect("merges"),
+        vec![fgdb_types::VId(2)],
+        "before the retirement it is still there"
+    );
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(
+            &[early.clone(), late.clone()],
+            fgdb_types::VId(1),
+            REL,
+            CommitSeq(5)
+        )
+        .expect("merges"),
+        Vec::<fgdb_types::VId>::new(),
+        "at the retirement sequence it is gone — half-open, as within a block"
+    );
+    // And the earlier block ALONE still says it is live, so the merge is doing
+    // the work rather than the block.
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&[early], fgdb_types::VId(1), REL, CommitSeq(5))
+            .expect("merges"),
+        vec![fgdb_types::VId(2)]
+    );
+}
+
+/// A RE-CREATION after a retirement is visible again: supersede is by block
+/// order, so the newest state for a key wins whatever its interval says.
+#[test]
+fn a_re_creation_after_retirement_is_visible_again() {
+    let blocks = vec![vec![entry(1, 2, 1, Some(3))], vec![entry(1, 2, 7, None)]];
+    for (as_of, expected) in [
+        (1u64, vec![fgdb_types::VId(2)]),
+        (3, Vec::new()),
+        (6, Vec::new()),
+        (7, vec![fgdb_types::VId(2)]),
+    ] {
+        assert_eq!(
+            fgdb_strata::root::merge_neighbours(&blocks, fgdb_types::VId(1), REL, CommitSeq(as_of))
+                .expect("merges"),
+            expected,
+            "at {as_of}"
+        );
+    }
+}
+
+/// SUPERSEDE IS PER VERSION: entries for the SAME version supersede by block
+/// order, and entries for DIFFERENT versions of one key both survive.
+///
+/// The distinction is the whole model, and getting it wrong loses history. A
+/// merge keyed on `dst` alone passes every retirement law in this file and is
+/// wrong: once a key is retired and re-created, the newer version replaces the
+/// older outright, so a read AS OF a sequence when the older one was live returns
+/// nothing. That is MVCC time-travel silently dropped, and it is exactly what the
+/// first implementation here did until `a_re_creation_after_retirement_is_visible_again`
+/// caught it.
+#[test]
+fn supersede_is_per_version_not_per_key() {
+    // SAME version (both created at 1): the later block's retirement wins.
+    let same = vec![vec![entry(1, 2, 1, None)], vec![entry(1, 2, 1, Some(4))]];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&same, fgdb_types::VId(1), REL, CommitSeq(5))
+            .expect("merges"),
+        Vec::<fgdb_types::VId>::new(),
+        "a later block retiring the same version must win"
+    );
+
+    // DIFFERENT versions: both survive, and each answers for its own interval.
+    let different = vec![vec![entry(1, 2, 1, Some(3))], vec![entry(1, 2, 7, None)]];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&different, fgdb_types::VId(1), REL, CommitSeq(2))
+            .expect("merges"),
+        vec![fgdb_types::VId(2)],
+        "the OLD version must still answer at a sequence when it was live"
+    );
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&different, fgdb_types::VId(1), REL, CommitSeq(8))
+            .expect("merges"),
+        vec![fgdb_types::VId(2)],
+        "and the new version answers at its own"
+    );
+}
+
+/// TWO LIVE VERSIONS OF ONE KEY AT ONE SEQUENCE IS REFUSED, not deduplicated.
+///
+/// It means the stream retired a version and created its successor with
+/// overlapping intervals, so the history is not a sequence of states. Collapsing
+/// it would return a plausible answer built on an impossible one — the shape of
+/// wrong that is hardest to notice.
+#[test]
+fn two_live_versions_of_one_key_are_refused() {
+    let overlapping = vec![vec![entry(1, 2, 1, Some(9))], vec![entry(1, 2, 5, None)]];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&overlapping, fgdb_types::VId(1), REL, CommitSeq(6)),
+        Err(fgdb_strata::root::RootError::OverlappingVersions {
+            dst: fgdb_types::VId(2),
+            as_of: CommitSeq(6),
+        })
+    );
+    // Outside the overlap the same history answers normally, so the refusal is
+    // about the instant rather than about the pair existing.
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&overlapping, fgdb_types::VId(1), REL, CommitSeq(2))
+            .expect("merges"),
+        vec![fgdb_types::VId(2)]
+    );
+}
+
+/// THE SKIP RULE IS SOUND: dropping every block whose `first_seq` exceeds the
+/// snapshot gives the IDENTICAL answer, not merely a faster one.
+///
+/// This is the root's whole payoff — carrying ranges is only worth it if a reader
+/// may act on them. Swept across every sequence in and around the fixture rather
+/// than probed once, because a skip rule that is wrong at exactly one boundary is
+/// the way this fails.
+#[test]
+fn skipping_blocks_above_the_snapshot_gives_the_same_answer() {
+    let (id_a, _, span_a) = block(vec![entry(1, 2, 1, None), entry(1, 3, 2, None)]);
+    let (id_b, _, span_b) = block(vec![entry(1, 2, 1, Some(6)), entry(1, 4, 7, None)]);
+    let root = PartitionRoot {
+        graph: GRAPH,
+        branch: BRANCH,
+        partition: 0,
+        published_at: CommitSeq(9),
+        blocks: vec![reference(id_a, span_a), reference(id_b, span_b)],
+    };
+    let all = vec![
+        vec![entry(1, 2, 1, None), entry(1, 3, 2, None)],
+        vec![entry(1, 2, 1, Some(6)), entry(1, 4, 7, None)],
+    ];
+
+    for as_of in 1..=9u64 {
+        let full =
+            fgdb_strata::root::merge_neighbours(&all, fgdb_types::VId(1), REL, CommitSeq(as_of))
+                .expect("merges");
+        let kept: Vec<Vec<AdjacencyEntry>> =
+            fgdb_strata::root::blocks_visible_at(&root, CommitSeq(as_of))
+                .into_iter()
+                .map(|index| all[index].clone())
+                .collect();
+        let skipped =
+            fgdb_strata::root::merge_neighbours(&kept, fgdb_types::VId(1), REL, CommitSeq(as_of))
+                .expect("merges");
+        assert_eq!(full, skipped, "skipping changed the answer at {as_of}");
+    }
+}
+
+/// The skip rule actually SKIPS something — otherwise the law above would hold
+/// vacuously by reading every block every time.
+#[test]
+fn the_skip_rule_is_not_vacuous() {
+    let (id_a, _, span_a) = block(vec![entry(1, 2, 1, None)]);
+    let (id_b, _, span_b) = block(vec![entry(1, 3, 7, None)]);
+    let root = PartitionRoot {
+        graph: GRAPH,
+        branch: BRANCH,
+        partition: 0,
+        published_at: CommitSeq(9),
+        blocks: vec![reference(id_a, span_a), reference(id_b, span_b)],
+    };
+    assert_eq!(
+        fgdb_strata::root::blocks_visible_at(&root, CommitSeq(3)),
+        vec![0],
+        "the block that starts at 7 is skipped at snapshot 3"
+    );
+    assert_eq!(
+        fgdb_strata::root::blocks_visible_at(&root, CommitSeq(7)),
+        vec![0, 1],
+        "and read once the snapshot reaches it"
+    );
+}
+
+/// A merge over disjoint keys is a union, and it is scoped to its source and
+/// relation like a single-block scan is.
+#[test]
+fn a_merge_unions_disjoint_keys_and_stays_scoped() {
+    let blocks = vec![
+        vec![entry(1, 2, 1, None), entry(2, 9, 1, None)],
+        vec![entry(1, 3, 2, None)],
+    ];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&blocks, fgdb_types::VId(1), REL, CommitSeq(9))
+            .expect("merges"),
+        vec![fgdb_types::VId(2), fgdb_types::VId(3)]
+    );
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&blocks, fgdb_types::VId(2), REL, CommitSeq(9))
+            .expect("merges"),
+        vec![fgdb_types::VId(9)],
+        "another source's edges are not in this answer"
+    );
+}

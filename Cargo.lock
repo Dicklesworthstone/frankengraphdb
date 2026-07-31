@@ -587,6 +587,7 @@ dependencies = [
  "fgdb-crypto",
  "fgdb-delta-types",
  "fgdb-reference",
+ "fgdb-strata",
  "fgdb-types",
 ]
 
