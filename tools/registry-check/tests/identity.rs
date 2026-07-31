@@ -2874,6 +2874,54 @@ fn appendix_a_inline_record_unions_require_exact_payload_digests() {
 }
 
 #[test]
+fn appendix_a_ordinary_union_arm_tags_follow_source_order() {
+    let source = real_plan_source();
+    let control = real_appendix_catalog();
+    let control_violations = appendix_a::verify_source(&control, &source);
+    assert!(
+        control_violations.is_empty(),
+        "the unmodified catalog must satisfy the source-order law: {control_violations:?}"
+    );
+
+    for (union_name, top_level) in [
+        ("RestoreServicePromotionManifest", true),
+        ("MandatoryInventoryEntryValue", false),
+    ] {
+        let mut swapped = real_appendix_catalog();
+        let union = swapped
+            .identity
+            .ordinary_unions
+            .iter_mut()
+            .find(|union| union.union_name == union_name)
+            .expect("source-backed two-arm ordinary union exists");
+        assert_eq!(
+            union.containing_schema == union.union_path,
+            top_level,
+            "{union_name} must exercise the intended whole-schema/embedded shape"
+        );
+        assert_eq!(
+            union.arms.len(),
+            2,
+            "{union_name} must retain exactly two source arms"
+        );
+        let [first, second] = union.arms.as_mut_slice() else {
+            return;
+        };
+        std::mem::swap(&mut first.arm_tag, &mut second.arm_tag);
+
+        let violations = appendix_a::verify_source(&swapped, &source);
+        let tag_mismatches = violations
+            .iter()
+            .filter(|violation| violation.code == "source_union_arm_tag_mismatch")
+            .count();
+        assert_eq!(
+            tag_mismatches, 2,
+            "swapping {union_name} tags must reject both arms: {violations:?}"
+        );
+    }
+}
+
+#[test]
 fn appendix_a_full_plan_reference_occurrence_drift_fails_closed() {
     let catalog = real_appendix_catalog();
     let source = real_plan_source();
@@ -16852,6 +16900,29 @@ fn idr_payload_bearing_arm_values_preserve_the_complete_payload() {
     assert_ne!(
         uppercase_sha, operation_payload_sha,
         "the registered digest must contain letters for this mutation to mean anything"
+    );
+    let uppercase = canonical_context.replace(
+        &format!("(payload_sha256 {operation_payload_sha})"),
+        &format!("(payload_sha256 {uppercase_sha})"),
+    );
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(uppercase)),
+        ["arm_value_payload_pin_malformed".to_owned()],
+        "an uppercase digest must fail as malformed, not as a digest mismatch"
+    );
+
+    // (e3) A contradictory SECOND digest infix is the reviewed fail-open one
+    // level down: the closed spelling is total over both the pin prefix and
+    // the digest infix, so a row that pins one arm and then smuggles another
+    // digest past the ignored tail fails as malformed.
+    let repeated = format!(
+        "{canonical_context}; the spare arm payload (payload_sha256 {})",
+        "a".repeat(64)
+    );
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(repeated)),
+        ["arm_value_payload_pin_malformed".to_owned()],
+        "a second contradictory digest infix must fail as malformed"
     );
     let uppercase = canonical_context.replace(
         &format!("(payload_sha256 {operation_payload_sha})"),

@@ -342,9 +342,17 @@ fn parse_arm_value_payload_pin(
     let pin_count = encoding_context
         .matches(ARM_VALUE_PAYLOAD_PIN_PREFIX)
         .count();
-    match pin_count {
-        0 => return None,
-        1 => {}
+    let infix_count = encoding_context
+        .matches(ARM_VALUE_PAYLOAD_PIN_INFIX)
+        .count();
+    // Totality at BOTH levels of the closed spelling: exactly one pin prefix
+    // and exactly one digest infix. A repeated prefix is the reviewed
+    // fail-open; a repeated digest infix is the same hole one level down — a
+    // row could pin one arm correctly and smuggle a contradictory second
+    // digest past the ignored tail. Neither is a prose mention to skip.
+    match (pin_count, infix_count) {
+        (0, 0) => return None,
+        (1, 1) => {}
         _ => return Some(Err(())),
     }
     let (_, rest) = encoding_context.split_once(ARM_VALUE_PAYLOAD_PIN_PREFIX)?;
@@ -1778,8 +1786,8 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:e58f17a47a31533c";
-    const FIELDS: &str = "fnv1a64:a096e7dd6b68ffde";
+    const WIRE: &str = "fnv1a64:a4c2fbd09b7b8df8";
+    const FIELDS: &str = "fnv1a64:7020ed5083f427dc";
 
     let logical = rows_pin(
         r.logical
@@ -1929,14 +1937,14 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 43,
+            expected_epoch: 44,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 79,
+            expected_epoch: 80,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,

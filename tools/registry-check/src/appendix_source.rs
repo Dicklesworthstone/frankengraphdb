@@ -299,6 +299,11 @@ pub struct ArmCandidate {
     pub key: ArmCandidateKey,
     pub payload_sha256s: Vec<String>,
     pub payload_conflict: bool,
+    /// Zero-based alternative positions observed for this arm in its source
+    /// union. A singleton is required before a durable one-based arm tag can
+    /// be derived; multiple values mean repeated source evidence disagrees on
+    /// order even when the arm set itself is unchanged.
+    pub source_ordinals: Vec<usize>,
     pub locations: Vec<SourceSpan>,
 }
 
@@ -481,6 +486,7 @@ struct ArmOccurrence {
     key: ArmCandidateKey,
     payload: Option<String>,
     raw: String,
+    source_ordinal: usize,
     source_range: Range<usize>,
 }
 
@@ -2614,7 +2620,7 @@ fn parse_union(
         unparsed_arm_count: 0,
     });
     let mut parsed = 0;
-    for alternative in alternatives {
+    for (source_ordinal, alternative) in alternatives.into_iter().enumerate() {
         let trimmed = trim_range(&mapped.text, alternative.start..alternative.end);
         if trimmed.is_empty() {
             let source_range = mapped.source_range(alternative.start..alternative.end);
@@ -2775,6 +2781,7 @@ fn parse_union(
             key: arm_key.clone(),
             payload,
             raw: normalize_whitespace(&alternative_mapped.text),
+            source_ordinal,
             source_range: alternative_mapped.source_range(0..alternative_mapped.text.len()),
         });
         parsed += 1;
@@ -3450,6 +3457,7 @@ fn canonical_arms(rows: &[&ArmOccurrence], source_map: &SourceMap<'_>) -> Vec<Ar
                 key,
                 payload_conflict: payload_forms.len() > 1,
                 payload_sha256s,
+                source_ordinals: sorted_unique(rows.iter().map(|row| row.source_ordinal)),
                 locations: sorted_unique(rows.iter().map(|row| source_map.span(&row.source_range))),
             }
         })
@@ -5148,6 +5156,28 @@ mod tests {
     }
 
     #[test]
+    fn union_arm_candidates_retain_zero_based_source_ordinals() {
+        let source = "`Choice = Zebra | Alpha{x:u8} | Middle`.\n";
+        let slices = [SourceSliceSpec {
+            id: "source-order",
+            start_line: 50,
+            end_line: 50,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 50, &slices)
+            .expect("source-ordered union must census");
+        let arms = census
+            .arms
+            .iter()
+            .map(|arm| (arm.key.arm_name.as_str(), arm.source_ordinals.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arms,
+            vec![("Alpha", vec![1]), ("Middle", vec![2]), ("Zebra", vec![0]),],
+            "canonical arm-key order must not erase each arm's source position"
+        );
+    }
+
+    #[test]
     fn indexed_map_value_unions_are_first_class_without_reclassifying_plain_maps() {
         let source = concat!(
             "`Indexed = {entries:[u16 -> Empty|Record{value:u8}|",
@@ -5836,17 +5866,16 @@ mod tests {
             "a dash-leading exact type is only the genuinely malformed source's own report"
         );
         // The trailing dash is NOT swallowed: `trailing-dash-:u16` still
-        // reports against the source exactly as before the fix.
+        // reports against the source exactly as before the fix — one
+        // FieldTypeAmbiguous at the member's path, carrying the source text.
         let trailing = field("trailing-dash").expect("the dash ends the name");
         assert_eq!(trailing.exact_types, ["-:u16".to_owned()]);
         assert!(
             census.ambiguities.iter().any(|candidate| {
-                candidate.key.path.as_deref() == Some("Spec.trailing-dash")  // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
-                    && candidate.raw.contains("noncanonical")
-            }) || census
-                .ambiguities
-                .iter()
-                .any(|candidate| { candidate.key.path.as_deref() == Some("Spec.trailing-dash") }), // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
+                matches!(candidate.key.kind, AmbiguityKind::FieldTypeAmbiguous)
+                    && candidate.key.path.as_deref() == Some("Spec.trailing-dash")  // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
+                    && candidate.raw.eq("trailing-dash-:u16")
+            }),
             "a trailing dash must still report against the source"
         );
         // The plain member is untouched.
