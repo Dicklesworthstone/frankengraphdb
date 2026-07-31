@@ -220,7 +220,7 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
     Ok(out)
 }
 
-fn validate_entry(index: usize, entry: &AdjacencyEntry) -> Result<(), BlockError> {
+pub(crate) fn validate_entry(index: usize, entry: &AdjacencyEntry) -> Result<(), BlockError> {
     if entry.created_at.0 == 0 {
         return Err(BlockError::CreatedAtZero { at: index });
     }

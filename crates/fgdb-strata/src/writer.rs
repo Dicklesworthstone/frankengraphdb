@@ -26,7 +26,9 @@
 //! seals early rather than producing a block the encoder would refuse.
 
 use crate::root::{BlockRef, PartitionRoot, RootError, span_of, validate_root};
-use crate::{AdjacencyEntry, BlockError, block_id, encode_block};
+use crate::{
+    AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES, block_id, encode_block, validate_entry,
+};
 use fgdb_delta_types::{DeltaRow, RelationId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
@@ -63,7 +65,7 @@ pub enum WriteError {
     /// or is missing a row. Skipping would silently produce a partition whose
     /// adjacency disagrees with the history that built it.
     UnknownEdge { eid: EId },
-    /// A row arrived at a sequence at or before the previous one.
+    /// A row arrived at a sequence before the previous one.
     ///
     /// The writer is a fold over an ordered stream; out-of-order input would put
     /// entries in a block whose declared range no longer bounds them.
@@ -137,6 +139,7 @@ impl BlockWriter {
     }
 
     /// Fold one row at `seq`, sealing early if it would collide with a pending key.
+    /// Every typed refusal leaves the writer exactly as it was before the call.
     pub fn apply(
         &mut self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
@@ -151,8 +154,6 @@ impl BlockWriter {
                 offered: seq,
             });
         }
-        self.last_seq = Some(seq);
-
         match row {
             DeltaRow::CreateEdge {
                 eid,
@@ -161,7 +162,6 @@ impl BlockWriter {
                 dst,
                 ..
             } => {
-                self.live.insert(*eid, (*src, *relation, *dst, seq));
                 self.push(
                     keys,
                     AdjacencyEntry {
@@ -172,6 +172,7 @@ impl BlockWriter {
                         retired_at: None,
                     },
                 )?;
+                self.live.insert(*eid, (*src, *relation, *dst, seq));
             }
             DeltaRow::DeleteEdge { eid, .. } => {
                 self.retire(keys, *eid, seq)?;
@@ -185,6 +186,7 @@ impl BlockWriter {
                 // materializer that produced it; recomputing here would be a second
                 // opinion about which edges a deletion retires, and two opinions
                 // about one fact is how they drift.
+                self.preflight_retirements(sorted_retired_incident_edges, seq)?;
                 for eid in sorted_retired_incident_edges {
                     self.retire(keys, *eid, seq)?;
                 }
@@ -196,7 +198,41 @@ impl BlockWriter {
             // worse than not storing them.
             _ => {}
         }
+        self.last_seq = Some(seq);
         Ok(())
+    }
+
+    /// Prove every cascade member can retire before changing the first one.
+    ///
+    /// The commit stream carries this list in strict canonical order, so a
+    /// repeated adjacent identity would become unknown after its first
+    /// retirement and is refused during the same preflight. `push` admits only
+    /// validated entries and seals at the hard format ceiling, so after this pass
+    /// the retirement loop has no reachable typed refusal left halfway through.
+    fn preflight_retirements(&self, eids: &[EId], seq: CommitSeq) -> Result<(), WriteError> {
+        let mut previous = None;
+        for &eid in eids {
+            if previous == Some(eid) {
+                return Err(WriteError::UnknownEdge { eid });
+            }
+            self.retirement_entry(eid, seq)?;
+            previous = Some(eid);
+        }
+        Ok(())
+    }
+
+    fn retirement_entry(&self, eid: EId, seq: CommitSeq) -> Result<AdjacencyEntry, WriteError> {
+        let &(src, relation, dst, created_at) =
+            self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
+        let entry = AdjacencyEntry {
+            src,
+            relation,
+            dst,
+            created_at,
+            retired_at: Some(seq),
+        };
+        validate_entry(0, &entry).map_err(WriteError::Block)?;
+        Ok(entry)
     }
 
     fn retire(
@@ -205,20 +241,11 @@ impl BlockWriter {
         eid: EId,
         seq: CommitSeq,
     ) -> Result<(), WriteError> {
-        let (src, relation, dst, created_at) = self
-            .live
-            .remove(&eid)
-            .ok_or(WriteError::UnknownEdge { eid })?;
-        self.push(
-            keys,
-            AdjacencyEntry {
-                src,
-                relation,
-                dst,
-                created_at,
-                retired_at: Some(seq),
-            },
-        )
+        let entry = self.retirement_entry(eid, seq)?;
+        self.push(keys, entry)?;
+        let removed = self.live.remove(&eid);
+        debug_assert!(removed.is_some(), "preflighted live edge disappeared");
+        Ok(())
     }
 
     /// Stage one entry, sealing first if its key is already pending.
@@ -232,12 +259,21 @@ impl BlockWriter {
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
         entry: AdjacencyEntry,
     ) -> Result<(), WriteError> {
+        validate_entry(0, &entry).map_err(WriteError::Block)?;
         let key = (entry.src, entry.relation, entry.dst);
         match self.pending.get(&key) {
             Some(existing) if existing.created_at == entry.created_at => {
                 self.pending.insert(key, entry);
             }
             Some(_) => {
+                self.seal(keys)?;
+                self.pending.insert(key, entry);
+            }
+            None if self.pending.len()
+                >= usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX) =>
+            {
+                // This is a format ceiling, not an adaptive seal policy: allowing
+                // one more row would create a block no conforming reader accepts.
                 self.seal(keys)?;
                 self.pending.insert(key, entry);
             }
@@ -257,7 +293,6 @@ impl BlockWriter {
             return Ok(None);
         }
         let entries: Vec<AdjacencyEntry> = self.pending.values().copied().collect();
-        self.pending.clear();
         let bytes = encode_block(&entries).map_err(WriteError::Block)?;
         let (first_seq, last_seq) = span_of(&entries).expect("non-empty");
         let sealed = SealedBlock {
@@ -266,6 +301,7 @@ impl BlockWriter {
             first_seq,
             last_seq,
         };
+        self.pending.clear();
         self.sealed.push(sealed.clone());
         Ok(Some(sealed))
     }
@@ -290,5 +326,44 @@ impl BlockWriter {
         };
         validate_root(&root).map_err(WriteError::Root)?;
         Ok((root, self.sealed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockWriter, WriteError};
+    use crate::{AdjacencyEntry, BlockError};
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::ids::DatabaseSecurityNamespaceId;
+    use fgdb_types::{BranchId, CommitSeq, GraphId, VId};
+
+    const K_OID: [u8; 32] = [0x5a; 32];
+
+    fn keys() -> (&'static [u8; 32], DatabaseSecurityNamespaceId) {
+        (&K_OID, DatabaseSecurityNamespaceId([0x77; 32]))
+    }
+
+    #[test]
+    fn a_failed_seal_preserves_its_pending_entries() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer.pending.insert(
+            (VId(1), RelationId(1), VId(2)),
+            AdjacencyEntry {
+                src: VId(1),
+                relation: RelationId(1),
+                dst: VId(2),
+                created_at: CommitSeq(0),
+                retired_at: None,
+            },
+        );
+
+        let expected = Err(WriteError::Block(BlockError::CreatedAtZero { at: 0 }));
+        assert_eq!(writer.seal(keys()), expected);
+        assert_eq!(writer.pending_len(), 1, "a failed seal retains its input");
+        assert_eq!(
+            writer.seal(keys()),
+            expected,
+            "retry observes the same deterministic refusal"
+        );
     }
 }

@@ -223,6 +223,21 @@ fn a_delete_of_an_unknown_edge_is_refused() {
     );
 }
 
+/// Rejecting a row is not an observation of that row's sequence. The caller may
+/// still need to supply an earlier missing prefix before retrying the refusal.
+#[test]
+fn a_refused_delete_does_not_advance_the_stream_frontier() {
+    let mut w = writer();
+    assert_eq!(
+        w.apply(keys(), CommitSeq(5), &delete(99)),
+        Err(WriteError::UnknownEdge { eid: EId(99) })
+    );
+    assert!(
+        w.apply(keys(), CommitSeq(4), &create(10, 1, 2)).is_ok(),
+        "the refused future row must not consume sequence 5"
+    );
+}
+
 /// THE CASCADE COMES FROM THE ROW, and every edge it names is retired.
 #[test]
 fn a_vertex_deletion_retires_its_declared_cascade() {
@@ -275,6 +290,84 @@ fn a_cascade_naming_an_unknown_edge_is_refused() {
             },
         ),
         Err(WriteError::UnknownEdge { eid: EId(77) })
+    );
+    w.apply(keys(), CommitSeq(4), &delete(10))
+        .expect("the rejected cascade must leave its earlier edge live");
+}
+
+/// The stream contract makes cascade identities strictly ordered and unique. A
+/// duplicate would become unknown only after its first retirement, so it must be
+/// detected before either copy changes the writer.
+#[test]
+fn a_duplicate_cascade_edge_is_refused_atomically() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("creates");
+    assert_eq!(
+        w.apply(
+            keys(),
+            CommitSeq(4),
+            &DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(10), EId(10)],
+            },
+        ),
+        Err(WriteError::UnknownEdge { eid: EId(10) })
+    );
+    w.apply(keys(), CommitSeq(4), &delete(10))
+        .expect("the duplicate refusal must leave the edge live");
+}
+
+/// Every retirement in a cascade is validated before the first one lands. A row
+/// cannot return a late interval error after already consuming an earlier edge.
+#[test]
+fn a_cascade_is_preflighted_before_any_retirement() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("creates the earlier edge");
+    w.apply(keys(), CommitSeq(4), &create(11, 3, 1))
+        .expect("creates the same-commit edge");
+
+    assert_eq!(
+        w.apply(
+            keys(),
+            CommitSeq(4),
+            &DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(10), EId(11)],
+            },
+        ),
+        Err(WriteError::Block(
+            fgdb_strata::BlockError::RetiredBeforeCreated {
+                at: 0,
+                created_at: CommitSeq(4),
+                retired_at: CommitSeq(4),
+            }
+        ))
+    );
+    w.apply(keys(), CommitSeq(4), &delete(10))
+        .expect("the late refusal must leave the earlier edge live");
+    w.apply(keys(), CommitSeq(5), &delete(11))
+        .expect("the late refusal must also leave its own invalid edge live");
+}
+
+/// A row that can never become a canonical block is refused before it changes the
+/// pending map or consumes its sequence.
+#[test]
+fn an_invalid_entry_is_refused_before_writer_mutation() {
+    let mut w = writer();
+    assert_eq!(
+        w.apply(keys(), CommitSeq(0), &create(10, 1, 2)),
+        Err(WriteError::Block(fgdb_strata::BlockError::CreatedAtZero {
+            at: 0,
+        }))
+    );
+    assert_eq!(w.pending_len(), 0, "the invalid row was never staged");
+    assert!(
+        w.apply(keys(), CommitSeq(1), &create(10, 1, 2)).is_ok(),
+        "the refused zero sequence did not advance the frontier"
     );
 }
 
