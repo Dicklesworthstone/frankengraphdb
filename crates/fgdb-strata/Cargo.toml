@@ -21,3 +21,11 @@ workspace = true
 
 [dev-dependencies.fgdb-delta-types]
 path = "../fgdb-delta-types"
+
+# The lab runtime, for tests only: the block store is the first thing in this
+# crate that touches a disk, so its laws must run under the runtime that can
+# inject fsync lies and torn writes at that boundary.
+[dev-dependencies.asupersync]
+git = "https://github.com/Dicklesworthstone/asupersync"
+rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb"
+default-features = false

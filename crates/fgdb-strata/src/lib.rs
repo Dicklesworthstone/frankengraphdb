@@ -37,6 +37,7 @@
 #![forbid(unsafe_code)]
 
 pub mod root;
+pub mod store;
 pub mod writer;
 
 use fgdb_delta_types::RelationId;
