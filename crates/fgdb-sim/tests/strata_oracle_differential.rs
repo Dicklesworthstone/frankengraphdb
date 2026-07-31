@@ -53,11 +53,7 @@ enum Step {
         src: u128,
         dst: u128,
     },
-    DeleteEdge {
-        eid: u128,
-        src: u128,
-        dst: u128,
-    },
+    DeleteEdge(u128),
     /// Retire a vertex and everything hanging off it.
     ///
     /// Added because MUTATION FOUND THIS MISSING: making the writer ignore a
@@ -119,7 +115,7 @@ fn build(
                     sorted_retired_incident_edges: graph.incident_edges(VId(vid)),
                 }
             }
-            Step::DeleteEdge { eid, .. } => {
+            Step::DeleteEdge(eid) => {
                 // THE BEFORE-IMAGE IS READ FROM THE ORACLE, not invented. Its
                 // delete refuses a version that disagrees with materialized state
                 // — that check is the delta stream's self-verification and this
@@ -250,14 +246,7 @@ fn a_cross_block_deletion_agrees_with_the_oracle() {
                 dst: 3,
             },
         ),
-        (
-            5,
-            Step::DeleteEdge {
-                eid: 10,
-                src: 1,
-                dst: 2,
-            },
-        ),
+        (5, Step::DeleteEdge(10)),
     ];
     let (graph, blocks) = build(&history, &[4]);
     assert!(blocks.len() >= 2);
@@ -286,14 +275,7 @@ fn a_re_created_edge_agrees_with_the_oracle() {
                 dst: 2,
             },
         ),
-        (
-            4,
-            Step::DeleteEdge {
-                eid: 10,
-                src: 1,
-                dst: 2,
-            },
-        ),
+        (4, Step::DeleteEdge(10)),
         (
             6,
             Step::AddEdge {
@@ -353,14 +335,7 @@ fn every_block_boundary_gives_the_same_answers() {
                 dst: 3,
             },
         ),
-        (
-            4,
-            Step::DeleteEdge {
-                eid: 10,
-                src: 1,
-                dst: 2,
-            },
-        ),
+        (4, Step::DeleteEdge(10)),
         (
             5,
             Step::AddEdge {
