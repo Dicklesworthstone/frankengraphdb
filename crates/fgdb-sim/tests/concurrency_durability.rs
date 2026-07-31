@@ -184,8 +184,20 @@ fn finish(
     let seq = next_seq(cx, coordinator);
     let effects = txn.effects().to_vec();
     let mut decision_basis = recovered(cx, coordinator);
+    // The logical command sequence MATCHES the commit sequence here, and that is
+    // required rather than convenient: `marker_for_capsule` writes
+    // `logical_command_seq: commit_seq` into the marker, and replay reads the
+    // logical sequence back out of it. A fixture that passed a different value
+    // would make the in-memory decision basis disagree with the durable stream it
+    // is supposed to mirror.
     let outcome = txn
-        .commit(&mut decision_basis, REL, INTENT_SEMANTICS, seq)
+        .commit(
+            &mut decision_basis,
+            REL,
+            INTENT_SEMANTICS,
+            seq,
+            fgdb_types::LogicalCommandSeq(seq.0),
+        )
         .expect("commit decision");
 
     // PREPARED EVEN WHEN REFUSED, and that is not a wasted step: preparing is
