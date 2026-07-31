@@ -360,7 +360,7 @@ fn verify_catches_a_window_whose_frontier_outruns_its_entries() {
         let broken = LocalDeltaBatchIndex::from_parts_for_test(
             CommitSeq(1),
             CommitSeq(3),
-            vec![batch_at(3, &cx)], // seq 2 is missing
+            vec![(CommitSeq(3), batch_at(3, &cx))], // seq 2 is missing
         );
         assert!(
             matches!(broken.verify(), Err(IndexError::Gapped { .. })),
@@ -402,8 +402,11 @@ fn verify_refuses_a_same_cardinality_batch_with_the_wrong_marker() {
             CommitSeq(1),
             CommitSeq(1),
         );
-        let broken =
-            LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(1), vec![malformed]);
+        let broken = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(0),
+            CommitSeq(1),
+            vec![(CommitSeq(1), malformed)],
+        );
         assert_eq!(
             broken.verify(),
             Err(IndexError::WrongMarker {
@@ -428,13 +431,40 @@ fn verify_refuses_a_same_cardinality_batch_with_the_wrong_frontier() {
             CommitSeq(1),
             CommitSeq(9),
         );
-        let broken =
-            LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(1), vec![malformed]);
+        let broken = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(0),
+            CommitSeq(1),
+            vec![(CommitSeq(1), malformed)],
+        );
         assert_eq!(
             broken.verify(),
             Err(IndexError::WrongFrontier {
                 commit_seq: CommitSeq(1),
                 frontier: CommitSeq(9),
+            })
+        );
+    });
+}
+
+/// Exact key coverage and an internally valid batch are still insufficient if
+/// the decoder associated the batch with the wrong durable map key. The stored
+/// key is part of the authenticated index structure; deriving it again from
+/// the value would erase precisely the corruption this law exercises.
+#[test]
+fn verify_refuses_a_same_cardinality_batch_stored_under_the_wrong_key() {
+    with_commit_cx(0x1DED, |cx| {
+        let batch_for_seven = batch_at(7, &cx);
+        let broken = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(0),
+            CommitSeq(1),
+            vec![(CommitSeq(1), batch_for_seven)],
+        );
+
+        assert_eq!(
+            broken.verify(),
+            Err(IndexError::WrongEntryKey {
+                stored: CommitSeq(1),
+                batch: CommitSeq(7),
             })
         );
     });

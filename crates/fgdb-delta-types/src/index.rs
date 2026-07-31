@@ -80,6 +80,10 @@ pub enum IndexError {
         commit_seq: CommitSeq,
         frontier: CommitSeq,
     },
+    /// The durable index key and the batch stored under it name different
+    /// commits. A decoder must preserve both values independently so
+    /// verification can bind the map structure to the batch identity.
+    WrongEntryKey { stored: CommitSeq, batch: CommitSeq },
     /// A retirement that would move the retained floor past the frontier, or
     /// backwards. Either would leave the window describing an interval it does
     /// not hold.
@@ -114,6 +118,10 @@ impl core::fmt::Display for IndexError {
             } => write!(
                 f,
                 "wrong frontier: a local batch at {commit_seq:?} declares frontier {frontier:?}"
+            ),
+            Self::WrongEntryKey { stored, batch } => write!(
+                f,
+                "wrong entry key: index key {stored:?} stores a batch for {batch:?}"
             ),
             Self::UnretirableInterval {
                 retained_after,
@@ -168,11 +176,11 @@ impl LocalDeltaBatchIndex {
     pub fn from_parts_for_test(
         retained_after_commit_seq: CommitSeq,
         frontier: CommitSeq,
-        batches: Vec<LogicalDeltaBatch>,
+        keyed_batches: Vec<(CommitSeq, LogicalDeltaBatch)>,
     ) -> Self {
         let mut entries = BTreeMap::new();
-        for batch in batches {
-            entries.insert(batch.commit_seq().0, batch);
+        for (stored_seq, batch) in keyed_batches {
+            entries.insert(stored_seq.0, batch);
         }
         Self {
             format: INDEX_FORMAT_V1,
@@ -338,6 +346,13 @@ impl LocalDeltaBatchIndex {
                     retained_after: self.retained_after_commit_seq,
                     frontier: self.frontier,
                     requested: CommitSeq(*stored_seq),
+                });
+            }
+            let batch_commit_seq = batch.commit_seq();
+            if batch_commit_seq.0 != *stored_seq {
+                return Err(IndexError::WrongEntryKey {
+                    stored: CommitSeq(*stored_seq),
+                    batch: batch_commit_seq,
                 });
             }
             let expected = previous
