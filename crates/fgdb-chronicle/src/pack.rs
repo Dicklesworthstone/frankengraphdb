@@ -54,6 +54,21 @@ pub struct PackDomain {
     pub retention_class: u16,
 }
 
+/// Caller-selected protection policy for one pack realization.
+///
+/// There is deliberately no nonce field here. The pack derives its nonce from
+/// its keyed identity and this complete profile, so a caller cannot reuse one
+/// nonce across different pack plaintexts or protection descriptors. The
+/// object kind, plaintext lengths, and AEAD tag length are likewise facts of
+/// the realization and are constructed by [`PackBuilder::seal`], not asserted
+/// by its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackProtectionProfile {
+    pub codec_profile: u16,
+    pub data_crypto_profile: u16,
+    pub dek_id: [u8; 16],
+}
+
 /// Why a pack could not be built or read. Every variant is fail-closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackError {
@@ -193,7 +208,7 @@ impl PackBuilder {
         self,
         k_oid: &[u8; 32],
         dek: &[u8; 32],
-        descriptor: CipherDescriptor,
+        profile: PackProtectionProfile,
     ) -> Result<PackedObjectGroup, PackError> {
         if self.members.is_empty() {
             return Err(PackError::EmptyPack);
@@ -222,6 +237,19 @@ impl PackBuilder {
             PACK_HEADER_DOMAIN,
             &packed_plaintext,
         );
+        let packed_len = packed_plaintext.len() as u64;
+        let descriptor = CipherDescriptor {
+            object_kind: PACK_REALIZATION_KIND,
+            canonical_plaintext_len: packed_len,
+            codec_profile: profile.codec_profile,
+            compressed_len: packed_len,
+            data_crypto_profile: profile.data_crypto_profile,
+            dek_id: profile.dek_id,
+            object_nonce: derive_pack_nonce(pack_object.object_id(), profile),
+            // XChaCha20-Poly1305's fixed authenticator width. A caller cannot
+            // choose a shorter split and thereby weaken CiphertextId binding.
+            object_tag_len: 16,
+        };
         let protected = pack_object.protect(dek, descriptor, &packed_plaintext);
 
         Ok(PackedObjectGroup {
@@ -235,6 +263,26 @@ impl PackBuilder {
 /// The header domain string of a pack realization. Distinct from every
 /// logical-object domain so a pack can never be mistaken for one.
 pub const PACK_HEADER_DOMAIN: &[u8] = b"fgdb:packed-object-group:v1";
+
+/// Domain separation for deterministic pack-nonce derivation.
+const PACK_NONCE_DOMAIN: &[u8] = b"fgdb:packed-object-group-nonce:v1";
+
+/// Derive the AEAD nonce from everything that can distinguish two pack
+/// encryptions under one DEK. Identical identity/profile pairs encrypt the
+/// identical plaintext under identical AAD; changing either the pack bytes or
+/// any caller-selectable protection field necessarily changes the nonce.
+fn derive_pack_nonce(object_id: ObjectId, profile: PackProtectionProfile) -> [u8; 24] {
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(PACK_NONCE_DOMAIN);
+    hasher.update(&object_id.0);
+    hasher.update(&profile.codec_profile.to_be_bytes());
+    hasher.update(&profile.data_crypto_profile.to_be_bytes());
+    hasher.update(&profile.dek_id);
+    let digest = hasher.finalize();
+    let mut nonce = [0u8; 24];
+    nonce.copy_from_slice(&digest.0[..24]);
+    nonce
+}
 
 /// A pack never acquires an `ObjectKind`. `0x0000` is permanently invalid in
 /// every registry code space (plan L290), so a pack realization cannot collide

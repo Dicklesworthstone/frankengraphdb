@@ -34,7 +34,7 @@ use fgdb_crypto::Digest;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
 use fgdb_types::{CommitSeq, MarkerRef};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -43,6 +43,11 @@ pub const CAPSULE_DIR: &str = "capsules";
 
 /// The append-only marker log.
 pub const COMMIT_LOG_NAME: &str = "commits.log";
+
+/// Stable inode whose whole-file lock is the sole live-writer authority for a
+/// database's commit stream. The file is durable layout scaffolding; the lock
+/// itself is process-death-released and never interpreted as durable state.
+const COORDINATOR_LOCK_NAME: &str = ".commit-coordinator.lock";
 
 /// Stack buffer used to compare an existing immutable capsule with the
 /// deterministic candidate without allocating a second capsule-sized `Vec`.
@@ -111,6 +116,10 @@ pub enum CommitError {
     /// must not be committed, and one that cannot be recovered is not a commit
     /// this database can honour.
     Capsule(CapsuleError),
+    /// Another live coordinator already owns this database's commit stream.
+    /// Recovery and sequence allocation must never run concurrently against
+    /// one log, even inside one process.
+    WriterAlreadyOpen,
     /// A previous commit failed at or after the marker write, so this
     /// coordinator can no longer know whether the durable log contains that
     /// entry. Reopen the directory to find out.
@@ -148,6 +157,9 @@ impl core::fmt::Display for CommitError {
                 write!(f, "commit chain diverges at seq {commit_seq}")
             }
             Self::Capsule(error) => write!(f, "capsule: {error}"),
+            Self::WriterAlreadyOpen => {
+                f.write_str("another commit coordinator already owns this database")
+            }
             Self::Poisoned => write!(
                 f,
                 "coordinator poisoned by an interrupted commit; reopen the database directory"
@@ -213,10 +225,12 @@ pub enum CrashPoint {
 ///
 /// One actor allocates every `CommitSeq`, which is what makes the sequence
 /// gap-free without coordination: there is no second allocator to race. The
-/// type owns the chain, so a caller cannot hold two coordinators over one log.
+/// type retains a process-death-released whole-file lease for its lifetime, so
+/// a caller cannot hold two coordinators over one log.
 #[derive(Debug)]
 pub struct CommitCoordinator {
     dir: PathBuf,
+    _writer_lease: File,
     keys: CapsuleKeys,
     chain: MarkerChain,
     discarded_tail_bytes: usize,
@@ -236,11 +250,22 @@ enum EntryDefect {
     Corrupt,
 }
 
+/// One decoded commit-log frame and one bounded reader step. Naming both keeps
+/// the streaming reader's result vocabulary legible without boxing a marker on
+/// every successful entry.
+type DecodedEntry = (CommitMarker, Digest, usize);
+type EntryRead = Option<Result<DecodedEntry, EntryDefect>>;
+
 impl CommitCoordinator {
     /// Open a database directory's commit stream, recovering whatever is
     /// durable.
-    pub fn open(database_dir: impl AsRef<Path>, keys: CapsuleKeys) -> Result<Self, CommitError> {
+    pub fn open(
+        cx: &CommitCx,
+        database_dir: impl AsRef<Path>,
+        keys: CapsuleKeys,
+    ) -> Result<Self, CommitError> {
         let dir = database_dir.as_ref().to_path_buf();
+        let writer_lease = Self::acquire_writer_lease(cx, &dir)?;
         let capsule_dir = dir.join(CAPSULE_DIR);
         match std::fs::create_dir(&capsule_dir) {
             Ok(()) => {}
@@ -261,6 +286,7 @@ impl CommitCoordinator {
         let (chain, discarded_tail_bytes) = Self::recover_chain(&dir)?;
         Ok(Self {
             dir,
+            _writer_lease: writer_lease,
             keys,
             chain,
             discarded_tail_bytes,
@@ -271,6 +297,38 @@ impl CommitCoordinator {
             capsule_directory_parent_sync_pending: true,
             commit_log_parent_sync_pending: true,
         })
+    }
+
+    /// Mint the sole live-writer authority before recovery can inspect or
+    /// truncate the log. Opening an independent descriptor is load-bearing:
+    /// duplicated handles can share lock ownership on some platforms, whereas
+    /// independent opens contend both within one process and across processes.
+    fn acquire_writer_lease(cx: &CommitCx, dir: &Path) -> Result<File, CommitError> {
+        let path = dir.join(COORDINATOR_LOCK_NAME);
+        let lease = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "commit coordinator lock path exists but is not a regular file",
+                    )
+                    .into());
+                }
+                OpenOptions::new().read(true).write(true).open(&path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match cx.with_restriction(|| lease.try_lock()) {
+            Ok(()) => Ok(lease),
+            Err(TryLockError::WouldBlock) => Err(CommitError::WriterAlreadyOpen),
+            Err(TryLockError::Error(error)) => Err(error.into()),
+        }
     }
 
     pub fn chain(&self) -> &MarkerChain {
@@ -650,21 +708,25 @@ impl CommitCoordinator {
     /// a commit log: durable data lost with a green light.
     fn recover_chain(dir: &Path) -> Result<(MarkerChain, usize), CommitError> {
         let path = dir.join(COMMIT_LOG_NAME);
-        let mut bytes = Vec::new();
-        match File::open(&path) {
-            Ok(mut file) => {
-                file.read_to_end(&mut bytes)?;
-            }
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok((MarkerChain::new(), 0));
             }
             Err(error) => return Err(error.into()),
-        }
+        };
 
         let mut chain = MarkerChain::new();
         let mut cursor = 0usize;
-        while cursor < bytes.len() {
-            let (marker, stored_chain_hash, consumed) = match Self::decode_entry(&bytes[cursor..]) {
+        // One bounded entry buffer replaces whole-log materialization. A valid
+        // writer entry is at most MAX_ENTRY_BODY plus its fixed framing, so a
+        // hostile sparse or multi-gigabyte log can never demand a matching
+        // allocation merely because it exists on disk.
+        let mut entry = Vec::with_capacity(
+            ENTRY_HEADER_BYTES + MAX_ENTRY_BODY + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES,
+        );
+        while let Some(decoded) = Self::read_next_entry(&mut file, &mut entry)? {
+            let (marker, stored_chain_hash, consumed) = match decoded {
                 Ok(decoded) => decoded,
                 // Reachable only when the remaining bytes run out, which by
                 // construction means end of file.
@@ -685,9 +747,33 @@ impl CommitCoordinator {
             chain
                 .append(marker)
                 .map_err(|_| CommitError::CorruptLogEntry { commit_seq: seq })?;
-            cursor += consumed;
+            cursor = cursor.checked_add(consumed).ok_or_else(|| {
+                CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "commit log length exceeds this platform's address space",
+                ))
+            })?;
         }
-        let discarded_tail_bytes = bytes.len() - cursor;
+        let valid_len = u64::try_from(cursor).map_err(|_| {
+            CommitError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "commit log length does not fit u64",
+            ))
+        })?;
+        let file_len = file.metadata()?.len();
+        let discarded_tail_bytes =
+            usize::try_from(file_len.checked_sub(valid_len).ok_or_else(|| {
+                CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "commit log shrank during recovery",
+                ))
+            })?)
+            .map_err(|_| {
+                CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "discarded commit-log tail does not fit usize",
+                ))
+            })?;
         if discarded_tail_bytes != 0 {
             // O_APPEND uses the file's physical end, not the recovered
             // chain's logical end. Leaving the torn bytes in place would put
@@ -695,18 +781,63 @@ impl CommitCoordinator {
             // following restart would stop at that old prefix and silently
             // lose the acknowledged commit. The next successful D2 sync makes
             // this truncation durable together with the appended entry.
-            let valid_len = u64::try_from(cursor).map_err(|_| {
-                CommitError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "commit log length does not fit u64",
-                ))
-            })?;
             OpenOptions::new()
                 .write(true)
                 .open(&path)?
                 .set_len(valid_len)?;
         }
         Ok((chain, discarded_tail_bytes))
+    }
+
+    /// Read and decode exactly one bounded entry.
+    ///
+    /// `None` is a clean entry-boundary EOF. A partial header/body is handed to
+    /// `decode_entry`, which preserves the same missing-versus-wrong-byte rule
+    /// as the in-memory decoder without ever reading beyond one maximum entry.
+    fn read_next_entry(reader: &mut impl Read, entry: &mut Vec<u8>) -> std::io::Result<EntryRead> {
+        entry.clear();
+        if !Self::read_until_len(reader, entry, ENTRY_HEADER_BYTES)? {
+            return if entry.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(Self::decode_entry(entry)))
+            };
+        }
+
+        // Refuse impossible framing from the fixed header before asking the
+        // reader for any claimed body bytes. This is what makes an invalid
+        // prefix in front of an enormous file cheap and fail-closed.
+        if entry[..ENTRY_MAGIC.len()] != ENTRY_MAGIC {
+            return Ok(Some(Err(EntryDefect::Corrupt)));
+        }
+        let body_len = u32::from_be_bytes([entry[4], entry[5], entry[6], entry[7]]) as usize;
+        if body_len > MAX_ENTRY_BODY {
+            return Ok(Some(Err(EntryDefect::Corrupt)));
+        }
+        let total = ENTRY_HEADER_BYTES + body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
+        let _complete = Self::read_until_len(reader, entry, total)?;
+        Ok(Some(Self::decode_entry(entry)))
+    }
+
+    /// Extend `bytes` to `target_len`, returning false only when EOF arrives
+    /// first. Reads use a fixed stack chunk so even a corrupt length field never
+    /// controls a single allocation or read request.
+    fn read_until_len(
+        reader: &mut impl Read,
+        bytes: &mut Vec<u8>,
+        target_len: usize,
+    ) -> std::io::Result<bool> {
+        let mut chunk = [0u8; 8 * 1024];
+        while bytes.len() < target_len {
+            let wanted = (target_len - bytes.len()).min(chunk.len());
+            match reader.read(&mut chunk[..wanted]) {
+                Ok(0) => return Ok(false),
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
     }
 
     /// Decode one entry, or say which way it failed.
@@ -821,4 +952,43 @@ fn decode_hex_oid(hex: &str) -> Option<ObjectId> {
         *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
     Some(ObjectId(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommitCoordinator, ENTRY_HEADER_BYTES, EntryDefect};
+    use std::io::{self, Read};
+
+    /// A hostile source with an invalid fixed header and an arbitrarily large
+    /// suffix. Touching the suffix panics, so this is a direct negative control
+    /// for the old whole-log `read_to_end` behavior.
+    struct InvalidHeaderWithForbiddenSuffix {
+        header_delivered: bool,
+    }
+
+    impl Read for InvalidHeaderWithForbiddenSuffix {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            assert!(
+                !self.header_delivered,
+                "recovery read past a corrupt header"
+            );
+            assert_eq!(bytes.len(), ENTRY_HEADER_BYTES);
+            bytes.copy_from_slice(b"BAD!\0\0\0\0");
+            self.header_delivered = true;
+            Ok(ENTRY_HEADER_BYTES)
+        }
+    }
+
+    #[test]
+    fn corrupt_header_is_rejected_before_its_unbounded_suffix_is_read() {
+        let mut source = InvalidHeaderWithForbiddenSuffix {
+            header_delivered: false,
+        };
+        let mut entry = Vec::new();
+        let decoded = CommitCoordinator::read_next_entry(&mut source, &mut entry)
+            .expect("the source itself is readable")
+            .expect("a header was present");
+        assert!(matches!(decoded, Err(EntryDefect::Corrupt)));
+        assert_eq!(entry.len(), ENTRY_HEADER_BYTES);
+    }
 }

@@ -258,7 +258,7 @@ fn finish(
 fn a_refused_transaction_seals_no_capsule() {
     let dir = scratch_dir("refused");
     under_lab(11, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         let db = recovered(cx, &coordinator);
         let mut seed = begin(&db);
         seed.execute(&[create(1, 0), create(2, 0)])
@@ -317,7 +317,7 @@ fn a_refused_transaction_seals_no_capsule() {
 fn durability_decides_membership_in_the_ssi_history() {
     let dir = scratch_dir("membership");
     under_lab(12, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         let db = recovered(cx, &coordinator);
         let mut seed = begin(&db);
         seed.execute(&[create(1, 1), create(2, 1)])
@@ -342,7 +342,7 @@ fn durability_decides_membership_in_the_ssi_history() {
         assert_eq!(b.trace.commit_seq, None, "the lost commit is not committed");
 
         drop(coordinator);
-        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
 
         // The recovered graph carries only the first transaction's effect.
         let graph = graph_of(cx, &reopened);
@@ -383,7 +383,7 @@ fn durability_decides_membership_in_the_ssi_history() {
 fn a_crash_releases_the_lost_transactions_conflicts() {
     let dir = scratch_dir("release");
     under_lab(13, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         let db = recovered(cx, &coordinator);
         let mut seed = begin(&db);
         seed.execute(&[create(1, 0)]).expect("executes");
@@ -397,7 +397,7 @@ fn a_crash_releases_the_lost_transactions_conflicts() {
         assert!(lost.outcome.is_committed(), "it decided to commit");
 
         drop(coordinator);
-        let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let mut reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
 
         // A later transaction writes the SAME element. It must not conflict: the
         // write that would have conflicted is not in the history.
@@ -430,7 +430,7 @@ fn a_crash_releases_the_lost_transactions_conflicts() {
 fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
     let dir = scratch_dir("seq");
     under_lab(14, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         for round in 0..4u128 {
             let db = recovered(cx, &coordinator);
             let predicted = next_seq(cx, &coordinator);
@@ -464,7 +464,7 @@ fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
 fn dangerous_structures_are_monotone_under_restriction() {
     let dir = scratch_dir("monotone");
     under_lab(15, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         let db = recovered(cx, &coordinator);
         let mut seed = begin(&db);
         seed.execute(&[create(1, 1), create(2, 1)])

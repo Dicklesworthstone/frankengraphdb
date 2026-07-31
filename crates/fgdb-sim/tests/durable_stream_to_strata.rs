@@ -179,13 +179,13 @@ fn a_partition_rebuilt_from_the_recovered_stream_agrees_with_the_oracle() {
     let dir = scratch_dir("arc");
     under_lab(21, move |cx| {
         {
-            let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
             commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]);
             commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2)]);
             commit_rows(&mut coordinator, cx, vec![edge(11, 1, 3), edge(12, 2, 3)]);
         }
         // The coordinator is GONE. Everything below comes off disk.
-        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         let database = replay(cx, &reopened).expect("the stream replays").database;
         let graph = database
             .graph(GRAPH, BRANCH)
@@ -221,7 +221,7 @@ fn a_deletion_in_a_later_commit_agrees_with_the_oracle() {
     let dir = scratch_dir("delete");
     under_lab(22, move |cx| {
         {
-            let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
             commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]);
             commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2), edge(11, 1, 3)]);
             // A later commit retires one of them. The before-image is READ from
@@ -244,7 +244,7 @@ fn a_deletion_in_a_later_commit_agrees_with_the_oracle() {
                 }],
             );
         }
-        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         let database = replay(cx, &reopened).expect("replays").database;
         let graph = database.graph(GRAPH, BRANCH).expect("materialized");
         let frontier = database.applied_through(GRAPH, BRANCH).expect("frontier");
@@ -284,16 +284,16 @@ fn rebuilding_twice_produces_identical_blocks() {
     let dir = scratch_dir("deterministic");
     under_lab(23, move |cx| {
         {
-            let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
             commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2)]);
             commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2)]);
         }
         let first = {
-            let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+            let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
             rebuild_from_stream(&reopened)
         };
         let second = {
-            let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+            let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
             rebuild_from_stream(&reopened)
         };
         assert_eq!(

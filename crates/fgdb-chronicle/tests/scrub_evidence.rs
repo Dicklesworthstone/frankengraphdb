@@ -8,6 +8,7 @@
 
 use fgdb_chronicle::identity::{CipherDescriptor, EncodingDescriptor, IdentifiedObject};
 use fgdb_chronicle::scrub::{LostReason, ScrubVerdict, scrub_object};
+use fgdb_chronicle::symbol::SymbolRecord;
 use fgdb_chronicle::symbolize::{RecoveryTarget, encode_object, source_symbol_count};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
@@ -116,11 +117,61 @@ fn a_healthy_object_scrubs_intact_with_a_decode_proof() {
     assert!(!report.needs_maintenance(), "intact needs no action");
     assert_eq!(report.corrupt_symbols(), 0);
     assert_eq!(report.symbols_authentic, f.symbols.len());
+    assert_eq!(report.symbols_distinct_authentic, f.symbols.len());
+    assert_eq!(report.duplicate_symbols(), 0);
     assert_eq!(report.source_symbols, f.source_count);
     assert!(
         report.decode_proof_hash.is_some(),
         "a decode ran, so there must be attestable proof"
     );
+}
+
+/// Authenticated retransmissions do not buy repair headroom. This is the exact
+/// accounting error hcf5 found: three copies of one ESI are one equation, not
+/// three surviving symbols.
+#[test]
+fn duplicate_esis_do_not_inflate_surviving_overhead() {
+    let f = fixture(8);
+    let mut baseline_symbols = f.symbols.clone();
+    rot(&mut baseline_symbols[2], 0);
+    let baseline = scrub_object(&f.encoding, &baseline_symbols, target(&f), &dek());
+
+    let mut repeated = baseline_symbols;
+    repeated.extend([f.symbols[3].clone(), f.symbols[3].clone()]);
+    let report = scrub_object(&f.encoding, &repeated, target(&f), &dek());
+
+    assert_eq!(report.symbols_authentic, baseline.symbols_authentic + 2);
+    assert_eq!(
+        report.symbols_distinct_authentic, baseline.symbols_distinct_authentic,
+        "repeating one authenticated ESI adds no decode equation"
+    );
+    assert_eq!(report.duplicate_symbols(), 2);
+    assert_eq!(report.corrupt_symbols(), 1);
+    assert_eq!(report.verdict, baseline.verdict);
+}
+
+/// Two valid MACs for one coordinate but different payloads are producer
+/// equivocation, not redundant availability. Recovery must not choose whichever
+/// record happened to arrive first.
+#[test]
+fn conflicting_authenticated_esis_fail_closed() {
+    let f = fixture(8);
+    let mut records = f.symbols.clone();
+    let mut conflict = SymbolRecord::verify(&records[0], &f.encoding, &dek())
+        .expect("fixture symbol authenticates");
+    conflict.payload[0] ^= 0x01;
+    records.push(conflict.serialize(&f.encoding.symbol_auth_key(&dek())));
+
+    let report = scrub_object(&f.encoding, &records, target(&f), &dek());
+    assert_eq!(
+        report.verdict,
+        ScrubVerdict::Lost {
+            reason: LostReason::ConflictingSymbols
+        }
+    );
+    assert_eq!(report.corrupt_symbols(), 0);
+    assert_eq!(report.duplicate_symbols(), 1);
+    assert!(report.decode_proof_hash.is_none());
 }
 
 /// THE MAINTENANCE WINDOW. Corruption present, object still recoverable —

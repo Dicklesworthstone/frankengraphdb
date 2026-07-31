@@ -229,7 +229,7 @@ fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
 fn reference_effects_round_trip_through_chronicle() {
     let dir = scratch_dir("arc");
     under_lab(1, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
 
         let first = append_fixture(
             &mut coordinator,
@@ -265,7 +265,7 @@ fn reference_effects_round_trip_through_chronicle() {
         drop(coordinator);
 
         // Restart: nothing in memory, everything from disk.
-        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         let graph = graph_of(cx, &reopened);
         assert_eq!(graph.vertex_count(), 2);
         assert_eq!(graph.edge_count(), 1);
@@ -290,7 +290,7 @@ fn reference_effects_round_trip_through_chronicle() {
 fn an_aborted_reference_evaluation_appends_no_graph_marker() {
     let dir = scratch_dir("abort");
     under_lab(2, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         append_fixture(
             &mut coordinator,
             cx,
@@ -356,7 +356,7 @@ fn an_aborted_reference_evaluation_appends_no_graph_marker() {
 fn an_empty_reference_effect_set_appends_no_graph_marker_and_is_not_an_abort() {
     let dir = scratch_dir("empty");
     under_lab(3, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         append_fixture(
             &mut coordinator,
             cx,
@@ -398,7 +398,7 @@ fn an_empty_reference_effect_set_appends_no_graph_marker_and_is_not_an_abort() {
 fn a_statement_error_still_appends_the_surviving_reference_effects() {
     let dir = scratch_dir("stmt-error");
     under_lab(4, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         append_fixture(
             &mut coordinator,
             cx,
@@ -445,7 +445,7 @@ fn a_statement_error_still_appends_the_surviving_reference_effects() {
 fn a_crash_mid_fixture_append_leaves_the_committed_prefix_replayable() {
     let dir = scratch_dir("crash");
     under_lab(5, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
         append_fixture(
             &mut coordinator,
             cx,
@@ -482,7 +482,7 @@ fn a_crash_mid_fixture_append_leaves_the_committed_prefix_replayable() {
         assert!(crashed.is_err());
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         let graph = graph_of(cx, &reopened);
         assert_eq!(
             graph.vertex_count(),

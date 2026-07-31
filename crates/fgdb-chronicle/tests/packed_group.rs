@@ -6,9 +6,10 @@
 //! branch's keys" would leave another domain's bytes unreadable, or worse,
 //! readable. It must fail at build time, and every axis must fail.
 
-use fgdb_chronicle::identity::{CipherDescriptor, IdentifiedObject};
+use fgdb_chronicle::identity::IdentifiedObject;
 use fgdb_chronicle::pack::{
-    DomainAxis, PACK_REALIZATION_KIND, PackBuilder, PackDomain, PackError, WriteKeyDomain,
+    DomainAxis, PACK_REALIZATION_KIND, PackBuilder, PackDomain, PackError, PackProtectionProfile,
+    WriteKeyDomain,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 
@@ -38,16 +39,11 @@ fn domain() -> PackDomain {
     }
 }
 
-fn descriptor(compressed_len: u64) -> CipherDescriptor {
-    CipherDescriptor {
-        object_kind: PACK_REALIZATION_KIND,
-        canonical_plaintext_len: compressed_len,
+fn protection_profile() -> PackProtectionProfile {
+    PackProtectionProfile {
         codec_profile: 1,
-        compressed_len,
         data_crypto_profile: 1,
         dek_id: [3u8; 16],
-        object_nonce: core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(2)),
-        object_tag_len: 16,
     }
 }
 
@@ -69,7 +65,7 @@ fn sealed_pack() -> fgdb_chronicle::PackedObjectGroup {
     let total: u64 = builder.len() as u64;
     assert_eq!(total, 4);
     builder
-        .seal(&k_oid(), &dek(), descriptor(344))
+        .seal(&k_oid(), &dek(), protection_profile())
         .expect("a homogeneous pack must seal")
 }
 
@@ -170,6 +166,43 @@ fn a_pack_pays_one_pipeline_for_every_member() {
         PACK_REALIZATION_KIND,
         "a pack never acquires a logical ObjectKind"
     );
+}
+
+/// The public pack profile has no nonce. The implementation derives one from
+/// the pack identity and every selectable protection field, so the same pack
+/// is reproducible while a different protection transcript cannot reuse it.
+#[test]
+fn the_pack_nonce_and_descriptor_facts_are_derived() {
+    let first = sealed_pack();
+    let second = sealed_pack();
+    assert_eq!(
+        first.protected().descriptor().object_nonce,
+        second.protected().descriptor().object_nonce,
+        "the identical pack/profile pair has one deterministic nonce"
+    );
+
+    let mut changed_profile = protection_profile();
+    changed_profile.dek_id[0] ^= 0x01;
+    let mut builder = PackBuilder::new(domain());
+    for (tag, len) in [(1u8, 96usize), (2, 40), (3, 200), (4, 8)] {
+        builder
+            .add(member(tag, len), domain())
+            .expect("homogeneous members must be admitted");
+    }
+    let changed = builder
+        .seal(&k_oid(), &dek(), changed_profile)
+        .expect("changed profile still seals");
+    assert_ne!(
+        first.protected().descriptor().object_nonce,
+        changed.protected().descriptor().object_nonce,
+        "a distinct protection transcript must not reuse the nonce"
+    );
+
+    let descriptor = first.protected().descriptor();
+    assert_eq!(descriptor.object_kind, PACK_REALIZATION_KIND);
+    assert_eq!(descriptor.canonical_plaintext_len, 344);
+    assert_eq!(descriptor.compressed_len, 344);
+    assert_eq!(descriptor.object_tag_len, 16);
 }
 
 /// Every member keeps its own identity, and extraction PROVES it: the bytes at
@@ -276,7 +309,7 @@ fn an_empty_pack_cannot_be_sealed() {
     let builder = PackBuilder::new(domain());
     assert!(builder.is_empty());
     assert_eq!(
-        builder.seal(&k_oid(), &dek(), descriptor(0)).err(),
+        builder.seal(&k_oid(), &dek(), protection_profile()).err(),
         Some(PackError::EmptyPack)
     );
 }

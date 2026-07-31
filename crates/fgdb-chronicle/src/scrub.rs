@@ -21,6 +21,7 @@ use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object};
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::proof::ProofOutcome;
 use asupersync::types::ObjectId as RaptorqObjectId;
+use std::collections::BTreeMap;
 
 /// What a scrub found. Ordered from healthy to lost.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +58,10 @@ pub enum LostReason {
     /// Bytes recovered and opened, but the recomputed `ObjectId` is not the
     /// one recorded. Content addressing says these are not that object.
     IdentityMismatch,
+    /// Two independently authenticated records claim the same source-block/ESI
+    /// coordinate with different bytes. Choosing either would make recovery
+    /// depend on input order, so scrub fails closed instead.
+    ConflictingSymbols,
     /// The parameters or symbol framing were not usable at all.
     Unusable,
 }
@@ -69,6 +74,9 @@ pub struct ScrubReport {
     pub symbols_presented: usize,
     /// Symbols that passed their own MAC and encoding binding.
     pub symbols_authentic: usize,
+    /// Distinct authenticated source-block/ESI coordinates. Exact duplicate
+    /// records authenticate, but they provide no additional repair equation.
+    pub symbols_distinct_authentic: usize,
     /// Source-symbol count of this encoding (K).
     pub source_symbols: usize,
     /// Content hash of the RaptorQ decode proof, when a decode ran. This is
@@ -87,6 +95,11 @@ impl ScrubReport {
     /// Symbols that failed authentication: detected, located corruption.
     pub fn corrupt_symbols(&self) -> usize {
         self.symbols_presented - self.symbols_authentic
+    }
+
+    /// Authenticated retransmissions that repeated an already-present ESI.
+    pub fn duplicate_symbols(&self) -> usize {
+        self.symbols_authentic - self.symbols_distinct_authentic
     }
 }
 
@@ -112,13 +125,27 @@ pub fn scrub_object(
 
     // Pass 1: authenticate every symbol independently. A rejected symbol is a
     // located corruption; it simply does not enter the decode.
-    let mut authentic = Vec::with_capacity(serialized_symbols.len());
+    let mut authentic_by_coordinate = BTreeMap::new();
+    let mut symbols_authentic = 0usize;
+    let mut conflicting_symbols = false;
     for bytes in serialized_symbols {
-        if SymbolRecord::verify(bytes, encoding, dek).is_ok() {
-            authentic.push(bytes.clone());
+        if let Ok(record) = SymbolRecord::verify(bytes, encoding, dek) {
+            symbols_authentic += 1;
+            let coordinate = (record.source_block, record.esi);
+            match authentic_by_coordinate.entry(coordinate) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(bytes.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    if entry.get() != bytes {
+                        conflicting_symbols = true;
+                    }
+                }
+            }
         }
     }
-    let symbols_authentic = authentic.len();
+    let symbols_distinct_authentic = authentic_by_coordinate.len();
+    let authentic: Vec<Vec<u8>> = authentic_by_coordinate.into_values().collect();
 
     if symbol_size == 0 || source_symbols == 0 {
         return ScrubReport {
@@ -127,6 +154,20 @@ pub fn scrub_object(
             },
             symbols_presented: serialized_symbols.len(),
             symbols_authentic,
+            symbols_distinct_authentic,
+            source_symbols,
+            decode_proof_hash: None,
+        };
+    }
+
+    if conflicting_symbols {
+        return ScrubReport {
+            verdict: ScrubVerdict::Lost {
+                reason: LostReason::ConflictingSymbols,
+            },
+            symbols_presented: serialized_symbols.len(),
+            symbols_authentic,
+            symbols_distinct_authentic,
             source_symbols,
             decode_proof_hash: None,
         };
@@ -146,7 +187,7 @@ pub fn scrub_object(
             } else {
                 ScrubVerdict::Degraded {
                     corrupt_symbols: corrupt,
-                    surviving_overhead: symbols_authentic.saturating_sub(source_symbols),
+                    surviving_overhead: symbols_distinct_authentic.saturating_sub(source_symbols),
                 }
             }
         }
@@ -168,6 +209,7 @@ pub fn scrub_object(
         verdict,
         symbols_presented: serialized_symbols.len(),
         symbols_authentic,
+        symbols_distinct_authentic,
         source_symbols,
         decode_proof_hash,
     }

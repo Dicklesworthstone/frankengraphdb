@@ -40,8 +40,8 @@ pub use marker::{
     ChainError, ChainedMarker, CommitMarker, EffectSource, HeadCasMismatch, HeadUpdate, MarkerChain,
 };
 pub use pack::{
-    DomainAxis, PackBuilder, PackDomain, PackError, PackedObjectGroup, SubobjectLocator,
-    WriteKeyDomain,
+    DomainAxis, PackBuilder, PackDomain, PackError, PackProtectionProfile, PackedObjectGroup,
+    SubobjectLocator, WriteKeyDomain,
 };
 pub use root::{
     IdentityTuple, RootBootstrap, RootRecoveryError, RootSelection, RootSlot, SlotError,
