@@ -278,6 +278,13 @@ pub enum ApplyError {
         declared: SchemaEpoch,
         actual: SchemaEpoch,
     },
+    /// The commit-time constraint-root binding drifted after the snapshot
+    /// was taken: effects evaluated under the old root may not be restamped
+    /// onto the new one (fgdb-hdgw).
+    ConstraintBindingMismatch {
+        declared_constraint_root: ObjectId,
+        actual_constraint_root: ObjectId,
+    },
     /// The entry-level schema-transition reference does not exactly describe
     /// the schema row carried by that entry.
     SchemaTransitionMismatch {
@@ -463,6 +470,14 @@ impl core::fmt::Display for ApplyError {
                 "schema binding for ({graph:?}, {branch:?}, {relation:?}) declares \
                  {declared:?}, pre-template state has {actual:?}"
             ),
+            Self::ConstraintBindingMismatch {
+                declared_constraint_root,
+                actual_constraint_root,
+            } => write!(
+                f,
+                "constraint-root binding declares {declared_constraint_root:?}, \
+                 pre-commit state has {actual_constraint_root:?}"
+            ),
             Self::SchemaTransitionMismatch {
                 graph,
                 branch,
@@ -616,6 +631,14 @@ impl ReferenceGraph {
 
     pub fn schema_epoch(&self) -> SchemaEpoch {
         self.schema_epoch
+    }
+
+    pub fn schema_root(&self) -> ObjectId {
+        self.schema_root
+    }
+
+    pub fn constraint_root(&self) -> ObjectId {
+        self.constraint_root
     }
 
     pub fn counter(&self, elem: ElementId, property: PropertyKeyId) -> Option<i128> {

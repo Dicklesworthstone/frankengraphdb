@@ -1439,3 +1439,136 @@ fn a_commit_binds_the_current_schema_epoch_after_a_transition() {
     assert_eq!(seq, CommitSeq(3));
     assert_eq!(prop_of(&db, MAIN, 3), Some(30));
 }
+
+/// fgdb-hdgw control (b) — a schema transition BETWEEN begin and commit
+/// invalidates the commit exactly, and applies nothing. The binding is part
+/// of snapshot identity (plan:205/213): effects evaluated under epoch 0 may
+/// not be restamped onto epoch 1. (li8d's live-epoch read did exactly that;
+/// the mutation proof below restores it and watches this commit succeed.)
+#[test]
+fn a_schema_transition_after_begin_invalidates_the_commit_without_applying() {
+    let mut db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin at epoch 0");
+    txn.execute(&[create(3, 30)])
+        .expect("executes under epoch 0");
+
+    // A concurrent transition lands durably.
+    let bump = LogicalDeltaTemplate::build(
+        SEMANTICS,
+        [0x22; 32],
+        vec![CoordinateEntry {
+            graph: GRAPH,
+            branch: MAIN,
+            relation: REL,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: Some(ObjectId([0x71; 32])),
+            rows: vec![DeltaRow::Schema {
+                transition_oid: ObjectId([0x71; 32]),
+                before_epoch: SchemaEpoch(0),
+                after_epoch: SchemaEpoch(1),
+            }],
+        }],
+    )
+    .expect("bump template builds");
+    db.apply_template(&bump, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("schema transition applies");
+
+    let outcome = txn.commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30));
+    assert!(
+        matches!(
+            outcome,
+            Err(TxnError::Apply(ref error))
+                if matches!(
+                    **error,
+                    fgdb_reference::ApplyError::SchemaBindingMismatch {
+                        declared: SchemaEpoch(0),
+                        actual: SchemaEpoch(1),
+                        ..
+                    }
+                )
+        ),
+        "the commit must refuse with the exact epoch disagreement, got {outcome:?}"
+    );
+    assert_eq!(
+        prop_of(&db, MAIN, 3),
+        None,
+        "the refused commit applied nothing"
+    );
+    assert_eq!(
+        db.graph(GRAPH, MAIN).expect("coordinate").schema_epoch(),
+        SchemaEpoch(1),
+        "the transition itself stands"
+    );
+}
+
+/// fgdb-hdgw control (c) — a constraint-root-only move (no epoch bump) also
+/// invalidates: the binding is epoch PLUS roots, not the scalar alone.
+#[test]
+fn a_constraint_root_move_after_begin_also_invalidates() {
+    let mut db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.execute(&[create(3, 30)]).expect("executes");
+
+    let (schema_root, constraint_root) = {
+        let coordinate = db.graph(GRAPH, MAIN).expect("coordinate");
+        (coordinate.schema_root(), coordinate.constraint_root())
+    };
+    let moved = ObjectId([0x99; 32]);
+    let constraint_move = LogicalDeltaTemplate::build(
+        SEMANTICS,
+        [0x22; 32],
+        vec![CoordinateEntry {
+            graph: GRAPH,
+            branch: MAIN,
+            relation: REL,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: None,
+            rows: vec![DeltaRow::Constraint {
+                before_schema_root: schema_root,
+                after_schema_root: schema_root,
+                before_constraint_root: constraint_root,
+                after_constraint_root: moved,
+            }],
+        }],
+    )
+    .expect("constraint template builds");
+    db.apply_template(&constraint_move, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("constraint move applies");
+
+    let outcome = txn.commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30));
+    assert!(
+        matches!(
+            outcome,
+            Err(TxnError::Apply(ref error))
+                if matches!(
+                    **error,
+                    fgdb_reference::ApplyError::ConstraintBindingMismatch { .. }
+                )
+        ),
+        "the commit must refuse with the constraint-root disagreement, got {outcome:?}"
+    );
+    assert_eq!(prop_of(&db, MAIN, 3), None, "nothing applied");
+    assert_eq!(
+        db.graph(GRAPH, MAIN).expect("coordinate").schema_epoch(),
+        SchemaEpoch(0),
+        "no epoch move happened — the root move alone invalidated"
+    );
+}
+
+/// fgdb-hdgw control (d) — the binding check adds NO dependency to any write
+/// set: two disjoint ordinary transactions under one unchanged binding
+/// remain independently committable (the asymmetric shape must not serialize
+/// them).
+#[test]
+fn two_disjoint_transactions_commit_under_one_unchanged_binding() {
+    let mut db = seeded();
+    let mut first = Transaction::begin(&db, GRAPH, MAIN).expect("first begin");
+    first.execute(&[create(3, 30)]).expect("first writes v3");
+    let mut second = Transaction::begin(&db, GRAPH, MAIN).expect("second begin");
+    second.execute(&[create(4, 40)]).expect("second writes v4");
+
+    commit_ok(&mut db, first, 2);
+    commit_ok(&mut db, second, 3);
+    assert_eq!(prop_of(&db, MAIN, 3), Some(30));
+    assert_eq!(prop_of(&db, MAIN, 4), Some(40));
+}

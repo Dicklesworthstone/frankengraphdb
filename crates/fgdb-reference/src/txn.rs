@@ -52,6 +52,19 @@ use std::collections::BTreeSet;
 /// Not `Clone`: two handles to one transaction would let a caller commit the
 /// same work twice under different sequences, and the type refusing to be
 /// duplicated is cheaper than a rule saying not to.
+///
+/// The per-coordinate schema binding captured at begin: epoch plus both
+/// roots. Plan:205/213 makes the binding part of snapshot identity —
+/// effects are evaluated under it, so a commit may stamp only it; a
+/// post-snapshot move is an asymmetric invalidation of every holder of the
+/// old binding (fgdb-hdgw).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SchemaBindingAtBegin {
+    epoch: SchemaEpoch,
+    schema_root: ObjectId,
+    constraint_root: ObjectId,
+}
+
 #[derive(Debug)]
 pub struct Transaction {
     graph: GraphId,
@@ -61,6 +74,10 @@ pub struct Transaction {
     /// what read-your-own-writes MEANS: statements evaluate against the
     /// workspace, never against the basis or the live database.
     workspace: ReferenceGraph,
+    /// The schema binding captured at begin (fgdb-hdgw): effects are
+    /// evaluated under it and a commit may stamp only it. `None` on a
+    /// genesis claim.
+    schema_binding_at_begin: Option<SchemaBindingAtBegin>,
     effects: Vec<DeltaRow>,
     /// The last canonical source-intent ordinal consumed across every
     /// `execute` call. This belongs to the transaction, not to one evaluator
@@ -362,12 +379,23 @@ impl Transaction {
         let claims_genesis = db
             .branch_origin(snapshot.graph(), snapshot.branch())
             .is_none();
+        // The binding these effects will be evaluated under. `None` is the
+        // genesis claim: the coordinate does not exist until this
+        // transaction (or a concurrent winner) creates it.
+        let schema_binding_at_begin =
+            db.graph(snapshot.graph(), snapshot.branch())
+                .map(|coordinate| SchemaBindingAtBegin {
+                    epoch: coordinate.schema_epoch(),
+                    schema_root: coordinate.schema_root(),
+                    constraint_root: coordinate.constraint_root(),
+                });
         Ok(Self {
             graph: snapshot.graph(),
             branch: snapshot.branch(),
             snapshot,
             workspace,
             claims_genesis,
+            schema_binding_at_begin,
             effects: Vec::new(),
             last_intent_ordinal: 0,
             read_set: BTreeSet::new(),
@@ -736,6 +764,53 @@ impl Transaction {
         }
 
         let effects = self.effects.len();
+        // The snapshot's schema binding is part of its identity (plan:205/213):
+        // these effects were evaluated under the binding captured at begin, so
+        // the commit may stamp ONLY that binding. A Schema/Constraint move
+        // since is an asymmetric invalidation of every holder of the old
+        // binding — refuse exactly, never restamp old effects onto the new
+        // binding (fgdb-hdgw; li8d's live-epoch read was exactly that
+        // failure). Disjoint writers under an UNCHANGED binding are untouched:
+        // no dependency enters any write set.
+        let schema_epoch = match self.schema_binding_at_begin {
+            Some(at_begin) => {
+                if let Some(coordinate) = db.graph(self.graph, self.branch) {
+                    if coordinate.schema_epoch() != at_begin.epoch {
+                        return Err(TxnError::Apply(Box::new(
+                            ApplyError::SchemaBindingMismatch {
+                                graph: self.graph,
+                                branch: self.branch,
+                                relation,
+                                declared: at_begin.epoch,
+                                actual: coordinate.schema_epoch(),
+                            },
+                        )));
+                    }
+                    if coordinate.schema_root() != at_begin.schema_root {
+                        return Err(TxnError::Apply(Box::new(
+                            ApplyError::ConstraintRootMismatch {
+                                declared_schema_root: at_begin.schema_root,
+                                actual_schema_root: coordinate.schema_root(),
+                            },
+                        )));
+                    }
+                    if coordinate.constraint_root() != at_begin.constraint_root {
+                        return Err(TxnError::Apply(Box::new(
+                            ApplyError::ConstraintBindingMismatch {
+                                declared_constraint_root: at_begin.constraint_root,
+                                actual_constraint_root: coordinate.constraint_root(),
+                            },
+                        )));
+                    }
+                }
+                at_begin.epoch
+            }
+            // The genesis claim: the coordinate did not exist at begin. The
+            // first-committer-wins machinery owns the race to create it, and
+            // the preflight binds the entry to whatever epoch the winner's
+            // coordinate actually has.
+            None => SchemaEpoch(0),
+        };
         let template = LogicalDeltaTemplate::build(
             intent_semantics,
             [0u8; 32],
@@ -743,16 +818,7 @@ impl Transaction {
                 graph: self.graph,
                 branch: self.branch,
                 relation,
-                // The preflight binds every entry to the coordinate's CURRENT
-                // epoch (SchemaBindingMismatch otherwise), so the epoch must
-                // be read from the coordinate at commit time — a hardcoded
-                // SchemaEpoch(0) fails every commit after any schema
-                // transition (fgdb-li8d). `map_or(0)` is the genesis case:
-                // the coordinate does not exist until this commit creates it,
-                // which is the same computation the preflight itself makes.
-                schema_epoch: db
-                    .graph(self.graph, self.branch)
-                    .map_or(SchemaEpoch(0), ReferenceGraph::schema_epoch),
+                schema_epoch,
                 schema_transition: None,
                 rows: self.effects,
             }],
