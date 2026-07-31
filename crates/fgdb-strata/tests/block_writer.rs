@@ -76,6 +76,98 @@ fn a_create_and_delete_in_one_run_seal_as_one_finished_entry() {
     );
 }
 
+/// A retirement after its creation was sealed is a TOMBSTONE SUPERSEDE, so the
+/// later block truthfully repeats the version's old `created_at`. Its range must
+/// therefore overlap the creation block's range; publication cannot reject the
+/// writer's own representation.
+#[test]
+fn a_retirement_after_a_seal_publishes_an_encodable_root() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("creates");
+    w.seal(keys()).expect("seals the creation");
+    w.apply(keys(), CommitSeq(6), &delete(10)).expect("retires");
+
+    let (root, blocks) = w.publish(keys(), CommitSeq(6)).expect("publishes");
+    assert_eq!(
+        root.blocks
+            .iter()
+            .map(|block| (block.first_seq, block.last_seq))
+            .collect::<Vec<_>>(),
+        vec![(CommitSeq(1), CommitSeq(1)), (CommitSeq(1), CommitSeq(6)),],
+        "the later tombstone repeats the original creation sequence"
+    );
+
+    let encoded = fgdb_strata::root::encode_root(&root).expect("the writer's root is lawful");
+    assert_eq!(
+        fgdb_strata::root::decode_root(&encoded).expect("decodes"),
+        root
+    );
+
+    let owned = blocks.clone();
+    let resolved = fgdb_strata::root::resolve_blocks(keys().0, keys().1, &root, move |wanted| {
+        owned
+            .iter()
+            .find(|block| block.block_id == wanted)
+            .map(|block| block.bytes.clone())
+    })
+    .expect("the overlapping ranges remain truthful");
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&resolved, VId(1), REL, CommitSeq(5))
+            .expect("merges before retirement"),
+        vec![VId(2)]
+    );
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&resolved, VId(1), REL, CommitSeq(6))
+            .expect("merges at retirement"),
+        Vec::<VId>::new()
+    );
+}
+
+/// Retirement and re-creation in ONE COMMIT can force two block boundaries with
+/// equal upper frontiers. Equality is legal, and the version intervals still pick
+/// exactly one live edge at the boundary.
+#[test]
+fn retirement_and_recreation_at_one_sequence_remain_rootable() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("creates");
+    w.seal(keys()).expect("seals the creation");
+    w.apply(keys(), CommitSeq(6), &delete(10)).expect("retires");
+    w.apply(keys(), CommitSeq(6), &create(11, 1, 2))
+        .expect("re-creates at the same sequence");
+
+    let (root, blocks) = w.publish(keys(), CommitSeq(6)).expect("publishes");
+    assert_eq!(
+        root.blocks
+            .iter()
+            .map(|block| (block.first_seq, block.last_seq))
+            .collect::<Vec<_>>(),
+        vec![
+            (CommitSeq(1), CommitSeq(1)),
+            (CommitSeq(1), CommitSeq(6)),
+            (CommitSeq(6), CommitSeq(6)),
+        ]
+    );
+    fgdb_strata::root::encode_root(&root).expect("equal publication frontiers are lawful");
+
+    let decoded = blocks
+        .iter()
+        .map(|block| decode_block(&block.bytes).expect("decodes"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&decoded, VId(1), REL, CommitSeq(5))
+            .expect("merges before replacement"),
+        vec![VId(2)]
+    );
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&decoded, VId(1), REL, CommitSeq(6))
+            .expect("merges at replacement"),
+        vec![VId(2)],
+        "the old version retires exactly when its successor becomes visible"
+    );
+}
+
 /// A KEY'S SECOND VERSION FORCES A SEAL, without the caller asking.
 ///
 /// A block requires strictly ascending unique keys, so a re-creation cannot share
@@ -102,8 +194,9 @@ fn a_re_creation_forces_a_seal() {
     let (root, blocks) = w.publish(keys(), CommitSeq(9)).expect("publishes");
     assert_eq!(blocks.len(), 2);
     assert_eq!(root.blocks.len(), 2);
-    // Disjoint ascending ranges, which is what makes the root lawful at all.
-    assert!(root.blocks[0].last_seq.0 < root.blocks[1].first_seq.0);
+    // Publication frontiers ascend; lower visibility bounds may overlap in other
+    // histories because a tombstone repeats an old creation sequence.
+    assert!(root.blocks[0].last_seq.0 <= root.blocks[1].last_seq.0);
 }
 
 /// A DELETE THE WRITER CANNOT RESOLVE IS REFUSED.
@@ -253,8 +346,8 @@ fn sealing_nothing_produces_no_block() {
     assert!(blocks.is_empty() && root.blocks.is_empty());
 }
 
-/// A published root is LAWFUL: it decodes, its ranges ascend, and every block it
-/// names resolves against the bytes the writer produced.
+/// A published root is LAWFUL: it decodes, its publication frontiers ascend, and
+/// every block it names resolves against the bytes the writer produced.
 ///
 /// This is the writer's contract with the root format — the two were built
 /// separately and this is the only place they are required to agree.

@@ -14,18 +14,13 @@
 //! checked, and [`crate::read_block`] is what checks it. A reader following a root
 //! proves the bytes it found are the block the root meant.
 //!
-//! **RANGES ARE ASCENDING AND NON-OVERLAPPING, and that is a semantic rule rather
-//! than tidiness.** Two blocks claiming the same commit sequence would make a
-//! merge ambiguous: a reader assembling a partition's state at that sequence would
-//! have two sources for it and no rule to choose between them. Refusing the
-//! overlap at publication is how that ambiguity is made unrepresentable instead of
-//! resolved by accident at read time. GAPS are allowed — a partition that received
-//! no commits over a stretch of the stream simply has none.
-//!
-//! **WHAT IS DELIBERATELY ABSENT**: merging reads ACROSS blocks. A root says what
-//! the blocks are; assembling one answer out of several is the MVCC-chain slice,
-//! and it has a design question this slice deliberately does not prejudge — see
-//! the note on [`BlockRef`].
+//! **BLOCK ORDER IS PUBLICATION ORDER, AND RANGES MAY OVERLAP.** A later tombstone
+//! restates the version it retires, including that version's old `created_at`, so
+//! its truthful visibility span necessarily overlaps the creation block. The list
+//! supplies the total precedence rule: for two statements of one version, the
+//! later block wins. Validation therefore requires only that each block's upper
+//! sequence frontier does not regress. `first_seq` remains a conservative skip
+//! bound, not an ownership claim over an exclusive slice of the commit stream.
 
 use crate::BlockError;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -63,13 +58,10 @@ pub const MAX_ROOT_BLOCKS: u32 = 1 << 20;
 /// read: a root that understated a range would make a reader skip a block that
 /// mattered, silently.
 ///
-/// **THE CROSS-BLOCK RETIREMENT QUESTION IS OPEN AND NOT PREJUDGED HERE.**
-/// `AdjacencyEntry` carries `created_at` and `retired_at` in one entry, which is
-/// complete within a block and cannot express "an entry created in an earlier
-/// block was retired later" — an immutable block cannot be edited. The MVCC-chain
-/// slice must choose between tombstone entries that shadow an earlier creation and
-/// blocks that carry whole version chains per key. This slice stores neither, so
-/// it cannot make that choice by accident.
+/// Cross-block retirement uses tombstone supersede. The later block repeats the
+/// original `created_at` and adds `retired_at`, so overlap between block ranges is
+/// expected. The ordered root, not disjoint ranges, determines which statement of
+/// that version wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockRef {
     pub block_id: ObjectId,
@@ -108,13 +100,16 @@ pub enum RootError {
         first_seq: CommitSeq,
         last_seq: CommitSeq,
     },
-    /// Two blocks claim the same sequence, or the list is not ascending.
+    /// A later block's upper sequence frontier is below its predecessor's.
     ///
-    /// Carries both positions, because "this root overlaps" is not actionable and
-    /// "blocks 3 and 4 both claim sequence 12" is.
-    OverlappingRanges {
+    /// Overlapping lower bounds are expected under tombstone supersede, but the
+    /// writer consumes rows in commit order, so the greatest sequence mentioned by
+    /// successive sealed blocks may stay equal and may never move backwards.
+    BlockOrderRegression {
         earlier: usize,
         later: usize,
+        earlier_last_seq: CommitSeq,
+        later_last_seq: CommitSeq,
     },
     /// A block claims a sequence at or after the root's own publication.
     ///
@@ -185,12 +180,16 @@ impl core::fmt::Display for RootError {
                 f,
                 "block {at} spans {first_seq:?}..{last_seq:?}, which is empty"
             ),
-            Self::OverlappingRanges { earlier, later } => {
-                write!(
-                    f,
-                    "blocks {earlier} and {later} claim overlapping sequences"
-                )
-            }
+            Self::BlockOrderRegression {
+                earlier,
+                later,
+                earlier_last_seq,
+                later_last_seq,
+            } => write!(
+                f,
+                "block {later} ends at {later_last_seq:?}, before block {earlier}'s \
+                 publication frontier {earlier_last_seq:?}"
+            ),
             Self::BlockAfterPublication {
                 at,
                 last_seq,
@@ -247,12 +246,16 @@ fn validate(root: &PartitionRoot) -> Result<(), RootError> {
         }
         if index > 0 {
             let previous = &root.blocks[index - 1];
-            // Ascending AND disjoint in one comparison: the next block must start
-            // strictly after the previous one ended. Gaps are fine; overlap is not.
-            if block.first_seq.0 <= previous.last_seq.0 {
-                return Err(RootError::OverlappingRanges {
+            // Ranges summarize visibility intervals and may overlap: a tombstone
+            // repeats an old creation sequence. The upper frontier is the ordering
+            // witness because rows reach the writer in commit order. Equal is
+            // legal when one commit forces more than one block.
+            if block.last_seq.0 < previous.last_seq.0 {
+                return Err(RootError::BlockOrderRegression {
                     earlier: index - 1,
                     later: index,
+                    earlier_last_seq: previous.last_seq,
+                    later_last_seq: block.last_seq,
                 });
             }
         }
@@ -462,10 +465,10 @@ pub fn span_of(entries: &[crate::AdjacencyEntry]) -> Option<(CommitSeq, CommitSe
 /// containment. Only entries describing the same version supersede, which is
 /// exactly the cross-block retirement case.
 ///
-/// Among entries for one version, the LATER BLOCK wins, because the root already
-/// establishes a total order over blocks with disjoint ranges. Using the entry's
-/// own interval to decide would be a second ordering rule that could disagree with
-/// the first, and two rules for one question is how they drift.
+/// Among entries for one version, the LATER BLOCK wins, because the root is an
+/// ordered publication history whose upper sequence frontier never regresses.
+/// Using the entry's own interval to decide would be a second ordering rule that
+/// could disagree with the first, and two rules for one question is how they drift.
 ///
 /// **THE SKIP RULE IS SOUND AND IS THE ROOT'S WHOLE PAYOFF**: a block whose
 /// `first_seq` exceeds `as_of` cannot contribute anything visible, because every

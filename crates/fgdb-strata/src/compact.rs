@@ -38,8 +38,8 @@ use std::collections::BTreeMap;
 /// The result of compacting a partition's blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compaction {
-    /// The compacted blocks, in ascending order — fewer than went in, unless
-    /// nothing could be dropped.
+    /// The compacted blocks, ordered by nondecreasing upper sequence frontier —
+    /// fewer than went in, unless nothing could be dropped.
     pub blocks: Vec<Vec<AdjacencyEntry>>,
     /// How many entries were dropped as unobservable at or below the floor.
     ///
@@ -131,6 +131,22 @@ pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Compaction {
     for block in &mut packed {
         block.sort_by_key(|e| (e.src, e.relation, e.dst));
     }
+
+    // A root's list is publication order, witnessed by nondecreasing `last_seq`.
+    // Packing by per-key version depth does not preserve that order: one key's
+    // third version may be older than another key's second. Supersede has already
+    // collapsed every duplicate statement of a version above, so reordering these
+    // blocks cannot change last-wins precedence. Sort by the truthful span before a
+    // root is allowed to name the result; the depth order is the deterministic tie
+    // breaker because `sort_by_key` is stable.
+    packed.sort_by_key(|block| {
+        crate::root::span_of(block)
+            .map(|(first_seq, last_seq)| (last_seq, first_seq))
+            // Packing creates a block only while inserting its first entry, so the
+            // fallback is unreachable. Keeping the ordering total here avoids a
+            // production panic if that construction is ever refactored incorrectly.
+            .unwrap_or((CommitSeq(0), CommitSeq(0)))
+    });
     Compaction {
         blocks: packed,
         dropped,

@@ -17,11 +17,13 @@
 
 use fgdb_delta_types::RelationId;
 use fgdb_strata::compact::compact;
-use fgdb_strata::root::merge_neighbours;
-use fgdb_strata::{AdjacencyEntry, encode_block};
-use fgdb_types::{CommitSeq, VId};
+use fgdb_strata::root::{BlockRef, PartitionRoot, encode_root, merge_neighbours, span_of};
+use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
+use fgdb_types::ids::DatabaseSecurityNamespaceId;
+use fgdb_types::{BranchId, CommitSeq, GraphId, VId};
 
 const REL: RelationId = RelationId(1);
+const K_OID: [u8; 32] = [0x5a; 32];
 
 fn entry(src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     AdjacencyEntry {
@@ -59,12 +61,31 @@ fn assert_answers_preserved(
 /// Every compacted block must still be a LAWFUL block — canonical order, unique
 /// keys — or the compactor has produced something the encoder would refuse.
 fn assert_blocks_are_lawful(blocks: &[Vec<AdjacencyEntry>]) {
+    let mut published_at = CommitSeq(1);
+    let mut references = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter().enumerate() {
+        let encoded = encode_block(block);
         assert!(
-            encode_block(block).is_ok(),
-            "compacted block {index} is not encodable: {block:?}"
+            encoded.is_ok(),
+            "compacted block {index} is not encodable: {encoded:?}"
         );
+        let bytes = encoded.expect("the assertion checked the encoding result");
+        let (first_seq, last_seq) = span_of(block).expect("compacted blocks are non-empty");
+        published_at = CommitSeq(published_at.0.max(last_seq.0));
+        references.push(BlockRef {
+            block_id: block_id(&K_OID, DatabaseSecurityNamespaceId([0x77; 32]), &bytes),
+            first_seq,
+            last_seq,
+        });
     }
+    let root = PartitionRoot {
+        graph: GraphId(1),
+        branch: BranchId(1),
+        partition: 0,
+        published_at,
+        blocks: references,
+    };
+    encode_root(&root).expect("compacted blocks form a lawful ordered root");
 }
 
 /// Blocks with DISJOINT keys collapse into one, and the answers do not move.
@@ -297,4 +318,30 @@ fn compaction_supersedes_by_last_block_like_the_merge_does() {
         merge_neighbours(&later.blocks, VId(1), REL, CommitSeq(6)).expect("merges"),
         vec![VId(3)]
     );
+}
+
+/// Packing by per-key version DEPTH can put an old third version after another
+/// key's much newer second version. Compaction must reorder the finished blocks by
+/// upper sequence frontier before a partition root can name them.
+#[test]
+fn compacted_blocks_have_a_rootable_publication_order() {
+    let before = vec![
+        vec![entry(1, 2, 1, Some(10)), entry(2, 3, 2, Some(1_000))],
+        vec![entry(1, 2, 20, Some(30)), entry(2, 3, 1_001, None)],
+        vec![entry(1, 2, 40, None)],
+    ];
+    let result = compact(&before, CommitSeq(1));
+    assert_eq!(result.blocks.len(), 3, "one key still needs three blocks");
+    assert_blocks_are_lawful(&result.blocks);
+
+    let upper_frontiers = result
+        .blocks
+        .iter()
+        .map(|block| span_of(block).expect("non-empty").1.0)
+        .collect::<Vec<_>>();
+    assert!(
+        upper_frontiers.windows(2).all(|pair| pair[0] <= pair[1]),
+        "publication frontiers regressed: {upper_frontiers:?}"
+    );
+    assert_answers_preserved(&before, &result.blocks, CommitSeq(1), 1_002, &[1, 2]);
 }

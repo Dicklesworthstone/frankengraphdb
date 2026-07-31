@@ -10,10 +10,10 @@
 //! are the block the root named (identity), and that the block spans what the root
 //! said (range). Either check alone leaves a lie the other would catch.
 //!
-//! Ranges are ascending and NON-OVERLAPPING because two blocks claiming one
-//! sequence would make a merge ambiguous — a reader assembling state at that
-//! sequence would have two sources and no rule to choose. Gaps are fine: a
-//! partition that received no commits over a stretch of the stream has none.
+//! Block order is publication order. Visibility ranges may overlap because a later
+//! tombstone repeats the old `created_at` of the version it retires; the later block
+//! is the explicit precedence rule. Upper sequence frontiers never regress, while
+//! gaps and overlapping lower bounds are both legal.
 
 use fgdb_strata::root::{
     BlockRef, PartitionRoot, ROOT_FORMAT_V1, RootError, decode_root, encode_root, read_root,
@@ -156,36 +156,41 @@ fn every_truncation_and_any_trailing_byte_is_refused() {
 // Range laws
 // ---------------------------------------------------------------------------
 
-/// OVERLAPPING RANGES ARE REFUSED — the ambiguity is made unrepresentable rather
-/// than resolved at read time.
+/// OVERLAPPING RANGES ARE REQUIRED by tombstone supersede: the later statement of
+/// one version repeats its original creation sequence and adds the retirement.
 #[test]
-fn overlapping_ranges_are_refused() {
-    let (id_a, _, _) = block(vec![entry(1, 2, 1, None), entry(1, 3, 5, None)]);
-    let (id_b, _, _) = block(vec![entry(2, 3, 4, None)]);
+fn overlapping_ranges_round_trip_in_publication_order() {
+    let (id_a, bytes_a, span_a) = block(vec![entry(1, 2, 1, None)]);
+    let (id_b, bytes_b, span_b) = block(vec![entry(1, 2, 1, Some(5))]);
     let root = PartitionRoot {
         graph: GRAPH,
         branch: BRANCH,
         partition: 0,
-        published_at: CommitSeq(9),
-        blocks: vec![
-            reference(id_a, (CommitSeq(1), CommitSeq(5))),
-            // Starts at 4, inside the previous block's 1..5.
-            reference(id_b, (CommitSeq(4), CommitSeq(6))),
-        ],
+        published_at: CommitSeq(5),
+        blocks: vec![reference(id_a, span_a), reference(id_b, span_b)],
     };
+    let encoded = encode_root(&root).expect("truthful overlap is lawful");
+    assert_eq!(decode_root(&encoded).expect("decodes"), root);
+
+    let resolved = resolve_blocks(
+        &K_OID,
+        namespace(),
+        &root,
+        loader(vec![(id_a, bytes_a), (id_b, bytes_b)]),
+    )
+    .expect("both overlapping summaries match their blocks");
     assert_eq!(
-        encode_root(&root),
-        Err(RootError::OverlappingRanges {
-            earlier: 0,
-            later: 1
-        })
+        fgdb_strata::root::merge_neighbours(&resolved, fgdb_types::VId(1), REL, CommitSeq(5))
+            .expect("merges"),
+        Vec::<fgdb_types::VId>::new(),
+        "the later tombstone supplies the precedence rule"
     );
 }
 
-/// Blocks must ASCEND. A descending pair is caught by the same rule, since the
-/// later block must start strictly after the earlier one ended.
+/// A later block's UPPER frontier cannot regress. Its lower bound may move back
+/// under tombstone supersede, but rows were consumed in commit order.
 #[test]
-fn descending_blocks_are_refused() {
+fn a_regressing_publication_frontier_is_refused() {
     let (id_a, _, _) = block(vec![entry(1, 2, 5, None)]);
     let (id_b, _, _) = block(vec![entry(2, 3, 1, None)]);
     let root = PartitionRoot {
@@ -198,10 +203,15 @@ fn descending_blocks_are_refused() {
             reference(id_b, (CommitSeq(1), CommitSeq(1))),
         ],
     };
-    assert!(matches!(
+    assert_eq!(
         encode_root(&root),
-        Err(RootError::OverlappingRanges { .. })
-    ));
+        Err(RootError::BlockOrderRegression {
+            earlier: 0,
+            later: 1,
+            earlier_last_seq: CommitSeq(5),
+            later_last_seq: CommitSeq(1),
+        })
+    );
 }
 
 /// A GAP between blocks is ALLOWED. Without this law the overlap rule could be
@@ -280,8 +290,8 @@ fn inverted_and_zero_ranges_are_refused() {
     assert_eq!(encode_root(&zero), Err(RootError::SequenceZero { at: 0 }));
 }
 
-/// The DECODER re-checks the range laws independently, so a hand-built root cannot
-/// smuggle in an overlap the encoder would never emit.
+/// The DECODER re-checks publication order independently, so hand-built bytes
+/// cannot move the upper frontier backwards.
 #[test]
 fn the_decoder_re_checks_the_range_laws() {
     let (id_a, _, _) = block(vec![entry(1, 2, 1, None)]);
@@ -297,28 +307,28 @@ fn the_decoder_re_checks_the_range_laws() {
         ],
     };
     let mut bytes = encode_root(&lawful).expect("encodes");
-    // header(58) + one ref(48) + the id(32) inside the second ref. Verified before
+    // header(58) + the id(32) + first_seq(8) inside the first ref. Verified before
     // it is touched, because an offset slip here would silently patch a field this
-    // law says nothing about — and the first version of this test did exactly that,
-    // rewriting the FIRST block's first_seq to the value it already held.
+    // law says nothing about.
     const HEADER: usize = 4 + 2 + 16 + 16 + 8 + 8 + 4;
-    const REF: usize = 32 + 8 + 8;
-    let second_first_seq = HEADER + REF + 32;
+    let first_last_seq = HEADER + 32 + 8;
     assert_eq!(
         u64::from_be_bytes(
-            bytes[second_first_seq..second_first_seq + 8]
+            bytes[first_last_seq..first_last_seq + 8]
                 .try_into()
                 .expect("eight bytes")
         ),
-        2,
-        "the offset must land on the second block's first_seq"
+        1,
+        "the offset must land on the first block's last_seq"
     );
-    bytes[second_first_seq..second_first_seq + 8].copy_from_slice(&1u64.to_be_bytes());
+    bytes[first_last_seq..first_last_seq + 8].copy_from_slice(&3u64.to_be_bytes());
     assert_eq!(
         decode_root(&bytes),
-        Err(RootError::OverlappingRanges {
+        Err(RootError::BlockOrderRegression {
             earlier: 0,
-            later: 1
+            later: 1,
+            earlier_last_seq: CommitSeq(3),
+            later_last_seq: CommitSeq(2),
         })
     );
 }
