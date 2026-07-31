@@ -31,22 +31,14 @@
 //! substitute for it (doctrine 7).
 
 use fgdb_crypto::Digest;
-use fgdb_types::ids::ObjectId;
+use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef, ObjectId};
 
 /// Domain separator for the marker chain hash.
-pub const MARKER_CHAIN_DOMAIN: &[u8] = b"fgdb:commit-marker-chain:v1";
+pub const MARKER_CHAIN_DOMAIN: &[u8] = b"fgdb:commit-marker-chain:v2";
 
 /// The chain value before any marker exists. Genesis chains from this, so
 /// every stream has a defined origin rather than an implicit zero.
 pub const CHAIN_ORIGIN: Digest = Digest([0u8; 32]);
-
-/// The transaction-history identity used by branch heads, version
-/// origins/retirements, checkpoints, MMR leaves, and merges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MarkerRef {
-    pub marker_oid: ObjectId,
-    pub commit_seq: u64,
-}
 
 /// Where a commit's effects came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,21 +75,21 @@ impl EffectSource {
 /// it does not name its own successor, which is what keeps the graph acyclic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeadUpdate {
-    pub graph: u64,
-    pub branch: u64,
+    pub graph: GraphId,
+    pub branch: BranchId,
     pub expected_previous: Option<MarkerRef>,
 }
 
 impl HeadUpdate {
     fn write_into(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.graph.to_be_bytes());
-        out.extend_from_slice(&self.branch.to_be_bytes());
+        out.extend_from_slice(&self.graph.0.to_be_bytes());
+        out.extend_from_slice(&self.branch.0.to_be_bytes());
         match self.expected_previous {
             None => out.push(0x00),
             Some(previous) => {
                 out.push(0x01);
                 out.extend_from_slice(&previous.marker_oid.0);
-                out.extend_from_slice(&previous.commit_seq.to_be_bytes());
+                out.extend_from_slice(&previous.commit_seq.0.to_be_bytes());
             }
         }
     }
@@ -143,7 +135,7 @@ impl CommitMarker {
             Some(previous) => {
                 out.push(0x01);
                 out.extend_from_slice(&previous.marker_oid.0);
-                out.extend_from_slice(&previous.commit_seq.to_be_bytes());
+                out.extend_from_slice(&previous.commit_seq.0.to_be_bytes());
             }
         }
         out.extend_from_slice(&(self.head_updates.len() as u32).to_be_bytes());
@@ -197,6 +189,20 @@ impl CommitMarker {
     }
 }
 
+/// Typed evidence for a failed branch-head compare-and-swap.
+///
+/// The detail is boxed inside [`ChainError`] because two canonical marker
+/// references plus 128-bit graph and branch identities are intentionally
+/// large. Allocation is confined to the refused-write path; successful
+/// appends and the other error variants remain compact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadCasMismatch {
+    pub graph: GraphId,
+    pub branch: BranchId,
+    pub expected: Option<MarkerRef>,
+    pub actual: Option<MarkerRef>,
+}
+
 /// Why a marker could not be appended to a chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainError {
@@ -213,12 +219,7 @@ pub enum ChainError {
     /// this marker expected. THE WRITE IS REFUSED — this is the mechanism that
     /// makes concurrent branch advancement safe, so it must never be a
     /// warning.
-    HeadCasMismatch {
-        graph: u64,
-        branch: u64,
-        expected: Option<MarkerRef>,
-        actual: Option<MarkerRef>,
-    },
+    HeadCasMismatch(Box<HeadCasMismatch>),
 }
 
 impl core::fmt::Display for ChainError {
@@ -233,14 +234,10 @@ impl core::fmt::Display for ChainError {
             Self::NonCanonicalHeadUpdates => {
                 f.write_str("head updates are unsorted or contain a duplicate coordinate")
             }
-            Self::HeadCasMismatch {
-                graph,
-                branch,
-                expected,
-                actual,
-            } => write!(
+            Self::HeadCasMismatch(mismatch) => write!(
                 f,
-                "branch ({graph},{branch}) head is {actual:?}, marker expected {expected:?}"
+                "branch ({:?},{:?}) head is {:?}, marker expected {:?}",
+                mismatch.graph, mismatch.branch, mismatch.actual, mismatch.expected
             ),
         }
     }
@@ -306,7 +303,7 @@ pub struct ChainedMarker {
 #[derive(Debug, Clone, Default)]
 pub struct MarkerChain {
     entries: Vec<ChainedMarker>,
-    heads: Vec<((u64, u64), MarkerRef)>,
+    heads: Vec<((GraphId, BranchId), MarkerRef)>,
 }
 
 impl MarkerChain {
@@ -351,7 +348,7 @@ impl MarkerChain {
         for update in &chained.marker.head_updates {
             let new_head = MarkerRef {
                 marker_oid: chained.marker_oid,
-                commit_seq: chained.marker.commit_seq,
+                commit_seq: CommitSeq(chained.marker.commit_seq),
             };
             match self
                 .heads
@@ -405,7 +402,7 @@ impl MarkerChain {
     }
 
     /// A branch's current head, if it has one.
-    pub fn head(&self, graph: u64, branch: u64) -> Option<MarkerRef> {
+    pub fn head(&self, graph: GraphId, branch: BranchId) -> Option<MarkerRef> {
         self.heads
             .iter()
             .find(|((g, b), _)| *g == graph && *b == branch)
@@ -457,12 +454,12 @@ impl MarkerChain {
         for update in &marker.head_updates {
             let actual = self.head(update.graph, update.branch);
             if actual != update.expected_previous {
-                return Err(ChainError::HeadCasMismatch {
+                return Err(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
                     graph: update.graph,
                     branch: update.branch,
                     expected: update.expected_previous,
                     actual,
-                });
+                })));
             }
         }
 
@@ -568,8 +565,8 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
     let mut head_updates = Vec::with_capacity(head_count.min(1024));
     for _ in 0..head_count {
         head_updates.push(HeadUpdate {
-            graph: cursor.u64()?,
-            branch: cursor.u64()?,
+            graph: GraphId(cursor.u128()?),
+            branch: BranchId(cursor.u128()?),
             expected_previous: cursor.optional_marker_ref()?,
         });
     }
@@ -659,6 +656,13 @@ impl<'a> ByteReader<'a> {
         Some(u64::from_be_bytes(value))
     }
 
+    fn u128(&mut self) -> Option<u128> {
+        let slice = self.take(16)?;
+        let mut value = [0u8; 16];
+        value.copy_from_slice(slice);
+        Some(u128::from_be_bytes(value))
+    }
+
     fn array16(&mut self) -> Option<[u8; 16]> {
         let slice = self.take(16)?;
         let mut value = [0u8; 16];
@@ -681,7 +685,7 @@ impl<'a> ByteReader<'a> {
             0x00 => Some(None),
             0x01 => Some(Some(MarkerRef {
                 marker_oid: ObjectId(self.array32()?),
-                commit_seq: self.u64()?,
+                commit_seq: CommitSeq(self.u64()?),
             })),
             _ => None,
         }

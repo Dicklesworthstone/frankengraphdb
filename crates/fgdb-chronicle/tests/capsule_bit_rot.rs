@@ -37,7 +37,7 @@ use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate, MarkerChain};
 use fgdb_crypto::Digest;
 use fgdb_types::context::{CommitCx, PurposeContexts};
-use fgdb_types::ids::ObjectId;
+use fgdb_types::{BranchId, GraphId, ObjectId};
 use std::path::{Path, PathBuf};
 
 fn digest(seed: u8) -> Digest {
@@ -64,9 +64,9 @@ fn marker_for(seq: u64, capsule: ObjectId, chain: &MarkerChain) -> CommitMarker 
         },
         prev_global: None,
         head_updates: vec![HeadUpdate {
-            graph: 1,
-            branch: 1,
-            expected_previous: chain.head(1, 1),
+            graph: GraphId(1),
+            branch: BranchId(1),
+            expected_previous: chain.head(GraphId(1), BranchId(1)),
         }],
         merge_record_oid: None,
         coordinate_schema_transition_digest: digest(3),

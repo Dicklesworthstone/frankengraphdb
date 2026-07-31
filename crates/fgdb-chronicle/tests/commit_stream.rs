@@ -15,10 +15,10 @@
 
 use fgdb_chronicle::marker::{
     CHAIN_ORIGIN, ChainError, ChainVerifyCause, ChainVerifyFailure, ChainedMarker, CommitMarker,
-    EffectSource, HeadUpdate, MarkerChain, MarkerRef,
+    EffectSource, HeadCasMismatch, HeadUpdate, MarkerChain, decode_canonical,
 };
 use fgdb_crypto::Digest;
-use fgdb_types::ids::ObjectId;
+use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef, ObjectId};
 
 fn digest(seed: u8) -> Digest {
     Digest([seed; 32])
@@ -60,12 +60,16 @@ fn with_heads(mut m: CommitMarker, heads: Vec<HeadUpdate>) -> CommitMarker {
     m
 }
 
-fn head(graph: u64, branch: u64, expected_previous: Option<MarkerRef>) -> HeadUpdate {
+fn head(graph: u128, branch: u128, expected_previous: Option<MarkerRef>) -> HeadUpdate {
     HeadUpdate {
-        graph,
-        branch,
+        graph: GraphId(graph),
+        branch: BranchId(branch),
         expected_previous,
     }
+}
+
+fn current_head(chain: &MarkerChain, graph: u128, branch: u128) -> Option<MarkerRef> {
+    chain.head(GraphId(graph), BranchId(branch))
 }
 
 /// A chain of `n` plain markers.
@@ -126,7 +130,7 @@ fn tampering_with_any_marker_field_breaks_the_chain_at_that_sequence() {
         ("prev_global", |m| {
             m.prev_global = Some(MarkerRef {
                 marker_oid: oid(0xfc),
-                commit_seq: 1,
+                commit_seq: CommitSeq(1),
             })
         }),
         ("head_updates", |m| m.head_updates.push(head(1, 1, None))),
@@ -250,26 +254,30 @@ fn the_logical_command_sequence_must_advance() {
 #[test]
 fn a_branch_head_advances_only_against_the_expected_head() {
     let mut chain = MarkerChain::new();
-    assert_eq!(chain.head(1, 1), None, "an unknown branch has no head");
+    assert_eq!(
+        current_head(&chain, 1, 1),
+        None,
+        "an unknown branch has no head"
+    );
 
     // First commit on the branch: expects no previous head.
     chain
         .append(with_heads(marker(1, 10), vec![head(1, 1, None)]))
         .expect("first head update");
-    let first_head = chain.head(1, 1).expect("head exists now");
-    assert_eq!(first_head.commit_seq, 1);
+    let first_head = current_head(&chain, 1, 1).expect("head exists now");
+    assert_eq!(first_head.commit_seq, CommitSeq(1));
 
     // A second commit expecting NO previous head must be refused: the branch
     // has moved on, and this is exactly the lost-update the CAS prevents.
     let outcome = chain.append(with_heads(marker(2, 20), vec![head(1, 1, None)]));
     assert_eq!(
         outcome.err(),
-        Some(ChainError::HeadCasMismatch {
-            graph: 1,
-            branch: 1,
+        Some(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
+            graph: GraphId(1),
+            branch: BranchId(1),
             expected: None,
             actual: Some(first_head),
-        })
+        })))
     );
 
     // Expecting the CURRENT head succeeds, and the head advances.
@@ -279,9 +287,63 @@ fn a_branch_head_advances_only_against_the_expected_head() {
             vec![head(1, 1, Some(first_head))],
         ))
         .expect("advancing from the current head");
-    let second_head = chain.head(1, 1).expect("head");
-    assert_eq!(second_head.commit_seq, 2);
+    let second_head = current_head(&chain, 1, 1).expect("head");
+    assert_eq!(second_head.commit_seq, CommitSeq(2));
     assert_ne!(second_head.marker_oid, first_head.marker_oid);
+}
+
+/// Graph and branch identities are 128-bit canonical IDs. Chronicle used to
+/// narrow both to `u64`, so coordinates that differed only above bit 63 were
+/// unrepresentable in marker bytes and would alias in the head index.
+#[test]
+fn head_coordinates_preserve_high_bits_without_low_64_aliases() {
+    let low_graph = 1u128;
+    let low_branch = 2u128;
+    let high_graph = (1u128 << 96) | low_graph;
+    let high_branch = (1u128 << 80) | low_branch;
+
+    let mut chain = MarkerChain::new();
+    chain
+        .append(with_heads(
+            marker(1, 10),
+            vec![head(low_graph, low_branch, None)],
+        ))
+        .expect("low coordinate appends");
+    let low_head = current_head(&chain, low_graph, low_branch).expect("low head");
+
+    assert_eq!(
+        current_head(&chain, high_graph, low_branch),
+        None,
+        "high graph bits cannot alias the existing low graph"
+    );
+    assert_eq!(
+        current_head(&chain, low_graph, high_branch),
+        None,
+        "high branch bits cannot alias the existing low branch"
+    );
+
+    let high_marker = with_heads(
+        marker(2, 20),
+        vec![
+            head(low_graph, high_branch, None),
+            head(high_graph, low_branch, None),
+        ],
+    );
+    let encoded = high_marker.canonical_bytes();
+    let decoded = decode_canonical(&encoded).expect("high-bit marker decodes");
+    assert_eq!(decoded, high_marker, "all 128 coordinate bits round-trip");
+    chain.append(decoded).expect("high coordinates append");
+
+    let high_branch_head = current_head(&chain, low_graph, high_branch).expect("high branch head");
+    let high_graph_head = current_head(&chain, high_graph, low_branch).expect("high graph head");
+    assert_eq!(low_head.commit_seq, CommitSeq(1));
+    assert_eq!(high_branch_head.commit_seq, CommitSeq(2));
+    assert_eq!(high_graph_head.commit_seq, CommitSeq(2));
+    assert_eq!(
+        current_head(&chain, low_graph, low_branch),
+        Some(low_head),
+        "adding either high-bit coordinate cannot overwrite the low coordinate"
+    );
 }
 
 /// A FAILED CAS CHANGES NOTHING — including the other branches in the same
@@ -297,14 +359,14 @@ fn a_failed_head_cas_leaves_every_branch_untouched() {
         ))
         .expect("three branches created together");
 
-    let head_a = chain.head(1, 1).expect("a");
-    let head_b = chain.head(1, 2).expect("b");
-    let head_c = chain.head(2, 1).expect("c");
+    let head_a = current_head(&chain, 1, 1).expect("a");
+    let head_b = current_head(&chain, 1, 2).expect("b");
+    let head_c = current_head(&chain, 2, 1).expect("c");
 
     // A marker advancing all three, but with ONE stale expectation.
     let stale = MarkerRef {
         marker_oid: oid(0xee),
-        commit_seq: 99,
+        commit_seq: CommitSeq(99),
     };
     let outcome = chain.append(with_heads(
         marker(2, 20),
@@ -316,12 +378,25 @@ fn a_failed_head_cas_leaves_every_branch_untouched() {
     ));
     assert!(matches!(
         outcome,
-        Err(ChainError::HeadCasMismatch { branch: 2, .. })
+        Err(ChainError::HeadCasMismatch(mismatch))
+            if mismatch.branch == BranchId(2)
     ));
 
-    assert_eq!(chain.head(1, 1), Some(head_a), "branch (1,1) untouched");
-    assert_eq!(chain.head(1, 2), Some(head_b), "branch (1,2) untouched");
-    assert_eq!(chain.head(2, 1), Some(head_c), "branch (2,1) untouched");
+    assert_eq!(
+        current_head(&chain, 1, 1),
+        Some(head_a),
+        "branch (1,1) untouched"
+    );
+    assert_eq!(
+        current_head(&chain, 1, 2),
+        Some(head_b),
+        "branch (1,2) untouched"
+    );
+    assert_eq!(
+        current_head(&chain, 2, 1),
+        Some(head_c),
+        "branch (2,1) untouched"
+    );
     assert_eq!(chain.len(), 1, "the marker was not appended");
 }
 
@@ -336,8 +411,8 @@ fn one_marker_advances_several_branches_atomically() {
             vec![head(1, 1, None), head(1, 2, None)],
         ))
         .expect("create two branches");
-    let a = chain.head(1, 1).expect("a");
-    let b = chain.head(1, 2).expect("b");
+    let a = current_head(&chain, 1, 1).expect("a");
+    let b = current_head(&chain, 1, 2).expect("b");
     assert_eq!(a.commit_seq, b.commit_seq, "both heads are the same marker");
     assert_eq!(a.marker_oid, b.marker_oid);
 }
@@ -515,13 +590,13 @@ fn verify_refuses_non_canonical_head_updates() {
         marker(1, 10),
         vec![
             HeadUpdate {
-                graph: 1,
-                branch: 9,
+                graph: GraphId(1),
+                branch: BranchId(9),
                 expected_previous: None,
             },
             HeadUpdate {
-                graph: 1,
-                branch: 2,
+                graph: GraphId(1),
+                branch: BranchId(2),
                 expected_previous: None,
             },
         ],
@@ -543,12 +618,12 @@ fn verify_refuses_a_head_cas_that_never_held() {
     let claiming = with_heads(
         marker(1, 10),
         vec![HeadUpdate {
-            graph: 1,
-            branch: 2,
+            graph: GraphId(1),
+            branch: BranchId(2),
             // Claims to follow a head that cannot exist: nothing precedes commit 1.
             expected_previous: Some(MarkerRef {
                 marker_oid: oid(0xaa),
-                commit_seq: 0,
+                commit_seq: CommitSeq(0),
             }),
         }],
     );
@@ -557,15 +632,17 @@ fn verify_refuses_a_head_cas_that_never_held() {
         MarkerChain::verify_entries(&entries),
         Err(ChainVerifyFailure {
             commit_seq: 1,
-            cause: ChainVerifyCause::Structure(ChainError::HeadCasMismatch {
-                graph: 1,
-                branch: 2,
-                expected: Some(MarkerRef {
-                    marker_oid: oid(0xaa),
-                    commit_seq: 0,
-                }),
-                actual: None,
-            }),
+            cause: ChainVerifyCause::Structure(ChainError::HeadCasMismatch(Box::new(
+                HeadCasMismatch {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    expected: Some(MarkerRef {
+                        marker_oid: oid(0xaa),
+                        commit_seq: CommitSeq(0),
+                    }),
+                    actual: None,
+                },
+            ))),
         })
     );
 }
@@ -617,8 +694,8 @@ fn a_rebuilt_chain_has_a_real_head_index() {
     let m = with_heads(
         marker(1, 10),
         vec![HeadUpdate {
-            graph: 1,
-            branch: 2,
+            graph: GraphId(1),
+            branch: BranchId(2),
             expected_previous: None,
         }],
     );
@@ -626,6 +703,9 @@ fn a_rebuilt_chain_has_a_real_head_index() {
     appended.append(m).expect("appends");
     let rebuilt = MarkerChain::from_entries(appended.entries()).expect("valid chain rebuilds");
 
-    assert_eq!(rebuilt.head(1, 2), appended.head(1, 2));
-    assert!(rebuilt.head(1, 2).is_some(), "and it is actually populated");
+    assert_eq!(current_head(&rebuilt, 1, 2), current_head(&appended, 1, 2));
+    assert!(
+        current_head(&rebuilt, 1, 2).is_some(),
+        "and it is actually populated"
+    );
 }

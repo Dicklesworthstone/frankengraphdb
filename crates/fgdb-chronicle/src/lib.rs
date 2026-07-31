@@ -37,7 +37,7 @@ pub use identity::{
     PlacedObject, PlacementDescriptor, ProtectedObject,
 };
 pub use marker::{
-    ChainError, ChainedMarker, CommitMarker, EffectSource, HeadUpdate, MarkerChain, MarkerRef,
+    ChainError, ChainedMarker, CommitMarker, EffectSource, HeadCasMismatch, HeadUpdate, MarkerChain,
 };
 pub use pack::{
     DomainAxis, PackBuilder, PackDomain, PackError, PackedObjectGroup, SubobjectLocator,

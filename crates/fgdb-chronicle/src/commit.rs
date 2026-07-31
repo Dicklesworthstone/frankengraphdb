@@ -28,10 +28,11 @@
 //! is corruption, because entries before it were durable.
 
 use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_container};
-use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain, MarkerRef};
+use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
 use fgdb_crypto::Digest;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
+use fgdb_types::{CommitSeq, MarkerRef};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -46,15 +47,16 @@ pub const COMMIT_LOG_NAME: &str = "commits.log";
 /// deterministic candidate without allocating a second capsule-sized `Vec`.
 const CAPSULE_COMPARE_BUFFER_BYTES: usize = 8 * 1024;
 
-/// Version-2 per-entry framing magic.
+/// Version-3 per-entry framing magic.
 ///
-/// Version 2 adds an end trailer carrying the body length again. Recovery
-/// deliberately rejects the earlier `FGCM` shape: accepting two shapes without
-/// a migration contract would make damaged framing ambiguous.
-pub const ENTRY_MAGIC: [u8; 4] = *b"FGC2";
+/// Version 3 widens marker graph/branch coordinates to their canonical 128-bit
+/// representation. Recovery deliberately rejects the narrower version-2 shape:
+/// accepting two shapes without a migration contract would make field boundaries
+/// ambiguous and could alias distinct high-bit identities.
+pub const ENTRY_MAGIC: [u8; 4] = *b"FGC3";
 
-/// End sentinel for a complete version-2 entry.
-const ENTRY_TRAILER_MAGIC: [u8; 4] = *b"FGE2";
+/// End sentinel for a complete version-3 entry.
+const ENTRY_TRAILER_MAGIC: [u8; 4] = *b"FGE3";
 
 const ENTRY_HEADER_BYTES: usize = 8;
 const CHAIN_HASH_BYTES: usize = 32;
@@ -455,7 +457,7 @@ impl CommitCoordinator {
         let entry = Self::encode_entry(&marker, chain_hash)?;
         let marker_ref = MarkerRef {
             marker_oid: chained.marker_oid,
-            commit_seq: chained.marker.commit_seq,
+            commit_seq: CommitSeq(chained.marker.commit_seq),
         };
 
         // ---- Build + D1: the capsule becomes durable BEFORE any marker can
@@ -671,7 +673,7 @@ impl CommitCoordinator {
         Ok((marker, Digest(chain_hash), total))
     }
 
-    /// Does `bytes` contain a whole version-2 entry under the marker's
+    /// Does `bytes` contain a whole version-3 entry under the marker's
     /// self-described canonical extent, independently of the leading length?
     fn has_complete_intrinsic_entry_extent(bytes: &[u8]) -> bool {
         let Some(marker_and_suffix) = bytes.get(ENTRY_HEADER_BYTES..) else {

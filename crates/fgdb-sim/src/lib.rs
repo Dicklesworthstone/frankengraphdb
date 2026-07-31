@@ -26,13 +26,14 @@
 
 use fgdb_chronicle::commit::{CommitCoordinator, CommitError};
 use fgdb_chronicle::identity::IdentifiedObject;
-use fgdb_chronicle::marker::{CommitMarker, EffectSource, MarkerRef};
+use fgdb_chronicle::marker::{CommitMarker, EffectSource};
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
     CanonicalError, CommittedMarker, IndexError, LocalDeltaBatchIndex, LogicalDeltaBatch,
     LogicalDeltaTemplate,
 };
 use fgdb_reference::{ApplyError, ReferenceDatabase};
+use fgdb_types::MarkerRef;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseId, DatabaseSecurityNamespaceId, ObjectId};
 

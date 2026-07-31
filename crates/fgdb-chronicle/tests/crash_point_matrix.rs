@@ -39,7 +39,7 @@ use fgdb_chronicle::commit::{
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate, MarkerChain};
 use fgdb_crypto::Digest;
 use fgdb_types::context::{CommitCx, PurposeContexts};
-use fgdb_types::ids::ObjectId;
+use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef, ObjectId};
 use std::path::{Path, PathBuf};
 
 /// A per-test directory carrying the process id, so a neighbouring pane
@@ -88,9 +88,9 @@ fn marker_for(seq: u64, capsule: ObjectId, chain: &MarkerChain) -> CommitMarker 
         },
         prev_global: None,
         head_updates: vec![HeadUpdate {
-            graph: 1,
-            branch: 1,
-            expected_previous: chain.head(1, 1),
+            graph: GraphId(1),
+            branch: BranchId(1),
+            expected_previous: chain.head(GraphId(1), BranchId(1)),
         }],
         merge_record_oid: None,
         coordinate_schema_transition_digest: digest(3),
@@ -184,27 +184,27 @@ fn fully_populated_marker() -> CommitMarker {
             capsule_ref: ObjectId([0x11; 32]),
             logical_delta_template_digest: Digest([0x22; 32]),
         },
-        prev_global: Some(fgdb_chronicle::marker::MarkerRef {
+        prev_global: Some(MarkerRef {
             marker_oid: ObjectId([0x33; 32]),
-            commit_seq: 41,
+            commit_seq: CommitSeq(41),
         }),
         head_updates: vec![
             HeadUpdate {
-                graph: 1,
-                branch: 2,
+                graph: GraphId(1),
+                branch: BranchId(2),
                 expected_previous: None,
             },
             HeadUpdate {
-                graph: 1,
-                branch: 3,
-                expected_previous: Some(fgdb_chronicle::marker::MarkerRef {
+                graph: GraphId(1),
+                branch: BranchId((1u128 << 96) | 3),
+                expected_previous: Some(MarkerRef {
                     marker_oid: ObjectId([0x44; 32]),
-                    commit_seq: 7,
+                    commit_seq: CommitSeq(7),
                 }),
             },
             HeadUpdate {
-                graph: 2,
-                branch: 1,
+                graph: GraphId((1u128 << 100) | 2),
+                branch: BranchId(1),
                 expected_previous: None,
             },
         ],
@@ -273,7 +273,10 @@ fn committed_markers_survive_a_restart() {
         for seq in 1..=5 {
             commit_ok(&mut coordinator, cx, seq);
         }
-        let head_before = coordinator.chain().head(1, 1).expect("branch head");
+        let head_before = coordinator
+            .chain()
+            .head(GraphId(1), BranchId(1))
+            .expect("branch head");
         drop(coordinator);
 
         let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
@@ -282,7 +285,7 @@ fn committed_markers_survive_a_restart() {
         assert_eq!(reopened.discarded_tail_bytes(), 0);
         assert_eq!(reopened.chain().verify(), Ok(()));
         assert_eq!(
-            reopened.chain().head(1, 1),
+            reopened.chain().head(GraphId(1), BranchId(1)),
             Some(head_before),
             "branch heads are rebuilt from the log, not stored separately"
         );
@@ -391,7 +394,7 @@ fn identical_payloads_reuse_one_capsule_and_both_markers_survive_restart() {
                     marker_for(seq, oid, &chain_snapshot)
                 })
                 .expect("deduplicated commit");
-            assert_eq!(marker_ref.commit_seq, expected_seq);
+            assert_eq!(marker_ref.commit_seq, CommitSeq(expected_seq));
         }
 
         assert_eq!(
@@ -740,8 +743,8 @@ fn a_marker_above_the_recovery_bound_is_rejected_before_any_write() {
             let mut marker = marker_for(seq, oid, &chain_snapshot);
             marker.head_updates = (0..4_000)
                 .map(|branch| HeadUpdate {
-                    graph: 7,
-                    branch,
+                    graph: GraphId(7),
+                    branch: BranchId(branch),
                     expected_previous: None,
                 })
                 .collect();
