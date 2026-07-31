@@ -38,7 +38,9 @@ use fgdb_reference::txn::{
     WorkspaceGeneration,
 };
 use fgdb_reference::{ConflictKey, ReferenceDatabase, collect_conflict_keys};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+};
 use std::collections::BTreeSet;
 
 const GRAPH: GraphId = GraphId(1);
@@ -86,10 +88,16 @@ fn delete_vertex(vid: u128) -> Statement {
 
 /// Commit a transaction that is expected to succeed, at `seq`.
 fn commit_ok(db: &mut ReferenceDatabase, txn: Transaction, seq: u64) -> (CommitSeq, usize, usize) {
-    txn.commit(db, REL, SEMANTICS, CommitSeq(seq))
-        .expect("commit should not error")
-        .committed_parts()
-        .expect("commit should have succeeded")
+    txn.commit(
+        db,
+        REL,
+        SEMANTICS,
+        CommitSeq(seq),
+        LogicalCommandSeq(seq * 10),
+    )
+    .expect("commit should not error")
+    .committed_parts()
+    .expect("commit should have succeeded")
 }
 
 fn prop_of(db: &ReferenceDatabase, branch: BranchId, vid: u128) -> Option<i64> {
@@ -296,7 +304,7 @@ fn a_lost_update_is_refused() {
 
     commit_ok(&mut db, first, 2);
     let outcome = second
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("commit should not error");
 
     assert_eq!(
@@ -320,7 +328,7 @@ fn the_first_committer_wins_not_the_last() {
 
     commit_ok(&mut db, first, 2);
     let refused = second
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("no error");
 
     assert!(!refused.is_committed());
@@ -345,7 +353,7 @@ fn a_conflicted_transaction_writes_nothing() {
     commit_ok(&mut db, first, 2);
     let before = db.clone();
     let refused = second
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("no error");
 
     assert!(refused.conflicts().is_some());
@@ -428,7 +436,7 @@ fn assert_edge_delete_race_is_a_conflict(
     let commits_before = db.recorded_commits(GRAPH, MAIN);
 
     let outcome = loser
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("a lost endpoint race is an outcome, not an apply error");
     assert_eq!(
         outcome,
@@ -636,7 +644,7 @@ fn an_aborted_transaction_is_not_reported_as_a_conflict() {
     commit_ok(&mut db, other, 2);
 
     let outcome = doomed
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("no error");
     assert_eq!(outcome, TxnOutcome::Aborted { statement: 1 });
     assert_eq!(prop_of(&db, MAIN, 1), Some(99));
@@ -723,7 +731,7 @@ fn a_mutation_capable_noop_takes_the_write_terminal_path() {
     .expect("executes");
 
     let outcome = txn
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20))
         .expect("no error");
     assert_eq!(
         outcome,
@@ -768,7 +776,7 @@ fn generation_zero_and_published_read_only_work_read_close() {
     );
 
     assert_eq!(
-        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20),)
             .expect("read close"),
         TxnOutcome::ReadClosed {
             statement_failures: 0
@@ -827,7 +835,7 @@ fn publication_join_never_goes_backwards_and_failures_do_not_advance() {
     assert!(!events.get(3).is_some_and(|event| event.results_visible()));
 
     assert_eq!(
-        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20),)
             .expect("write terminal"),
         TxnOutcome::WriteCommitted {
             commit_seq: CommitSeq(2),
@@ -899,7 +907,7 @@ fn abandoned_and_failed_statements_are_distinct_nonpublishing_terminals() {
         CanonicalMutationPotential::ProvenReadOnly
     );
     assert_eq!(
-        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20),)
             .expect("read close"),
         TxnOutcome::ReadClosed {
             statement_failures: 1
@@ -954,7 +962,7 @@ fn a_transaction_begun_in_the_past_conflicts_with_everything_since() {
 
     stale.execute(&[set(1, 1)]).expect("executes");
     let outcome = stale
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("no error");
     assert_eq!(
         outcome,
@@ -1261,7 +1269,7 @@ fn a_historical_child_transaction_conflicts_with_its_inherited_lineage() {
 
     let before = db.clone();
     let outcome = txn
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("a lost race is an outcome, not an error");
     assert_eq!(
         outcome,
@@ -1325,7 +1333,7 @@ fn a_grandchild_conflicts_with_the_middle_ancestors_window() {
     assert_eq!(read(txn.workspace(), 1), Some(0));
     txn.execute(&[set(1, 9)]).expect("executes");
     let outcome = txn
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30))
         .expect("outcome");
     assert!(
         outcome.conflicts().is_some(),
@@ -1354,7 +1362,7 @@ fn concurrent_genesis_transactions_cannot_both_create_the_branch() {
 
     let before = db.clone();
     let outcome = second
-        .commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20))
         .expect("outcome");
     assert_eq!(
         outcome,

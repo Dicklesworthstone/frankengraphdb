@@ -31,7 +31,9 @@ use fgdb_delta_types::{
     SchemaEpoch, ValidTimePeriod,
 };
 use fgdb_reference::{ApplyError, ReferenceDatabase, ReferenceGraph, SnapshotError};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+};
 
 const GRAPH: GraphId = GraphId(1);
 const MAIN: BranchId = BranchId(1);
@@ -109,8 +111,12 @@ fn template(branch: BranchId, rows: Vec<DeltaRow>) -> LogicalDeltaTemplate {
 }
 
 fn apply_at(db: &mut ReferenceDatabase, branch: BranchId, seq: u64, rows: Vec<DeltaRow>) {
-    db.apply_template(&template(branch, rows), CommitSeq(seq))
-        .expect("applies");
+    db.apply_template(
+        &template(branch, rows),
+        CommitSeq(seq),
+        LogicalCommandSeq(seq * 10),
+    )
+    .expect("applies");
 }
 
 /// Read a coordinate as of a sequence. `expect` rather than a `panic!` arm: the
@@ -363,6 +369,7 @@ fn a_refused_template_leaves_no_trace_in_the_history() {
     let refused = db.apply_template(
         &template(MAIN, vec![set_prop(2, Some(999), Some(0))]),
         CommitSeq(8),
+        LogicalCommandSeq(80),
     );
     assert!(matches!(
         refused,

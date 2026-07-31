@@ -27,7 +27,9 @@ use fgdb_reference::intents::{Intent, Statement};
 use fgdb_reference::ssi::{DangerousStructure, TxnTrace, dangerous_structures};
 use fgdb_reference::txn::{Transaction, TxnOutcome};
 use fgdb_reference::{ConflictKey, ReferenceDatabase, ssi};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+};
 use std::collections::BTreeSet;
 
 const GRAPH: GraphId = GraphId(1);
@@ -100,7 +102,13 @@ fn commit(
 ) -> (TxnOutcome, TxnTrace) {
     let trace = txn.trace(id);
     let outcome = txn
-        .commit(db, REL, SEMANTICS, CommitSeq(seq))
+        .commit(
+            db,
+            REL,
+            SEMANTICS,
+            CommitSeq(seq),
+            LogicalCommandSeq(seq * 10),
+        )
         .expect("commit should not error");
     let trace = match outcome.committed_parts() {
         Some((commit_seq, _, _)) => trace.committed_at(commit_seq),

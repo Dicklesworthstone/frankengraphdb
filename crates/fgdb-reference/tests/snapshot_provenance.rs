@@ -30,7 +30,9 @@ use fgdb_delta_types::{
 };
 use fgdb_reference::txn::{Transaction, TxnError};
 use fgdb_reference::{ReferenceDatabase, SnapshotError};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, DatabaseId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, DatabaseId, GraphId, LogicalCommandSeq, ObjectId, VId,
+};
 
 const GRAPH: GraphId = GraphId(1);
 const MAIN: BranchId = BranchId(1);
@@ -72,7 +74,7 @@ fn apply(db: &mut ReferenceDatabase, seq: u64, rows: Vec<DeltaRow>) {
         }],
     )
     .expect("template builds");
-    db.apply_template(&template, CommitSeq(seq))
+    db.apply_template(&template, CommitSeq(seq), LogicalCommandSeq(seq * 10))
         .expect("applies");
 }
 
@@ -119,12 +121,12 @@ fn divergent_child_clones() -> (ReferenceDatabase, ReferenceDatabase, BranchId) 
     .expect("template builds");
 
     let mut a = ReferenceDatabase::new();
-    a.apply_template(&template, CommitSeq(1))
+    a.apply_template(&template, CommitSeq(1), LogicalCommandSeq(10))
         .expect("a applies");
     let mut b = a.clone();
-    a.fork_branch_at(GRAPH, MAIN, child, CommitSeq(1))
+    a.fork_branch_at(GRAPH, MAIN, child, LogicalCommandSeq(10))
         .expect("a forks child from main");
-    b.fork_branch_at(GRAPH, alt, child, CommitSeq(1))
+    b.fork_branch_at(GRAPH, alt, child, LogicalCommandSeq(10))
         .expect("b forks child from alt");
     (a, b, child)
 }
@@ -297,7 +299,7 @@ fn a_transaction_cannot_commit_into_a_different_database() {
     .expect("executes");
 
     let settled = b.clone();
-    let result = txn.commit(&mut b, REL, SEMANTICS, CommitSeq(3));
+    let result = txn.commit(&mut b, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30));
     assert_eq!(
         result,
         Err(TxnError::Snapshot(SnapshotError::ForeignSnapshot {
@@ -348,7 +350,13 @@ fn a_genesis_snapshot_is_authority_bound_and_still_guarded() {
         .expect("executes");
     let independent_before = independent.clone();
     assert_eq!(
-        foreign_txn.commit(&mut independent, REL, SEMANTICS, CommitSeq(1)),
+        foreign_txn.commit(
+            &mut independent,
+            REL,
+            SEMANTICS,
+            CommitSeq(1),
+            LogicalCommandSeq(10),
+        ),
         Err(TxnError::Snapshot(SnapshotError::ForeignSnapshot {
             graph: GRAPH,
             branch: MAIN,
@@ -380,7 +388,13 @@ fn a_genesis_snapshot_is_authority_bound_and_still_guarded() {
     .expect("executes");
     let settled = advanced_b.clone();
     let result = txn
-        .commit(&mut advanced_b, REL, SEMANTICS, CommitSeq(1))
+        .commit(
+            &mut advanced_b,
+            REL,
+            SEMANTICS,
+            CommitSeq(1),
+            LogicalCommandSeq(10),
+        )
         .expect("a lost race is an outcome, not an error");
     assert_eq!(
         result,
@@ -499,9 +513,9 @@ fn same_parent_with_a_different_fork_boundary_is_refused() {
     let child = BranchId(3);
     let mut a = advanced(2);
     let mut b = a.clone();
-    a.fork_branch_at(GRAPH, MAIN, child, CommitSeq(1))
+    a.fork_branch_at(GRAPH, MAIN, child, LogicalCommandSeq(10))
         .expect("a forks at one");
-    b.fork_branch_at(GRAPH, MAIN, child, CommitSeq(2))
+    b.fork_branch_at(GRAPH, MAIN, child, LogicalCommandSeq(20))
         .expect("b forks at two");
 
     let from_a = a.snapshot(GRAPH, child).expect("a mints child snapshot");
@@ -535,7 +549,7 @@ fn divergent_fork_lineage_refuses_transaction_commit_without_side_effects() {
 
     let settled = b.clone();
     assert_eq!(
-        txn.commit(&mut b, REL, SEMANTICS, CommitSeq(2)),
+        txn.commit(&mut b, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20),),
         Err(TxnError::Snapshot(SnapshotError::ForeignSnapshot {
             graph: GRAPH,
             branch: child,

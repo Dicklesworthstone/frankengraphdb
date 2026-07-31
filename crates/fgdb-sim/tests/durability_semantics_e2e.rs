@@ -462,6 +462,42 @@ fn a_marker_declaring_the_wrong_template_digest_is_refused() {
     });
 }
 
+/// Replay takes the semantic command position from the durable marker, not from
+/// the transaction commit sequence. The two domains deliberately use different
+/// gaps here so substituting `commit_seq` in the replay path turns both frontier
+/// assertions red.
+#[test]
+fn replay_preserves_the_markers_independent_logical_command_sequence() {
+    let dir = scratch_dir("logical-command-sequence");
+    under_lab(37, move |cx| {
+        let capsules = three_commits();
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+
+        for (capsule, logical_command_seq) in [(&capsules[0], 10_u64), (&capsules[1], 25_u64)] {
+            coordinator
+                .commit(cx, &capsule.bytes, |commit_seq, capsule_oid| {
+                    let mut marker =
+                        fgdb_sim::marker_for_capsule(commit_seq, capsule_oid, capsule, vec![]);
+                    marker.logical_command_seq = logical_command_seq;
+                    marker
+                })
+                .expect("commit with an independent logical command position");
+        }
+        drop(coordinator);
+
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let recovered = replay(cx, &reopened).expect("replay");
+        assert_eq!(
+            recovered.database.replay_frontier(),
+            fgdb_types::CommitSeq(2)
+        );
+        assert_eq!(
+            recovered.database.logical_command_frontier(),
+            fgdb_types::LogicalCommandSeq(25)
+        );
+    });
+}
+
 /// A capsule deleted out from under a committed marker is unrecoverable, and
 /// says so. This is NOT the orphan case: the marker exists, so the commit
 /// happened, so the bytes were durable before it was written.

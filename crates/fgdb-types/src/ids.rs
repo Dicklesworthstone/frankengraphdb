@@ -75,6 +75,14 @@ u64_scalar! {
     CommitSeq
 }
 u64_scalar! {
+    /// Stream-wide semantic command sequence.
+    ///
+    /// Transaction commits occupy positions in this domain, but control
+    /// commands do too, so it is intentionally distinct from [`CommitSeq`] and
+    /// need only advance rather than remain gap-free across commits.
+    LogicalCommandSeq
+}
+u64_scalar! {
     /// Local writer fence epoch (`local_writer_fence_epoch` in `RootSlot`).
     WriterFenceEpoch
 }
@@ -97,6 +105,7 @@ mod tests {
         assert_eq!(e, EId(7));
         assert!(VId(1) < VId(2));
         assert!(CommitSeq(1) < CommitSeq(2));
+        assert!(LogicalCommandSeq(1) < LogicalCommandSeq(2));
         let a = ObjectId([0u8; 32]);
         let mut hi = [0u8; 32];
         hi[0] = 1;

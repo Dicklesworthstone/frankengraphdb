@@ -16,11 +16,12 @@
 //! the engine; it is there to disagree when the engine is wrong.
 //!
 //! **TWO FRONTIERS, TWO QUESTIONS.** The per-coordinate map stays: intervening
-//! commits can touch other coordinates, so a branch's own frontier is genuinely
-//! below the stream's, and both the fork boundary and the conflict window are
-//! derived from the per-coordinate value. "What has this branch seen" and "where is
-//! the stream" are different facts and neither substitutes for the other. The last
-//! law here pins that they can differ.
+//! commits can touch other coordinates, so a branch's own transaction frontier is
+//! genuinely below the stream's. The conflict window still needs that coordinate
+//! value, while a branch fork now records the independent logical-command
+//! frontier and derives the transaction prefix visible there. "What last changed
+//! this branch", "where is the commit stream", and "where is the semantic command
+//! stream" are three different facts.
 //!
 //! **WHAT WOULD MAKE THESE VACUOUS.** A rule that refused everything would pass
 //! every refusal law in this file, so two of the laws are controls: an ordinary
@@ -32,8 +33,8 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId, RelationId,
     SchemaEpoch,
 };
-use fgdb_reference::{ApplyError, ReferenceDatabase};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, ObjectId, VId};
+use fgdb_reference::{ApplyError, BranchOrigin, ReferenceDatabase};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, LogicalCommandSeq, ObjectId, VId};
 
 const GRAPH: GraphId = GraphId(1);
 const A: BranchId = BranchId(1);
@@ -81,19 +82,19 @@ fn a_globally_reversed_sequence_is_refused() {
     let mut db = ReferenceDatabase::new();
     // Even the FIRST commit must be the stream's next one, which is 1.
     assert_eq!(
-        db.apply_template(&one(A, 1), CommitSeq(2)),
+        db.apply_template(&one(A, 1), CommitSeq(2), LogicalCommandSeq(20)),
         Err(ApplyError::SequenceNotNext {
             expected: CommitSeq(1),
             offered: CommitSeq(2),
         })
     );
 
-    db.apply_template(&one(A, 1), CommitSeq(1))
+    db.apply_template(&one(A, 1), CommitSeq(1), LogicalCommandSeq(10))
         .expect("applies");
-    db.apply_template(&one(A, 2), CommitSeq(2))
+    db.apply_template(&one(A, 2), CommitSeq(2), LogicalCommandSeq(20))
         .expect("applies");
     assert_eq!(
-        db.apply_template(&one(B, 3), CommitSeq(1)),
+        db.apply_template(&one(B, 3), CommitSeq(1), LogicalCommandSeq(30)),
         Err(ApplyError::SequenceNotNext {
             expected: CommitSeq(3),
             offered: CommitSeq(1),
@@ -110,18 +111,71 @@ fn a_globally_reversed_sequence_is_refused() {
 #[test]
 fn a_gap_is_refused() {
     let mut db = ReferenceDatabase::new();
-    db.apply_template(&one(A, 1), CommitSeq(1))
+    db.apply_template(&one(A, 1), CommitSeq(1), LogicalCommandSeq(10))
         .expect("applies");
 
     for (branch, vid) in [(A, 10u128), (B, 11)] {
         assert_eq!(
-            db.apply_template(&one(branch, vid), CommitSeq(5)),
+            db.apply_template(&one(branch, vid), CommitSeq(5), LogicalCommandSeq(50)),
             Err(ApplyError::SequenceNotNext {
                 expected: CommitSeq(2),
                 offered: CommitSeq(5),
             })
         );
     }
+}
+
+/// Logical command positions are independent of transaction commit positions.
+/// Commits stay exact-next at 1,2 while their semantic positions advance 10,25;
+/// equal or lower logical positions are refused without moving either frontier.
+#[test]
+fn logical_command_positions_advance_independently_of_commit_sequences() {
+    let mut db = ReferenceDatabase::new();
+    db.apply_template(&one(A, 1), CommitSeq(1), LogicalCommandSeq(10))
+        .expect("first position applies");
+    let settled = db.clone();
+
+    for offered in [LogicalCommandSeq(9), LogicalCommandSeq(10)] {
+        assert_eq!(
+            db.apply_template(&one(A, 2), CommitSeq(2), offered),
+            Err(ApplyError::LogicalCommandSequenceNotAdvancing {
+                previous: LogicalCommandSeq(10),
+                offered,
+            })
+        );
+        assert_eq!(db, settled, "a refused logical position moved state");
+    }
+
+    db.apply_template(&one(A, 2), CommitSeq(2), LogicalCommandSeq(25))
+        .expect("a gap left by control commands is legal");
+    assert_eq!(db.replay_frontier(), CommitSeq(2));
+    assert_eq!(
+        db.logical_command_frontier(),
+        LogicalCommandSeq(25),
+        "the two domains do not move in lockstep"
+    );
+}
+
+/// Stream provenance binds both axes. Otherwise two histories with identical
+/// transaction commits and effects but different intervening logical-command
+/// positions would mint interchangeable snapshots.
+#[test]
+fn stream_prefix_digest_binds_the_logical_command_position() {
+    let template = one(A, 1);
+    let mut at_ten = ReferenceDatabase::new();
+    let mut at_twenty = ReferenceDatabase::new();
+    at_ten
+        .apply_template(&template, CommitSeq(1), LogicalCommandSeq(10))
+        .expect("applies at ten");
+    at_twenty
+        .apply_template(&template, CommitSeq(1), LogicalCommandSeq(20))
+        .expect("applies at twenty");
+
+    assert_ne!(
+        at_ten.prefix_digest(CommitSeq(1)),
+        at_twenty.prefix_digest(CommitSeq(1)),
+        "logical command position is part of stream provenance"
+    );
 }
 
 /// Sequence ZERO is refused. Chronicle's chain starts at 1, so zero names no
@@ -131,7 +185,7 @@ fn sequence_zero_is_refused() {
     let mut db = ReferenceDatabase::new();
     assert_eq!(db.replay_frontier(), CommitSeq(0));
     assert_eq!(
-        db.apply_template(&one(A, 1), CommitSeq(0)),
+        db.apply_template(&one(A, 1), CommitSeq(0), LogicalCommandSeq(0)),
         Err(ApplyError::SequenceNotNext {
             expected: CommitSeq(1),
             offered: CommitSeq(0),
@@ -151,7 +205,7 @@ fn an_empty_template_is_refused() {
     let mut db = ReferenceDatabase::new();
     let empty = template(vec![]);
     assert_eq!(
-        db.apply_template(&empty, CommitSeq(1)),
+        db.apply_template(&empty, CommitSeq(1), LogicalCommandSeq(10)),
         Err(ApplyError::EmptyTemplate)
     );
     assert_eq!(
@@ -163,10 +217,10 @@ fn an_empty_template_is_refused() {
 
     // Refused at a legal sequence too, so the refusal is about emptiness and not
     // about the sequence.
-    db.apply_template(&one(A, 1), CommitSeq(1))
+    db.apply_template(&one(A, 1), CommitSeq(1), LogicalCommandSeq(10))
         .expect("applies");
     assert_eq!(
-        db.apply_template(&empty, CommitSeq(2)),
+        db.apply_template(&empty, CommitSeq(2), LogicalCommandSeq(20)),
         Err(ApplyError::EmptyTemplate)
     );
 }
@@ -178,8 +232,12 @@ fn an_empty_template_is_refused() {
 fn a_sequential_history_across_coordinates_is_admitted() {
     let mut db = ReferenceDatabase::new();
     for (seq, branch, vid) in [(1u64, A, 1u128), (2, B, 2), (3, A, 3), (4, B, 4), (5, A, 5)] {
-        db.apply_template(&one(branch, vid), CommitSeq(seq))
-            .expect("a sequential history applies");
+        db.apply_template(
+            &one(branch, vid),
+            CommitSeq(seq),
+            LogicalCommandSeq(seq * 10),
+        )
+        .expect("a sequential history applies");
     }
     assert_eq!(db.replay_frontier(), CommitSeq(5));
     assert_eq!(db.coordinate_count(), 2);
@@ -197,7 +255,8 @@ fn a_sequential_history_across_coordinates_is_admitted() {
 fn one_template_may_carry_several_coordinates_at_one_sequence() {
     let mut db = ReferenceDatabase::new();
     let both = template(vec![entry(A, vec![vertex(1)]), entry(B, vec![vertex(2)])]);
-    db.apply_template(&both, CommitSeq(1)).expect("applies");
+    db.apply_template(&both, CommitSeq(1), LogicalCommandSeq(10))
+        .expect("applies");
 
     assert_eq!(db.replay_frontier(), CommitSeq(1));
     assert_eq!(db.applied_through(GRAPH, A), Some(CommitSeq(1)));
@@ -214,12 +273,16 @@ fn one_template_may_carry_several_coordinates_at_one_sequence() {
 #[test]
 fn a_refused_template_moves_neither_frontier() {
     let mut db = ReferenceDatabase::new();
-    db.apply_template(&one(A, 1), CommitSeq(1))
+    db.apply_template(&one(A, 1), CommitSeq(1), LogicalCommandSeq(10))
         .expect("applies");
     let settled = db.clone();
 
     for (seq, kind) in [(0u64, "zero"), (1, "duplicate"), (7, "gap")] {
-        let result = db.apply_template(&one(A, 90 + seq as u128), CommitSeq(seq));
+        let result = db.apply_template(
+            &one(A, 90 + seq as u128),
+            CommitSeq(seq),
+            LogicalCommandSeq(seq * 10),
+        );
         assert!(result.is_err(), "{kind} must be refused");
         assert_eq!(db, settled, "{kind} changed the database");
     }
@@ -229,18 +292,20 @@ fn a_refused_template_moves_neither_frontier() {
 
 /// THE TWO FRONTIERS DIFFER, and both are needed.
 ///
-/// A branch's own frontier sits below the stream's whenever another coordinate
-/// committed in between. That gap is why the per-coordinate map cannot be replaced
-/// by the stream frontier: the conflict window and the fork boundary are both
-/// derived from what a BRANCH has seen, not from where the stream is.
+/// A branch's own last-write frontier sits below the stream's whenever another
+/// coordinate committed in between. That gap is why the per-coordinate map
+/// cannot be replaced by the stream frontier for conflict certification. A
+/// current fork, however, is created at the current LOGICAL position, so its
+/// transaction-visible prefix includes intervening commits even when they did
+/// not change the parent.
 #[test]
 fn a_coordinates_frontier_sits_below_the_streams() {
     let mut db = ReferenceDatabase::new();
-    db.apply_template(&one(A, 1), CommitSeq(1))
+    db.apply_template(&one(A, 1), CommitSeq(1), LogicalCommandSeq(10))
         .expect("applies");
-    db.apply_template(&one(B, 2), CommitSeq(2))
+    db.apply_template(&one(B, 2), CommitSeq(2), LogicalCommandSeq(20))
         .expect("applies");
-    db.apply_template(&one(B, 3), CommitSeq(3))
+    db.apply_template(&one(B, 3), CommitSeq(3), LogicalCommandSeq(30))
         .expect("applies");
 
     assert_eq!(db.replay_frontier(), CommitSeq(3));
@@ -249,13 +314,20 @@ fn a_coordinates_frontier_sits_below_the_streams() {
         Some(CommitSeq(1)),
         "A has seen only its own commit, two behind the stream"
     );
-    // And a fork from A records A's frontier, not the stream's — the value the
-    // lineage cap depends on.
+    // A current fork records the semantic frontier and derives the corresponding
+    // global transaction prefix. It still materializes A's unchanged state.
     let mut forked = db.clone();
     forked.fork_branch(GRAPH, A, BranchId(9)).expect("forks");
     assert_eq!(
         forked.applied_through(GRAPH, BranchId(9)),
-        Some(CommitSeq(1)),
-        "the fork boundary is the parent's frontier, not the stream's"
+        Some(CommitSeq(3)),
+        "the child exists at the transaction prefix paired with logical position 30"
+    );
+    assert_eq!(
+        forked.branch_origin(GRAPH, BranchId(9)),
+        Some(BranchOrigin::Fork {
+            parent_branch: A,
+            fork_boundary: LogicalCommandSeq(30),
+        })
     );
 }

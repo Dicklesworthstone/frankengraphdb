@@ -40,13 +40,16 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, DatabaseId, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, DatabaseId, EId, GraphId, LogicalCommandSeq, ObjectId,
+    VId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Domain separation for the stream-prefix digest. A bare hash of the bytes would
 /// collide with any other transcript that happens to hash the same material.
-const PREFIX_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.stream-prefix.v1";
+const PREFIX_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.stream-prefix.v2";
 const LINEAGE_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.snapshot-lineage.v1";
 const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v1";
 
@@ -322,6 +325,17 @@ pub enum ApplyError {
         expected: CommitSeq,
         offered: CommitSeq,
     },
+    /// The transaction commit did not advance the independent semantic-command
+    /// position.
+    ///
+    /// This is deliberately NOT an exact-next law. Control commands occupy
+    /// logical-command positions without consuming a [`CommitSeq`], so two
+    /// successive transaction commits may have a gap in this domain. Chronicle's
+    /// `MarkerChain::validate` enforces the same strictly-increasing law.
+    LogicalCommandSequenceNotAdvancing {
+        previous: LogicalCommandSeq,
+        offered: LogicalCommandSeq,
+    },
     /// The template's canonical bytes could not be produced, so the stream-prefix
     /// digest cannot be computed.
     ///
@@ -458,6 +472,10 @@ impl core::fmt::Display for ApplyError {
             Self::SequenceNotNext { expected, offered } => write!(
                 f,
                 "the stream's next commit is {expected:?}; {offered:?} is not it"
+            ),
+            Self::LogicalCommandSequenceNotAdvancing { previous, offered } => write!(
+                f,
+                "logical command position {offered:?} does not advance {previous:?}"
             ),
             Self::TemplateNotCanonical(cause) => write!(
                 f,
@@ -1278,36 +1296,18 @@ impl ReferenceGraph {
 /// to run.
 ///
 /// SUBSET NOTE (doctrine 7): the plan's `Fork` arm additionally carries
-/// `parent_head: StrongMarkerRef`, `fork_boundary_logical_command_seq`, and
-/// `boundary_reservation_identity`. None is spellable honestly in this
-/// sequence-neutral materializer: it tracks neither committed parent heads nor
-/// logical-command history, and the reservation belongs to W4's certification
-/// machinery. This slice therefore models only a fork of the parent's current
-/// materialized state.
-///
-/// FORKING FROM AN EARLIER SEQUENCE IS NOW IMPLEMENTABLE and is not yet
-/// implemented. The blocker used to be real — there was no history to select a
-/// boundary in, so a caller-supplied sequence would have been an unauthenticated
-/// label rather than oracle evidence. [`ReferenceDatabase::read`] removes it: a
-/// boundary can now be checked against the parent's frontier and *used*, by
-/// materializing the parent at that sequence. That is a capability this type
-/// should grow, and until it does, the restriction is a missing feature rather
-/// than an impossibility — recorded here so the distinction does not decay back
-/// into "cannot".
+/// `parent_head: StrongMarkerRef` and `boundary_reservation_identity`. Neither
+/// is spellable honestly yet: this oracle has no committed marker-head model and
+/// the reservation belongs to W4's certification machinery. The logical-command
+/// boundary is modeled because committed applications now carry that independent
+/// sequence and historical selection uses it. A placeholder head or reservation
+/// would still be counterfeit evidence, so neither appears here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchOrigin {
     Genesis,
     Fork {
         parent_branch: BranchId,
-        /// The parent's `applied_through` at the moment of the fork.
-        ///
-        /// DERIVED, never supplied. An earlier version of this type took a
-        /// boundary from the caller and stored it, which was a counterfeit: the
-        /// materializer could not select or verify a historical boundary, so the
-        /// value constrained nothing while the signature advertised historical
-        /// forking (fgdb-vyb0). This is the honest version — it records the
-        /// sequence the parent had actually applied, which is a fact the
-        /// database owns and can check.
+        /// The selected stream-wide logical-command position.
         ///
         /// It is LOAD-BEARING as well as recorded: [`ReferenceDatabase::read`]
         /// caps each ancestor's contribution at its boundary, so this value is
@@ -1315,16 +1315,15 @@ pub enum BranchOrigin {
         /// reads. Deleting it would not merely drop a label — it would make every
         /// cross-fork read wrong.
         ///
-        /// It is the parent's frontier for a [`fork_branch`] and an earlier
-        /// sequence for a [`fork_branch_at`]; either way it is the sequence the
-        /// child's inherited state was materialized at, which is what makes it
-        /// checkable. plan:2000 calls this
-        /// `fork_boundary_logical_command_seq`; commit sequences are the
-        /// analogue this materializer has.
+        /// It is the database's logical-command frontier for a [`fork_branch`]
+        /// and an earlier observed logical position for a [`fork_branch_at`].
+        /// Transaction-only [`CommitSeq`] values are deliberately not accepted:
+        /// control commands may occupy positions between commits, and plan:2000
+        /// names exactly `fork_boundary_logical_command_seq`.
         ///
         /// [`fork_branch`]: ReferenceDatabase::fork_branch
         /// [`fork_branch_at`]: ReferenceDatabase::fork_branch_at
-        fork_boundary: CommitSeq,
+        fork_boundary: LogicalCommandSeq,
     },
 }
 
@@ -1339,18 +1338,30 @@ pub enum BranchError {
     BranchExists { graph: GraphId, branch: BranchId },
     /// A branch may not fork from itself.
     SelfFork { branch: BranchId },
-    /// The requested boundary is above what the parent has applied — a fork from
-    /// the parent's future.
+    /// The requested boundary is above the logical-command stream frontier — a
+    /// fork from the database's future.
     ///
     /// Refused rather than clamped to the frontier. Clamping would make a fork
     /// silently mean something other than what it said, and the difference is
     /// invisible afterwards: the child's recorded boundary would be the frontier
     /// and nothing would show that a different one was asked for.
-    BoundaryBeyondParentFrontier {
+    BoundaryBeyondLogicalFrontier {
         graph: GraphId,
         parent: BranchId,
-        applied_through: CommitSeq,
-        requested: CommitSeq,
+        logical_frontier: LogicalCommandSeq,
+        requested: LogicalCommandSeq,
+    },
+    /// The boundary is neither zero nor a logical-command position observed in
+    /// the reference stream.
+    ///
+    /// A numeric value below the frontier is not evidence that a command existed
+    /// there. The full engine verifies a `BranchEpochBoundaryReservation`; this
+    /// narrower oracle fails closed over the command positions it can actually
+    /// witness.
+    BoundaryNotObserved {
+        graph: GraphId,
+        parent: BranchId,
+        requested: LogicalCommandSeq,
     },
     /// The parent's state at the boundary could not be materialized.
     ///
@@ -1361,7 +1372,7 @@ pub enum BranchError {
     BoundaryNotMaterializable {
         graph: GraphId,
         parent: BranchId,
-        boundary: CommitSeq,
+        boundary: LogicalCommandSeq,
         cause: Box<SnapshotError>,
     },
 }
@@ -1376,15 +1387,24 @@ impl core::fmt::Display for BranchError {
                 write!(f, "branch {branch:?} in graph {graph:?} already exists")
             }
             Self::SelfFork { branch } => write!(f, "branch {branch:?} cannot fork from itself"),
-            Self::BoundaryBeyondParentFrontier {
+            Self::BoundaryBeyondLogicalFrontier {
                 graph,
                 parent,
-                applied_through,
+                logical_frontier,
                 requested,
             } => write!(
                 f,
-                "parent {parent:?} in graph {graph:?} has applied through \
-                 {applied_through:?}, cannot fork at {requested:?}"
+                "the logical-command stream is at {logical_frontier:?}; parent \
+                 {parent:?} in graph {graph:?} cannot fork at {requested:?}"
+            ),
+            Self::BoundaryNotObserved {
+                graph,
+                parent,
+                requested,
+            } => write!(
+                f,
+                "parent {parent:?} in graph {graph:?} cannot fork at unobserved \
+                 logical-command position {requested:?}"
             ),
             Self::BoundaryNotMaterializable {
                 graph,
@@ -1471,7 +1491,13 @@ pub struct ReferenceDatabase {
     /// How each branch came to exist. Separate from the state map because a
     /// branch's origin is metadata about history, not part of the graph.
     origins: BTreeMap<(GraphId, BranchId), BranchOrigin>,
-    /// The highest commit sequence each coordinate has applied.
+    /// The highest transaction prefix each coordinate can observe.
+    ///
+    /// For a genesis branch this advances when the branch itself is written. A
+    /// fork starts at the greatest global commit prefix at or below its logical
+    /// boundary, even when the last commit in that prefix touched another
+    /// coordinate; the child's graph is unchanged, but its system-time cut is
+    /// not an earlier global history.
     applied_through: BTreeMap<(GraphId, BranchId), CommitSeq>,
     /// The stream's frontier: the highest commit sequence this database has
     /// applied, across every coordinate.
@@ -1482,6 +1508,20 @@ pub struct ReferenceDatabase {
     /// need the per-coordinate value. Two frontiers answering two different
     /// questions: "what has this branch seen" and "where is the stream".
     replay_frontier: CommitSeq,
+    /// Highest semantic command position carried by the committed stream.
+    ///
+    /// Unlike `replay_frontier`, this is strictly increasing rather than
+    /// gap-free: control commands consume logical positions without consuming a
+    /// transaction commit sequence. Keeping the domains in distinct Rust types
+    /// prevents a historical fork from silently selecting the wrong one.
+    logical_command_frontier: LogicalCommandSeq,
+    /// Logical-command position carried by each transaction commit.
+    ///
+    /// The mapping is append-only and order-preserving. It lets a snapshot in
+    /// the transaction-only [`CommitSeq`] domain acquire the corresponding
+    /// logical cut, and lets a fork at a logical position derive the greatest
+    /// committed prefix at or below that boundary.
+    stream_positions: BTreeMap<CommitSeq, LogicalCommandSeq>,
     /// The digest of the stream through each applied sequence.
     ///
     /// **THIS IS THE HISTORY COMPONENT OF SNAPSHOT PROVENANCE**
@@ -1731,9 +1771,16 @@ pub fn collect_conflict_keys(row: &DeltaRow, keys: &mut BTreeSet<ConflictKey>) {
 /// A `(graph, branch)` pair: one materialization coordinate.
 type Coordinate = (GraphId, BranchId);
 
-/// One ancestor of a lineage walk, with the highest sequence it may contribute
-/// through — its own fork boundary, or the requested `high` if that is lower.
-type CappedAncestor = (Coordinate, CommitSeq);
+/// The two independent stream positions through which an ancestor may
+/// contribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HistoryCut {
+    commit_high: CommitSeq,
+    logical_command_high: LogicalCommandSeq,
+}
+
+/// One ancestor of a lineage walk and its effective two-axis cut.
+type CappedAncestor = (Coordinate, HistoryCut);
 
 /// One coordinate's contribution at one commit sequence.
 ///
@@ -1742,7 +1789,8 @@ type CappedAncestor = (Coordinate, CommitSeq);
 /// the materializer and can drift from it.
 #[derive(Clone, Debug, PartialEq)]
 struct CommitRecord {
-    seq: CommitSeq,
+    commit_seq: CommitSeq,
+    logical_command_seq: LogicalCommandSeq,
     entry: CoordinateEntry,
 }
 
@@ -1847,6 +1895,12 @@ pub enum SnapshotError {
     /// Surfaced as a typed refusal because silently substituting an "unknown"
     /// sentinel would mint a capability with counterfeit provenance.
     PrefixDigestMissing { seq: CommitSeq },
+    /// A committed prefix has no corresponding logical-command position.
+    ///
+    /// Successful application installs both axes atomically. Without this
+    /// mapping a commit-domain snapshot cannot be projected into the logical
+    /// domain used by branch ancestry, so replay fails closed.
+    LogicalCommandPositionMissing { commit_seq: CommitSeq },
     /// The snapshot was minted against a different history.
     ///
     /// The issuing database authority, stream prefix, or selected branch lineage
@@ -1906,6 +1960,10 @@ impl core::fmt::Display for SnapshotError {
             Self::PrefixDigestMissing { seq } => {
                 write!(f, "the stream-prefix digest at {seq:?} is missing")
             }
+            Self::LogicalCommandPositionMissing { commit_seq } => write!(
+                f,
+                "commit position {commit_seq:?} has no logical-command position"
+            ),
             Self::ForeignSnapshot {
                 graph,
                 branch,
@@ -1950,6 +2008,8 @@ impl Default for ReferenceDatabase {
             // from a Default impl on CommitSeq, so the starting point of the
             // stream is stated where it matters.
             replay_frontier: CommitSeq(0),
+            logical_command_frontier: LogicalCommandSeq(0),
+            stream_positions: BTreeMap::new(),
             prefix_digests: BTreeMap::new(),
             history: BTreeMap::new(),
         }
@@ -1997,16 +2057,23 @@ impl ReferenceDatabase {
         self.replay_frontier
     }
 
+    /// The highest semantic command position observed in the committed stream.
+    pub fn logical_command_frontier(&self) -> LogicalCommandSeq {
+        self.logical_command_frontier
+    }
+
     pub fn graph(&self, graph: GraphId, branch: BranchId) -> Option<&ReferenceGraph> {
         self.coordinates.get(&(graph, branch))
     }
 
-    /// The highest commit sequence this coordinate has applied — its frontier.
+    /// The highest transaction prefix this coordinate can observe.
     ///
     /// This is the *bound* on visibility, not visibility itself: it is the
-    /// largest `high` [`snapshot_at`](Self::snapshot_at) will mint, and the
-    /// sequence a fork boundary honestly records. Reading the graph as it stood
-    /// at an earlier sequence goes through [`read`](Self::read).
+    /// largest `high` [`snapshot_at`](Self::snapshot_at) will mint. For a fork it
+    /// is the global commit prefix paired with the branch's logical-command
+    /// boundary, not necessarily the last commit that changed the parent.
+    /// Reading the graph as it stood at an earlier sequence goes through
+    /// [`read`](Self::read).
     pub fn applied_through(&self, graph: GraphId, branch: BranchId) -> Option<CommitSeq> {
         self.applied_through.get(&(graph, branch)).copied()
     }
@@ -2071,7 +2138,7 @@ impl ReferenceDatabase {
             .history
             .get(&(graph, branch))
             .and_then(|records| records.first())
-            .is_some_and(|first| first.seq.0 > since.0)
+            .is_some_and(|first| first.commit_seq.0 > since.0)
         {
             summary.writes.insert(ConflictKey::CoordinateExistence);
         }
@@ -2081,10 +2148,12 @@ impl ReferenceDatabase {
                 continue;
             };
             for record in records {
-                if record.seq.0 <= since.0 {
+                if record.commit_seq.0 <= since.0 {
                     continue;
                 }
-                if record.seq.0 > cap.0 {
+                if record.commit_seq.0 > cap.commit_high.0
+                    || record.logical_command_seq.0 > cap.logical_command_high.0
+                {
                     break;
                 }
                 for row in &record.entry.rows {
@@ -2108,7 +2177,7 @@ impl ReferenceDatabase {
             // commit count.
             records
                 .iter()
-                .map(|record| record.seq)
+                .map(|record| record.commit_seq)
                 .collect::<BTreeSet<_>>()
                 .len()
         })
@@ -2125,6 +2194,7 @@ impl ReferenceDatabase {
         let basis = self
             .prefix_digest(high)
             .ok_or(SnapshotError::PrefixDigestMissing { seq: high })?;
+        self.logical_position_for_commit(high)?;
         Ok(Snapshot {
             graph,
             branch,
@@ -2196,6 +2266,7 @@ impl ReferenceDatabase {
         let basis = self
             .prefix_digest(high)
             .ok_or(SnapshotError::PrefixDigestMissing { seq: high })?;
+        self.logical_position_for_commit(high)?;
         Ok(Snapshot {
             graph,
             branch,
@@ -2223,7 +2294,6 @@ impl ReferenceDatabase {
     /// fact rather than two facts that must be kept in step.
     pub fn read(&self, snapshot: &Snapshot) -> Result<ReferenceGraph, SnapshotError> {
         self.check_provenance(snapshot)?;
-        let mut graph = ReferenceGraph::new();
         // A genesis snapshot names a coordinate with no history. Sequence zero of
         // a branch that does not exist yet is the same empty graph as sequence
         // zero of one that does, so this answers rather than refusing — which
@@ -2234,24 +2304,44 @@ impl ReferenceDatabase {
                 .origins
                 .contains_key(&(snapshot.graph, snapshot.branch))
         {
-            return Ok(graph);
+            return Ok(ReferenceGraph::new());
         }
-        for (key, cap) in self.lineage(snapshot.graph, snapshot.branch, snapshot.high)? {
+        let logical_command_high = self.logical_position_for_commit(snapshot.high)?;
+        self.materialize_at_cut(
+            snapshot.graph,
+            snapshot.branch,
+            HistoryCut {
+                commit_high: snapshot.high,
+                logical_command_high,
+            },
+        )
+    }
+
+    /// Fold one branch lineage through an exact two-axis history cut.
+    fn materialize_at_cut(
+        &self,
+        graph_id: GraphId,
+        branch_id: BranchId,
+        cut: HistoryCut,
+    ) -> Result<ReferenceGraph, SnapshotError> {
+        let mut graph = ReferenceGraph::new();
+        for (key, cap) in self.lineage_at_cut(graph_id, branch_id, cut)? {
             let Some(records) = self.history.get(&key) else {
                 continue;
             };
             for record in records {
-                // Ascending by construction: `apply_template` refuses a
-                // sequence that does not advance the coordinate, so a record
-                // above the cap means every later one is too.
-                if record.seq.0 > cap.0 {
+                // Both axes ascend together across committed records. A record
+                // above either cap means every later record is above it too.
+                if record.commit_seq.0 > cap.commit_high.0
+                    || record.logical_command_seq.0 > cap.logical_command_high.0
+                {
                     break;
                 }
                 graph.apply_entry(&record.entry).map_err(|cause| {
                     SnapshotError::HistoryNotApplicable {
                         graph: key.0,
                         branch: key.1,
-                        seq: record.seq,
+                        seq: record.commit_seq,
                         cause: Box::new(cause),
                     }
                 })?;
@@ -2348,8 +2438,46 @@ impl ReferenceDatabase {
         Ok(hasher.finalize().0)
     }
 
-    /// The ancestor chain from genesis to `branch`, each capped at the sequence
-    /// it may contribute through.
+    /// The logical-command position carried by a transaction commit.
+    fn logical_position_for_commit(
+        &self,
+        commit_seq: CommitSeq,
+    ) -> Result<LogicalCommandSeq, SnapshotError> {
+        if commit_seq.0 == 0 {
+            return Ok(LogicalCommandSeq(0));
+        }
+        self.stream_positions
+            .get(&commit_seq)
+            .copied()
+            .ok_or(SnapshotError::LogicalCommandPositionMissing { commit_seq })
+    }
+
+    /// Greatest transaction commit whose logical position is at or below
+    /// `boundary`.
+    ///
+    /// Values are strictly increasing in commit order, so the reverse scan stops
+    /// at the first match. The reference oracle deliberately favors the obvious
+    /// definition over a second index that could disagree with this one.
+    fn commit_frontier_at_logical(&self, boundary: LogicalCommandSeq) -> CommitSeq {
+        self.stream_positions
+            .iter()
+            .rev()
+            .find_map(|(commit_seq, logical_command_seq)| {
+                (logical_command_seq.0 <= boundary.0).then_some(*commit_seq)
+            })
+            .unwrap_or(CommitSeq(0))
+    }
+
+    fn logical_position_is_observed(&self, boundary: LogicalCommandSeq) -> bool {
+        boundary.0 == 0
+            || self
+                .stream_positions
+                .values()
+                .any(|position| position.0 == boundary.0)
+    }
+
+    /// The ancestor chain from genesis to `branch`, each capped in both
+    /// transaction-commit and logical-command domains.
     ///
     /// Each ancestor's cap is the minimum of the requested `high` and every fork
     /// boundary below it. Taking the minimum is what makes a child's pre-fork
@@ -2366,9 +2494,25 @@ impl ReferenceDatabase {
         branch: BranchId,
         high: CommitSeq,
     ) -> Result<Vec<CappedAncestor>, SnapshotError> {
+        self.lineage_at_cut(
+            graph,
+            branch,
+            HistoryCut {
+                commit_high: high,
+                logical_command_high: self.logical_position_for_commit(high)?,
+            },
+        )
+    }
+
+    fn lineage_at_cut(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        cut: HistoryCut,
+    ) -> Result<Vec<CappedAncestor>, SnapshotError> {
         let mut chain: Vec<CappedAncestor> = Vec::new();
         let mut key = (graph, branch);
-        let mut cap = high;
+        let mut cap = cut;
         loop {
             chain.push((key, cap));
             match self.origins.get(&key) {
@@ -2391,8 +2535,12 @@ impl ReferenceDatabase {
                             parent: *parent_branch,
                         });
                     }
-                    if fork_boundary.0 < cap.0 {
-                        cap = *fork_boundary;
+                    if fork_boundary.0 < cap.logical_command_high.0 {
+                        cap.logical_command_high = *fork_boundary;
+                    }
+                    let boundary_commit = self.commit_frontier_at_logical(*fork_boundary);
+                    if boundary_commit.0 < cap.commit_high.0 {
+                        cap.commit_high = boundary_commit;
                     }
                     key = parent_key;
                 }
@@ -2418,8 +2566,9 @@ impl ReferenceDatabase {
     /// is B1's git-style branching and B6's branch-per-agent isolation, and it
     /// is what the laws in `tests/branch_fork.rs` pin.
     ///
-    /// Defined as [`fork_branch_at`](Self::fork_branch_at) at the parent's
-    /// frontier, so there is one fork mechanism rather than two that must agree.
+    /// Defined as [`fork_branch_at`](Self::fork_branch_at) at the current
+    /// logical-command frontier, so there is one fork mechanism rather than two
+    /// that must agree.
     /// The boundary stays DERIVED here — supplying it is what fgdb-vyb0 got
     /// wrong — and the historical form is a separate method precisely so that
     /// "fork here" cannot be spelled by accidentally passing a stale sequence.
@@ -2444,12 +2593,11 @@ impl ReferenceDatabase {
     ) -> Result<(), BranchError> {
         // Read before the shape checks so a missing parent is still reported as
         // NoSuchParent rather than as a boundary problem.
-        let frontier = self
-            .applied_through
+        self.applied_through
             .get(&(graph, parent))
             .copied()
             .ok_or(BranchError::NoSuchParent { graph, parent })?;
-        self.fork_branch_at(graph, parent, child, frontier)
+        self.fork_branch_at(graph, parent, child, self.logical_command_frontier)
     }
 
     /// Fork `child` from `parent` **as the parent stood at `boundary`** — a
@@ -2460,20 +2608,21 @@ impl ReferenceDatabase {
     /// history to select in, a caller-supplied boundary could only be stored,
     /// which made it an unauthenticated label rather than oracle evidence
     /// (fgdb-vyb0). It is landable now for exactly one reason — the boundary is
-    /// *used*: the child's state is the parent's fold at that sequence, and the
-    /// boundary is checked against the parent's frontier first. Delete the
-    /// parameter and the child inherits a different graph.
+    /// *used*: the child's state is the parent's fold at that logical position,
+    /// and the boundary must be an observed command position no later than the
+    /// stream frontier. Delete the parameter and the child may inherit a
+    /// different graph.
     ///
-    /// `CommitSeq(0)` is a legal boundary and produces an empty child: a branch
-    /// taken from before the parent's first commit. Refusing zero would be
-    /// arbitrary — the parent's state at zero is a state the parent genuinely
+    /// `LogicalCommandSeq(0)` is a legal boundary and produces an empty child: a
+    /// branch taken from before the parent's first command. Refusing zero would
+    /// be arbitrary — the parent's state at zero is a state the parent genuinely
     /// had.
     pub fn fork_branch_at(
         &mut self,
         graph: GraphId,
         parent: BranchId,
         child: BranchId,
-        boundary: CommitSeq,
+        boundary: LogicalCommandSeq,
     ) -> Result<(), BranchError> {
         if parent == child {
             return Err(BranchError::SelfFork { branch: child });
@@ -2486,16 +2635,22 @@ impl ReferenceDatabase {
                 branch: child,
             });
         }
-        let frontier = self
-            .applied_through
+        self.applied_through
             .get(&(graph, parent))
             .copied()
             .ok_or(BranchError::NoSuchParent { graph, parent })?;
-        if boundary.0 > frontier.0 {
-            return Err(BranchError::BoundaryBeyondParentFrontier {
+        if boundary.0 > self.logical_command_frontier.0 {
+            return Err(BranchError::BoundaryBeyondLogicalFrontier {
                 graph,
                 parent,
-                applied_through: frontier,
+                logical_frontier: self.logical_command_frontier,
+                requested: boundary,
+            });
+        }
+        if !self.logical_position_is_observed(boundary) {
+            return Err(BranchError::BoundaryNotObserved {
+                graph,
+                parent,
                 requested: boundary,
             });
         }
@@ -2505,22 +2660,22 @@ impl ReferenceDatabase {
         // that is the faithfulness law — so routing the current-state fork
         // through here costs nothing and removes the second implementation that
         // could drift from this one.
-        let snapshot = self.snapshot_at(graph, parent, boundary).map_err(|cause| {
-            BranchError::BoundaryNotMaterializable {
+        let commit_high = self.commit_frontier_at_logical(boundary);
+        let inherited = self
+            .materialize_at_cut(
+                graph,
+                parent,
+                HistoryCut {
+                    commit_high,
+                    logical_command_high: boundary,
+                },
+            )
+            .map_err(|cause| BranchError::BoundaryNotMaterializable {
                 graph,
                 parent,
                 boundary,
                 cause: Box::new(cause),
-            }
-        })?;
-        let inherited =
-            self.read(&snapshot)
-                .map_err(|cause| BranchError::BoundaryNotMaterializable {
-                    graph,
-                    parent,
-                    boundary,
-                    cause: Box::new(cause),
-                })?;
+            })?;
 
         // The child's state is materialized; its HISTORY is not copied. The child
         // owns an empty record vector and reaches everything before the boundary
@@ -2528,7 +2683,7 @@ impl ReferenceDatabase {
         // dimension that time-travel reads — the mechanism plan:451 describes,
         // even though the state materialization beside it is not.
         self.coordinates.insert((graph, child), inherited);
-        self.applied_through.insert((graph, child), boundary);
+        self.applied_through.insert((graph, child), commit_high);
         self.origins.insert(
             (graph, child),
             BranchOrigin::Fork {
@@ -2609,10 +2764,15 @@ impl ReferenceDatabase {
     /// entry 1 and not at entry 3 leaves the database exactly as it was. A
     /// partially-applied commit would put the database in a state no commit
     /// stream describes, which is the one outcome an oracle must never produce.
+    ///
+    /// `commit_seq` is gap-free and exact-next. `logical_command_seq` is the
+    /// independent semantic-command position and need only advance, because
+    /// control commands may occupy positions between two transaction commits.
     pub fn apply_template(
         &mut self,
         template: &LogicalDeltaTemplate,
         commit_seq: CommitSeq,
+        logical_command_seq: LogicalCommandSeq,
     ) -> Result<(), ApplyError> {
         if template.coordinate_entries().is_empty() {
             return Err(ApplyError::EmptyTemplate);
@@ -2624,9 +2784,19 @@ impl ReferenceDatabase {
                 offered: commit_seq,
             });
         }
+        if logical_command_seq.0 <= self.logical_command_frontier.0 {
+            return Err(ApplyError::LogicalCommandSequenceNotAdvancing {
+                previous: self.logical_command_frontier,
+                offered: logical_command_seq,
+            });
+        }
         self.preflight_template_schema(template)?;
         let mut candidate = self.clone();
         candidate.replay_frontier = commit_seq;
+        candidate.logical_command_frontier = logical_command_seq;
+        candidate
+            .stream_positions
+            .insert(commit_seq, logical_command_seq);
         // Folded over the PREVIOUS prefix and this template's canonical bytes, so
         // the value at each sequence is a function of the whole stream up to it —
         // two databases agree here exactly when their histories agree.
@@ -2639,6 +2809,7 @@ impl ReferenceDatabase {
                 })?;
         hasher.update(&previous);
         hasher.update(&commit_seq.0.to_le_bytes());
+        hasher.update(&logical_command_seq.0.to_le_bytes());
         let canonical = template
             .canonical_bytes()
             .map_err(ApplyError::TemplateNotCanonical)?;
@@ -2685,7 +2856,8 @@ impl ReferenceDatabase {
                 .entry(key)
                 .or_default()
                 .push(CommitRecord {
-                    seq: commit_seq,
+                    commit_seq,
+                    logical_command_seq,
                     entry: entry.clone(),
                 });
         }
@@ -2698,7 +2870,7 @@ impl ReferenceDatabase {
 mod provenance_internal_tests {
     use super::{ApplyError, ReferenceDatabase, SnapshotError};
     use fgdb_delta_types::{CoordinateEntry, LogicalDeltaTemplate, RelationId, SchemaEpoch};
-    use fgdb_types::{BranchId, CommitSeq, GraphId, ObjectId};
+    use fgdb_types::{BranchId, CommitSeq, GraphId, LogicalCommandSeq, ObjectId};
 
     fn rowless_template() -> LogicalDeltaTemplate {
         LogicalDeltaTemplate::build(
@@ -2725,7 +2897,7 @@ mod provenance_internal_tests {
         let settled = db.clone();
 
         assert_eq!(
-            db.apply_template(&rowless_template(), CommitSeq(2)),
+            db.apply_template(&rowless_template(), CommitSeq(2), LogicalCommandSeq(2)),
             Err(ApplyError::PrefixDigestMissing { seq: CommitSeq(1) })
         );
         assert_eq!(db, settled);
@@ -2734,13 +2906,28 @@ mod provenance_internal_tests {
     #[test]
     fn a_snapshot_cannot_mint_an_unknown_history_basis() {
         let mut db = ReferenceDatabase::new();
-        db.apply_template(&rowless_template(), CommitSeq(1))
+        db.apply_template(&rowless_template(), CommitSeq(1), LogicalCommandSeq(1))
             .expect("initial template applies");
         db.prefix_digests.remove(&CommitSeq(1));
 
         assert_eq!(
             db.snapshot(GraphId(1), BranchId(1)),
             Err(SnapshotError::PrefixDigestMissing { seq: CommitSeq(1) })
+        );
+    }
+
+    #[test]
+    fn a_snapshot_cannot_mint_without_its_logical_command_position() {
+        let mut db = ReferenceDatabase::new();
+        db.apply_template(&rowless_template(), CommitSeq(1), LogicalCommandSeq(10))
+            .expect("initial template applies");
+        db.stream_positions.remove(&CommitSeq(1));
+
+        assert_eq!(
+            db.snapshot(GraphId(1), BranchId(1)),
+            Err(SnapshotError::LogicalCommandPositionMissing {
+                commit_seq: CommitSeq(1),
+            })
         );
     }
 }

@@ -16,7 +16,9 @@ use fgdb_delta_types::{
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
 use fgdb_reference::{ApplyError, ReferenceDatabase, ReferenceGraph};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+};
 
 fn oid(seed: u8) -> ObjectId {
     ObjectId([seed; 32])
@@ -722,7 +724,8 @@ fn a_multi_coordinate_template_lands_in_separate_graphs() {
     .expect("template builds");
 
     let mut db = ReferenceDatabase::new();
-    db.apply_template(&template, CommitSeq(1)).expect("applies");
+    db.apply_template(&template, CommitSeq(1), LogicalCommandSeq(1))
+        .expect("applies");
 
     assert_eq!(db.coordinate_count(), 2);
     assert_eq!(
@@ -760,6 +763,7 @@ fn a_template_that_fails_partway_applies_nothing() {
         )
         .expect("builds"),
         CommitSeq(1),
+        LogicalCommandSeq(1),
     )
     .expect("first commit applies");
     let settled = db.clone();
@@ -777,7 +781,7 @@ fn a_template_that_fails_partway_applies_nothing() {
     .expect("builds");
 
     assert!(matches!(
-        db.apply_template(&bad, CommitSeq(2)),
+        db.apply_template(&bad, CommitSeq(2), LogicalCommandSeq(2)),
         Err(ApplyError::DanglingEndpoint { .. })
     ));
     assert_eq!(
@@ -805,7 +809,7 @@ fn template_schema_binding_is_checked_before_apply() {
     let settled = db.clone();
 
     assert_eq!(
-        db.apply_template(&bad, CommitSeq(1)),
+        db.apply_template(&bad, CommitSeq(1), LogicalCommandSeq(1)),
         Err(ApplyError::SchemaBindingMismatch {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -870,7 +874,7 @@ fn template_schema_transition_must_exactly_name_its_schema_row() {
         let settled = db.clone();
 
         assert_eq!(
-            db.apply_template(&bad, CommitSeq(1)),
+            db.apply_template(&bad, CommitSeq(1), LogicalCommandSeq(1)),
             Err(ApplyError::SchemaTransitionMismatch {
                 graph: GraphId(1),
                 branch: BranchId(1),
@@ -906,7 +910,7 @@ fn matching_template_schema_transition_applies() {
     .expect("template builds");
     let mut db = ReferenceDatabase::new();
 
-    db.apply_template(&template, CommitSeq(1))
+    db.apply_template(&template, CommitSeq(1), LogicalCommandSeq(1))
         .expect("matching transition applies");
     assert_eq!(
         db.graph(GraphId(1), BranchId(1))
@@ -936,7 +940,7 @@ fn same_coordinate_relation_entries_share_one_commit_sequence() {
     .expect("distinct relations are distinct coordinate entries");
     let mut db = ReferenceDatabase::new();
 
-    db.apply_template(&template, CommitSeq(1))
+    db.apply_template(&template, CommitSeq(1), LogicalCommandSeq(1))
         .expect("one atomic commit may carry both relation entries");
     let graph = db
         .graph(GraphId(1), BranchId(1))
@@ -988,7 +992,7 @@ fn earlier_relation_transition_cannot_rewrite_a_later_entrys_validation_basis() 
     let settled = db.clone();
 
     assert_eq!(
-        db.apply_template(&bad, CommitSeq(1)),
+        db.apply_template(&bad, CommitSeq(1), LogicalCommandSeq(1)),
         Err(ApplyError::SchemaBindingMismatch {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -1015,7 +1019,7 @@ fn earlier_relation_transition_cannot_rewrite_a_later_entrys_validation_basis() 
         ],
     )
     .expect("template builds");
-    db.apply_template(&valid, CommitSeq(1))
+    db.apply_template(&valid, CommitSeq(1), LogicalCommandSeq(1))
         .expect("both entries share the pre-template binding");
     let graph = db
         .graph(GraphId(1), BranchId(1))
@@ -1063,7 +1067,7 @@ fn schema_rows_cannot_chain_across_relation_entries() {
     let settled = db.clone();
 
     assert_eq!(
-        db.apply_template(&chained, CommitSeq(1)),
+        db.apply_template(&chained, CommitSeq(1), LogicalCommandSeq(1)),
         Err(ApplyError::SchemaEpochMismatch {
             declared: SchemaEpoch(1),
             actual: SchemaEpoch(0),

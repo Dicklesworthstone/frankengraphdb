@@ -19,7 +19,9 @@ use fgdb_delta_types::{
     SchemaEpoch,
 };
 use fgdb_reference::{BranchError, BranchOrigin, ReferenceDatabase};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+};
 
 const GRAPH: GraphId = GraphId(1);
 const MAIN: BranchId = BranchId(1);
@@ -73,7 +75,7 @@ fn apply_at(db: &mut ReferenceDatabase, branch: BranchId, seq: u64, rows: Vec<De
         }],
     )
     .expect("template builds");
-    db.apply_template(&template, CommitSeq(seq))
+    db.apply_template(&template, CommitSeq(seq), LogicalCommandSeq(seq * 10))
         .expect("applies");
 }
 
@@ -126,7 +128,7 @@ fn a_fork_records_its_parent() {
         db.branch_origin(GRAPH, FEATURE),
         Some(BranchOrigin::Fork {
             parent_branch: MAIN,
-            fork_boundary: CommitSeq(1),
+            fork_boundary: LogicalCommandSeq(10),
         })
     );
     assert_eq!(
@@ -292,7 +294,8 @@ fn before_images_are_checked_per_branch() {
     )
     .expect("builds");
     assert!(
-        db.apply_template(&template, CommitSeq(3)).is_err(),
+        db.apply_template(&template, CommitSeq(3), LogicalCommandSeq(30))
+            .is_err(),
         "a row whose basis is another branch's state must not apply here"
     );
     assert_eq!(
@@ -333,7 +336,11 @@ fn a_sequence_that_does_not_advance_is_refused() {
             }],
         )
         .expect("builds");
-        let result = db.apply_template(&template, CommitSeq(offered));
+        let result = db.apply_template(
+            &template,
+            CommitSeq(offered),
+            LogicalCommandSeq(offered * 10),
+        );
         assert_eq!(
             result,
             Err(fgdb_reference::ApplyError::SequenceNotNext {
@@ -384,7 +391,8 @@ fn a_child_must_advance_past_its_inherited_position() {
     )
     .expect("builds");
     assert!(
-        db.apply_template(&template, CommitSeq(1)).is_err(),
+        db.apply_template(&template, CommitSeq(1), LogicalCommandSeq(10))
+            .is_err(),
         "the child may not re-apply the sequence it inherited"
     );
 
@@ -478,7 +486,7 @@ fn forks_chain_and_all_levels_stay_isolated() {
             parent_branch: FEATURE,
             // feature applied its post-fork write at 2, so that is where
             // release begins — derived from the chain, not chosen.
-            fork_boundary: CommitSeq(2),
+            fork_boundary: LogicalCommandSeq(20),
         })
     );
 
@@ -525,7 +533,7 @@ fn layered() -> ReferenceDatabase {
 #[test]
 fn a_historical_fork_inherits_the_parent_at_the_boundary() {
     let mut db = layered();
-    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(2))
+    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(20))
         .expect("forks at 2");
 
     let child = db.graph(GRAPH, HISTORICAL).expect("feature exists");
@@ -541,15 +549,50 @@ fn a_historical_fork_inherits_the_parent_at_the_boundary() {
     );
 }
 
+/// The fork boundary is a LOGICAL command position, not the parent's commit
+/// sequence. Position 20 belongs to a commit on another branch, between main's
+/// commits 1 and 3. Main's fold there therefore contains only commit 1 while
+/// the child's transaction-visible high is the global commit prefix 2.
+///
+/// Replacing the boundary with `CommitSeq` makes this test impossible to state:
+/// `20` is far beyond the commit frontier and `2` names the wrong domain.
+#[test]
+fn a_logical_boundary_between_parent_commits_selects_the_parent_fold() {
+    const OTHER: BranchId = BranchId(77);
+    let mut db = ReferenceDatabase::new();
+    apply_at(&mut db, MAIN, 1, vec![vertex(1, "ada"), vertex(2, "grace")]);
+    apply_at(&mut db, OTHER, 2, vec![vertex(90, "other")]);
+    apply_at(&mut db, MAIN, 3, vec![vertex(3, "hopper")]);
+
+    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(20))
+        .expect("the observed logical boundary forks");
+
+    let child = db.graph(GRAPH, HISTORICAL).expect("child exists");
+    assert_eq!(child.vertex_count(), 2);
+    assert!(child.vertex(VId(3)).is_none());
+    assert_eq!(
+        db.applied_through(GRAPH, HISTORICAL),
+        Some(CommitSeq(2)),
+        "the fork inherits the global transaction prefix through logical position 20"
+    );
+    assert_eq!(
+        db.branch_origin(GRAPH, HISTORICAL),
+        Some(BranchOrigin::Fork {
+            parent_branch: MAIN,
+            fork_boundary: LogicalCommandSeq(20),
+        })
+    );
+}
+
 /// Two forks from the same parent at different boundaries are different
 /// branches. The sharpest form of "the parameter is used": one call site, one
 /// parent, one moment in time, two answers.
 #[test]
 fn two_boundaries_give_two_different_children() {
     let mut db = layered();
-    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(1))
+    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(10))
         .expect("forks at 1");
-    db.fork_branch_at(GRAPH, MAIN, SECOND_HISTORICAL, CommitSeq(3))
+    db.fork_branch_at(GRAPH, MAIN, SECOND_HISTORICAL, LogicalCommandSeq(30))
         .expect("forks at 3");
 
     assert_eq!(db.graph(GRAPH, HISTORICAL).expect("f").vertex_count(), 2);
@@ -567,7 +610,7 @@ fn two_boundaries_give_two_different_children() {
 #[test]
 fn a_fork_at_zero_is_an_empty_child() {
     let mut db = layered();
-    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(0))
+    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(0))
         .expect("forks at 0");
 
     let child = db.graph(GRAPH, HISTORICAL).expect("feature exists");
@@ -576,19 +619,19 @@ fn a_fork_at_zero_is_an_empty_child() {
     assert_eq!(db.applied_through(GRAPH, HISTORICAL), Some(CommitSeq(0)));
 }
 
-/// A boundary above the parent's frontier is REFUSED — a fork from the parent's
-/// future. Clamping to the frontier would make the fork silently mean something
-/// other than what was asked, and nothing afterwards would show the difference.
+/// A boundary above the logical-command frontier is REFUSED — a fork from the
+/// database's future. Clamping would make the fork silently mean something other
+/// than what was asked, and nothing afterwards would show the difference.
 #[test]
-fn a_fork_above_the_parents_frontier_is_refused() {
+fn a_fork_above_the_logical_frontier_is_refused() {
     let mut db = layered();
     assert_eq!(
-        db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(4)),
-        Err(BranchError::BoundaryBeyondParentFrontier {
+        db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(40)),
+        Err(BranchError::BoundaryBeyondLogicalFrontier {
             graph: GRAPH,
             parent: MAIN,
-            applied_through: CommitSeq(3),
-            requested: CommitSeq(4),
+            logical_frontier: LogicalCommandSeq(30),
+            requested: LogicalCommandSeq(40),
         })
     );
     assert_eq!(
@@ -597,10 +640,27 @@ fn a_fork_above_the_parents_frontier_is_refused() {
         "a refused fork must not have created the branch"
     );
     assert!(
-        db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(3))
+        db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(30))
             .is_ok(),
         "the frontier itself is a legal boundary"
     );
+}
+
+/// A number below the frontier is not by itself evidence that a logical command
+/// existed there. The full engine verifies a boundary reservation; the reference
+/// stream can at least refuse positions absent from every committed marker.
+#[test]
+fn an_unobserved_logical_boundary_is_refused() {
+    let mut db = layered();
+    assert_eq!(
+        db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(15)),
+        Err(BranchError::BoundaryNotObserved {
+            graph: GRAPH,
+            parent: MAIN,
+            requested: LogicalCommandSeq(15),
+        })
+    );
+    assert_eq!(db.branch_origin(GRAPH, HISTORICAL), None);
 }
 
 /// The recorded origin carries the boundary that was used, and the child's
@@ -609,13 +669,13 @@ fn a_fork_above_the_parents_frontier_is_refused() {
 #[test]
 fn a_historical_fork_records_and_advances_from_its_boundary() {
     let mut db = layered();
-    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(2))
+    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(20))
         .expect("forks at 2");
     assert_eq!(
         db.branch_origin(GRAPH, HISTORICAL),
         Some(BranchOrigin::Fork {
             parent_branch: MAIN,
-            fork_boundary: CommitSeq(2),
+            fork_boundary: LogicalCommandSeq(20),
         })
     );
     assert_eq!(db.applied_through(GRAPH, HISTORICAL), Some(CommitSeq(2)));
@@ -641,7 +701,7 @@ fn a_historical_fork_records_and_advances_from_its_boundary() {
 #[test]
 fn a_historical_child_never_sees_the_parent_past_its_boundary() {
     let mut db = layered();
-    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(1))
+    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(10))
         .expect("forks at 1");
     apply_at(&mut db, HISTORICAL, 4, vec![vertex(9, "wilkes")]);
 
@@ -665,20 +725,25 @@ fn a_historical_child_never_sees_the_parent_past_its_boundary() {
 fn shape_refusals_outrank_the_boundary() {
     let mut db = layered();
     assert_eq!(
-        db.fork_branch_at(GRAPH, MAIN, MAIN, CommitSeq(99)),
+        db.fork_branch_at(GRAPH, MAIN, MAIN, LogicalCommandSeq(990)),
         Err(BranchError::SelfFork { branch: MAIN })
     );
-    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(1))
+    db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(10))
         .expect("forks");
     assert_eq!(
-        db.fork_branch_at(GRAPH, MAIN, HISTORICAL, CommitSeq(99)),
+        db.fork_branch_at(GRAPH, MAIN, HISTORICAL, LogicalCommandSeq(990)),
         Err(BranchError::BranchExists {
             graph: GRAPH,
             branch: HISTORICAL,
         })
     );
     assert_eq!(
-        db.fork_branch_at(GRAPH, ABSENT_PARENT, SECOND_HISTORICAL, CommitSeq(1)),
+        db.fork_branch_at(
+            GRAPH,
+            ABSENT_PARENT,
+            SECOND_HISTORICAL,
+            LogicalCommandSeq(10),
+        ),
         Err(BranchError::NoSuchParent {
             graph: GRAPH,
             parent: ABSENT_PARENT,

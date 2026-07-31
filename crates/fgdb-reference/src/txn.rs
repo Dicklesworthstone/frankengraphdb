@@ -44,7 +44,7 @@ use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, PropertyKeyId,
     RelationId, SchemaEpoch,
 };
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, LogicalCommandSeq, ObjectId, VId};
 use std::collections::BTreeSet;
 
 /// A transaction reading at a fixed sequence, writing into a private workspace.
@@ -672,7 +672,8 @@ impl Transaction {
         self.statement_failures
     }
 
-    /// Try to make this transaction durable at `commit_seq`.
+    /// Try to make this transaction durable at `commit_seq` and its independent
+    /// semantic `logical_command_seq`.
     ///
     /// ABORT IS DECIDED BEFORE CONFLICT, and that order is observable: a
     /// transaction that aborted never had a claim to make, so reporting it as a
@@ -693,6 +694,7 @@ impl Transaction {
         relation: RelationId,
         intent_semantics: ObjectId,
         commit_seq: CommitSeq,
+        logical_command_seq: LogicalCommandSeq,
     ) -> Result<TxnOutcome, TxnError> {
         // THE WRITE-SIDE HALF of the provenance hole: `begin_at` validates against
         // the database it began on, and this used to accept an arbitrary `&mut
@@ -747,7 +749,7 @@ impl Transaction {
             }],
         )
         .map_err(TxnError::Canonical)?;
-        db.apply_template(&template, commit_seq)
+        db.apply_template(&template, commit_seq, logical_command_seq)
             .map_err(|error| TxnError::Apply(Box::new(error)))?;
 
         Ok(TxnOutcome::WriteCommitted {

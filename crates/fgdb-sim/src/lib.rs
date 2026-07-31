@@ -297,7 +297,11 @@ pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed
         let template = LogicalDeltaTemplate::decode_canonical(&bytes)
             .map_err(|error| ReplayError::Decode { commit_seq, error })?;
         database
-            .apply_template(&template, fgdb_types::CommitSeq(commit_seq))
+            .apply_template(
+                &template,
+                fgdb_types::CommitSeq(commit_seq),
+                fgdb_types::LogicalCommandSeq(entry.marker.logical_command_seq),
+            )
             .map_err(|error| ReplayError::Apply { commit_seq, error })?;
 
         // The batch enters the index in the SAME step that applied it — the
