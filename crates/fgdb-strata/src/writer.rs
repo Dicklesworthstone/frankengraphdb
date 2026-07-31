@@ -25,7 +25,7 @@
 //! in slice 4 rather than declared, and this is where it is honoured: the writer
 //! seals early rather than producing a block the encoder would refuse.
 
-use crate::root::{BlockRef, PartitionRoot, span_of};
+use crate::root::{BlockRef, PartitionRoot, RootError, span_of, validate_root};
 use crate::{AdjacencyEntry, BlockError, block_id, encode_block};
 use fgdb_delta_types::{DeltaRow, RelationId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -52,7 +52,7 @@ impl SealedBlock {
     }
 }
 
-/// Why the writer could not fold a row or seal a block.
+/// Why the writer could not fold a row, seal a block, or publish a root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriteError {
     /// A `DeleteEdge` or cascade named an edge this writer never saw created.
@@ -73,6 +73,8 @@ pub enum WriteError {
     },
     /// Sealing produced bytes the block encoder refused.
     Block(BlockError),
+    /// The finished root violated a publication or structural law.
+    Root(RootError),
 }
 
 impl core::fmt::Display for WriteError {
@@ -86,6 +88,7 @@ impl core::fmt::Display for WriteError {
                 "rows must arrive in commit order; {offered:?} follows {previous:?}"
             ),
             Self::Block(error) => write!(f, "sealing: {error}"),
+            Self::Root(error) => write!(f, "publishing: {error}"),
         }
     }
 }
@@ -285,6 +288,7 @@ impl BlockWriter {
             published_at,
             blocks: self.sealed.iter().map(SealedBlock::reference).collect(),
         };
+        validate_root(&root).map_err(WriteError::Root)?;
         Ok((root, self.sealed))
     }
 }

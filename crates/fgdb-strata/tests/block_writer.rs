@@ -17,6 +17,7 @@
 
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_strata::decode_block;
+use fgdb_strata::root::RootError;
 use fgdb_strata::writer::{BlockWriter, WriteError};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
@@ -334,6 +335,33 @@ fn rows_must_arrive_in_commit_order() {
     );
     // The same sequence is fine: one commit carries many rows.
     assert!(w.apply(keys(), CommitSeq(5), &create(11, 1, 3)).is_ok());
+}
+
+/// `publish` is the producer boundary, so it must refuse a root whose declared
+/// publication is below a block it names instead of returning an invalid value for
+/// some later encoder to discover.
+#[test]
+fn publication_before_the_last_block_is_refused_by_the_writer() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(5), &create(10, 1, 2))
+        .expect("creates");
+    assert_eq!(
+        w.publish(keys(), CommitSeq(4)),
+        Err(WriteError::Root(RootError::BlockAfterPublication {
+            at: 0,
+            last_seq: CommitSeq(5),
+            published_at: CommitSeq(4),
+        }))
+    );
+
+    let mut boundary = writer();
+    boundary
+        .apply(keys(), CommitSeq(5), &create(10, 1, 2))
+        .expect("creates");
+    assert!(
+        boundary.publish(keys(), CommitSeq(5)).is_ok(),
+        "publication at the exact upper frontier is legal"
+    );
 }
 
 /// Sealing an empty run is a no-op rather than an empty block — an empty block

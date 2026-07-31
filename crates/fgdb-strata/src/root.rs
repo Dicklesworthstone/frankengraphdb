@@ -225,7 +225,16 @@ impl core::fmt::Display for RootError {
 
 impl core::error::Error for RootError {}
 
-fn validate(root: &PartitionRoot) -> Result<(), RootError> {
+/// Validate a root's structural laws without allocating its canonical encoding.
+///
+/// Producers call this before an invalid root can escape; encoders and decoders
+/// call the same function so publication and persistence cannot drift into two
+/// definitions of lawfulness.
+pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
+    let declared = u32::try_from(root.blocks.len()).unwrap_or(u32::MAX);
+    if declared > MAX_ROOT_BLOCKS {
+        return Err(RootError::ImplausibleBlockCount { declared });
+    }
     for (index, block) in root.blocks.iter().enumerate() {
         if block.first_seq.0 == 0 || block.last_seq.0 == 0 {
             return Err(RootError::SequenceZero { at: index });
@@ -265,12 +274,7 @@ fn validate(root: &PartitionRoot) -> Result<(), RootError> {
 
 /// Encode a root canonically, refusing anything that is not.
 pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
-    if root.blocks.len() as u64 > u64::from(MAX_ROOT_BLOCKS) {
-        return Err(RootError::ImplausibleBlockCount {
-            declared: MAX_ROOT_BLOCKS,
-        });
-    }
-    validate(root)?;
+    validate_root(root)?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + root.blocks.len() * REF_LEN);
     out.extend_from_slice(&ROOT_MAGIC);
@@ -347,7 +351,7 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
         published_at: CommitSeq(u64_at(OFF_PUBLISHED)),
         blocks,
     };
-    validate(&root)?;
+    validate_root(&root)?;
     Ok(root)
 }
 
