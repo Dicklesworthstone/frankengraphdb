@@ -104,9 +104,13 @@ impl core::error::Error for PackError {}
 
 /// Where one member's canonical plaintext lives inside the unpacked bytes.
 ///
-/// This is the authenticated subobject locator the object-location index
-/// stores: a member is addressed by `(pack encoding, offset, length)` while
-/// still being *named* by its logical `ObjectId`.
+/// This is the subobject locator the object-location index stores: a member
+/// is addressed by `(pack encoding, offset, length)` while still being
+/// *named* by its logical `ObjectId`. The locator itself is pack-side
+/// metadata and is NOT under the pack's AEAD — what makes an edited locator
+/// fail closed is extract-time identity re-derivation (the bytes it points
+/// at must recompute the requested `ObjectId`), so tampering degrades
+/// availability, never returns wrong bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubobjectLocator {
     pub object_id: ObjectId,
@@ -179,10 +183,12 @@ impl PackBuilder {
     /// Seal the pack: concatenate members' canonical plaintext in admission
     /// order, record their locators, and pay ONE AEAD for the whole group.
     ///
-    /// Framing is length-delimited by the locators themselves — offsets and
-    /// lengths are authenticated with the pack (they ride the same AEAD), so
-    /// the index cannot be edited to point a member's identity at another
-    /// member's bytes without the pack failing to open.
+    /// Framing is length-delimited by the locators. The locators themselves
+    /// are pack-side metadata OUTSIDE the AEAD — what the AEAD covers is the
+    /// packed plaintext. An edited locator cannot hand back the wrong
+    /// object: `extract` recomputes the member's `ObjectId` from the bytes
+    /// the locator names, so tampering fails closed as an availability
+    /// loss, never as wrong bytes.
     pub fn seal(
         self,
         k_oid: &[u8; 32],
@@ -248,7 +254,8 @@ impl PackedObjectGroup {
         self.domain
     }
 
-    /// The authenticated subobject locators, in pack order.
+    /// The member locators, in pack order. Pack-side metadata outside the
+    /// AEAD; extract-time identity re-derivation is their integrity guard.
     pub fn locators(&self) -> &[SubobjectLocator] {
         &self.locators
     }
