@@ -169,6 +169,40 @@ fn block_creation_waits_for_store_directory_sync() {
     });
 }
 
+/// A writer may die after its staging inode is complete. That inode is not a
+/// block until publication: the canonical path must remain absent, and the next
+/// publication permit owner must be able to reuse the staging slot and finish.
+#[test]
+fn a_staging_crash_never_exposes_partial_canonical_bytes() {
+    let dir = scratch_dir("staging-before-publication");
+    under_lab(43, move |cx| {
+        let bytes = sample();
+        let id = block_id(&K_OID, NAMESPACE, &bytes);
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+
+        let interrupted = store.put_with_crash(
+            cx,
+            &bytes,
+            Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
+        );
+        assert!(
+            interrupted.is_err(),
+            "staging completion is not canonical publication"
+        );
+        assert!(
+            !store.path(id).exists(),
+            "no partial or empty canonical path may be visible"
+        );
+
+        assert_eq!(
+            store.put(cx, &bytes).expect("retry publishes"),
+            id,
+            "the next permit owner reuses the noncanonical staging slot"
+        );
+        assert_eq!(store.get_bytes(id).expect("published bytes"), bytes);
+    });
+}
+
 /// Equal existing bytes are still namespace-uncertain after a reopen. The
 /// idempotent path must re-enter the durability barrier instead of returning
 /// merely because the bytes happen to be visible in the current kernel view.

@@ -27,6 +27,13 @@
 //! `fgdb-capsule-no-overwrite-pysi` names for capsules, avoided here for the same
 //! reason.
 //!
+//! **A PARTIAL FILE IS NEVER CANONICAL.** Publication is serialized by a
+//! process-death-released filesystem lease represented inside this module by a
+//! non-clone permit. The permit owner writes and syncs a staging inode first,
+//! then moves that complete inode to the content-addressed path and syncs the
+//! directory. An identical loser can therefore observe only absence or the
+//! winner's complete bytes — never the winner halfway through `write_all`.
+//!
 //! **WHAT IS DELIBERATELY ABSENT.** Blocks are stored as their canonical bytes,
 //! NOT sealed into capsules. `strata_blocks_are_durable_objects.rs` proves a block
 //! survives the whole §5.1 pipeline including erasure recovery, so that composition
@@ -45,6 +52,16 @@ use std::path::{Path, PathBuf};
 /// Directory holding a database's Strata blocks.
 pub const BLOCK_DIR: &str = "strata-blocks";
 
+/// One durable, empty inode whose process-scoped lock mints the non-clone block
+/// publication permit. It is not transaction authority: it serializes only the
+/// instant at which a complete immutable inode gains its canonical name.
+const PUBLICATION_LOCK_FILE: &str = ".block-publication.lock";
+
+/// The sole noncanonical inode name used while holding the publication permit.
+/// A crash may leave it incomplete; the next permit owner rewrites it before it
+/// can become canonical.
+const PUBLICATION_STAGING_FILE: &str = ".block-publication.staging";
+
 /// Creation-only crash instants that distinguish inode durability from
 /// namespace durability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,12 +72,37 @@ pub enum BlockStoreCrashPoint {
     /// The block inode is durable, but `strata-blocks` has not yet made the
     /// block's content-addressed name durable.
     AfterBlockFileSyncBeforeStoreDirectorySync,
+    /// The staging inode is complete and durable, but it has not yet acquired
+    /// the content-addressed canonical name.
+    AfterStagingFileSyncBeforePublication,
 }
 
 /// Make every directory entry currently visible in `directory` durable.
 fn sync_directory(cx: &CommitCx, directory: &Path) -> std::io::Result<()> {
     let directory = File::open(directory)?;
     cx.with_restriction(|| directory.sync_all())
+}
+
+/// Whether an existing noncanonical staging name is the inode's only link.
+/// Rewriting a multiply linked staging inode could silently rewrite a canonical
+/// block reached through another name, violating immutability. Platforms that
+/// cannot report the link count fail closed instead of guessing.
+fn staging_inode_is_exclusive(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink() == 1
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.number_of_links() == Some(1)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        false
+    }
 }
 
 /// Run the ordered durability work for a new or previously uncertain file
@@ -87,6 +129,18 @@ fn run_ordered_creation_barrier(
     sync_created_inode()?;
     after_inode_sync()?;
     sync_parent_directory()
+}
+
+/// Exclusive authority to publish one complete staging inode.
+///
+/// The file descriptor owns a process-death-released whole-inode lock. This
+/// type is deliberately neither public nor cloneable, so the code that moves a
+/// staging name to a canonical name cannot run without visibly acquiring the
+/// publication authority first. Dropping the descriptor releases the lock on
+/// every return path, including an injected crash error.
+#[derive(Debug)]
+struct BlockPublicationPermit {
+    _locked_file: File,
 }
 
 /// Why a block could not be stored or loaded.
@@ -150,6 +204,7 @@ impl From<std::io::Error> for StoreError {
 #[derive(Debug, Clone)]
 pub struct BlockStore {
     dir: PathBuf,
+    publication_lock_path: PathBuf,
     k_oid: [u8; 32],
     namespace: DatabaseSecurityNamespaceId,
 }
@@ -192,6 +247,39 @@ impl BlockStore {
             Err(error) => return Err(error.into()),
         }
 
+        let publication_lock_path = dir.join(PUBLICATION_LOCK_FILE);
+        let publication_lock = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&publication_lock_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::symlink_metadata(&publication_lock_path)?
+                    .file_type()
+                    .is_file()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "block publication lock path exists but is not a regular file",
+                    )
+                    .into());
+                }
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&publication_lock_path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        // The lock inode belongs to the store-directory creation closure. Sync
+        // it before the child directory, then the child before its name in the
+        // database parent. A successful open therefore never relies on a
+        // volatile lock-file dirent for writer exclusion after restart.
+        cx.with_restriction(|| publication_lock.sync_all())?;
+
         // Re-sync on every open. Besides closing a newly created directory,
         // this repairs the uncertainty left by an earlier process that failed
         // between the child-directory and database-directory barriers.
@@ -214,6 +302,7 @@ impl BlockStore {
 
         Ok(Self {
             dir,
+            publication_lock_path,
             k_oid,
             namespace,
         })
@@ -243,6 +332,24 @@ impl BlockStore {
         self.put_with_crash(cx, bytes, None)
     }
 
+    /// Acquire the sole block-publication authority through the capability
+    /// context. Opening a fresh descriptor per acquisition matters: whole-file
+    /// locks on duplicated descriptors may be re-entrant within one process,
+    /// whereas two independent opens contend just like two processes do.
+    fn acquire_publication_permit(
+        &self,
+        cx: &CommitCx,
+    ) -> Result<BlockPublicationPermit, StoreError> {
+        let locked_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.publication_lock_path)?;
+        cx.with_restriction(|| File::lock(&locked_file))?;
+        Ok(BlockPublicationPermit {
+            _locked_file: locked_file,
+        })
+    }
+
     /// Store bytes while optionally stopping between block-inode and block-name
     /// durability. The normal path delegates here so crash tests cannot drift
     /// from production ordering.
@@ -253,31 +360,108 @@ impl BlockStore {
         bytes: &[u8],
         crash_at: Option<BlockStoreCrashPoint>,
     ) -> Result<ObjectId, StoreError> {
+        self.put_with_steps(cx, bytes, crash_at, || {}, || {})
+    }
+
+    /// The exact production path with two deterministic observation points.
+    /// Unit tests use them to order a loser before the winner publishes without
+    /// sleeps; ordinary and crash-test callers both supply no-op hooks.
+    fn put_with_steps(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+        crash_at: Option<BlockStoreCrashPoint>,
+        before_lock: impl FnOnce(),
+        after_staging_sync: impl FnOnce(),
+    ) -> Result<ObjectId, StoreError> {
         let id = block_id(&self.k_oid, self.namespace, bytes);
         let path = self.path(id);
 
-        // create_new: two writers racing on one identity both succeed only if one
-        // of them loses the create and then finds its own complete bytes already
-        // there. Equal existing bytes are never rewritten, but they are synced:
-        // after a reopen, existence alone does not prove an earlier creation
-        // crossed its durability barriers.
-        let file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(bytes)?;
-                file
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+        before_lock();
+        let _permit = self.acquire_publication_permit(cx)?;
+
+        // The canonical path is inspected only while publication authority is
+        // held, so a conforming writer can see either no winner or one complete
+        // winner. Equal bytes are never rewritten, but they are re-synced after
+        // reopen because visibility alone is not a durability receipt.
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "canonical block path exists but is not a regular file",
+                    )
+                    .into());
+                }
                 let mut existing = Vec::new();
                 let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
                 file.read_to_end(&mut existing)?;
                 if existing != bytes {
                     return Err(StoreError::Collision { block_id: id });
                 }
-                file
+                sync_file_and_directory(cx, &file, &self.dir, || {
+                    if crash_at
+                        == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
+                    {
+                        return Err(std::io::Error::other(
+                            "crash: strata block inode durable before directory entry",
+                        ));
+                    }
+                    Ok(())
+                })?;
+                return Ok(id);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        // Only a permit owner may touch the one staging name. It is explicitly
+        // noncanonical, so an interrupted prior owner may leave partial bytes
+        // here and the next owner may safely rewrite them. The canonical name
+        // remains absent until this inode is complete and synced.
+        let staging_path = self.dir.join(PUBLICATION_STAGING_FILE);
+        let mut staging = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&staging_path)?;
+                if !metadata.file_type().is_file() || !staging_inode_is_exclusive(&metadata) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "block staging path is not an exclusive regular-file inode",
+                    )
+                    .into());
+                }
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&staging_path)?
             }
             Err(error) => return Err(error.into()),
         };
-        sync_file_and_directory(cx, &file, &self.dir, || {
+
+        staging.write_all(bytes)?;
+        cx.with_restriction(|| staging.sync_all())?;
+        after_staging_sync();
+        if crash_at == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication) {
+            return Err(StoreError::Io(std::io::Error::other(
+                "crash: complete staging inode before canonical publication",
+            )));
+        }
+
+        // Close before rename for platforms that refuse to move an open file.
+        // Publication is atomic for conforming writers because the non-clone
+        // permit spans the absence check, staging write, and move.
+        drop(staging);
+        std::fs::rename(&staging_path, &path)?;
+
+        let published = OpenOptions::new().read(true).write(true).open(&path)?;
+        sync_file_and_directory(cx, &published, &self.dir, || {
             if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
                 return Err(std::io::Error::other(
                     "crash: strata block inode durable before directory entry",
@@ -391,8 +575,41 @@ impl BlockStore {
 
 #[cfg(test)]
 mod durability_tests {
-    use super::run_ordered_creation_barrier;
+    use super::{BlockStore, PUBLICATION_STAGING_FILE, StoreError, run_ordered_creation_barrier};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::context::{CommitCx, PurposeContexts};
+    use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
     use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex, mpsc::sync_channel};
+    use std::thread::JoinHandle;
+
+    const K_OID: [u8; 32] = [0xa5; 32];
+    const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x17; 32]);
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fgdb-block-publication-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn under_lab<T: Send + 'static>(
+        seed: u64,
+        test: impl FnOnce(&CommitCx) -> T + Send + 'static,
+    ) -> T {
+        let (output, report) = run_async_under_lab(seed, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            test(&contexts.commit())
+        });
+        assert!(
+            report.invariant_violations.is_empty(),
+            "lab invariant violation: {report:?}"
+        );
+        output
+    }
 
     #[test]
     fn creation_barrier_runs_inode_hook_then_parent() {
@@ -434,5 +651,92 @@ mod durability_tests {
         );
         assert!(outcome.is_err());
         assert_eq!(*order.borrow(), ["inode", "hook"]);
+    }
+
+    /// The interleaving is channel-driven, not timing-driven: the winner holds
+    /// the non-clone permit with a fully synced staging inode, then the loser
+    /// announces that it is immediately about to acquire the same permit. Only
+    /// after that handshake may the winner publish. The loser therefore cannot
+    /// read an empty or partial canonical file and both calls must return the
+    /// same identity.
+    #[test]
+    fn an_identical_loser_observes_only_the_complete_winner() {
+        type PutHandle = JoinHandle<Result<ObjectId, StoreError>>;
+
+        let dir = scratch_dir("identical-loser");
+        let bytes = b"one complete immutable block".to_vec();
+        let loser_bytes = bytes.clone();
+        let loser_dir = dir.clone();
+        let (loser_attempting_tx, loser_attempting_rx) = sync_channel(0);
+        let loser_handle: Arc<Mutex<Option<PutHandle>>> = Arc::new(Mutex::new(None));
+        let hook_handle = Arc::clone(&loser_handle);
+
+        let winner = under_lab(45, move |cx| {
+            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("winner opens");
+            store.put_with_steps(
+                cx,
+                &bytes,
+                None,
+                || {},
+                move || {
+                    let handle = std::thread::spawn(move || {
+                        under_lab(46, move |loser_cx| {
+                            let store = BlockStore::open(loser_cx, &loser_dir, K_OID, NAMESPACE)
+                                .expect("loser opens");
+                            store.put_with_steps(
+                                loser_cx,
+                                &loser_bytes,
+                                None,
+                                move || loser_attempting_tx.send(()).expect("attempt handshake"),
+                                || {},
+                            )
+                        })
+                    });
+                    *hook_handle.lock().expect("handle slot") = Some(handle);
+                    loser_attempting_rx
+                        .recv()
+                        .expect("loser reached the permit boundary");
+                },
+            )
+        })
+        .expect("winner publishes");
+
+        let loser = loser_handle
+            .lock()
+            .expect("handle slot")
+            .take()
+            .expect("loser was spawned")
+            .join()
+            .expect("loser thread")
+            .expect("identical loser succeeds");
+        assert_eq!(loser, winner);
+    }
+
+    /// A staging pathname is noncanonical, but its inode still might have been
+    /// hard-linked to a canonical block by a corrupt or nonconforming actor.
+    /// Reusing that inode must fail closed before truncation.
+    #[test]
+    fn a_multiply_linked_staging_inode_cannot_rewrite_a_canonical_block() {
+        let dir = scratch_dir("multiply-linked-staging");
+        under_lab(47, move |cx| {
+            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            let original = b"already canonical";
+            let original_id = store.put(cx, original).expect("initial publication");
+            std::fs::hard_link(
+                store.path(original_id),
+                store.dir.join(PUBLICATION_STAGING_FILE),
+            )
+            .expect("construct multiply linked staging control");
+
+            assert!(matches!(
+                store.put(cx, b"a different block"),
+                Err(StoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::InvalidData
+            ));
+            assert_eq!(
+                store.get_bytes(original_id).expect("original survives"),
+                original
+            );
+        });
     }
 }
