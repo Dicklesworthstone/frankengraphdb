@@ -1094,3 +1094,148 @@ fn topology_gap_rows_reference_consumed_capabilities_only() {
         let _typed: &AssetEvidenceGap = gap;
     }
 }
+
+// ---------------------------------------------------------------------------
+// fgdb-fa3k — the crates → registries compile-time coupling is exactly one edge
+// ---------------------------------------------------------------------------
+//
+// The catalog lane's scoping question ("may a registries-only increment skip
+// the workspace test?") rests on ONE premise, proven by hand in the bead and
+// made executable here: crates/** compiles registries/ content into itself at
+// exactly one site, fgdb-types/src/refs.rs's include of
+// logical_object_kinds.toml — so an increment touching any OTHER registry
+// file cannot break a crate build, and one touching THAT projection can. If
+// this guard ever goes red, the premise moved and any scoping rule derived
+// from it must be re-derived, not trusted.
+
+/// What an include site looks like to the guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IncludeSite {
+    /// A constant-string path the compiler and the guard both see exactly.
+    Literal(String),
+    /// A concat!/expression include: the compiler accepts it and no lexical
+    /// scan can bind its value, so the guard refuses it outright rather than
+    /// guess.
+    Unverifiable,
+}
+
+/// Scan one source text for `include_bytes!`/`include_str!` sites whose body
+/// mentions `registries/`. Deliberately lexical: the pattern set is the two
+/// macro spellings, which are the only compile-time file-include macros the
+/// toolchain accepts.
+fn registry_include_sites(source: &str) -> Vec<IncludeSite> {
+    fn classify(segment: &str) -> Option<IncludeSite> {
+        let after_open = segment.trim_start().strip_prefix('(')?;
+        let trimmed = after_open.trim_start();
+        if let Some(lit) = trimmed.strip_prefix('"') {
+            let end = lit.find('"')?;
+            let literal = &lit[..end];
+            return literal
+                .contains("registries/")
+                .then(|| IncludeSite::Literal(literal.to_string()));
+        }
+        // Not a bare literal. Only suspicious if the body mentions
+        // registries at all — otherwise it is an ordinary computed include
+        // and none of the guard's business.
+        let body_end = trimmed.find(')').unwrap_or(trimmed.len()).min(512);
+        trimmed[..body_end]
+            .contains("registries/")
+            .then_some(IncludeSite::Unverifiable)
+    }
+
+    let mut sites = Vec::new();
+    for needle in ["include_bytes!", "include_str!"] {
+        for segment in source.split(needle).skip(1) {
+            if let Some(site) = classify(segment) {
+                sites.push(site);
+            }
+        }
+    }
+    sites
+}
+
+#[test]
+fn the_extractor_sees_literals_and_refuses_the_unverifiable() {
+    // Direction one: a real citation is extracted — the exact refs.rs form.
+    let real =
+        r#"const R: &[u8] = include_bytes!("../../../registries/logical_object_kinds.toml");"#;
+    assert_eq!(
+        registry_include_sites(real),
+        vec![IncludeSite::Literal(
+            "../../../registries/logical_object_kinds.toml".to_string()
+        )]
+    );
+    // Direction two: a concat! include mentioning registries/ is REFUSED as
+    // unverifiable — never silently passed, never silently included.
+    let computed = r#"include_str!(concat!("../../", "registries/x.toml"));"#;
+    assert_eq!(
+        registry_include_sites(computed),
+        vec![IncludeSite::Unverifiable]
+    );
+    // Direction three: prose mentioning registries/ is not an include.
+    assert_eq!(
+        registry_include_sites("// read registries/laws.toml at runtime"),
+        Vec::new()
+    );
+    // Whitespace variants are still literals.
+    assert_eq!(
+        registry_include_sites(r#"include_bytes!(  "../registries/y.toml" )"#),
+        vec![IncludeSite::Literal("../registries/y.toml".to_string())]
+    );
+}
+
+#[test]
+fn crates_reach_registries_at_compile_time_through_exactly_one_edge() {
+    fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    let root = repo_root();
+    let mut sources = Vec::new();
+    walk(&root.join("crates"), &mut sources);
+    assert!(
+        sources.len() > 20,
+        "the sweep actually saw the crate universe ({} files)",
+        sources.len()
+    );
+
+    let mut literals: Vec<(String, String)> = Vec::new();
+    let mut unverifiable: Vec<String> = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path).expect("source reads");
+        let rel = path
+            .strip_prefix(&root)
+            .expect("under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        for site in registry_include_sites(&text) {
+            match site {
+                IncludeSite::Literal(target) => literals.push((rel.clone(), target)),
+                IncludeSite::Unverifiable => unverifiable.push(rel.clone()),
+            }
+        }
+    }
+
+    assert_eq!(
+        unverifiable,
+        Vec::<String>::new(),
+        "a concat!/expression include of registries/ cannot be statically \
+         bound; make it a literal or remove it"
+    );
+    assert_eq!(
+        literals,
+        vec![(
+            "crates/fgdb-types/src/refs.rs".to_string(),
+            "../../../registries/logical_object_kinds.toml".to_string()
+        )],
+        "the compile-time coupling moved: re-derive the catalog-lane \
+         scoping premise (fgdb-fa3k) before trusting any scoped test rule"
+    );
+}
