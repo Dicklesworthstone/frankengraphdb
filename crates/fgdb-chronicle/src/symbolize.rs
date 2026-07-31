@@ -28,6 +28,8 @@ pub enum SymbolizeError {
     InvalidParameters,
     /// The RFC 6330 encoder rejected these parameters.
     EncoderUnavailable,
+    /// Heap storage for source symbols or serialized records was refused.
+    AllocationFailed,
     /// Fewer independent symbols survived than the code needs. This is the
     /// honest "beyond the repair budget" outcome.
     InsufficientSymbols,
@@ -58,6 +60,9 @@ impl core::fmt::Display for SymbolizeError {
             Self::InvalidParameters => f.write_str("invalid symbolization parameters"),
             Self::EncoderUnavailable => {
                 f.write_str("the RaptorQ encoder rejected these parameters")
+            }
+            Self::AllocationFailed => {
+                f.write_str("the RaptorQ encoder could not reserve bounded working storage")
             }
             Self::InsufficientSymbols => {
                 f.write_str("too few symbols survived to decode: beyond the repair budget")
@@ -109,19 +114,58 @@ pub fn erasure_budget(repair_symbols: usize) -> usize {
     repair_symbols
 }
 
-/// Split the protected bytes into K equal source symbols, zero-padding the
-/// final one. `transfer_length` in the encoding descriptor is what tells the
-/// decoder how much of the last symbol is real, so the padding is recoverable
-/// information, not lost information.
-fn source_symbols(protected: &[u8], symbol_size: usize) -> Vec<Vec<u8>> {
-    protected
-        .chunks(symbol_size)
-        .map(|chunk| {
-            let mut symbol = vec![0u8; symbol_size];
-            symbol[..chunk.len()].copy_from_slice(chunk);
-            symbol
+const MAX_SOURCE_SYMBOLS_PER_BLOCK: usize = 56_403;
+
+/// Allocation authority for exactly one RFC-valid source block.
+///
+/// Keeping the constructor private makes the ordering law structural:
+/// source-symbol storage cannot be materialized until the zero/empty checks
+/// and the RFC systematic-table ceiling have all passed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ValidatedSourceBlock {
+    symbol_size: usize,
+    source_symbols: usize,
+}
+
+impl ValidatedSourceBlock {
+    fn try_new(protected_len: usize, symbol_size: u16) -> Result<Self, SymbolizeError> {
+        let symbol_size = usize::from(symbol_size);
+        if symbol_size == 0 || protected_len == 0 {
+            return Err(SymbolizeError::InvalidParameters);
+        }
+        let source_symbols = protected_len.div_ceil(symbol_size);
+        if source_symbols > MAX_SOURCE_SYMBOLS_PER_BLOCK {
+            return Err(SymbolizeError::InvalidParameters);
+        }
+        Ok(Self {
+            symbol_size,
+            source_symbols,
         })
-        .collect()
+    }
+
+    /// Split the protected bytes into K equal source symbols, zero-padding the
+    /// final one. `transfer_length` in the encoding descriptor is what tells
+    /// the decoder how much of the last symbol is real.
+    fn materialize(self, protected: &[u8]) -> Result<Vec<Vec<u8>>, SymbolizeError> {
+        debug_assert_eq!(
+            protected.len().div_ceil(self.symbol_size),
+            self.source_symbols
+        );
+        let mut source = Vec::new();
+        source
+            .try_reserve_exact(self.source_symbols)
+            .map_err(|_| SymbolizeError::AllocationFailed)?;
+        for chunk in protected.chunks(self.symbol_size) {
+            let mut symbol = Vec::new();
+            symbol
+                .try_reserve_exact(self.symbol_size)
+                .map_err(|_| SymbolizeError::AllocationFailed)?;
+            symbol.resize(self.symbol_size, 0);
+            symbol[..chunk.len()].copy_from_slice(chunk);
+            source.push(symbol);
+        }
+        Ok(source)
+    }
 }
 
 /// Encode one protected object into authenticated symbol records: every source
@@ -139,25 +183,30 @@ pub fn encode_object(
     repair_symbols: u32,
     dek: &[u8; 32],
 ) -> Result<Vec<Vec<u8>>, SymbolizeError> {
-    let symbol_size = usize::from(encoding.descriptor().symbol_size);
-    if symbol_size == 0 || protected.is_empty() {
-        return Err(SymbolizeError::InvalidParameters);
-    }
-
-    let source = source_symbols(protected, symbol_size);
     // The RFC 6330 systematic-index table bound (K = 4..=56403), enforced by
     // asupersync's parameter builder with a PANIC past it. The bound lives
     // here instead: a large object is a typed refusal, never a process
     // panic, and the check precedes every allocation on this path.
-    if source.len() > 56_403 {
-        return Err(SymbolizeError::InvalidParameters);
-    }
-    let k = u32::try_from(source.len()).map_err(|_| SymbolizeError::InvalidParameters)?;
+    let source_shape =
+        ValidatedSourceBlock::try_new(protected.len(), encoding.descriptor().symbol_size)?;
+    let source = source_shape.materialize(protected)?;
+    let k = u32::try_from(source_shape.source_symbols)
+        .map_err(|_| SymbolizeError::InvalidParameters)?;
+    let symbol_size = source_shape.symbol_size;
     let encoder = SystematicEncoder::new(&source, symbol_size, code_seed(encoding))
         .ok_or(SymbolizeError::EncoderUnavailable)?;
 
     let k_symbol = encoding.symbol_auth_key(dek);
-    let mut records = Vec::with_capacity(source.len() + repair_symbols as usize);
+    let record_count = source
+        .len()
+        .checked_add(
+            usize::try_from(repair_symbols).map_err(|_| SymbolizeError::InvalidParameters)?,
+        )
+        .ok_or(SymbolizeError::InvalidParameters)?;
+    let mut records = Vec::new();
+    records
+        .try_reserve_exact(record_count)
+        .map_err(|_| SymbolizeError::AllocationFailed)?;
 
     // Source symbols carry ESI 0..K; repair symbols continue from K, which is
     // the RFC's own numbering, so the decoder needs no side channel.
@@ -179,6 +228,22 @@ pub fn encode_object(
         records.push(record.serialize(&k_symbol));
     }
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SOURCE_SYMBOLS_PER_BLOCK, SymbolizeError, ValidatedSourceBlock};
+
+    #[test]
+    fn source_block_ceiling_is_validated_before_materialization_authority_exists() {
+        let maximum = ValidatedSourceBlock::try_new(MAX_SOURCE_SYMBOLS_PER_BLOCK, 1)
+            .expect("the RFC ceiling is admissible");
+        assert_eq!(maximum.source_symbols, MAX_SOURCE_SYMBOLS_PER_BLOCK);
+        assert_eq!(
+            ValidatedSourceBlock::try_new(MAX_SOURCE_SYMBOLS_PER_BLOCK + 1, 1),
+            Err(SymbolizeError::InvalidParameters)
+        );
+    }
 }
 
 /// What a caller is asking recovery to produce: the exact object, named by the

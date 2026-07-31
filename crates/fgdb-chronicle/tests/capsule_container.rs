@@ -280,10 +280,10 @@ fn a_self_consistent_oversized_transfer_length_fails_without_panicking() {
 /// THE ENCODER'S OWN BOUNDARY. The decoder side above refuses an oversized
 /// source block as data (fgdb-raptorq-decoder-boundary-panic-hpjb). The
 /// ENCODER owes the same law: past RFC 6330's systematic-table bound
-/// (K = 56403), asupersync's parameter builder panics, so the refusal must
-/// happen before it runs.
+/// (K = 56403), asupersync's parameter builder panics. The encoder must
+/// validate K before materializing K separately allocated source buffers.
 #[test]
-fn an_oversized_source_block_is_an_encoder_refusal_not_a_panic() {
+fn an_oversized_source_block_is_refused_before_symbol_materialization() {
     // One-byte symbols make a 56,404-byte block one past the bound.
     let oversized: Vec<u8> = (0..56_404u32).map(|i| (i % 251) as u8).collect();
     let capsule = sealed();
@@ -298,7 +298,7 @@ fn an_oversized_source_block_is_an_encoder_refusal_not_a_panic() {
     assert_eq!(
         fgdb_chronicle::symbolize::encode_object(&encoding, &oversized, KIND, 0, 4, &DEK),
         Err(fgdb_chronicle::symbolize::SymbolizeError::InvalidParameters),
-        "a source block past the systematic-table bound must be a typed refusal"
+        "a source block past the systematic-table bound must fail in preflight"
     );
 }
 
