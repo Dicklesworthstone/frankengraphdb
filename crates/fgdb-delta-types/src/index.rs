@@ -298,6 +298,16 @@ impl LocalDeltaBatchIndex {
                 found: commit_seq,
             });
         }
+        // The duplicate law binds the ACTUAL map, not only the derived
+        // frontier: a decoder-shaped window can hold keys above its claimed
+        // frontier, and `entries.insert` would silently REPLACE one — the
+        // outcome the `Duplicate` arm exists to forbid (fgdb-uqkt).
+        if self.entries.contains_key(&commit_seq.0) {
+            return Err(IndexError::Duplicate {
+                frontier: self.frontier,
+                found: commit_seq,
+            });
+        }
 
         self.entries.insert(commit_seq.0, batch);
         self.frontier = commit_seq;

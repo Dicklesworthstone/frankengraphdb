@@ -495,3 +495,58 @@ fn verify_refuses_a_same_cardinality_batch_stored_under_the_wrong_key() {
         );
     });
 }
+
+/// fgdb-uqkt — the duplicate law binds the ACTUAL map, not the derived
+/// frontier: a window holding keys above its claimed frontier must never
+/// have them silently REPLACED by a later insert. The durable decode path
+/// rejects such windows (WrongEntryKey + the contiguous-walk laws), so the
+/// only constructor of this shape is from_parts_for_test — which is exactly
+/// why insert must not trust the frontier to speak for the map.
+#[test]
+fn insert_refuses_to_replace_a_batch_the_frontier_forgot() {
+    with_commit_cx(0x77, |cx| {
+        // Decoder-shaped incoherence: the map holds 5 while claiming
+        // frontier 3.
+        let mut index = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(2),
+            CommitSeq(3),
+            vec![(CommitSeq(5), batch_at(5, &cx))],
+        );
+        index
+            .insert(batch_at(4, &cx))
+            .expect("seq 4 extends the frontier honestly");
+
+        // A DIFFERENT batch carrying the same commit_seq 5 — same marker,
+        // different rows. Pre-fix, `entries.insert` silently replaced the
+        // resident batch with this one.
+        let impostor = LogicalDeltaBatch::order(
+            &template(99),
+            [0x33; 32],
+            CommittedMarker::attest(
+                MarkerRef {
+                    marker_oid: ObjectId([5; 32]),
+                    commit_seq: CommitSeq(5),
+                },
+                &cx,
+            ),
+        );
+        assert_ne!(
+            impostor,
+            batch_at(5, &cx),
+            "the two seq-5 batches really differ, or the test proves nothing"
+        );
+        assert_eq!(
+            index.insert(impostor),
+            Err(IndexError::Duplicate {
+                frontier: CommitSeq(4),
+                found: CommitSeq(5),
+            }),
+            "the duplicate law must bind the map, not only the derived frontier"
+        );
+        assert_eq!(
+            index.get(CommitSeq(5)),
+            Some(&batch_at(5, &cx)),
+            "the resident batch was not replaced"
+        );
+    });
+}
