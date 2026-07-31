@@ -311,14 +311,18 @@ struct Slot {
 ///
 /// Chunks are allocated at their full size and never resized, so every chunk's
 /// base address is stable for the region's life. That stability is what lets
-/// alignment be computed in safe code — [`Region::alloc_block`] reads the base
-/// with `as_ptr().addr()` and pads to the next aligned offset — and it is also
-/// the first obligation the exclusive-view site relies on.
+/// alignment be computed in safe code — [`Region::alloc_block`] pads to the
+/// next aligned offset within each chunk's canonically aligned window — and
+/// it is also the first obligation the exclusive-view site relies on.
 #[derive(Debug)]
 pub struct Region {
     id: u64,
-    chunks: Vec<Vec<u8>>,
+    chunks: Vec<ChunkStorage>,
     chunk_bytes: usize,
+    /// Bytes used within the LAST chunk's usable window (which starts at its
+    /// `base_pad`). Window-relative, so placement pads derive only from
+    /// offsets the region itself assigned — never from a heap address
+    /// (fgdb-owje).
     used_in_last: usize,
     slots: Vec<Slot>,
     free_slots: Vec<u32>,
@@ -345,6 +349,25 @@ struct Resolved {
     len: usize,
     at: usize,
     write_len: usize,
+}
+
+/// One backing chunk and its canonically aligned usable window.
+///
+/// The global allocator promises only 16-byte alignment while
+/// [`MAX_BLOCK_ALIGN`] is 64, so deriving placement padding from the runtime
+/// base address made fit decisions heap-history-dependent (fgdb-owje: one
+/// 512B chunk lands at base%64 ∈ {0,16,32,48} depending on live chunks,
+/// producing BOTH fit outcomes for one request). Every chunk is therefore
+/// over-allocated by MAX_BLOCK_ALIGN−1 and `base_pad` is recorded once at
+/// creation: the window `[base_pad, base_pad + chunk_bytes)` starts at an
+/// address that is 0 mod 64, hence 0 mod every legal align, and placement
+/// pads depend only on window offsets. The 63 unused bytes (base_pad plus
+/// trailing slack — always exactly 63 in sum) are the chunk's fixed
+/// alignment prologue, charged to `alignment_padding_bytes`.
+#[derive(Debug)]
+struct ChunkStorage {
+    data: Vec<u8>,
+    base_pad: usize,
 }
 
 impl Region {
@@ -529,6 +552,7 @@ impl Region {
         let found = self.slots.iter().enumerate().find(|(_, slot)| {
             slot.live
                 && self.chunks[slot.chunk]
+                    .data
                     .as_ptr()
                     .addr()
                     .checked_add(slot.start)
@@ -671,7 +695,11 @@ impl Region {
 
         // Base pointers first, one per chunk, taken in safe code. Each carries
         // provenance for its own chunk buffer and nothing else.
-        let bases: Vec<*mut u8> = self.chunks.iter_mut().map(Vec::as_mut_ptr).collect();
+        let bases: Vec<*mut u8> = self
+            .chunks
+            .iter_mut()
+            .map(|chunk| chunk.data.as_mut_ptr())
+            .collect();
 
         let mut views = Vec::with_capacity(plan.len());
         for entry in &plan {
@@ -726,7 +754,7 @@ impl Region {
             EditPath::Sequential => {
                 for (entry, edit) in plan.iter().zip(edits) {
                     let from = entry.start + entry.at;
-                    self.chunks[entry.chunk][from..from + entry.write_len]
+                    self.chunks[entry.chunk].data[from..from + entry.write_len]
                         .copy_from_slice(edit.bytes);
                 }
             }
@@ -772,10 +800,15 @@ impl RegionAlloc for Region {
         // slot/chunk metadata reserves are completed before either vector is
         // changed. A refused allocation therefore cannot leave an empty chunk
         // or a half-created slot behind.
+        //
+        // Placement pads derive ONLY from `used_in_last`, the window-relative
+        // offset the region itself assigned: every chunk's window starts at
+        // an address that is 0 mod MAX_BLOCK_ALIGN (ChunkStorage), hence 0
+        // mod every legal align, so no fit decision can depend on where the
+        // global allocator happened to put the chunk (fgdb-owje).
         let mut placed = None;
-        if let Some(chunk) = self.chunks.last() {
-            let base = chunk.as_ptr().addr();
-            let pad = (align - ((base + self.used_in_last) % align)) % align;
+        if self.chunks.last().is_some() {
+            let pad = (align - (self.used_in_last % align)) % align;
             if self
                 .used_in_last
                 .checked_add(pad)
@@ -794,29 +827,31 @@ impl RegionAlloc for Region {
                 // accepted capacity is measured on the still-local chunk
                 // below. Chunks are never freed early, so this limit — not
                 // the live budget — is what bounds the region's actual
-                // footprint under allocate/release churn.
+                // footprint under allocate/release churn. The request is the
+                // window plus its fixed alignment prologue.
+                let required = self.chunk_bytes.saturating_add(MAX_BLOCK_ALIGN - 1);
                 let resident_remaining =
                     self.max_resident_bytes.saturating_sub(self.resident_bytes);
-                if self.chunk_bytes > resident_remaining {
+                if required > resident_remaining {
                     return Err(ArenaError::ResidentLimitExceeded {
-                        requested: self.chunk_bytes,
+                        requested: required,
                         remaining: resident_remaining,
                     });
                 }
                 let mut chunk = Vec::new();
-                chunk.try_reserve_exact(self.chunk_bytes).map_err(|_| {
+                chunk.try_reserve_exact(required).map_err(|_| {
                     ArenaError::BackingAllocationFailed {
-                        requested: self.chunk_bytes,
+                        requested: required,
                     }
                 })?;
-                chunk.resize(self.chunk_bytes, 0_u8);
+                chunk.resize(required, 0_u8);
                 // `try_reserve_exact` contractually guarantees only
-                // `capacity() >= chunk_bytes` — the allocator may accept a
+                // `capacity() >= required` — the allocator may accept a
                 // larger layout — so the retained charge is the capacity the
                 // vector actually reports, measured before the chunk becomes
                 // region-visible. Under the pinned toolchain `try_reserve_exact`
                 // records exactly the requested capacity, so this equals
-                // `chunk_bytes` today; the measurement is what keeps the hard
+                // `required` today; the measurement is what keeps the hard
                 // limit honest if that implementation detail ever moves. A
                 // refusal drops the chunk while it is still a local: nothing
                 // region-visible has mutated, and the transient local is
@@ -828,29 +863,39 @@ impl RegionAlloc for Region {
                         remaining: resident_remaining,
                     });
                 }
-                let base = chunk.as_ptr().addr();
-                let pad = (align - (base % align)) % align;
-                if pad + len > self.chunk_bytes {
-                    return Err(ArenaError::BlockLargerThanChunk {
-                        len: pad + len,
-                        chunk_bytes: self.chunk_bytes,
-                    });
-                }
+                // The canonical window: the usable range starts at an address
+                // that is 0 mod MAX_BLOCK_ALIGN, so the first block in a
+                // chunk never needs placement padding — which is also why
+                // `len > chunk_bytes` (checked above) fully decides
+                // BlockLargerThanChunk BEFORE any allocation happens.
+                let base_pad =
+                    (MAX_BLOCK_ALIGN - (chunk.as_ptr().addr() % MAX_BLOCK_ALIGN))
+                        % MAX_BLOCK_ALIGN;
+                debug_assert!(
+                    base_pad + self.chunk_bytes <= accepted,
+                    "the window must fit its chunk: {base_pad} + {} <= {accepted}",
+                    self.chunk_bytes
+                );
                 self.chunks
                     .try_reserve(1)
                     .map_err(|_| ArenaError::BackingAllocationFailed {
-                        requested: mem::size_of::<Vec<u8>>(),
+                        requested: mem::size_of::<ChunkStorage>(),
                     })?;
-                Some((chunk, pad, accepted))
+                Some((chunk, base_pad, accepted))
             }
         };
 
         // A generation at u32::MAX is retired rather than wrapped: wrapping
         // would eventually make a stale handle current again. Retired slots
-        // are small metadata tombstones and never name live storage.
+        // are small metadata tombstones and never name live storage. The
+        // candidate is PEEKED, not popped: the reserves below are fallible,
+        // and a pop before them would lose a reusable index to a refusal
+        // (fgdb-owje's minor 3).
         let reusable = loop {
-            match self.free_slots.pop() {
-                Some(index) if self.slots[index as usize].generation == u32::MAX => continue,
+            match self.free_slots.last().copied() {
+                Some(index) if self.slots[index as usize].generation == u32::MAX => {
+                    self.free_slots.pop();
+                }
                 other => break other,
             }
         };
@@ -874,22 +919,34 @@ impl RegionAlloc for Region {
                     requested: release_capacity.saturating_mul(mem::size_of::<u32>()),
                 }
             })?;
+        } else {
+            // The reserves succeeded (or were not needed): the peeked slot is
+            // now consumed for real.
+            self.free_slots.pop();
         }
 
-        let (chunk_index, start, pad) = match (placed, new_chunk) {
+        let (chunk_index, window_start, pad) = match (placed, new_chunk) {
             (Some(place), None) => place,
-            (None, Some((chunk, pad, accepted))) => {
+            (None, Some((chunk, base_pad, accepted))) => {
                 let index = self.chunks.len();
-                self.chunks.push(chunk);
+                self.chunks.push(ChunkStorage {
+                    data: chunk,
+                    base_pad,
+                });
                 self.resident_bytes += accepted;
                 self.chunks_allocated += 1;
                 self.peak_resident_bytes = self.peak_resident_bytes.max(self.resident_bytes as u64);
-                (index, pad, pad)
+                // The chunk's fixed alignment prologue: base_pad plus the
+                // trailing slack always sums to exactly MAX_BLOCK_ALIGN−1,
+                // so the charge is deterministic rather than heap-derived.
+                self.alignment_padding_bytes += (MAX_BLOCK_ALIGN - 1) as u64;
+                (index, 0, 0)
             }
             _ => unreachable!("placement planning must choose exactly one chunk"),
         };
-        self.used_in_last = start + len;
+        self.used_in_last = window_start + len;
         self.alignment_padding_bytes += pad as u64;
+        let start = self.chunks[chunk_index].base_pad + window_start;
 
         let slot_index = match reusable {
             Some(index) => {
@@ -930,13 +987,13 @@ impl RegionAlloc for Region {
     fn block(&self, handle: Handle) -> Result<&[u8], ArenaError> {
         let index = self.resolve(handle)?;
         let slot = self.slots[index];
-        Ok(&self.chunks[slot.chunk][slot.start..slot.start + slot.len])
+        Ok(&self.chunks[slot.chunk].data[slot.start..slot.start + slot.len])
     }
 
     fn block_mut(&mut self, handle: Handle) -> Result<&mut [u8], ArenaError> {
         let index = self.resolve(handle)?;
         let slot = self.slots[index];
-        Ok(&mut self.chunks[slot.chunk][slot.start..slot.start + slot.len])
+        Ok(&mut self.chunks[slot.chunk].data[slot.start..slot.start + slot.len])
     }
 
     fn release(&mut self, handle: Handle) -> Result<usize, ArenaError> {
@@ -1288,6 +1345,7 @@ unsafe impl core::alloc::Allocator for PrivateRegionAllocator<'_> {
         // `&mut chunk[start..end]` would uniquely retag the whole byte chunk
         // and invalidate pointers previously handed to other RegionVecs.
         let pointer = region.chunks[slot.chunk]
+            .data
             .as_mut_ptr()
             .wrapping_add(slot.start);
         let Some(pointer) = NonNull::new(pointer) else {
