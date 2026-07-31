@@ -37,6 +37,7 @@
 #![forbid(unsafe_code)]
 
 pub mod root;
+pub mod writer;
 
 use fgdb_delta_types::RelationId;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
