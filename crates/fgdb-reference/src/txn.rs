@@ -33,7 +33,9 @@
 //! This is endpoint-specific referential integrity, not a claim that this SI
 //! oracle protects general adjacency or neighbour phantoms.
 
-use crate::intents::{Outcome, Statement, StatementFailure, evaluate_from_intent_ordinal};
+use crate::intents::{
+    CanonicalMutationPotential, Outcome, Statement, StatementFailure, evaluate_from_intent_ordinal,
+};
 use crate::{
     ApplyError, CertificationSummary, ConflictKey, ReferenceDatabase, ReferenceGraph, Snapshot,
     SnapshotError, Vertex, collect_conflict_keys,
@@ -75,6 +77,17 @@ pub struct Transaction {
     /// may write one adjacency without conflicting under SI. The domain becomes
     /// a dependency only when another transaction READ it.
     ssi_predicate_writes: BTreeSet<ConflictKey>,
+    /// The latest successfully published statement generation. Generation zero
+    /// is installed at begin and every successful publication advances exactly
+    /// once from its predecessor.
+    workspace_generation: WorkspaceGeneration,
+    /// Monotone join of every successfully published statement's server-derived
+    /// mutation class. Terminal-path selection reads this value, never the
+    /// surviving effect count.
+    cumulative_mutation_potential: CanonicalMutationPotential,
+    /// Append-only reference statement lifecycle. Every execution appends
+    /// `Opened` before evaluation and exactly one terminal event afterward.
+    statement_events: Vec<StatementLifecycleEvent>,
     statement_failures: usize,
     /// Transaction-global index of the next statement submitted through
     /// `execute`. Evaluator outcomes use slice-local indexes, so every boundary
@@ -95,11 +108,92 @@ pub struct Transaction {
     aborted_at: Option<usize>,
 }
 
+/// Identity of one predecessor-linked transaction workspace generation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WorkspaceGeneration(u64);
+
+impl WorkspaceGeneration {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+
+    fn successor(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+/// One statement's terminal disposition after its mandatory Open state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StatementTerminal {
+    /// The statement published successfully and installed exactly one successor
+    /// workspace generation. This is the only terminal that publishes results.
+    Published {
+        predecessor: WorkspaceGeneration,
+        generation: WorkspaceGeneration,
+        cumulative_mutation_potential: CanonicalMutationPotential,
+    },
+    /// Evaluation rejected the statement. It published neither effects nor
+    /// results and did not advance the workspace generation.
+    Failed { failure: StatementFailure },
+    /// The registered Open statement was abandoned before evaluation reached a
+    /// semantic verdict. Distinct from `Failed` so retry policy need not guess.
+    Abandoned,
+}
+
+/// One append-only statement lifecycle transition.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StatementLifecycleEvent {
+    /// Appended before semantic evaluation begins.
+    Opened {
+        statement: usize,
+        predecessor: WorkspaceGeneration,
+        mutation_potential: CanonicalMutationPotential,
+    },
+    /// Appended only after evaluation reaches exactly one terminal.
+    Terminal {
+        statement: usize,
+        terminal: StatementTerminal,
+    },
+}
+
+impl StatementLifecycleEvent {
+    pub const fn statement(&self) -> usize {
+        match self {
+            Self::Opened { statement, .. } | Self::Terminal { statement, .. } => *statement,
+        }
+    }
+
+    pub const fn terminal(&self) -> Option<&StatementTerminal> {
+        match self {
+            Self::Opened { .. } => None,
+            Self::Terminal { terminal, .. } => Some(terminal),
+        }
+    }
+
+    /// Statement result publication is exactly the `Published` terminal.
+    pub const fn results_visible(&self) -> bool {
+        matches!(
+            self,
+            Self::Terminal {
+                terminal: StatementTerminal::Published { .. },
+                ..
+            }
+        )
+    }
+}
+
 /// What happened when a transaction tried to commit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TxnOutcome {
-    /// Durable. `commit_seq` is where it landed.
-    Committed {
+    /// The write terminal path. `commit_seq` is where it landed, including a
+    /// mutation-capable statement whose final effect set is empty.
+    WriteCommitted {
         commit_seq: CommitSeq,
         effects: usize,
         statement_failures: usize,
@@ -112,11 +206,9 @@ pub enum TxnOutcome {
     /// A statement aborted the transaction. Nothing durable, and NOT a
     /// conflict: the transaction did exactly what its guard told it to.
     Aborted { statement: usize },
-    /// No effects to commit — every statement was a no-op or failed. Nothing
-    /// durable, no sequence consumed, and distinct from `Aborted`, because a
-    /// caller deciding whether to retry needs to tell "nothing to do" from
-    /// "refused".
-    NothingToCommit { statement_failures: usize },
+    /// The cumulative statement class remained `ProvenReadOnly`. No graph
+    /// marker is written and no commit sequence is consumed.
+    ReadClosed { statement_failures: usize },
 }
 
 /// Why a transaction operation could not be carried out at all.
@@ -131,6 +223,14 @@ pub enum TxnError {
     Snapshot(SnapshotError),
     /// Statements were issued after the transaction aborted.
     AlreadyAborted { statement: usize },
+    /// A statement named a stale, reused, or future workspace generation.
+    WorkspaceGenerationMismatch {
+        expected: WorkspaceGeneration,
+        offered: WorkspaceGeneration,
+    },
+    /// The generation counter cannot represent the next successful
+    /// publication. Refuse before publishing effects or results.
+    WorkspaceGenerationExhausted { current: WorkspaceGeneration },
     /// The effects did not form a canonical template.
     Canonical(CanonicalError),
     /// The effects did not apply to the committed state even though no conflict
@@ -154,6 +254,17 @@ impl core::fmt::Display for TxnError {
             Self::AlreadyAborted { statement } => {
                 write!(f, "transaction aborted at statement {statement}")
             }
+            Self::WorkspaceGenerationMismatch { expected, offered } => write!(
+                f,
+                "workspace generation mismatch: expected {}, offered {}",
+                expected.value(),
+                offered.value()
+            ),
+            Self::WorkspaceGenerationExhausted { current } => write!(
+                f,
+                "workspace generation {} has no representable successor",
+                current.value()
+            ),
             Self::Canonical(error) => write!(f, "effects are not canonical: {error:?}"),
             Self::Apply(error) => write!(f, "effects did not apply: {error}"),
         }
@@ -261,6 +372,9 @@ impl Transaction {
             last_intent_ordinal: 0,
             read_set: BTreeSet::new(),
             ssi_predicate_writes: BTreeSet::new(),
+            workspace_generation: WorkspaceGeneration::ZERO,
+            cumulative_mutation_potential: CanonicalMutationPotential::ProvenReadOnly,
+            statement_events: Vec::new(),
             statement_failures: 0,
             next_statement_index: 0,
             aborted_at: None,
@@ -373,6 +487,21 @@ impl Transaction {
         self.aborted_at.is_some()
     }
 
+    /// Latest successfully published workspace generation.
+    pub const fn workspace_generation(&self) -> WorkspaceGeneration {
+        self.workspace_generation
+    }
+
+    /// Monotone mutation class of all successfully published statements.
+    pub const fn cumulative_mutation_potential(&self) -> CanonicalMutationPotential {
+        self.cumulative_mutation_potential
+    }
+
+    /// Append-only Open and terminal statement events in registration order.
+    pub fn statement_events(&self) -> &[StatementLifecycleEvent] {
+        &self.statement_events
+    }
+
     /// Every ordinary first-committer-wins key this transaction has written.
     ///
     /// Shared endpoint-existence dependencies and SSI adjacency predicates
@@ -401,41 +530,141 @@ impl Transaction {
     /// of its statements, and therefore the only way the anomaly laws can be
     /// written at all. Each call sees the workspace the previous call left.
     pub fn execute(&mut self, statements: &[Statement]) -> Result<(), TxnError> {
+        self.execute_at_generation(self.workspace_generation, statements)
+    }
+
+    /// Evaluate statements whose registration names `expected_predecessor`.
+    ///
+    /// A stale/reused generation and a future/gapped generation are the same
+    /// typed refusal. The check runs before any statement becomes Open, so a
+    /// refused registration leaves no lifecycle or workspace trace.
+    pub fn execute_at_generation(
+        &mut self,
+        expected_predecessor: WorkspaceGeneration,
+        statements: &[Statement],
+    ) -> Result<(), TxnError> {
         if let Some(statement) = self.aborted_at {
             return Err(TxnError::AlreadyAborted { statement });
         }
-        let statement_base = self.next_statement_index;
-        let (outcome, last_intent_ordinal) =
-            evaluate_from_intent_ordinal(&self.workspace, statements, self.last_intent_ordinal);
-        match outcome {
-            Outcome::Aborted { statement, .. } => {
-                self.last_intent_ordinal = last_intent_ordinal;
-                let statement = statement_base + statement;
-                self.next_statement_index = statement + 1;
-                self.aborted_at = Some(statement);
-                // The workspace is deliberately left as it was. An aborted
-                // transaction has no state worth inspecting, and clearing it
-                // would make `workspace()` say the snapshot was empty.
-                Ok(())
-            }
-            Outcome::Committed {
-                effects,
-                statement_failures,
-            } => {
-                for row in &effects {
-                    let predicate_writes = ssi_predicate_writes_for(row, &self.workspace);
-                    self.workspace
-                        .apply_row(row)
-                        .map_err(|error| TxnError::Apply(Box::new(error)))?;
-                    self.ssi_predicate_writes.extend(predicate_writes);
+        if expected_predecessor != self.workspace_generation {
+            return Err(TxnError::WorkspaceGenerationMismatch {
+                expected: self.workspace_generation,
+                offered: expected_predecessor,
+            });
+        }
+
+        for statement in statements {
+            let statement_index = self.next_statement_index;
+            let opened_at = self.workspace_generation;
+            let mutation_potential = statement.mutation_potential();
+            self.statement_events.push(StatementLifecycleEvent::Opened {
+                statement: statement_index,
+                predecessor: opened_at,
+                mutation_potential,
+            });
+            let (outcome, last_intent_ordinal) = evaluate_from_intent_ordinal(
+                &self.workspace,
+                core::slice::from_ref(statement),
+                self.last_intent_ordinal,
+            );
+            self.last_intent_ordinal = last_intent_ordinal;
+            self.next_statement_index += 1;
+
+            match outcome {
+                Outcome::Aborted { failure, .. } => {
+                    self.statement_events
+                        .push(StatementLifecycleEvent::Terminal {
+                            statement: statement_index,
+                            terminal: StatementTerminal::Failed { failure },
+                        });
+                    self.aborted_at = Some(statement_index);
+                    // Earlier statement publications retain their workspace
+                    // generations, but an aborted transaction has no durable
+                    // graph outcome and later statements are not opened.
+                    return Ok(());
                 }
-                self.last_intent_ordinal = last_intent_ordinal;
-                self.next_statement_index = statement_base + statements.len();
-                self.statement_failures += statement_failures.len();
-                self.effects.extend(effects);
-                Ok(())
+                Outcome::Committed {
+                    effects,
+                    statement_failures,
+                } => {
+                    let failure_count = statement_failures.len();
+                    if let Some((_, failure)) = statement_failures.into_iter().next() {
+                        self.statement_failures += failure_count;
+                        self.statement_events
+                            .push(StatementLifecycleEvent::Terminal {
+                                statement: statement_index,
+                                terminal: StatementTerminal::Failed { failure },
+                            });
+                        continue;
+                    }
+
+                    let generation = opened_at
+                        .successor()
+                        .ok_or(TxnError::WorkspaceGenerationExhausted { current: opened_at })?;
+                    let mut workspace = self.workspace.clone();
+                    let mut predicate_writes = BTreeSet::new();
+                    for row in &effects {
+                        predicate_writes.extend(ssi_predicate_writes_for(row, &workspace));
+                        workspace
+                            .apply_row(row)
+                            .map_err(|error| TxnError::Apply(Box::new(error)))?;
+                    }
+                    self.workspace = workspace;
+                    self.ssi_predicate_writes.extend(predicate_writes);
+                    self.effects.extend(effects);
+                    self.cumulative_mutation_potential =
+                        self.cumulative_mutation_potential.join(mutation_potential);
+                    self.workspace_generation = generation;
+                    self.statement_events
+                        .push(StatementLifecycleEvent::Terminal {
+                            statement: statement_index,
+                            terminal: StatementTerminal::Published {
+                                predecessor: opened_at,
+                                generation,
+                                cumulative_mutation_potential: self.cumulative_mutation_potential,
+                            },
+                        });
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Terminally abandon one Open statement without evaluating or publishing
+    /// it. Abandonment consumes a statement index but neither an intent ordinal
+    /// nor a workspace generation.
+    pub fn abandon_statement(&mut self, statement: &Statement) -> Result<(), TxnError> {
+        self.abandon_statement_at_generation(self.workspace_generation, statement)
+    }
+
+    /// Generation-checked form of [`Self::abandon_statement`].
+    pub fn abandon_statement_at_generation(
+        &mut self,
+        expected_predecessor: WorkspaceGeneration,
+        statement: &Statement,
+    ) -> Result<(), TxnError> {
+        if let Some(statement) = self.aborted_at {
+            return Err(TxnError::AlreadyAborted { statement });
+        }
+        if expected_predecessor != self.workspace_generation {
+            return Err(TxnError::WorkspaceGenerationMismatch {
+                expected: self.workspace_generation,
+                offered: expected_predecessor,
+            });
+        }
+        let statement_index = self.next_statement_index;
+        self.next_statement_index += 1;
+        self.statement_events.push(StatementLifecycleEvent::Opened {
+            statement: statement_index,
+            predecessor: self.workspace_generation,
+            mutation_potential: statement.mutation_potential(),
+        });
+        self.statement_events
+            .push(StatementLifecycleEvent::Terminal {
+                statement: statement_index,
+                terminal: StatementTerminal::Abandoned,
+            });
+        Ok(())
     }
 
     /// The statement failures accumulated so far.
@@ -451,10 +680,10 @@ impl Transaction {
     /// chose. There is a law for it, because an aborted transaction whose writes
     /// *would* have conflicted is exactly the case where the two answers differ.
     ///
-    /// The conflict/emptiness order, by contrast, is NOT observable, and saying
-    /// otherwise would be a claim with nothing behind it: a transaction with no
-    /// effects has an empty write set and therefore cannot conflict, so the two
-    /// conditions are mutually exclusive and either order gives the same answer.
+    /// Read-close is selected from the cumulative binder class, not by counting
+    /// effects. A successfully published mutation-capable statement therefore
+    /// follows write certification and consumes its offered commit sequence even
+    /// when every effect normalized away.
     ///
     /// Consumes the transaction. A handle that survived its own commit could be
     /// committed again at a second sequence, duplicating the effects.
@@ -479,6 +708,12 @@ impl Transaction {
             return Ok(TxnOutcome::Aborted { statement });
         }
 
+        if self.cumulative_mutation_potential.is_proven_read_only() {
+            return Ok(TxnOutcome::ReadClosed {
+                statement_failures: self.statement_failures,
+            });
+        }
+
         let mine = CertificationSummary::from_transaction(&self.effects, self.claims_genesis);
         if !mine.is_empty() {
             // A coordinate that does not exist yet has nothing to conflict with,
@@ -498,12 +733,6 @@ impl Transaction {
             }
         }
 
-        if self.effects.is_empty() {
-            return Ok(TxnOutcome::NothingToCommit {
-                statement_failures: self.statement_failures,
-            });
-        }
-
         let effects = self.effects.len();
         let template = LogicalDeltaTemplate::build(
             intent_semantics,
@@ -521,7 +750,7 @@ impl Transaction {
         db.apply_template(&template, commit_seq)
             .map_err(|error| TxnError::Apply(Box::new(error)))?;
 
-        Ok(TxnOutcome::Committed {
+        Ok(TxnOutcome::WriteCommitted {
             commit_seq,
             effects,
             statement_failures: self.statement_failures,
@@ -537,7 +766,7 @@ impl TxnOutcome {
     /// panic class.
     pub fn committed_parts(&self) -> Option<(CommitSeq, usize, usize)> {
         match self {
-            Self::Committed {
+            Self::WriteCommitted {
                 commit_seq,
                 effects,
                 statement_failures,
@@ -554,7 +783,7 @@ impl TxnOutcome {
     }
 
     pub fn is_committed(&self) -> bool {
-        matches!(self, Self::Committed { .. })
+        matches!(self, Self::WriteCommitted { .. })
     }
 }
 

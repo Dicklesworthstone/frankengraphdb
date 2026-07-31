@@ -158,15 +158,67 @@ pub enum Intent {
     },
 }
 
-/// One statement's worth of intents.
+/// The binder-derived upper bound on one statement's mutation capability.
+///
+/// The order is the conservative monotone join order used by a transaction's
+/// workspace. Once a published statement raises the cumulative value, a later
+/// read-only statement cannot lower it and thereby gain the read-close path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CanonicalMutationPotential {
+    #[default]
+    ProvenReadOnly,
+    MayMutateGraph,
+    MayMutateSchema,
+    MayInvokeReplicatedProcedure,
+}
+
+impl CanonicalMutationPotential {
+    /// Conservative monotone join for a predecessor-linked workspace.
+    pub fn join(self, next: Self) -> Self {
+        self.max(next)
+    }
+
+    pub const fn is_proven_read_only(self) -> bool {
+        matches!(self, Self::ProvenReadOnly)
+    }
+}
+
+/// One statement's worth of intents plus its server-derived mutation class.
+///
+/// Every intent currently modelled by this reference crate is a graph mutation
+/// intent, even when evaluation later reduces it to no effect. Consequently
+/// [`Statement::new`] is always `MayMutateGraph`; an empty vector passed there
+/// remains a mutation-capable semantic no-op. A genuinely read-only statement
+/// is constructed with [`Statement::read_only`]. Keeping the field private
+/// prevents a caller from attaching mutation intents to a read-only class.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Statement {
-    pub intents: Vec<Intent>,
+    intents: Vec<Intent>,
+    mutation_potential: CanonicalMutationPotential,
 }
 
 impl Statement {
     pub fn new(intents: Vec<Intent>) -> Self {
-        Self { intents }
+        Self {
+            intents,
+            mutation_potential: CanonicalMutationPotential::MayMutateGraph,
+        }
+    }
+
+    /// A successfully publishable statement with no mutation intents.
+    pub fn read_only() -> Self {
+        Self {
+            intents: Vec::new(),
+            mutation_potential: CanonicalMutationPotential::ProvenReadOnly,
+        }
+    }
+
+    pub const fn mutation_potential(&self) -> CanonicalMutationPotential {
+        self.mutation_potential
+    }
+
+    fn intents(&self) -> &[Intent] {
+        &self.intents
     }
 }
 
@@ -360,7 +412,7 @@ pub(crate) fn evaluate_from_intent_ordinal(
         let mut statement_effects: Vec<DeltaRow> = Vec::new();
         let mut failure: Option<StatementFailure> = None;
 
-        for intent in &statement.intents {
+        for intent in statement.intents() {
             intent_ordinal += 1;
             match reduce(&statement_scratch, intent, intent_ordinal) {
                 Reduction::Effects(rows) => {

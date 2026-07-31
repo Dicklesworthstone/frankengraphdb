@@ -32,8 +32,11 @@ use fgdb_delta_types::{
     DeltaRow, ElementId, EscrowDomainId, LabelId, OperationKey, PropertyKeyId, RelationId,
     SchemaEpoch,
 };
-use fgdb_reference::intents::{Intent, MismatchPolicy, Statement};
-use fgdb_reference::txn::{Transaction, TxnError, TxnOutcome};
+use fgdb_reference::intents::{CanonicalMutationPotential, Intent, MismatchPolicy, Statement};
+use fgdb_reference::txn::{
+    StatementLifecycleEvent, StatementTerminal, Transaction, TxnError, TxnOutcome,
+    WorkspaceGeneration,
+};
 use fgdb_reference::{ConflictKey, ReferenceDatabase, collect_conflict_keys};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
 use std::collections::BTreeSet;
@@ -699,10 +702,11 @@ fn a_transaction_cannot_execute_after_it_aborted() {
     );
 }
 
-/// A transaction with no effects commits nothing and is NOT an abort. A caller
-/// deciding whether to retry needs to tell "nothing to do" from "refused".
+/// Mutation capability is bound before execution. A write-class statement whose
+/// effects normalize away therefore takes the write terminal path rather than
+/// being reclassified from its empty final effect set.
 #[test]
-fn a_transaction_with_no_effects_is_not_an_abort() {
+fn a_mutation_capable_noop_takes_the_write_terminal_path() {
     let mut db = seeded();
     let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
     // A no-op write plus a NoOp guard that fails: zero effects, one no-op.
@@ -723,11 +727,184 @@ fn a_transaction_with_no_effects_is_not_an_abort() {
         .expect("no error");
     assert_eq!(
         outcome,
-        TxnOutcome::NothingToCommit {
+        TxnOutcome::WriteCommitted {
+            commit_seq: CommitSeq(2),
+            effects: 0,
+            statement_failures: 0
+        }
+    );
+    assert_eq!(db.applied_through(GRAPH, MAIN), Some(CommitSeq(2)));
+}
+
+#[test]
+fn generation_zero_and_published_read_only_work_read_close() {
+    let mut db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    assert_eq!(txn.workspace_generation(), WorkspaceGeneration::ZERO);
+    assert_eq!(
+        txn.cumulative_mutation_potential(),
+        CanonicalMutationPotential::ProvenReadOnly
+    );
+
+    txn.execute(&[Statement::read_only()]).expect("executes");
+    assert_eq!(txn.workspace_generation(), WorkspaceGeneration::new(1));
+    let events = txn.statement_events();
+    assert_eq!(
+        events.first(),
+        Some(&StatementLifecycleEvent::Opened {
+            statement: 0,
+            predecessor: WorkspaceGeneration::ZERO,
+            mutation_potential: CanonicalMutationPotential::ProvenReadOnly,
+        })
+    );
+    assert!(events.get(1).is_some_and(|event| event.results_visible()));
+    assert_eq!(
+        events.get(1).and_then(StatementLifecycleEvent::terminal),
+        Some(&StatementTerminal::Published {
+            predecessor: WorkspaceGeneration::ZERO,
+            generation: WorkspaceGeneration::new(1),
+            cumulative_mutation_potential: CanonicalMutationPotential::ProvenReadOnly,
+        })
+    );
+
+    assert_eq!(
+        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+            .expect("read close"),
+        TxnOutcome::ReadClosed {
             statement_failures: 0
         }
     );
     assert_eq!(db.applied_through(GRAPH, MAIN), Some(CommitSeq(1)));
+}
+
+#[test]
+fn publication_join_never_goes_backwards_and_failures_do_not_advance() {
+    let mut db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.execute(&[
+        // Successful mutation-capable semantic no-op: generation 0 -> 1.
+        set(1, 0),
+        // Failed mutation: no publication and no generation advance.
+        Statement::new(vec![Intent::CompareAndSet {
+            elem: ElementId::Vertex(VId(1)),
+            name: PROP,
+            expected: Some(int(777)),
+            value: int(1),
+            mismatch: MismatchPolicy::StatementError,
+        }]),
+        // Published read-only work: generation 1 -> 2, mutation class retained.
+        Statement::read_only(),
+    ])
+    .expect("executes");
+
+    assert_eq!(txn.workspace_generation(), WorkspaceGeneration::new(2));
+    assert_eq!(
+        txn.cumulative_mutation_potential(),
+        CanonicalMutationPotential::MayMutateGraph
+    );
+    let events = txn.statement_events();
+    assert_eq!(events.len(), 6);
+    assert_eq!(
+        events.get(1).and_then(StatementLifecycleEvent::terminal),
+        Some(&StatementTerminal::Published {
+            predecessor: WorkspaceGeneration::ZERO,
+            generation: WorkspaceGeneration::new(1),
+            cumulative_mutation_potential: CanonicalMutationPotential::MayMutateGraph,
+        })
+    );
+    assert!(matches!(
+        events.get(3).and_then(StatementLifecycleEvent::terminal),
+        Some(StatementTerminal::Failed { .. })
+    ));
+    assert_eq!(
+        events.get(5).and_then(StatementLifecycleEvent::terminal),
+        Some(&StatementTerminal::Published {
+            predecessor: WorkspaceGeneration::new(1),
+            generation: WorkspaceGeneration::new(2),
+            cumulative_mutation_potential: CanonicalMutationPotential::MayMutateGraph,
+        })
+    );
+    assert!(!events.get(3).is_some_and(|event| event.results_visible()));
+
+    assert_eq!(
+        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+            .expect("write terminal"),
+        TxnOutcome::WriteCommitted {
+            commit_seq: CommitSeq(2),
+            effects: 0,
+            statement_failures: 1,
+        }
+    );
+}
+
+#[test]
+fn reused_and_gapped_workspace_generations_are_refused_before_open() {
+    let db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    assert_eq!(
+        txn.execute_at_generation(WorkspaceGeneration::new(1), &[Statement::read_only()]),
+        Err(TxnError::WorkspaceGenerationMismatch {
+            expected: WorkspaceGeneration::ZERO,
+            offered: WorkspaceGeneration::new(1),
+        })
+    );
+    assert!(txn.statement_events().is_empty());
+
+    txn.execute_at_generation(
+        WorkspaceGeneration::ZERO,
+        &[Statement::read_only(), Statement::read_only()],
+    )
+    .expect("exact predecessor");
+    assert_eq!(txn.workspace_generation(), WorkspaceGeneration::new(2));
+    for offered in [WorkspaceGeneration::new(1), WorkspaceGeneration::new(4)] {
+        assert_eq!(
+            txn.execute_at_generation(offered, &[Statement::read_only()]),
+            Err(TxnError::WorkspaceGenerationMismatch {
+                expected: WorkspaceGeneration::new(2),
+                offered,
+            })
+        );
+    }
+    assert_eq!(txn.statement_events().len(), 4);
+}
+
+#[test]
+fn abandoned_and_failed_statements_are_distinct_nonpublishing_terminals() {
+    let mut db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.abandon_statement(&set(1, 9)).expect("abandon");
+    txn.execute(&[Statement::new(vec![Intent::CompareAndSet {
+        elem: ElementId::Vertex(VId(1)),
+        name: PROP,
+        expected: Some(int(999)),
+        value: int(1),
+        mismatch: MismatchPolicy::StatementError,
+    }])])
+    .expect("failed statement is terminal");
+
+    let events = txn.statement_events();
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events.get(1).and_then(StatementLifecycleEvent::terminal),
+        Some(&StatementTerminal::Abandoned)
+    );
+    assert!(matches!(
+        events.get(3).and_then(StatementLifecycleEvent::terminal),
+        Some(StatementTerminal::Failed { .. })
+    ));
+    assert!(events.iter().all(|event| !event.results_visible()));
+    assert_eq!(txn.workspace_generation(), WorkspaceGeneration::ZERO);
+    assert_eq!(
+        txn.cumulative_mutation_potential(),
+        CanonicalMutationPotential::ProvenReadOnly
+    );
+    assert_eq!(
+        txn.commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+            .expect("read close"),
+        TxnOutcome::ReadClosed {
+            statement_failures: 1
+        }
+    );
 }
 
 /// A statement error still commits the surviving statements, and the failure
