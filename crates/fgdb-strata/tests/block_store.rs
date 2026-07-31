@@ -272,3 +272,146 @@ fn stored_bytes_that_are_not_a_block_are_refused_as_malformed() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Reopening a partition from disk
+// ---------------------------------------------------------------------------
+
+use fgdb_delta_types::DeltaRow;
+use fgdb_strata::root::merge_neighbours;
+use fgdb_strata::writer::BlockWriter;
+use fgdb_types::{BranchId, EId, GraphId};
+
+fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
+    DeltaRow::CreateEdge {
+        eid: EId(eid),
+        birth_ordinal: eid as u64,
+        src: VId(src),
+        relation: REL,
+        dst: VId(dst),
+        canonical_key: None,
+        props: vec![],
+        valid_time: None,
+    }
+}
+
+/// **THE PAYOFF: a partition reopens from disk with no stream replay.**
+///
+/// The writer produces blocks and a root; all of it goes into the store; and a
+/// FRESH store handle — as a restarted process would have — is given nothing but
+/// the root identity and reconstructs the whole partition, answering the same
+/// adjacency queries. Until this existed a partition could only be produced by
+/// folding the entire commit history, which is correct and is not a storage tier.
+#[test]
+fn a_partition_reopens_from_disk_with_no_stream_replay() {
+    let dir = scratch_dir("reopen");
+    under_lab(41, move |cx| {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer
+            .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
+            .expect("creates");
+        writer
+            .apply(strata_keys, CommitSeq(2), &create(11, 1, 3))
+            .expect("creates");
+        writer.seal(strata_keys).expect("seals");
+        writer
+            .apply(strata_keys, CommitSeq(4), &create(12, 2, 3))
+            .expect("creates");
+        let (root, blocks) = writer
+            .publish(strata_keys, CommitSeq(9))
+            .expect("publishes");
+        assert!(blocks.len() >= 2, "the fixture spans more than one block");
+
+        let root_id = {
+            let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+            for block in &blocks {
+                store.put(cx, &block.bytes).expect("stores a block");
+            }
+            store.put_root(cx, &root).expect("stores the root")
+        };
+
+        // A FRESH handle, holding nothing but the root identity.
+        let reopened = BlockStore::open(&dir, K_OID, NAMESPACE).expect("reopens");
+        let (loaded_root, loaded_blocks) = reopened.reopen(root_id).expect("reopens the partition");
+
+        assert_eq!(loaded_root, root, "the root came back exactly");
+        assert_eq!(loaded_blocks.len(), blocks.len());
+        assert_eq!(
+            merge_neighbours(&loaded_blocks, VId(1), REL, CommitSeq(9)).expect("merges"),
+            vec![VId(2), VId(3)],
+            "and the partition answers the same adjacency it did in memory"
+        );
+        assert_eq!(
+            merge_neighbours(&loaded_blocks, VId(2), REL, CommitSeq(9)).expect("merges"),
+            vec![VId(3)]
+        );
+    });
+}
+
+/// A root naming a block the store does not hold is refused, naming the block's
+/// position — a partial partition is not a partition.
+#[test]
+fn reopening_with_a_missing_block_is_refused() {
+    let dir = scratch_dir("reopen-missing");
+    under_lab(42, move |cx| {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer
+            .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
+            .expect("creates");
+        writer.seal(strata_keys).expect("seals");
+        writer
+            .apply(strata_keys, CommitSeq(4), &create(11, 1, 3))
+            .expect("creates");
+        let (root, blocks) = writer
+            .publish(strata_keys, CommitSeq(9))
+            .expect("publishes");
+
+        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        // Store the root and only the FIRST block.
+        store.put(cx, &blocks[0].bytes).expect("stores");
+        let root_id = store.put_root(cx, &root).expect("stores the root");
+
+        assert!(
+            matches!(store.reopen(root_id), Err(StoreError::MalformedRoot(_))),
+            "a root whose blocks are not all present must not reopen"
+        );
+        // The root itself is still perfectly readable — the failure is about the
+        // partition, not about the root object, and the two are worth telling apart.
+        assert_eq!(store.get_root(root_id).expect("the root is fine"), root);
+    });
+}
+
+/// A root is subject to the same identity rule as a block: bytes at its path that
+/// are a DIFFERENT root are refused.
+#[test]
+fn a_root_at_the_wrong_identity_is_refused() {
+    let dir = scratch_dir("reopen-wrongroot");
+    under_lab(43, move |cx| {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer
+            .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
+            .expect("creates");
+        let (root, _) = writer
+            .publish(strata_keys, CommitSeq(9))
+            .expect("publishes");
+
+        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let root_id = store.put_root(cx, &root).expect("stores");
+
+        // A different lawful root written over the path.
+        let other = fgdb_strata::root::PartitionRoot {
+            published_at: CommitSeq(11),
+            ..root
+        };
+        let other_bytes = fgdb_strata::root::encode_root(&other).expect("encodes");
+        std::fs::write(store.path(root_id), &other_bytes).expect("plant");
+
+        assert!(matches!(
+            store.get_root(root_id),
+            Err(StoreError::IdentityMismatch { .. })
+        ));
+    });
+}

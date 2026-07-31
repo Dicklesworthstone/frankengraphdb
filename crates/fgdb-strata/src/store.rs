@@ -67,6 +67,13 @@ pub enum StoreError {
     },
     /// The stored bytes are not a lawful block.
     Malformed(BlockError),
+    /// The stored bytes are not a lawful partition root, or a block it names
+    /// disagreed with what the root claimed about it.
+    ///
+    /// Separate from `Malformed`: a caller reopening a partition needs to know
+    /// whether the ROOT is wrong or one of the BLOCKS is, because those are
+    /// different objects to go and look at.
+    MalformedRoot(crate::root::RootError),
 }
 
 impl core::fmt::Display for StoreError {
@@ -81,6 +88,7 @@ impl core::fmt::Display for StoreError {
                 write!(f, "{block_id:?} already exists with different bytes")
             }
             Self::Malformed(error) => write!(f, "stored block is malformed: {error}"),
+            Self::MalformedRoot(error) => write!(f, "stored root is malformed: {error}"),
         }
     }
 }
@@ -207,6 +215,53 @@ impl BlockStore {
             });
         }
         Ok(bytes)
+    }
+
+    /// Store a partition root, returning the identity it was stored under.
+    ///
+    /// **A ROOT IS AN OBJECT LIKE ANY OTHER**, which is what makes reopening a
+    /// partition possible at all: the root is content-addressed and immutable, so
+    /// publishing a new one never mutates the old, and a reader that holds a root
+    /// identity can prove the bytes it found are that root. `manifest.root` remains
+    /// the only mutable object in the database (doctrine 5) — what would live there
+    /// is a POINTER to the current root's identity, and choosing where that pointer
+    /// lives is Chronicle's question rather than this store's.
+    ///
+    /// Deliberately the same `put`, so a root gets the identity derivation, the
+    /// no-overwrite rule and the collision refusal without a second implementation
+    /// that could drift from them. Only the reader differs, because only the reader
+    /// knows which decoder applies.
+    pub fn put_root(
+        &self,
+        cx: &CommitCx,
+        root: &crate::root::PartitionRoot,
+    ) -> Result<ObjectId, StoreError> {
+        let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
+        self.put(cx, &bytes)
+    }
+
+    /// Load the partition root named by `id`, verifying identity then lawfulness.
+    pub fn get_root(&self, id: ObjectId) -> Result<crate::root::PartitionRoot, StoreError> {
+        let bytes = self.get_bytes(id)?;
+        crate::root::decode_root(&bytes).map_err(StoreError::MalformedRoot)
+    }
+
+    /// Reopen a whole partition: the root, and every block it names.
+    ///
+    /// **THIS IS THE PAYOFF OF EVERYTHING ABOVE.** No commit stream is replayed and
+    /// no writer runs: a root identity, a directory, and the two checks that make a
+    /// content-addressed store trustworthy — the bytes are the object asked for, and
+    /// each block spans what the root claimed about it.
+    pub fn reopen(
+        &self,
+        id: ObjectId,
+    ) -> Result<(crate::root::PartitionRoot, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
+        let root = self.get_root(id)?;
+        let blocks = crate::root::resolve_blocks(&self.k_oid, self.namespace, &root, |wanted| {
+            self.get_bytes(wanted).ok()
+        })
+        .map_err(StoreError::MalformedRoot)?;
+        Ok((root, blocks))
     }
 
     /// Does this store hold the block named by `id`?
