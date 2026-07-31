@@ -1271,10 +1271,17 @@ fn maintenance_usage_never_bills_against_the_ordinary_band() {
     let rejection = led
         .apply(&second)
         .expect_err("maintenance committed + reserved must bound the lane");
-    let report = format!("{rejection:?}");
-    assert!(
-        report.contains("MaintenanceReserveExceeded"),
-        "the refusal must name the maintenance reserve, got: {report}"
+    assert_eq!(
+        rejection,
+        fgdb_resource::ledger::LedgerError::BucketRejected {
+            path: root_path(),
+            cause: fgdb_resource::ledger::BucketStateError::MaintenanceReserveExceeded {
+                axis: DurableChargeAxis::CanonicalDurableBytes,
+                usage: 40,
+                reserve: 20,
+            },
+        },
+        "the refusal must be the reserve law with the exact class-scoped arithmetic"
     );
 
     // And the ordinary band is fully intact: an ordinary reserve of the
@@ -1309,4 +1316,252 @@ fn maintenance_usage_never_bills_against_the_ordinary_band() {
     let bucket = bucket_of(&led);
     assert_eq!(bucket.maintenance_committed(), DurableChargeVector::ZERO);
     assert_eq!(bucket.ordinary_reserved(), dv(80, 0, 0));
+}
+
+/// CLASS PROPAGATION THROUGH ADJUST. The reserve law must bind every stage,
+/// not just reserve/charge: an adjust-up that would push the lane past its
+/// reserve is refused with the reserve law, and an adjust-down frees exactly
+/// the delta for the next reservation. Class propagation could regress here
+/// independently of the charge path because adjust rebuilds the committed
+/// delta from the charge entry's class.
+#[test]
+fn maintenance_adjust_is_bound_by_the_same_reserve() {
+    let mut led = probe_ledger();
+
+    let reservation = ReservationId([0x41; 32]);
+    let charge = ChargeId([0x42; 32]);
+    led.apply(&probe_transition(
+        0,
+        0x50,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Reserve {
+            reservation_id: reservation,
+            vector: dv(20, 0, 0),
+            hold: OwnerHold::None,
+        },
+    ))
+    .expect("reserve 20");
+    led.apply(&probe_transition(
+        1,
+        0x51,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Charge {
+            reservation_id: reservation,
+            expected_reservation_generation: 0,
+            charge_id: charge,
+            vector: dv(20, 0, 0),
+            stable_subject_key: StableSubjectKey([0x52; 32]),
+        },
+    ))
+    .expect("charge 20");
+
+    // Adjust UP to 40: the lane's committed alone would exceed the reserve.
+    let adjust_up = probe_transition(
+        2,
+        0x53,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Adjust {
+            charge_id: charge,
+            expected_generation: 0,
+            before_vector: dv(20, 0, 0),
+            after_vector: dv(40, 0, 0),
+            stable_subject_key: StableSubjectKey([0x52; 32]),
+        },
+    );
+    assert_eq!(
+        led.apply(&adjust_up)
+            .expect_err("adjust-up past the reserve must be refused"),
+        fgdb_resource::ledger::LedgerError::BucketRejected {
+            path: root_path(),
+            cause: fgdb_resource::ledger::BucketStateError::MaintenanceReserveExceeded {
+                axis: DurableChargeAxis::CanonicalDurableBytes,
+                usage: 40,
+                reserve: 20,
+            },
+        },
+    );
+
+    // Adjust DOWN to 10: admitted, and frees exactly 10 of lane capacity.
+    led.apply(&probe_transition(
+        2,
+        0x54,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Adjust {
+            charge_id: charge,
+            expected_generation: 0,
+            before_vector: dv(20, 0, 0),
+            after_vector: dv(10, 0, 0),
+            stable_subject_key: StableSubjectKey([0x52; 32]),
+        },
+    ))
+    .expect("adjust-down to 10");
+    assert_eq!(bucket_of(&led).maintenance_committed(), dv(10, 0, 0));
+
+    // The freed 10 is exactly reusable: reserve(10) fills the lane to 20.
+    led.apply(&probe_transition(
+        3,
+        0x55,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Reserve {
+            reservation_id: ReservationId([0x43; 32]),
+            vector: dv(10, 0, 0),
+            hold: OwnerHold::None,
+        },
+    ))
+    .expect("reserve 10 into the freed capacity");
+    let bucket = bucket_of(&led);
+    assert_eq!(bucket.maintenance_committed(), dv(10, 0, 0));
+    assert_eq!(bucket.maintenance_reserved(), dv(10, 0, 0));
+
+    // And one unit more is again the reserve law's refusal.
+    let over = probe_transition(
+        4,
+        0x56,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Reserve {
+            reservation_id: ReservationId([0x44; 32]),
+            vector: dv(1, 0, 0),
+            hold: OwnerHold::None,
+        },
+    );
+    assert_eq!(
+        led.apply(&over).expect_err("the lane is full at 20"),
+        fgdb_resource::ledger::LedgerError::BucketRejected {
+            path: root_path(),
+            cause: fgdb_resource::ledger::BucketStateError::MaintenanceReserveExceeded {
+                axis: DurableChargeAxis::CanonicalDurableBytes,
+                usage: 21,
+                reserve: 20,
+            },
+        },
+    );
+}
+
+/// CLASS PROPAGATION THROUGH TRANSFER. A charge moved to another path must
+/// keep its class on BOTH sides: the source-side subtract and the
+/// destination-side add route through the entry's class, so the destination
+/// lane — and every ancestor's — bills the moved usage against the right
+/// band. (At a shared ancestor the two sides net, which is exactly why a
+/// class slip here is invisible to conservation and needs its own test.)
+#[test]
+fn a_transferred_maintenance_charge_keeps_its_lane_on_both_sides() {
+    let child_path = QuotaPath::try_new(vec![
+        QuotaSegment::Database(DatabaseId([1u8; 16])),
+        QuotaSegment::Tenant(7),
+    ])
+    .expect("child path is canonical");
+
+    let all_ops = [
+        LedgerOperationKind::Reserve,
+        LedgerOperationKind::Charge,
+        LedgerOperationKind::Release,
+        LedgerOperationKind::Expire,
+        LedgerOperationKind::Transfer,
+        LedgerOperationKind::Adjust,
+    ];
+    let bucket = || {
+        ResourceBucketPolicy::try_new(dv(100, 1_000_000, 1_000), dv(20, 0, 0))
+            .expect("bucket policy")
+    };
+    let policy = ResourceLimitPolicy::try_new(
+        ResourceLimitPolicyEpoch(1),
+        [(root_path(), bucket()), (child_path.clone(), bucket())],
+        [
+            ResourceClassRule::try_new(ResourceClass::Ordinary, all_ops).expect("ordinary rule"),
+            ResourceClassRule::try_new(ResourceClass::RegisteredMaintenance, all_ops)
+                .expect("maintenance rule"),
+        ],
+        [1],
+    )
+    .expect("transfer policy");
+    let mut led = ResourceLedger::try_new(identity(), policy).expect("transfer ledger");
+
+    // Maintenance reserve+charge 20 at the ROOT path.
+    let reservation = ReservationId([0x61; 32]);
+    let charge = ChargeId([0x62; 32]);
+    led.apply(&probe_transition(
+        0,
+        0x70,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Reserve {
+            reservation_id: reservation,
+            vector: dv(20, 0, 0),
+            hold: OwnerHold::None,
+        },
+    ))
+    .expect("reserve 20 at root");
+    led.apply(&probe_transition(
+        1,
+        0x71,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Charge {
+            reservation_id: reservation,
+            expected_reservation_generation: 0,
+            charge_id: charge,
+            vector: dv(20, 0, 0),
+            stable_subject_key: StableSubjectKey([0x72; 32]),
+        },
+    ))
+    .expect("charge 20 at root");
+
+    // Transfer the charge to the child path under a registered maintenance
+    // owner.
+    led.apply(&probe_transition(
+        2,
+        0x73,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Transfer {
+            subject: LedgerSubject::Charge(charge),
+            expected_generation: 0,
+            target_owner: ResourceOwnerKey::Maintenance {
+                job_id: [0x74; 32],
+                registered_class: 1,
+            },
+            target_path: child_path.clone(),
+            exact_conserved_vector: dv(20, 0, 0),
+        },
+    ))
+    .expect("transfer the maintenance charge to the child");
+
+    // The child bills the moved usage as MAINTENANCE committed; the root,
+    // as the child's ancestor, nets the subtract against the
+    // destination-side add and keeps 20 — class-scoped on both.
+    let child_bucket = led.bucket(&child_path).expect("child bucket");
+    assert_eq!(child_bucket.maintenance_committed(), dv(20, 0, 0));
+    assert_eq!(child_bucket.ordinary_committed(), DurableChargeVector::ZERO);
+    let root_bucket = bucket_of(&led);
+    assert_eq!(root_bucket.maintenance_committed(), dv(20, 0, 0));
+    assert_eq!(root_bucket.ordinary_committed(), DurableChargeVector::ZERO);
+
+    // The ordinary band is untouched by maintenance usage at BOTH buckets:
+    // an ordinary reserve of the whole band at the child is admitted, and it
+    // bills ordinary at the root (its ancestor) while the maintenance usage
+    // stays in the maintenance lane at both. Pre-fix, the classless pool
+    // billed the child's moved usage against both ordinary bands.
+    let child_ordinary = ResourceLedgerTransition {
+        header: TransitionHeader {
+            expected_ledger_identity: identity(),
+            transition_id: TransitionId([0x76; 32]),
+            idempotency_key_digest: [0x76; 32],
+            expected_ledger_generation: 3,
+            owner: owner(SEQUENCE_OWNER),
+            resource_class: ResourceClass::Ordinary,
+            quota_path: child_path.clone(),
+        },
+        operation: LedgerOperation::Reserve {
+            reservation_id: ReservationId([0x64; 32]),
+            vector: dv(80, 0, 0),
+            hold: OwnerHold::None,
+        },
+        body_digest: [0x76; 32],
+    };
+    led.apply(&child_ordinary)
+        .expect("the child's ordinary band is untouched by maintenance usage");
+    let child_bucket = led.bucket(&child_path).expect("child bucket");
+    assert_eq!(child_bucket.ordinary_reserved(), dv(80, 0, 0));
+    assert_eq!(child_bucket.maintenance_committed(), dv(20, 0, 0));
+    let root_bucket = bucket_of(&led);
+    assert_eq!(root_bucket.ordinary_reserved(), dv(80, 0, 0));
+    assert_eq!(root_bucket.maintenance_committed(), dv(20, 0, 0));
+    assert_eq!(root_bucket.ordinary_committed(), DurableChargeVector::ZERO);
 }
