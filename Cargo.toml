@@ -26,6 +26,7 @@ members = [
     "crates/fgdb-resource",
     "crates/fgdb-sim",
     "crates/fgdb-sketch",
+    "crates/fgdb-strata",
     "crates/fgdb-types",
     "crates/fgdb-unsafe-arena",
     "crates/fgdb-unsafe-simd",

@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 70 (17 active, 52 planned, 1 reserved)
+* **Crates:** 70 (18 active, 51 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -84,7 +84,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
-| 1 | `fgdb-strata` | planned | `forbid` | all | W3 | — | label-independent tiers, seal/compact, stable-ID directory |
+| 1 | `fgdb-strata` | active | `forbid` | all | W3 | fgdb-w3-tier-d-ctj | label-independent tiers, seal/compact, stable-ID directory |
 | 2 | `fgdb-props` | planned | `forbid` | all | W3 | — | Property chunk storage, typed columns, and overflow promotion. |
 | 3 | `fgdb-buffer` | planned | `forbid` | all | W3 | — | The MVCC-aware ARC buffer pool and aligned direct-I/O buffers. |
 | 4 | `fgdb-scratch` | planned | `forbid` | all | W3 | — | Query-scoped spill scratch under bounded resources. |
@@ -383,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:cfe33cea8d7dbd6c` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:622285a436c644d0` — every normative decision, prose excluded.

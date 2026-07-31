@@ -34,10 +34,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
-// Re-frozen on each crate activation (fgdb-reference 08bfadf, then fgdb-sim).
+// Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim, then
+// fgdb-strata). Derived from the gate's own drift message, never hand-computed.
 // The semantic contract covers activation_status, so activating a crate MUST
 // move this — a pin that survived the change would be pinning nothing.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:cfe33cea8d7dbd6c";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:622285a436c644d0";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -163,12 +164,13 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        17,
-        "fourteen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's BLAKE3/AEAD \
+        18,
+        "fifteen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's BLAKE3/AEAD \
          kernel, fgdb-chronicle by fgdb-w2-object-identity-t0f's §5.1 identity \
          pipeline, fgdb-reference by fgdb-w2-delta-batches-og6n's semantics \
          oracle, fgdb-sim by fgdb-verif-sim-q97e's durability/semantics \
-         differential) plus all three landed islands: fgdb-unsafe-simd, \
+         differential, fgdb-strata by fgdb-w3-tier-d-ctj's tier-one \
+         delta-block format) plus all three landed islands: fgdb-unsafe-simd, \
          fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(
@@ -488,9 +490,13 @@ fn topology_neg_island_policy_downgraded() {
 
 #[test]
 fn topology_neg_planned_crate_claims_a_directory() {
+    // Keyed to fgdb-txn, not fgdb-strata: this fixture needs a crate that is
+    // STILL planned, and strata was activated. Whoever activates fgdb-txn must
+    // repoint it again rather than delete the law — a negative test whose subject
+    // became legal stops testing without ever going red on its own.
     let codes = codes_after(
-        "name = \"fgdb-strata\"\nlayer = \"strata\"\nlayer_position = 1\nrole = \"label-independent tiers, seal/compact, stable-ID directory\"\nrole_basis = \"plan_parenthetical\"\nunsafe_policy = \"forbid\"\nactivation_status = \"planned\"\nposture_participation = \"all\"\nposture_basis = \"product_shape\"\nowner = \"W3\"\nowner_bead = \"\"\nmanifest_dir = \"\"",
-        "name = \"fgdb-strata\"\nlayer = \"strata\"\nlayer_position = 1\nrole = \"label-independent tiers, seal/compact, stable-ID directory\"\nrole_basis = \"plan_parenthetical\"\nunsafe_policy = \"forbid\"\nactivation_status = \"planned\"\nposture_participation = \"all\"\nposture_basis = \"product_shape\"\nowner = \"W3\"\nowner_bead = \"\"\nmanifest_dir = \"crates/fgdb-strata\"",
+        "name = \"fgdb-txn\"\nlayer = \"txn_secure_access\"\nlayer_position = 1\nrole = \"MVCC, Graph-SSI/witness lifecycle, coordinator, final-effect merge ladder\"\nrole_basis = \"plan_parenthetical\"\nunsafe_policy = \"forbid\"\nactivation_status = \"planned\"\nposture_participation = \"all\"\nposture_basis = \"product_shape\"\nowner = \"W4\"\nowner_bead = \"fgdb-w4-g1-txn-core-qpmg\"\nmanifest_dir = \"\"",
+        "name = \"fgdb-txn\"\nlayer = \"txn_secure_access\"\nlayer_position = 1\nrole = \"MVCC, Graph-SSI/witness lifecycle, coordinator, final-effect merge ladder\"\nrole_basis = \"plan_parenthetical\"\nunsafe_policy = \"forbid\"\nactivation_status = \"planned\"\nposture_participation = \"all\"\nposture_basis = \"product_shape\"\nowner = \"W4\"\nowner_bead = \"fgdb-w4-g1-txn-core-qpmg\"\nmanifest_dir = \"crates/fgdb-txn\"",
     );
     assert_reports(&codes, "inactive_with_manifest_dir");
 }

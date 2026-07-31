@@ -1,0 +1,15 @@
+[package]
+name = "fgdb-strata"
+version = "0.0.1"
+edition = "2024"
+description = "Strata (B2): the graph-structured LSM. This activation lands tier one's durable artifact — the canonical delta-block format: a sorted, versioned adjacency run with an exact byte layout, a fail-closed decoder, and snapshot-visible scans read from the encoded form. Sealing, compressed CSR runs, archived anchors and the stable-ID directory are not here; bead fgdb-w3-tier-d-ctj."
+publish = false
+
+[dependencies.fgdb-types]
+path = "../fgdb-types"
+
+[dependencies.fgdb-delta-types]
+path = "../fgdb-delta-types"
+
+[lints]
+workspace = true
