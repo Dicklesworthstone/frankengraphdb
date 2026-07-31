@@ -241,6 +241,14 @@ pub enum ApplyError {
         declared: Option<ValidTimePeriod>,
         actual: Option<ValidTimePeriod>,
     },
+    /// A valid-time row whose after-period ends before it starts. The
+    /// before-image law checks agreement with the past; this one checks the
+    /// period itself — an inverted interval is not a weaker claim, it is not
+    /// a period at all (fgdb-nrub).
+    InvertedValidTimePeriod {
+        elem: ElementId,
+        declared: ValidTimePeriod,
+    },
     CounterBeforeMismatch {
         elem: ElementId,
         property: PropertyKeyId,
@@ -412,6 +420,12 @@ impl core::fmt::Display for ApplyError {
                 write!(
                     f,
                     "valid time on {elem:?}: before image disagrees with state"
+                )
+            }
+            Self::InvertedValidTimePeriod { elem, declared } => {
+                write!(
+                    f,
+                    "valid time on {elem:?}: after period {declared:?} ends before it starts"
                 )
             }
             Self::CounterBeforeMismatch {
@@ -982,6 +996,16 @@ impl ReferenceGraph {
                     self.edges.remove(eid);
                 }
                 self.vertices.remove(vid);
+                // Counter rows are element-keyed (the conflict layer emits
+                // ConflictKey::Element for them), so a deleted element's
+                // counters are dead state, not element-orthogonal history:
+                // identities never recycle (§6.2), which makes the residue
+                // permanently unreadable-but-present. Reap it with the
+                // element (fgdb-nrub).
+                self.counters.retain(|(elem, _), _| match elem {
+                    ElementId::Vertex(v) => v != vid,
+                    ElementId::Edge(e) => !actual.contains(e),
+                });
             }
             DeltaRow::DeleteEdge {
                 eid,
@@ -1000,6 +1024,10 @@ impl ReferenceGraph {
                     });
                 }
                 self.edges.remove(eid);
+                // Same law as DeleteVertex: element-keyed counters die with
+                // the element (fgdb-nrub).
+                self.counters
+                    .retain(|(elem, _), _| *elem != ElementId::Edge(*eid));
             }
             DeltaRow::LabelMembership {
                 vid,
@@ -1100,42 +1128,57 @@ impl ReferenceGraph {
                 before,
                 after,
                 ..
-            } => match elem {
-                ElementId::Vertex(vid) => {
-                    let vertex = self
-                        .vertices
-                        .get_mut(vid)
-                        .ok_or(ApplyError::NoSuchVertex { vid: *vid })?;
-                    let version = Self::successor_version(Some(vertex.version), row)?;
-                    let actual = vertex.valid_time;
-                    if actual != *before {
-                        return Err(ApplyError::ValidTimeBeforeMismatch {
-                            elem: *elem,
-                            declared: *before,
-                            actual,
-                        });
-                    }
-                    vertex.valid_time = *after;
-                    vertex.version = version;
+            } => {
+                // The after-period must BE a period before anything agrees
+                // to transition into it: start past end is inverted, and an
+                // inverted interval is dead state from the moment it lands
+                // (fgdb-nrub). Open periods (end = None) are always valid.
+                if let Some(period) = after
+                    && let Some(end) = period.end_micros
+                    && period.start_micros > end
+                {
+                    return Err(ApplyError::InvertedValidTimePeriod {
+                        elem: *elem,
+                        declared: *period,
+                    });
                 }
-                ElementId::Edge(eid) => {
-                    let edge = self
-                        .edges
-                        .get_mut(eid)
-                        .ok_or(ApplyError::NoSuchEdge { eid: *eid })?;
-                    let version = Self::successor_version(Some(edge.version), row)?;
-                    let actual = edge.valid_time;
-                    if actual != *before {
-                        return Err(ApplyError::ValidTimeBeforeMismatch {
-                            elem: *elem,
-                            declared: *before,
-                            actual,
-                        });
+                match elem {
+                    ElementId::Vertex(vid) => {
+                        let vertex = self
+                            .vertices
+                            .get_mut(vid)
+                            .ok_or(ApplyError::NoSuchVertex { vid: *vid })?;
+                        let version = Self::successor_version(Some(vertex.version), row)?;
+                        let actual = vertex.valid_time;
+                        if actual != *before {
+                            return Err(ApplyError::ValidTimeBeforeMismatch {
+                                elem: *elem,
+                                declared: *before,
+                                actual,
+                            });
+                        }
+                        vertex.valid_time = *after;
+                        vertex.version = version;
                     }
-                    edge.valid_time = *after;
-                    edge.version = version;
+                    ElementId::Edge(eid) => {
+                        let edge = self
+                            .edges
+                            .get_mut(eid)
+                            .ok_or(ApplyError::NoSuchEdge { eid: *eid })?;
+                        let version = Self::successor_version(Some(edge.version), row)?;
+                        let actual = edge.valid_time;
+                        if actual != *before {
+                            return Err(ApplyError::ValidTimeBeforeMismatch {
+                                elem: *elem,
+                                declared: *before,
+                                actual,
+                            });
+                        }
+                        edge.valid_time = *after;
+                        edge.version = version;
+                    }
                 }
-            },
+            }
             DeltaRow::Counter {
                 operation_key,
                 elem,

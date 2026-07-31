@@ -1138,3 +1138,111 @@ fn schema_rows_cannot_chain_across_relation_entries() {
         "a later relation may not validate against an earlier entry's transition"
     );
 }
+
+/// fgdb-nrub (F4) — counters are element-keyed state (the conflict layer
+/// emits ConflictKey::Element for them), so they die WITH the element:
+/// identities never recycle (§6.2), and residue would be permanently dead
+/// but present — observable to readers and to nothing else.
+#[test]
+fn a_deleted_elements_counters_are_reaped_with_it() {
+    let mut graph = social_graph();
+    let counter_on =
+        |key: u8, elem: ElementId, before: i128, delta: i128, after: i128| DeltaRow::Counter {
+            operation_key: OperationKey([key; 32]),
+            elem,
+            property: PROP_VISITS,
+            algebra_profile: oid(0x50),
+            delta,
+            before,
+            after,
+        };
+    graph
+        .apply_row(&counter_on(1, ElementId::Vertex(VId(1)), 0, 5, 5))
+        .expect("counter on vertex 1");
+    graph
+        .apply_row(&counter_on(2, ElementId::Vertex(VId(2)), 0, 7, 7))
+        .expect("counter on vertex 2");
+    graph
+        .apply_row(&counter_on(3, ElementId::Edge(EId(12)), 0, 3, 3))
+        .expect("counter on edge 12");
+
+    // Deleting edge 12 reaps ITS counter and no other.
+    let e12_version = graph.edge(EId(12)).expect("e12 exists").version;
+    graph
+        .apply_row(&DeltaRow::DeleteEdge {
+            eid: EId(12),
+            before_version: e12_version,
+        })
+        .expect("delete edge 12");
+    assert_eq!(
+        graph.counter(ElementId::Edge(EId(12)), PROP_VISITS),
+        None,
+        "the edge's counter dies with the edge"
+    );
+    assert_eq!(
+        graph.counter(ElementId::Vertex(VId(1)), PROP_VISITS),
+        Some(5),
+        "an unrelated vertex's counter survives"
+    );
+
+    // Deleting vertex 1 reaps its counter AND the counters of its retired
+    // incident edges (10, 11) — the cascade reaps the whole incident set's
+    // element-keyed state.
+    let v1_version = graph.vertex(VId(1)).expect("v1 exists").version;
+    graph
+        .apply_row(&DeltaRow::DeleteVertex {
+            vid: VId(1),
+            before_version: v1_version,
+            sorted_retired_incident_edges: vec![EId(10), EId(11)],
+        })
+        .expect("exact cascade applies");
+    assert_eq!(
+        graph.counter(ElementId::Vertex(VId(1)), PROP_VISITS),
+        None,
+        "the vertex's counter dies with the vertex"
+    );
+    assert_eq!(
+        graph.counter(ElementId::Vertex(VId(2)), PROP_VISITS),
+        Some(7),
+        "the surviving vertex's counter is untouched"
+    );
+}
+
+/// fgdb-nrub (F5) — a valid-time row whose after-period ends before it
+/// starts is refused: the before-image law checks agreement with the past,
+/// and this one checks the period itself.
+#[test]
+fn an_inverted_valid_time_period_is_refused() {
+    let mut graph = social_graph();
+    let period = |start: i64, end: Option<i64>| ValidTimePeriod {
+        start_micros: start,
+        end_micros: end,
+    };
+    let row = |before, after| DeltaRow::ValidTime {
+        elem: ElementId::Vertex(VId(1)),
+        contract_id: oid(0x80),
+        before,
+        after,
+    };
+
+    assert!(
+        matches!(
+            graph.apply_row(&row(None, Some(period(200, Some(100))))),
+            Err(ApplyError::InvertedValidTimePeriod {
+                elem: ElementId::Vertex(VId(1)),
+                ..
+            })
+        ),
+        "start past end is not a weaker claim, it is not a period"
+    );
+
+    // Boundary honesty — the refusal owns exactly one law: an OPEN period
+    // and a ZERO-LENGTH period are not inverted, and both still bind the
+    // before-image chain.
+    graph
+        .apply_row(&row(None, Some(period(200, None))))
+        .expect("an open period is not inverted");
+    graph
+        .apply_row(&row(Some(period(200, None)), Some(period(200, Some(200)))))
+        .expect("a zero-length period is not inverted");
+}
