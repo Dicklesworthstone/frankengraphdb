@@ -184,7 +184,14 @@ fn decode_proof_attestation(
     symbol_size: usize,
     dek: &[u8; 32],
 ) -> Option<[u8; 32]> {
-    let decoder = InactivationDecoder::new(source_symbols, symbol_size, code_seed(encoding));
+    // `source_symbols` derives from the descriptor's transfer_length, which
+    // is authenticated only by the UNKEYED EncodingId — attacker-rewritable
+    // past the systematic-table bound, where the infallible constructor
+    // panics. The attestation must not turn that into a process panic ahead
+    // of the hardened decode path (fgdb-raptorq-decoder-boundary-panic-hpjb's
+    // exact sibling).
+    let decoder =
+        InactivationDecoder::try_new(source_symbols, symbol_size, code_seed(encoding)).ok()?;
     let mut received = decoder.constraint_symbols();
     for bytes in authentic_symbols {
         let record = SymbolRecord::verify(bytes, encoding, dek).ok()?;

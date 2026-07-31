@@ -55,7 +55,11 @@ fn encoded(fec_profile: u16) -> fgdb_chronicle::EncodedObject {
 }
 
 fn symbol_payload() -> Vec<u8> {
-    (0..256u32).map(|i| (i % 241) as u8).collect()
+    // The wire model admits exactly `symbol_size` payloads: the encoder
+    // zero-pads every source symbol to the descriptor's size and asupersync's
+    // decoder refuses anything else wholesale, so a test record must honour
+    // the same law the production encoder does.
+    (0..1280u32).map(|i| (i % 241) as u8).collect()
 }
 
 fn record(encoding: &fgdb_chronicle::EncodedObject) -> SymbolRecord {
@@ -72,6 +76,22 @@ fn round_trips_through_serialize_and_verify() {
     let parsed = SymbolRecord::verify(&bytes, &encoding, &dek()).expect("authentic record");
     assert_eq!(parsed, original, "verify must reconstruct the exact record");
     assert_eq!(parsed.payload, symbol_payload());
+}
+
+/// THE WIRE-SHAPE LAW. Every symbol on the wire is exactly `symbol_size` —
+/// the encoder zero-pads to it and asupersync's decoder refuses anything
+/// else wholesale — so a SHORT-but-authentic payload must be rejected here
+/// rather than admitted to poison the entire decode downstream.
+#[test]
+fn a_short_payload_is_refused_even_when_authentic() {
+    let encoding = encoded(1);
+    let short = SymbolRecord::for_encoding(&encoding, 0x0002, 1, 42, 0, vec![0u8; 1279]);
+    let bytes = short.serialize(&encoding.symbol_auth_key(&dek()));
+    assert_eq!(
+        SymbolRecord::verify(&bytes, &encoding, &dek()),
+        Err(SymbolError::InconsistentLengths),
+        "a payload shorter than symbol_size is damage, not a shape to admit"
+    );
 }
 
 /// THE TRANSCRIPT-TOTALITY LAW. Flip one bit at every byte offset of the

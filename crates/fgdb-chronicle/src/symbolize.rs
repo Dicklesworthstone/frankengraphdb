@@ -15,7 +15,7 @@
 
 use crate::identity::EncodedObject;
 use crate::symbol::{SymbolError, SymbolRecord};
-use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
@@ -39,6 +39,11 @@ pub enum SymbolizeError {
     /// recomputed `ObjectId` is not the one requested. Content addressing
     /// says these are simply not that object.
     IdentityMismatch,
+    /// The RFC 6330 decode itself rejected the received set — structural
+    /// corruption (size/column/output violations) or a blown compute budget,
+    /// never rank deficiency, which is reported separately as
+    /// [`Self::InsufficientSymbols`] from the recovered source length.
+    DecodeFailed,
 }
 
 impl From<SymbolError> for SymbolizeError {
@@ -62,6 +67,9 @@ impl core::fmt::Display for SymbolizeError {
             Self::IdentityMismatch => {
                 f.write_str("recovered bytes do not recompute the requested ObjectId")
             }
+            Self::DecodeFailed => f.write_str(
+                "the RaptorQ decode rejected the received set (structural corruption or compute budget)",
+            ),
         }
     }
 }
@@ -137,6 +145,13 @@ pub fn encode_object(
     }
 
     let source = source_symbols(protected, symbol_size);
+    // The RFC 6330 systematic-index table bound (K = 4..=56403), enforced by
+    // asupersync's parameter builder with a PANIC past it. The bound lives
+    // here instead: a large object is a typed refusal, never a process
+    // panic, and the check precedes every allocation on this path.
+    if source.len() > 56_403 {
+        return Err(SymbolizeError::InvalidParameters);
+    }
     let k = u32::try_from(source.len()).map_err(|_| SymbolizeError::InvalidParameters)?;
     let encoder = SystematicEncoder::new(&source, symbol_size, code_seed(encoding))
         .ok_or(SymbolizeError::EncoderUnavailable)?;
@@ -156,7 +171,9 @@ pub fn encode_object(
         let esi = k
             .checked_add(offset)
             .ok_or(SymbolizeError::InvalidParameters)?;
-        let payload = encoder.repair_symbol(esi);
+        let payload = encoder
+            .try_repair_symbol(esi)
+            .map_err(|_| SymbolizeError::InvalidParameters)?;
         let record =
             SymbolRecord::for_encoding(encoding, object_kind, source_block, esi, 0, payload);
         records.push(record.serialize(&k_symbol));
@@ -250,7 +267,19 @@ pub fn decode_object(
         // This is the RFC 6330 erasure decoder; no JWT or signature state exists here.
         // ubs:ignore -- exact false match is `InactivationDecoder::decode`, not a JWT decoder.
         .decode(&received)
-        .map_err(|_| SymbolizeError::InsufficientSymbols)?;
+        .map_err(|error| match error {
+            // Rank deficiency — too few independent equations — is the one
+            // outcome "beyond the repair budget" honestly names: scrub must
+            // route it to repair, not to the corruption path.
+            DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. } => {
+                SymbolizeError::InsufficientSymbols
+            }
+            // Everything else is structural (size/arity/column/ESI/output
+            // violations) or a budget/rate-limit refusal: the received set is
+            // unusable, and calling it "insufficient" would have a scrubber
+            // fetch MORE copies of poison.
+            _ => SymbolizeError::DecodeFailed,
+        })?;
     if decoded.source.len() < k {
         return Err(SymbolizeError::InsufficientSymbols);
     }

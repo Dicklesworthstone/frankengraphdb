@@ -323,7 +323,14 @@ impl SymbolRecord {
         if record.source_block >= u32::from(descriptor.source_block_count) {
             return Err(SymbolError::InconsistentLengths);
         }
-        if record.payload.len() > usize::from(descriptor.symbol_size) {
+        // The encoder pads every source symbol to exactly `symbol_size`
+        // (symbolize.rs source_symbols zero-fills), and asupersync's
+        // validate_input requires the same equality wholesale: anything else
+        // is damage this check exists to name, not a shape to admit. A
+        // short-but-MAC-valid payload would otherwise enter here and fail the
+        // whole decode as one erasure too many, contradicting the per-symbol
+        // MAC's reason for existing.
+        if record.payload.len() != usize::from(descriptor.symbol_size) {
             return Err(SymbolError::InconsistentLengths);
         }
 
