@@ -29,8 +29,8 @@
 //! safe to leave untested.
 
 use fgdb_delta_types::{
-    DeltaRow, ElementId, EscrowDomainId, LabelId, OperationKey, PropertyKeyId, RelationId,
-    SchemaEpoch,
+    CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
+    OperationKey, PropertyKeyId, RelationId, SchemaEpoch,
 };
 use fgdb_reference::intents::{CanonicalMutationPotential, Intent, MismatchPolicy, Statement};
 use fgdb_reference::txn::{
@@ -1393,4 +1393,49 @@ fn an_uncontested_genesis_transaction_still_commits() {
     let mut next = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
     next.execute(&[create(2, 2)]).expect("executes");
     assert_eq!(commit_ok(&mut db, next, 2).0, CommitSeq(2));
+}
+
+/// fgdb-li8d — a commit must bind the coordinate's CURRENT schema epoch.
+/// The pre-fix commit hardcoded `SchemaEpoch(0)` into its CoordinateEntry,
+/// so every commit after any schema transition died
+/// `SchemaBindingMismatch{declared: 0, actual: 1}` — guaranteed reachable,
+/// one transition away.
+#[test]
+fn a_commit_binds_the_current_schema_epoch_after_a_transition() {
+    let mut db = seeded(); // coordinate at epoch 0, via the transaction path
+
+    // Bump the coordinate's epoch to 1 through the durable template path.
+    let bump = LogicalDeltaTemplate::build(
+        SEMANTICS,
+        [0x22; 32],
+        vec![CoordinateEntry {
+            graph: GRAPH,
+            branch: MAIN,
+            relation: REL,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: Some(ObjectId([0x70; 32])),
+            rows: vec![DeltaRow::Schema {
+                transition_oid: ObjectId([0x70; 32]),
+                before_epoch: SchemaEpoch(0),
+                after_epoch: SchemaEpoch(1),
+            }],
+        }],
+    )
+    .expect("bump template builds");
+    db.apply_template(&bump, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("schema transition applies");
+    assert_eq!(
+        db.graph(GRAPH, MAIN)
+            .expect("coordinate exists")
+            .schema_epoch(),
+        SchemaEpoch(1)
+    );
+
+    // THE LAW: a transaction begun after the transition commits cleanly.
+    // Pre-fix this died Apply(SchemaBindingMismatch{declared: 0, actual: 1}).
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.execute(&[create(3, 30)]).expect("executes");
+    let (seq, ..) = commit_ok(&mut db, txn, 3);
+    assert_eq!(seq, CommitSeq(3));
+    assert_eq!(prop_of(&db, MAIN, 3), Some(30));
 }

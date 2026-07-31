@@ -743,7 +743,16 @@ impl Transaction {
                 graph: self.graph,
                 branch: self.branch,
                 relation,
-                schema_epoch: SchemaEpoch(0),
+                // The preflight binds every entry to the coordinate's CURRENT
+                // epoch (SchemaBindingMismatch otherwise), so the epoch must
+                // be read from the coordinate at commit time — a hardcoded
+                // SchemaEpoch(0) fails every commit after any schema
+                // transition (fgdb-li8d). `map_or(0)` is the genesis case:
+                // the coordinate does not exist until this commit creates it,
+                // which is the same computation the preflight itself makes.
+                schema_epoch: db
+                    .graph(self.graph, self.branch)
+                    .map_or(SchemaEpoch(0), ReferenceGraph::schema_epoch),
                 schema_transition: None,
                 rows: self.effects,
             }],
