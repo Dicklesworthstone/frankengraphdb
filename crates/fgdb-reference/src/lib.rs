@@ -1175,6 +1175,7 @@ impl ReferenceGraph {
             DeltaRow::Escrow {
                 domain_id,
                 operation_key,
+                subject,
                 delta,
                 before_value,
                 after_value,
@@ -1183,6 +1184,18 @@ impl ReferenceGraph {
                 if self.already_applied(operation_key, row)? {
                     return Ok(());
                 }
+                // The conflict keys already claim this row "is checked against
+                // the subject, so a concurrent write to either [domain or
+                // subject] invalidates it" — and the anomaly test asserts that
+                // claim. Make it TRUE in the materializer, by the Counter
+                // arm's own precedent: subject existence plus version-chain
+                // participation (fgdb-wodn).
+                self.require_element(*subject)?;
+                let previous = self.element_version(*subject).ok_or(match subject {
+                    ElementId::Vertex(vid) => ApplyError::NoSuchVertex { vid: *vid },
+                    ElementId::Edge(eid) => ApplyError::NoSuchEdge { eid: *eid },
+                })?;
+                let version = Self::successor_version(Some(previous), row)?;
                 Self::require_closing(*before_value, *delta, *after_value)?;
                 let actual = self.escrow_balance(*domain_id);
                 if actual != *before_value {
@@ -1192,6 +1205,7 @@ impl ReferenceGraph {
                         actual,
                     });
                 }
+                self.set_element_version(*subject, version)?;
                 self.escrow.insert(*domain_id, *after_value);
                 self.operation_keys.insert(*operation_key, row.clone());
             }

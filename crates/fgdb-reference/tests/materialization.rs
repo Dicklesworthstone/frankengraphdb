@@ -574,6 +574,17 @@ fn an_operation_key_reused_by_a_different_row_is_refused() {
 #[test]
 fn an_escrow_row_with_a_false_before_value_is_refused() {
     let mut graph = ReferenceGraph::new();
+    // The subject must EXIST: fgdb-wodn made the materializer honour the
+    // check the conflict keys always claimed (Counter-arm precedent).
+    graph
+        .apply_row(&DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        })
+        .expect("subject vertex");
     let domain = EscrowDomainId(7);
     let row = |key: u8, before: i128, delta: i128, after: i128| DeltaRow::Escrow {
         domain_id: domain,
@@ -594,6 +605,55 @@ fn an_escrow_row_with_a_false_before_value_is_refused() {
         Err(ApplyError::EscrowBeforeMismatch { .. })
     ));
     assert_eq!(graph, settled);
+}
+
+/// fgdb-wodn — the subject check the conflict keys always claimed. An Escrow
+/// row naming a subject that does not exist is refused, and one that exists
+/// joins the element's version chain (the Counter arm's precedent), making
+/// "a concurrent write to either invalidates it" true in the materializer.
+#[test]
+fn an_escrow_row_requires_and_versions_its_subject() {
+    let domain = EscrowDomainId(9);
+    let row = |key: u8, before: i128, delta: i128, after: i128| DeltaRow::Escrow {
+        domain_id: domain,
+        epoch: 1,
+        operation_key: OperationKey([key; 32]),
+        subject: ElementId::Vertex(VId(1)),
+        subject_property: None,
+        delta,
+        before_value: before,
+        after_value: after,
+    };
+
+    // No vertex 1 anywhere: refused, and nothing is applied.
+    let mut graph = ReferenceGraph::new();
+    assert!(matches!(
+        graph.apply_row(&row(1, 0, 100, 100)),
+        Err(ApplyError::NoSuchVertex { .. })
+    ));
+    assert_eq!(graph, ReferenceGraph::new());
+
+    // With the subject present the row applies AND moves the subject's
+    // version chain: the claimed check is observable, not just emitted.
+    graph
+        .apply_row(&DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        })
+        .expect("subject vertex");
+    let version_before = graph.element_version(ElementId::Vertex(VId(1)));
+    graph
+        .apply_row(&row(2, 0, 100, 100))
+        .expect("escrow applies");
+    assert_eq!(graph.escrow_balance(domain), 100);
+    assert_ne!(
+        graph.element_version(ElementId::Vertex(VId(1))),
+        version_before,
+        "the subject participates in the version chain, as the conflict rule claims"
+    );
 }
 
 #[test]
