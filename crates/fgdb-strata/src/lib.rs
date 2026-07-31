@@ -36,6 +36,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compact;
 pub mod root;
 pub mod store;
 pub mod writer;
