@@ -645,107 +645,118 @@ impl<'region, V> Children<'region, V> {
     }
 
     fn shrink_best_effort(&mut self, scope: &'region RegionScope, cx: &QueryCx) {
-        if matches!(self, Self::Node16 { keys, .. } if keys.len() <= Self::NODE4_CAPACITY) {
-            let Ok(placeholder) = Self::empty(scope) else {
-                return;
-            };
-            let old = core::mem::replace(self, placeholder);
-            if let Self::Node16 { keys, nodes } = old {
-                *self = Self::Node4 { keys, nodes };
+        // Demotions cascade: a 256→48 demotion can land below the 48→16
+        // threshold, and that in turn below the 16→4 one. Each successful
+        // step strictly lowers the representation class, so the loop
+        // terminates; every step stays best-effort, and an allocation
+        // refusal keeps the current (valid, fatter) form.
+        loop {
+            if matches!(self, Self::Node16 { keys, .. } if keys.len() <= Self::NODE4_CAPACITY) {
+                let Ok(placeholder) = Self::empty(scope) else {
+                    return;
+                };
+                let old = core::mem::replace(self, placeholder);
+                if let Self::Node16 { keys, nodes } = old {
+                    *self = Self::Node4 { keys, nodes };
+                }
+                continue;
             }
-            return;
-        }
 
-        if matches!(self, Self::Node48 { len, .. } if *len <= Self::NODE16_CAPACITY) {
-            let Ok(mut new_keys) = RegionVec::new_in(scope) else {
-                return;
-            };
-            if Self::try_reserve(
-                &mut new_keys,
-                cx,
-                Self::NODE16_CAPACITY,
-                "demoting Node48 to Node16",
-            )
-            .is_err()
-            {
-                return;
-            }
-            let Ok(mut new_nodes) = try_empty_node_slots(
-                scope,
-                cx,
-                Self::NODE16_CAPACITY,
-                "demoting Node48 to Node16",
-            ) else {
-                return;
-            };
-            let Self::Node48 { index, len, .. } = self else {
-                return;
-            };
-            for edge in u8::MIN..=u8::MAX {
-                if index.get(usize::from(edge)).is_some_and(|slot| *slot != 0)
-                    && new_keys.try_push(cx, edge).is_err()
+            if matches!(self, Self::Node48 { len, .. } if *len <= Self::NODE16_CAPACITY) {
+                let Ok(mut new_keys) = RegionVec::new_in(scope) else {
+                    return;
+                };
+                if Self::try_reserve(
+                    &mut new_keys,
+                    cx,
+                    Self::NODE16_CAPACITY,
+                    "demoting Node48 to Node16",
+                )
+                .is_err()
                 {
                     return;
                 }
-            }
-            debug_assert_eq!(new_keys.len(), *len);
-            let Ok(placeholder) = Self::empty(scope) else {
-                return;
-            };
-            let old = core::mem::replace(self, placeholder);
-            if let Self::Node48 {
-                index,
-                mut nodes,
-                len,
-            } = old
-            {
-                for (ordinal, &edge) in new_keys.iter().enumerate() {
-                    let slot = usize::from(index.as_slice()[usize::from(edge)]) - 1;
-                    new_nodes.as_mut_slice()[ordinal] = nodes.get_mut(slot).and_then(Option::take);
-                }
-                new_nodes.truncate(len);
-                *self = Self::Node16 {
-                    keys: new_keys,
-                    nodes: new_nodes,
+                let Ok(mut new_nodes) = try_empty_node_slots(
+                    scope,
+                    cx,
+                    Self::NODE16_CAPACITY,
+                    "demoting Node48 to Node16",
+                ) else {
+                    return;
                 };
-            }
-            return;
-        }
-
-        if matches!(self, Self::Node256 { len, .. } if *len <= Self::NODE48_CAPACITY) {
-            let Ok(mut compact_nodes) = try_empty_node_slots(
-                scope,
-                cx,
-                Self::NODE48_CAPACITY,
-                "demoting Node256 to Node48",
-            ) else {
-                return;
-            };
-            let Ok(mut index) = try_zeroed_node48_index(scope, cx, "demoting Node256 to Node48")
-            else {
-                return;
-            };
-            let Ok(placeholder) = Self::empty(scope) else {
-                return;
-            };
-            let old = core::mem::replace(self, placeholder);
-            if let Self::Node256 { mut nodes, len } = old {
-                let mut compact_slot = 0usize;
-                for edge in 0..Self::NODE256_CAPACITY {
-                    if let Some(node) = nodes.get_mut(edge).and_then(Option::take) {
-                        compact_nodes.as_mut_slice()[compact_slot] = Some(node);
-                        index.as_mut_slice()[edge] = encode_node48_slot(compact_slot);
-                        compact_slot += 1;
+                let Self::Node48 { index, len, .. } = self else {
+                    return;
+                };
+                for edge in u8::MIN..=u8::MAX {
+                    if index.get(usize::from(edge)).is_some_and(|slot| *slot != 0)
+                        && new_keys.try_push(cx, edge).is_err()
+                    {
+                        return;
                     }
                 }
-                debug_assert_eq!(compact_slot, len);
-                *self = Self::Node48 {
-                    index,
-                    nodes: compact_nodes,
-                    len,
+                debug_assert_eq!(new_keys.len(), *len);
+                let Ok(placeholder) = Self::empty(scope) else {
+                    return;
                 };
-                self.shrink_best_effort(scope, cx);
+                let old = core::mem::replace(self, placeholder);
+                if let Self::Node48 {
+                    index,
+                    mut nodes,
+                    len,
+                } = old
+                {
+                    for (ordinal, &edge) in new_keys.iter().enumerate() {
+                        let slot = usize::from(index.as_slice()[usize::from(edge)]) - 1;
+                        new_nodes.as_mut_slice()[ordinal] =
+                            nodes.get_mut(slot).and_then(Option::take);
+                    }
+                    new_nodes.truncate(len);
+                    *self = Self::Node16 {
+                        keys: new_keys,
+                        nodes: new_nodes,
+                    };
+                }
+                continue;
             }
+
+            if matches!(self, Self::Node256 { len, .. } if *len <= Self::NODE48_CAPACITY) {
+                let Ok(mut compact_nodes) = try_empty_node_slots(
+                    scope,
+                    cx,
+                    Self::NODE48_CAPACITY,
+                    "demoting Node256 to Node48",
+                ) else {
+                    return;
+                };
+                let Ok(mut index) =
+                    try_zeroed_node48_index(scope, cx, "demoting Node256 to Node48")
+                else {
+                    return;
+                };
+                let Ok(placeholder) = Self::empty(scope) else {
+                    return;
+                };
+                let old = core::mem::replace(self, placeholder);
+                if let Self::Node256 { mut nodes, len } = old {
+                    let mut compact_slot = 0usize;
+                    for edge in 0..Self::NODE256_CAPACITY {
+                        if let Some(node) = nodes.get_mut(edge).and_then(Option::take) {
+                            compact_nodes.as_mut_slice()[compact_slot] = Some(node);
+                            index.as_mut_slice()[edge] = encode_node48_slot(compact_slot);
+                            compact_slot += 1;
+                        }
+                    }
+                    debug_assert_eq!(compact_slot, len);
+                    *self = Self::Node48 {
+                        index,
+                        nodes: compact_nodes,
+                        len,
+                    };
+                }
+                continue;
+            }
+
+            return;
         }
     }
 
@@ -789,45 +800,59 @@ impl<'region, V> Node<'region, V> {
     }
 
     fn get(&self, remaining: &[u8]) -> Option<&V> {
-        if !remaining.starts_with(self.prefix.as_slice()) {
-            return None;
+        // Iterative descent: ART depth is data-dependent (an attacker
+        // steering key divergence steers it), so no lookup path may spend
+        // native stack frames per level.
+        let mut current = self;
+        let mut remaining = remaining;
+        loop {
+            if !remaining.starts_with(current.prefix.as_slice()) {
+                return None;
+            }
+            remaining = &remaining[current.prefix.len()..];
+            if remaining.is_empty() {
+                return current.entry.as_ref().map(|entry| &entry.value);
+            }
+            current = current.children.get(remaining[0])?;
+            remaining = &remaining[1..];
         }
-        let remaining = &remaining[self.prefix.len()..];
-        if remaining.is_empty() {
-            return self.entry.as_ref().map(|entry| &entry.value);
-        }
-        self.children
-            .get(remaining[0])
-            .and_then(|child| child.get(&remaining[1..]))
     }
 
     fn get_mut(&mut self, remaining: &[u8]) -> Option<&mut V> {
-        if !remaining.starts_with(self.prefix.as_slice()) {
-            return None;
+        // Iterative, same reason as `get`.
+        let mut current = self;
+        let mut remaining = remaining;
+        loop {
+            if !remaining.starts_with(current.prefix.as_slice()) {
+                return None;
+            }
+            remaining = &remaining[current.prefix.len()..];
+            if remaining.is_empty() {
+                return current.entry.as_mut().map(|entry| &mut entry.value);
+            }
+            current = current.children.get_mut(remaining[0])?;
+            remaining = &remaining[1..];
         }
-        let remaining = &remaining[self.prefix.len()..];
-        if remaining.is_empty() {
-            return self.entry.as_mut().map(|entry| &mut entry.value);
-        }
-        self.children
-            .get_mut(remaining[0])
-            .and_then(|child| child.get_mut(&remaining[1..]))
     }
 
     fn find_prefix_node(&self, remaining: &[u8]) -> Option<&Self> {
-        let common = common_prefix_len(self.prefix.as_slice(), remaining);
-        if common == remaining.len() {
-            // The requested prefix can finish in the middle of this node's
-            // compressed prefix; every entry below it still matches.
-            return Some(self);
+        // Iterative, same reason as `get`.
+        let mut current = self;
+        let mut remaining = remaining;
+        loop {
+            let common = common_prefix_len(current.prefix.as_slice(), remaining);
+            if common == remaining.len() {
+                // The requested prefix can finish in the middle of this node's
+                // compressed prefix; every entry below it still matches.
+                return Some(current);
+            }
+            if common != current.prefix.len() {
+                return None;
+            }
+            remaining = &remaining[common..];
+            current = current.children.get(remaining[0])?;
+            remaining = &remaining[1..];
         }
-        if common != self.prefix.len() {
-            return None;
-        }
-        let remaining = &remaining[common..];
-        self.children
-            .get(remaining[0])
-            .and_then(|child| child.find_prefix_node(&remaining[1..]))
     }
 
     fn try_insert(
@@ -838,28 +863,40 @@ impl<'region, V> Node<'region, V> {
         full_key: &[u8],
         value: V,
     ) -> Result<Option<V>, ArtError> {
-        let common = common_prefix_len(self.prefix.as_slice(), remaining);
-        if common != self.prefix.len() {
-            return self.try_split_and_insert(scope, cx, common, remaining, full_key, value);
-        }
-
-        let remaining = &remaining[common..];
-        if remaining.is_empty() {
-            if let Some(entry) = &mut self.entry {
-                return Ok(Some(core::mem::replace(&mut entry.value, value)));
+        // Iterative descent: only the child-descent arm looped in the
+        // recursive form, and per-level native frames must not scale with
+        // attacker-influenced key divergence.
+        let mut current = self;
+        let mut remaining = remaining;
+        loop {
+            let common = common_prefix_len(current.prefix.as_slice(), remaining);
+            if common != current.prefix.len() {
+                return current.try_split_and_insert(scope, cx, common, remaining, full_key, value);
             }
-            self.entry = Some(Entry::try_new(scope, cx, full_key, value)?);
+
+            let after_prefix = &remaining[common..];
+            if after_prefix.is_empty() {
+                if let Some(entry) = &mut current.entry {
+                    return Ok(Some(core::mem::replace(&mut entry.value, value)));
+                }
+                current.entry = Some(Entry::try_new(scope, cx, full_key, value)?);
+                return Ok(None);
+            }
+
+            let edge = after_prefix[0];
+            if current.children.get(edge).is_some() {
+                remaining = &after_prefix[1..];
+                current = match current.children.get_mut(edge) {
+                    Some(child) => child,
+                    None => unreachable!("presence checked immediately above"),
+                };
+                continue;
+            }
+
+            let leaf = Self::try_leaf(scope, cx, &after_prefix[1..], full_key, value)?;
+            current.children.try_insert(scope, cx, edge, leaf)?;
             return Ok(None);
         }
-
-        let edge = remaining[0];
-        if let Some(child) = self.children.get_mut(edge) {
-            return child.try_insert(scope, cx, &remaining[1..], full_key, value);
-        }
-
-        let leaf = Self::try_leaf(scope, cx, &remaining[1..], full_key, value)?;
-        self.children.try_insert(scope, cx, edge, leaf)?;
-        Ok(None)
     }
 
     fn try_split_and_insert(
@@ -963,30 +1000,79 @@ impl<'region, V> Node<'region, V> {
     }
 
     fn remove(&mut self, scope: &'region RegionScope, cx: &QueryCx, remaining: &[u8]) -> Option<V> {
-        if !remaining.starts_with(self.prefix.as_slice()) {
-            return None;
-        }
-        let remaining = &remaining[self.prefix.len()..];
-        let removed = if remaining.is_empty() {
-            self.entry.take().map(|entry| entry.value)
-        } else {
-            let edge = remaining[0];
-            let (removed, child_became_empty) = {
-                let child = self.children.get_mut(edge)?;
-                let removed = child.remove(scope, cx, &remaining[1..]);
-                let empty = child.entry.is_none() && child.children.len() == 0;
-                (removed, empty)
-            };
-            if child_became_empty {
-                let _ = self.children.remove(scope, cx, edge);
-            }
-            removed
-        };
+        // Iterative two-pass removal. The recursive form spent one native
+        // frame per level on the way down and per level on the unwind;
+        // attacker-steered key divergence made that a stack-overflow abort
+        // (fgdb-6k8q). The unwind is safe to flatten because of two
+        // representation invariants, both maintained by this file:
+        //
+        //   1. Before any removal, every inner node holds an entry OR at
+        //      least two children (splits create entry-or-two-children
+        //      parents; every completed removal recompresses eagerly).
+        //   2. Recompressing a node mutates only that node — its parent
+        //      keeps the same child count at the same edge.
+        //
+        // So on the unwind path every ancestor's recompress check is a
+        // no-op, the empty-child edge drop can happen only at the target's
+        // parent, and the only frames that can do real work are the target
+        // and its parent.
 
-        if removed.is_some() {
-            self.recompress_unary_best_effort(scope, cx);
+        // Pass 1: descend to the node whose entry the key names.
+        let mut current = &mut *self;
+        let mut rest = remaining;
+        loop {
+            if !rest.starts_with(current.prefix.as_slice()) {
+                return None;
+            }
+            rest = &rest[current.prefix.len()..];
+            if rest.is_empty() {
+                break;
+            }
+            current = current.children.get_mut(rest[0])?;
+            rest = &rest[1..];
         }
-        removed
+        let removed = current.entry.take().map(|entry| entry.value)?;
+        // The recursive form recompresses the target's own frame before its
+        // parent acts; a target that lost its entry and holds one child
+        // merges with it here.
+        current.recompress_unary_best_effort(scope, cx);
+        if current.entry.is_some() || current.children.len() != 0 {
+            return Some(removed);
+        }
+
+        // Pass 2: the target became empty, so its parent drops the edge and
+        // recompresses. Re-descending reaches the same parent: pass 1 took
+        // an entry and (above) changed no prefix or edge on the path. The
+        // target is identified exactly — it is the child whose prefix
+        // consumes the last offered byte.
+        let mut parent = &mut *self;
+        let mut rest = remaining;
+        loop {
+            rest = &rest[parent.prefix.len()..];
+            if rest.is_empty() {
+                // The target was the root itself; there is no edge to drop.
+                return Some(removed);
+            }
+            let edge = rest[0];
+            let offered = &rest[1..];
+            let is_target = match parent.children.get(edge) {
+                Some(child) => offered.len() == child.prefix.len(),
+                None => unreachable!("pass 1 descended this exact edge"),
+            };
+            if is_target {
+                let child = parent.children.get(edge).expect("edge from pass 1");
+                debug_assert!(offered.starts_with(child.prefix.as_slice()));
+                debug_assert!(child.entry.is_none() && child.children.len() == 0);
+                let _ = parent.children.remove(scope, cx, edge);
+                parent.recompress_unary_best_effort(scope, cx);
+                return Some(removed);
+            }
+            rest = offered;
+            parent = match parent.children.get_mut(edge) {
+                Some(child) => child,
+                None => unreachable!("pass 1 descended this exact edge"),
+            };
+        }
     }
 
     fn recompress_unary_best_effort(&mut self, scope: &'region RegionScope, cx: &QueryCx) {
@@ -1024,15 +1110,21 @@ impl<'region, V> Node<'region, V> {
     }
 
     fn record_histogram(&self, histogram: &mut NodeKindHistogram) {
-        // A terminal leaf owns an empty Node4-shaped container for lazy
-        // expansion, but that container is not an ART inner node and must not
-        // inflate diagnostic representation counts.
-        if self.children.len() != 0 {
-            histogram.record(self.children.kind());
-        }
-        for ordinal in 0..self.children.len() {
-            if let Some((_, child)) = self.children.edge_at(ordinal) {
-                child.record_histogram(histogram);
+        // Explicit stack: this walk is diagnostic, but diagnostics run on
+        // live trees, and tree depth is data-dependent — the recursive form
+        // spent a native frame per level (fgdb-6k8q).
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            // A terminal leaf owns an empty Node4-shaped container for lazy
+            // expansion, but that container is not an ART inner node and must not
+            // inflate diagnostic representation counts.
+            if node.children.len() != 0 {
+                histogram.record(node.children.kind());
+            }
+            for ordinal in 0..node.children.len() {
+                if let Some((_, child)) = node.children.edge_at(ordinal) {
+                    stack.push(child);
+                }
             }
         }
     }
@@ -1927,6 +2019,77 @@ mod tests {
         assert_eq!(tree.remove(&cx, b"prefix-\xff"), Ok(Some(7)));
         assert!(tree.is_empty());
         assert_eq!(tree.node_kind_histogram(), NodeKindHistogram::default());
+    }
+
+    /// fgdb-6k8q: every ART operation is iterative, so tree depth — which is
+    /// data-dependent and therefore attacker-steerable through key
+    /// divergence — must never price native stack frames. The recursive
+    /// forms of get/get_mut/find_prefix_node/try_insert/remove and
+    /// record_histogram spent one frame per level; a chain of
+    /// prefix-extended keys made that a stack-overflow ABORT rather than a
+    /// typed refusal. This builds a 6,000-level chain inside a 512 KiB
+    /// thread (the recursive shape needed ~2 MiB at that depth) and walks it
+    /// down, mutates it, and walks it back up.
+    #[test]
+    fn deep_trees_do_not_spend_native_stack() {
+        const DEPTH: usize = 6_000;
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let scope = test_scope();
+                let cx = query_cx();
+                let mut tree = AdaptiveRadixTree::new_in(&scope);
+
+                // Each key is a strict prefix of the next, so every insert
+                // adds exactly one level: a worst-case chain, not a
+                // balanced trie.
+                let mut keys: Vec<Vec<u8>> = Vec::with_capacity(DEPTH);
+                for depth in 1..=DEPTH {
+                    keys.push(vec![0u8; depth]);
+                }
+                for (index, key) in keys.iter().enumerate() {
+                    assert_eq!(tree.insert(&cx, key, index as u64), Ok(None));
+                }
+                assert_eq!(tree.len(), DEPTH);
+
+                // Iterative lookup at full depth.
+                for (index, key) in keys.iter().enumerate() {
+                    assert_eq!(tree.get(key), Some(&(index as u64)));
+                }
+                // Prefix walk over the whole chain.
+                assert_eq!(tree.iter().count(), DEPTH);
+                // get_mut at full depth.
+                let deepest = keys.last().expect("nonempty").clone();
+                *tree.get_mut(&deepest).expect("present") = u64::MAX;
+                assert_eq!(tree.get(&deepest), Some(&u64::MAX));
+
+                // Removal in insertion order: shallowest first — each remove
+                // recompresses the chain's head; the last removes are full
+                // two-pass descents.
+                for (index, key) in keys.iter().enumerate() {
+                    let expected = if index == DEPTH - 1 {
+                        u64::MAX
+                    } else {
+                        index as u64
+                    };
+                    assert_eq!(tree.remove(&cx, key), Ok(Some(expected)));
+                }
+                assert!(tree.is_empty());
+                assert_eq!(tree.node_kind_histogram(), NodeKindHistogram::default());
+
+                // Rebuild and remove deepest-first: every remove is a full
+                // two-pass descent + parent edge drop.
+                for (index, key) in keys.iter().enumerate() {
+                    assert_eq!(tree.insert(&cx, key, index as u64), Ok(None));
+                }
+                for (index, key) in keys.iter().enumerate().rev() {
+                    assert_eq!(tree.remove(&cx, key), Ok(Some(index as u64)));
+                }
+                assert!(tree.is_empty());
+            })
+            .expect("spawn")
+            .join()
+            .expect("deep-tree thread must not abort or panic");
     }
 
     #[test]
