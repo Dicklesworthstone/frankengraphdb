@@ -249,6 +249,32 @@ fn the_logical_command_sequence_must_advance() {
     assert_eq!(chain.len(), 3);
 }
 
+#[test]
+fn logical_command_sequence_exhaustion_is_permanent_and_named_exactly() {
+    let maximum = u64::MAX;
+    let mut chain = MarkerChain::new();
+    chain
+        .append(marker(1, maximum))
+        .expect("the final representable logical position is assignable");
+
+    assert_eq!(
+        chain.append(marker(2, maximum)).err(),
+        Some(ChainError::LogicalCommandSeqExhausted { frontier: maximum })
+    );
+    assert_eq!(chain.len(), 1, "an exhausted append changes no state");
+
+    let entries = forged(vec![marker(1, maximum), marker(2, maximum)]);
+    assert_eq!(
+        MarkerChain::verify_entries(&entries),
+        Err(ChainVerifyFailure {
+            commit_seq: 2,
+            cause: ChainVerifyCause::Structure(ChainError::LogicalCommandSeqExhausted {
+                frontier: maximum,
+            }),
+        })
+    );
+}
+
 /// THE BRANCH-HEAD COMPARE-AND-SWAP. A head advances only against the head
 /// the marker expected.
 #[test]

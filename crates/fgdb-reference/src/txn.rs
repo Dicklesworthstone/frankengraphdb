@@ -102,8 +102,11 @@ pub struct Transaction {
     /// mutation class. Terminal-path selection reads this value, never the
     /// surviving effect count.
     cumulative_mutation_potential: CanonicalMutationPotential,
-    /// Append-only reference statement lifecycle. Every execution appends
-    /// `Opened` before evaluation and exactly one terminal event afterward.
+    /// Append-only reference statement lifecycle. Every accepted registration
+    /// appends `Opened` before evaluation, and every call returning `Ok` appends
+    /// exactly one terminal event for it. A typed publication error after
+    /// evaluation may leave the final statement open; no result is visible from
+    /// such an event.
     statement_events: Vec<StatementLifecycleEvent>,
     statement_failures: usize,
     /// Transaction-global index of the next statement submitted through
@@ -248,6 +251,10 @@ pub enum TxnError {
     /// The generation counter cannot represent the next successful
     /// publication. Refuse before publishing effects or results.
     WorkspaceGenerationExhausted { current: WorkspaceGeneration },
+    /// The next statement index has no representable successor. Refuse before
+    /// registering that Open event, because the cursor could not then advance
+    /// without wrapping or reusing the same index.
+    StatementIndexExhausted { current: usize },
     /// The effects did not form a canonical template.
     Canonical(CanonicalError),
     /// The effects did not apply to the committed state even though no conflict
@@ -282,6 +289,9 @@ impl core::fmt::Display for TxnError {
                 "workspace generation {} has no representable successor",
                 current.value()
             ),
+            Self::StatementIndexExhausted { current } => {
+                write!(f, "statement index space is exhausted at {current}")
+            }
             Self::Canonical(error) => write!(f, "effects are not canonical: {error:?}"),
             Self::Apply(error) => write!(f, "effects did not apply: {error}"),
         }
@@ -552,6 +562,20 @@ impl Transaction {
         keys
     }
 
+    /// Consume the next transaction-global statement index without wrapping.
+    ///
+    /// The cursor advances before `Opened` is appended. Consequently an
+    /// exhaustion refusal creates no lifecycle trace, while any later refusal
+    /// cannot cause a retry to reuse an index that has already become visible.
+    fn take_statement_index(&mut self) -> Result<usize, TxnError> {
+        let current = self.next_statement_index;
+        let next = current
+            .checked_add(1)
+            .ok_or(TxnError::StatementIndexExhausted { current })?;
+        self.next_statement_index = next;
+        Ok(current)
+    }
+
     /// Evaluate `statements` against the workspace, folding their effects in.
     ///
     /// Called more than once to model a transaction that issues statements over
@@ -583,7 +607,7 @@ impl Transaction {
         }
 
         for statement in statements {
-            let statement_index = self.next_statement_index;
+            let statement_index = self.take_statement_index()?;
             let opened_at = self.workspace_generation;
             let mutation_potential = statement.mutation_potential();
             self.statement_events.push(StatementLifecycleEvent::Opened {
@@ -597,8 +621,6 @@ impl Transaction {
                 self.last_intent_ordinal,
             );
             self.last_intent_ordinal = last_intent_ordinal;
-            self.next_statement_index += 1;
-
             match outcome {
                 Outcome::Aborted { failure, .. } => {
                     self.statement_events
@@ -681,8 +703,7 @@ impl Transaction {
                 offered: expected_predecessor,
             });
         }
-        let statement_index = self.next_statement_index;
-        self.next_statement_index += 1;
+        let statement_index = self.take_statement_index()?;
         self.statement_events.push(StatementLifecycleEvent::Opened {
             statement: statement_index,
             predecessor: self.workspace_generation,
@@ -867,3 +888,66 @@ impl TxnOutcome {
 /// A statement failure paired with the statement it came from, for callers that
 /// want to inspect what survived a partially-failed transaction.
 pub type IndexedFailure = (usize, StatementFailure);
+
+#[cfg(test)]
+mod overflow_internal_tests {
+    use super::{StatementTerminal, Transaction, TxnError};
+    use crate::ReferenceDatabase;
+    use crate::intents::{Intent, Statement, StatementFailure};
+    use fgdb_types::{BranchId, GraphId, VId};
+
+    fn transaction() -> Transaction {
+        Transaction::begin_genesis(&ReferenceDatabase::new(), GraphId(1), BranchId(1))
+            .expect("genesis transaction begins")
+    }
+
+    #[test]
+    fn statement_index_exhaustion_registers_no_lifecycle_event() {
+        let expected = Err(TxnError::StatementIndexExhausted {
+            current: usize::MAX,
+        });
+
+        let mut executing = transaction();
+        executing.next_statement_index = usize::MAX - 1;
+        assert_eq!(executing.execute(&[Statement::read_only()]), Ok(()));
+        assert_eq!(executing.next_statement_index, usize::MAX);
+        let settled_events = executing.statement_events().to_vec();
+        assert_eq!(executing.execute(&[Statement::read_only()]), expected);
+        assert_eq!(executing.statement_events(), settled_events);
+
+        let mut abandoning = transaction();
+        abandoning.next_statement_index = usize::MAX;
+        assert_eq!(
+            abandoning.abandon_statement(&Statement::read_only()),
+            Err(TxnError::StatementIndexExhausted {
+                current: usize::MAX,
+            })
+        );
+        assert!(abandoning.statement_events().is_empty());
+    }
+
+    #[test]
+    fn intent_ordinal_exhaustion_aborts_without_publication() {
+        let mut transaction = transaction();
+        transaction.last_intent_ordinal = u64::MAX;
+        let statement = Statement::new(vec![Intent::EnsureVertex {
+            vid: VId(1),
+            labels: vec![],
+            props: vec![],
+        }]);
+
+        assert_eq!(transaction.execute(&[statement]), Ok(()));
+        assert!(transaction.is_aborted());
+        assert!(transaction.effects().is_empty());
+        assert_eq!(transaction.last_intent_ordinal, u64::MAX);
+        assert!(matches!(
+            transaction
+                .statement_events()
+                .last()
+                .and_then(|event| event.terminal()),
+            Some(StatementTerminal::Failed {
+                failure: StatementFailure::IntentOrdinalExhausted { current }
+            }) if *current == u64::MAX
+        ));
+    }
+}

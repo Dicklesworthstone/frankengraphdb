@@ -238,6 +238,10 @@ pub enum StatementFailure {
     },
     /// An intent reduced to an effect the graph refused.
     Rejected(ApplyError),
+    /// The transaction has consumed the largest representable source-intent
+    /// ordinal, so another intent cannot be assigned a unique birth-order
+    /// component without wrapping.
+    IntentOrdinalExhausted { current: u64 },
     /// One intent named the same property twice with DIFFERENT values
     /// (fgdb-intent-conflicting-property-order-btxr).
     ///
@@ -275,7 +279,9 @@ impl StatementFailure {
             // Exhaustive rather than a wildcard: a new failure variant should stop
             // this crate compiling until someone decides whether it carries a
             // before/after pair, instead of silently reporting that it does not.
-            Self::Rejected(_) | Self::ConflictingPropertyValues { .. } => None,
+            Self::Rejected(_)
+            | Self::IntentOrdinalExhausted { .. }
+            | Self::ConflictingPropertyValues { .. } => None,
         }
     }
 
@@ -289,7 +295,7 @@ impl StatementFailure {
                 first,
                 second,
             } => Some((*property, first, second)),
-            Self::Mismatch { .. } | Self::Rejected(_) => None,
+            Self::Mismatch { .. } | Self::Rejected(_) | Self::IntentOrdinalExhausted { .. } => None,
         }
     }
 }
@@ -396,10 +402,12 @@ pub(crate) fn evaluate_from_intent_ordinal(
     // their own would collide" — argued for the wrong property: being derived
     // rather than supplied does not make a derivation sound.
     //
-    // Counted over EVERY intent visited, in statement/intent order, whatever each
-    // one reduces to. That makes the ordinal a property of the request, so it is
-    // stable across any basis and unique per source intent — which is exactly what
-    // the sequence-neutral definition asks of it.
+    // Counted over EVERY intent actually visited, in statement/intent order,
+    // whatever each one reduces to. The ordinal is therefore a function of the
+    // evaluated request prefix, not graph cardinality. A basis-dependent early
+    // statement failure can truncate that prefix and shift later ordinals; among
+    // the visited source intents, however, each ordinal remains unique and cannot
+    // move because unrelated graph elements were added or retired.
     //
     // SUBSET NOTE (doctrine 7): merge_ordinal and permanent element identity are
     // still absent, and are not fabricated from state to stand in for the missing
@@ -413,7 +421,18 @@ pub(crate) fn evaluate_from_intent_ordinal(
         let mut failure: Option<StatementFailure> = None;
 
         for intent in statement.intents() {
-            intent_ordinal += 1;
+            let Some(next_intent_ordinal) = intent_ordinal.checked_add(1) else {
+                return (
+                    Outcome::Aborted {
+                        statement: index,
+                        failure: StatementFailure::IntentOrdinalExhausted {
+                            current: intent_ordinal,
+                        },
+                    },
+                    intent_ordinal,
+                );
+            };
+            intent_ordinal = next_intent_ordinal;
             match reduce(&statement_scratch, intent, intent_ordinal) {
                 Reduction::Effects(rows) => {
                     for row in rows {
@@ -476,10 +495,10 @@ enum Reduction {
 
 /// Reduce one intent against `state`, at canonical intent ordinal `ordinal`.
 ///
-/// `ordinal` is the intent's POSITION IN THE PUBLISHED ORDER of this evaluation,
-/// counted over every intent visited in statement/intent order. It is a property
-/// of the request and not of the basis, which is the whole point — see the birth
-/// ordinal note in `evaluate`.
+/// `ordinal` is the intent's position in the visited prefix of this evaluation,
+/// counted in statement/intent order. It is independent of graph cardinality;
+/// see the basis-dependent early-exit boundary in the birth-ordinal note in
+/// [`evaluate`].
 fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
     match intent {
         Intent::CreateVertex { vid, labels, props } => {
@@ -707,4 +726,33 @@ fn canonical_props(
         }
     }
     Ok(deduped)
+}
+
+#[cfg(test)]
+mod overflow_internal_tests {
+    use super::{Intent, Outcome, Statement, StatementFailure, evaluate_from_intent_ordinal};
+    use crate::ReferenceGraph;
+    use fgdb_types::VId;
+
+    #[test]
+    fn intent_ordinal_exhaustion_aborts_without_wrapping() {
+        let statement = Statement::new(vec![Intent::EnsureVertex {
+            vid: VId(1),
+            labels: vec![],
+            props: vec![],
+        }]);
+
+        let (outcome, cursor) =
+            evaluate_from_intent_ordinal(&ReferenceGraph::default(), &[statement], u64::MAX);
+
+        assert_eq!(cursor, u64::MAX);
+        assert!(outcome.effects().is_empty());
+        assert_eq!(
+            outcome,
+            Outcome::Aborted {
+                statement: 0,
+                failure: StatementFailure::IntentOrdinalExhausted { current: u64::MAX },
+            }
+        );
+    }
 }

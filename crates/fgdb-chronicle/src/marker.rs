@@ -211,6 +211,10 @@ pub enum ChainError {
     /// The persisted chain frontier is the largest representable sequence, so
     /// no next marker exists in the gap-free commit domain.
     CommitSeqExhausted(CommitSeqExhaustion),
+    /// The persisted semantic-command frontier is the largest representable
+    /// position. No marker can advance it, so later appends are permanently
+    /// refused rather than reported as ordinary non-monotonic offers.
+    LogicalCommandSeqExhausted { frontier: u64 },
     /// `commit_seq` is not exactly one past the current tail. The commit
     /// sequence is gap-free by construction: a gap would make "the history up
     /// to N" ambiguous, and a repeat would make it contradictory.
@@ -231,6 +235,10 @@ impl core::fmt::Display for ChainError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::CommitSeqExhausted(cause) => write!(f, "{cause}"),
+            Self::LogicalCommandSeqExhausted { frontier } => write!(
+                f,
+                "logical command sequence space is exhausted at {frontier}"
+            ),
             Self::NonContiguousCommitSeq { expected, found } => {
                 write!(f, "commit_seq {found} is not the expected {expected}")
             }
@@ -448,13 +456,18 @@ impl MarkerChain {
                 found: marker.commit_seq,
             });
         }
-        if let Some(last) = self.entries.last()
-            && marker.logical_command_seq <= last.marker.logical_command_seq
-        {
-            return Err(ChainError::NonMonotonicCommandSeq {
-                previous: last.marker.logical_command_seq,
-                found: marker.logical_command_seq,
-            });
+        if let Some(last) = self.entries.last() {
+            if last.marker.logical_command_seq == u64::MAX {
+                return Err(ChainError::LogicalCommandSeqExhausted {
+                    frontier: last.marker.logical_command_seq,
+                });
+            }
+            if marker.logical_command_seq <= last.marker.logical_command_seq {
+                return Err(ChainError::NonMonotonicCommandSeq {
+                    previous: last.marker.logical_command_seq,
+                    found: marker.logical_command_seq,
+                });
+            }
         }
         if !marker.head_updates_are_canonical() {
             return Err(ChainError::NonCanonicalHeadUpdates);

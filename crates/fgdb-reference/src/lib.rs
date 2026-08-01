@@ -366,6 +366,12 @@ pub enum ApplyError {
     /// No further semantic commit can be assigned without wrapping to the
     /// reserved origin, so every later apply is permanently refused.
     CommitSeqExhausted(CommitSeqExhaustion),
+    /// The persisted semantic-command frontier is the largest representable
+    /// position. No later transaction or control command can advance it, so the
+    /// condition is permanent rather than a comparative ordering violation.
+    LogicalCommandSeqExhausted {
+        frontier: LogicalCommandSeq,
+    },
     /// The transaction commit did not advance the independent semantic-command
     /// position.
     ///
@@ -535,6 +541,10 @@ impl core::fmt::Display for ApplyError {
                 "the stream's next commit is {expected:?}; {offered:?} is not it"
             ),
             Self::CommitSeqExhausted(cause) => write!(f, "{cause}"),
+            Self::LogicalCommandSeqExhausted { frontier } => write!(
+                f,
+                "logical command sequence space is exhausted at {frontier:?}"
+            ),
             Self::LogicalCommandSequenceNotAdvancing { previous, offered } => write!(
                 f,
                 "logical command position {offered:?} does not advance {previous:?}"
@@ -948,8 +958,9 @@ impl ReferenceGraph {
     /// Apply one row, or refuse and leave the state untouched.
     ///
     /// Every mutation is computed and every check passed before anything is
-    /// written, so a refusal is total: a caller that retries after fixing the
-    /// row sees exactly the state it had.
+    /// written, so refusal of THIS ROW is total: a caller that retries after
+    /// fixing the row sees exactly the state it had before that row. This does
+    /// not make a sequence of separate [`Self::apply_row`] calls atomic.
     pub fn apply_row(&mut self, row: &DeltaRow) -> Result<(), ApplyError> {
         match row {
             DeltaRow::CreateVertex {
@@ -1377,6 +1388,10 @@ impl ReferenceGraph {
     ///
     /// The rows arrive canonically ordered from the template, so this is a
     /// total function of the entry rather than of how a caller iterated it.
+    /// Rows are not staged here: if a later row is refused, earlier rows remain
+    /// applied. [`ReferenceDatabase::apply_template`] obtains entry/template
+    /// atomicity by applying to a clone and installing it only after all rows
+    /// succeed; a direct caller needing the same boundary must stage likewise.
     pub fn apply_entry(&mut self, entry: &CoordinateEntry) -> Result<(), ApplyError> {
         for row in &entry.rows {
             self.apply_row(row)?;
@@ -3017,6 +3032,11 @@ impl ReferenceDatabase {
                 offered: commit_seq,
             });
         }
+        if self.logical_command_frontier.0 == u64::MAX {
+            return Err(ApplyError::LogicalCommandSeqExhausted {
+                frontier: self.logical_command_frontier,
+            });
+        }
         if logical_command_seq.0 <= self.logical_command_frontier.0 {
             return Err(ApplyError::LogicalCommandSequenceNotAdvancing {
                 previous: self.logical_command_frontier,
@@ -3144,6 +3164,24 @@ mod provenance_internal_tests {
         for logical_command_seq in [LogicalCommandSeq(2), LogicalCommandSeq(3)] {
             assert_eq!(
                 db.apply_template(&rowless_template(), maximum, logical_command_seq),
+                Err(exhausted.clone())
+            );
+            assert_eq!(db, settled, "an exhausted refusal changes no state");
+        }
+    }
+
+    #[test]
+    fn logical_command_exhaustion_is_permanent_and_named_exactly() {
+        let maximum = LogicalCommandSeq(u64::MAX);
+        let mut db = ReferenceDatabase::new();
+        db.apply_template(&rowless_template(), CommitSeq(1), maximum)
+            .expect("the final representable logical position is assignable");
+
+        let settled = db.clone();
+        let exhausted = ApplyError::LogicalCommandSeqExhausted { frontier: maximum };
+        for offered in [LogicalCommandSeq(0), maximum] {
+            assert_eq!(
+                db.apply_template(&rowless_template(), CommitSeq(2), offered),
                 Err(exhausted.clone())
             );
             assert_eq!(db, settled, "an exhausted refusal changes no state");
