@@ -482,6 +482,66 @@ fn recreating_an_existing_identity_is_refused() {
     );
 }
 
+/// Retirement removes the visible vertex, not its allocation history. A new
+/// create under that VId would give one stable identity two unrelated births.
+#[test]
+fn a_retired_vertex_identity_remains_permanently_spent() {
+    let mut graph = ReferenceGraph::new();
+    graph
+        .apply_row(&create_vertex(1, 1, "first"))
+        .expect("first birth applies");
+    let before_version = graph.vertex(VId(1)).expect("vertex exists").version;
+    graph
+        .apply_row(&DeltaRow::DeleteVertex {
+            vid: VId(1),
+            before_version,
+            sorted_retired_incident_edges: vec![],
+        })
+        .expect("retirement applies");
+
+    assert_eq!(
+        graph.apply_row(&create_vertex(1, 2, "impostor")),
+        Err(ApplyError::VertexIdentitySpent { vid: VId(1) })
+    );
+    assert!(
+        graph.vertex(VId(1)).is_none(),
+        "the refused second birth stays invisible"
+    );
+
+    graph
+        .apply_row(&create_vertex(2, 3, "fresh"))
+        .expect("a genuinely fresh VId still applies after a retirement");
+    assert!(graph.vertex(VId(2)).is_some());
+}
+
+/// Edge retirement obeys the same permanent-spend law independently of the
+/// endpoints chosen by the attempted second birth.
+#[test]
+fn a_retired_edge_identity_remains_permanently_spent() {
+    let mut graph = social_graph();
+    let before_version = graph.edge(EId(10)).expect("edge exists").version;
+    graph
+        .apply_row(&DeltaRow::DeleteEdge {
+            eid: EId(10),
+            before_version,
+        })
+        .expect("retirement applies");
+
+    assert_eq!(
+        graph.apply_row(&create_edge(10, 7, 2, REL_KNOWS, 3)),
+        Err(ApplyError::EdgeIdentitySpent { eid: EId(10) })
+    );
+    assert!(
+        graph.edge(EId(10)).is_none(),
+        "the refused second birth stays invisible"
+    );
+
+    graph
+        .apply_row(&create_edge(13, 8, 2, REL_KNOWS, 3))
+        .expect("a genuinely fresh EId still applies after a retirement");
+    assert!(graph.edge(EId(13)).is_some());
+}
+
 #[test]
 fn deleting_something_absent_is_refused() {
     let mut graph = social_graph();
@@ -768,9 +828,10 @@ fn entry(graph: u128, branch: u128, rows: Vec<DeltaRow>) -> CoordinateEntry {
     entry_with_schema(graph, branch, REL_KNOWS, SchemaEpoch(0), None, rows)
 }
 
-/// A template touching two coordinates lands in two separate graphs. Applying
-/// them to one shared map would silently merge two branches — an error a
-/// single-coordinate materializer cannot even represent.
+/// A template touching two coordinates lands in two separate graph states.
+/// Applying them to one shared map would silently merge two branch-local
+/// versions of the same stable identity — an error a single-coordinate
+/// materializer cannot even represent.
 #[test]
 fn a_multi_coordinate_template_lands_in_separate_graphs() {
     let template = LogicalDeltaTemplate::build(
@@ -805,7 +866,7 @@ fn a_multi_coordinate_template_lands_in_separate_graphs() {
             .props
             .get(&PROP_NAME),
         Some(&text("branch-ada")),
-        "the same VId on another branch is a different vertex"
+        "the same stable VId may carry a distinct branch-local version"
     );
 }
 

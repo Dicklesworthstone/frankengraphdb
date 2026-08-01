@@ -192,6 +192,18 @@ pub enum ApplyError {
     EdgeAlreadyExists {
         eid: EId,
     },
+    /// A create names an identity that existed earlier but is no longer live.
+    ///
+    /// Distinct from `*AlreadyExists`: the visible element is gone, but its
+    /// allocation slot remains permanently spent (plan §4.5). Keeping this a
+    /// typed refusal prevents a caller from mistaking retirement for permission
+    /// to mint a different element under the same stable identity.
+    VertexIdentitySpent {
+        vid: VId,
+    },
+    EdgeIdentitySpent {
+        eid: EId,
+    },
     /// A row names an element that is not there.
     NoSuchVertex {
         vid: VId,
@@ -399,6 +411,12 @@ impl core::fmt::Display for ApplyError {
         match self {
             Self::VertexAlreadyExists { vid } => write!(f, "vertex {vid:?} already exists"),
             Self::EdgeAlreadyExists { eid } => write!(f, "edge {eid:?} already exists"),
+            Self::VertexIdentitySpent { vid } => {
+                write!(f, "vertex identity {vid:?} is permanently spent")
+            }
+            Self::EdgeIdentitySpent { eid } => {
+                write!(f, "edge identity {eid:?} is permanently spent")
+            }
             Self::NoSuchVertex { vid } => write!(f, "no such vertex {vid:?}"),
             Self::NoSuchEdge { eid } => write!(f, "no such edge {eid:?}"),
             Self::ElementVersionMismatch { elem, .. } => {
@@ -555,6 +573,15 @@ impl From<CommitSeqExhaustion> for ApplyError {
 pub struct ReferenceGraph {
     vertices: BTreeMap<VId, Vertex>,
     edges: BTreeMap<EId, Edge>,
+    /// Every vertex identity ever admitted on this materialized lineage.
+    ///
+    /// Live identities are present here and in `vertices`; retirement removes
+    /// only the visible row. The set is deliberately part of cloned/equal state:
+    /// an empty genesis graph and a graph made visibly empty by deletion admit
+    /// different future histories, so they are not the same state-machine state.
+    spent_vertex_ids: BTreeSet<VId>,
+    /// Edge-kind counterpart of `spent_vertex_ids`.
+    spent_edge_ids: BTreeSet<EId>,
     /// Counter values, which are their own state rather than ordinary
     /// properties: their rows carry a checked delta and a merge algebra.
     counters: BTreeMap<(ElementId, PropertyKeyId), i128>,
@@ -593,6 +620,8 @@ impl ReferenceGraph {
         Self {
             vertices: BTreeMap::new(),
             edges: BTreeMap::new(),
+            spent_vertex_ids: BTreeSet::new(),
+            spent_edge_ids: BTreeSet::new(),
             counters: BTreeMap::new(),
             escrow: BTreeMap::new(),
             sketches: BTreeMap::new(),
@@ -933,6 +962,9 @@ impl ReferenceGraph {
                 if self.vertices.contains_key(vid) {
                     return Err(ApplyError::VertexAlreadyExists { vid: *vid });
                 }
+                if self.spent_vertex_ids.contains(vid) {
+                    return Err(ApplyError::VertexIdentitySpent { vid: *vid });
+                }
                 let version = Self::successor_version(None, row)?;
                 self.vertices.insert(
                     *vid,
@@ -944,6 +976,8 @@ impl ReferenceGraph {
                         valid_time: *valid_time,
                     },
                 );
+                let was_fresh = self.spent_vertex_ids.insert(*vid);
+                debug_assert!(was_fresh, "spent-set admission was checked above");
             }
             DeltaRow::CreateEdge {
                 eid,
@@ -957,6 +991,9 @@ impl ReferenceGraph {
             } => {
                 if self.edges.contains_key(eid) {
                     return Err(ApplyError::EdgeAlreadyExists { eid: *eid });
+                }
+                if self.spent_edge_ids.contains(eid) {
+                    return Err(ApplyError::EdgeIdentitySpent { eid: *eid });
                 }
                 // Referential integrity BEFORE insertion: a graph holding an
                 // edge to a vertex that does not exist is not a graph, and
@@ -983,6 +1020,8 @@ impl ReferenceGraph {
                         valid_time: *valid_time,
                     },
                 );
+                let was_fresh = self.spent_edge_ids.insert(*eid);
+                debug_assert!(was_fresh, "spent-set admission was checked above");
             }
             DeltaRow::DeleteVertex {
                 vid,
@@ -2167,6 +2206,63 @@ impl ReferenceDatabase {
         self.coordinates.get(&(graph, branch))
     }
 
+    /// Refuse a create that would recycle an identity spent on another branch.
+    ///
+    /// `ReferenceGraph` enforces the rule within one materialized lineage. This
+    /// database-level check closes the other half of plan §4.5: branches share
+    /// the graph allocator rather than forking its namespace. The union of the
+    /// coordinate spent sets is therefore graph-wide allocation history. That
+    /// also covers a historical fork taken before the original create: its
+    /// child materialization does not contain the identity, but a sibling or
+    /// parent coordinate still proves that the slot was spent.
+    ///
+    /// A live identity on the target coordinate is left to `apply_row`, which
+    /// reports the more precise `*AlreadyExists` error. Rows earlier in this
+    /// same entry are likewise handled by sequential application; this guard is
+    /// specifically the cross-coordinate boundary.
+    ///
+    /// Callers run this against the immutable pre-template database, not the
+    /// candidate. One atomic template may project one newly allocated identity
+    /// into several branch coordinates at the same birth; that is one first use,
+    /// not recycling. Once the template commits, every later template sees the
+    /// identity in at least one coordinate spent set and cannot mint it again.
+    fn preflight_graph_identity_reuse(&self, entry: &CoordinateEntry) -> Result<(), ApplyError> {
+        let local = self.coordinates.get(&(entry.graph, entry.branch));
+        for row in &entry.rows {
+            match row {
+                DeltaRow::CreateVertex { vid, .. } => {
+                    let locally_live = local.is_some_and(|graph| graph.vertices.contains_key(vid));
+                    let spent_in_graph = self.coordinates.iter().any(|((graph, _), state)| {
+                        *graph == entry.graph && state.spent_vertex_ids.contains(vid)
+                    });
+                    if !locally_live && spent_in_graph {
+                        return Err(ApplyError::VertexIdentitySpent { vid: *vid });
+                    }
+                }
+                DeltaRow::CreateEdge { eid, .. } => {
+                    let locally_live = local.is_some_and(|graph| graph.edges.contains_key(eid));
+                    let spent_in_graph = self.coordinates.iter().any(|((graph, _), state)| {
+                        *graph == entry.graph && state.spent_edge_ids.contains(eid)
+                    });
+                    if !locally_live && spent_in_graph {
+                        return Err(ApplyError::EdgeIdentitySpent { eid: *eid });
+                    }
+                }
+                DeltaRow::DeleteVertex { .. }
+                | DeltaRow::DeleteEdge { .. }
+                | DeltaRow::LabelMembership { .. }
+                | DeltaRow::Property { .. }
+                | DeltaRow::ValidTime { .. }
+                | DeltaRow::Counter { .. }
+                | DeltaRow::Escrow { .. }
+                | DeltaRow::Sketch { .. }
+                | DeltaRow::Schema { .. }
+                | DeltaRow::Constraint { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
     /// The highest transaction prefix this coordinate can observe.
     ///
     /// This is the *bound* on visibility, not visibility itself: it is the
@@ -2942,6 +3038,7 @@ impl ReferenceDatabase {
                 .origins
                 .entry(key)
                 .or_insert(BranchOrigin::Genesis);
+            self.preflight_graph_identity_reuse(entry)?;
             candidate
                 .coordinates
                 .entry(key)

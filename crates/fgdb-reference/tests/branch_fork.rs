@@ -18,7 +18,7 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId, RelationId,
     SchemaEpoch,
 };
-use fgdb_reference::{BranchError, BranchOrigin, ReferenceDatabase};
+use fgdb_reference::{ApplyError, BranchError, BranchOrigin, ReferenceDatabase};
 use fgdb_types::{
     BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
 };
@@ -61,8 +61,8 @@ fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
 ///
 /// The sequence is explicit at every call site because `apply_template` now
 /// requires it and refuses one that does not advance — history is append-only.
-fn apply_at(db: &mut ReferenceDatabase, branch: BranchId, seq: u64, rows: Vec<DeltaRow>) {
-    let template = LogicalDeltaTemplate::build(
+fn template_for(branch: BranchId, rows: Vec<DeltaRow>) -> LogicalDeltaTemplate {
+    LogicalDeltaTemplate::build(
         ObjectId([0x11; 32]),
         [0x22; 32],
         vec![CoordinateEntry {
@@ -74,7 +74,11 @@ fn apply_at(db: &mut ReferenceDatabase, branch: BranchId, seq: u64, rows: Vec<De
             rows,
         }],
     )
-    .expect("template builds");
+    .expect("template builds")
+}
+
+fn apply_at(db: &mut ReferenceDatabase, branch: BranchId, seq: u64, rows: Vec<DeltaRow>) {
+    let template = template_for(branch, rows);
     db.apply_template(&template, CommitSeq(seq), LogicalCommandSeq(seq * 10))
         .expect("applies");
 }
@@ -617,6 +621,76 @@ fn a_fork_at_zero_is_an_empty_child() {
     assert_eq!(child.vertex_count(), 0);
     assert_eq!(child.edge_count(), 0);
     assert_eq!(db.applied_through(GRAPH, HISTORICAL), Some(CommitSeq(0)));
+}
+
+/// Branches share one graph identity namespace even when a historical fork's
+/// visible cut predates the allocation. The empty child cannot use that absence
+/// as permission to mint identities the parent spent later in its own history.
+#[test]
+fn a_historical_fork_cannot_remint_parent_spent_identities() {
+    let mut db = seeded();
+    let edge_version = db
+        .graph(GRAPH, MAIN)
+        .and_then(|graph| graph.edge(EId(10)))
+        .expect("seed edge exists")
+        .version;
+    apply_at(
+        &mut db,
+        MAIN,
+        2,
+        vec![DeltaRow::DeleteEdge {
+            eid: EId(10),
+            before_version: edge_version,
+        }],
+    );
+    let vertex_version = db
+        .graph(GRAPH, MAIN)
+        .and_then(|graph| graph.vertex(VId(1)))
+        .expect("seed vertex exists")
+        .version;
+    apply_at(
+        &mut db,
+        MAIN,
+        3,
+        vec![DeltaRow::DeleteVertex {
+            vid: VId(1),
+            before_version: vertex_version,
+            sorted_retired_incident_edges: vec![],
+        }],
+    );
+
+    db.fork_branch_at(GRAPH, MAIN, FEATURE, LogicalCommandSeq(0))
+        .expect("historical fork is empty");
+    assert_eq!(db.graph(GRAPH, FEATURE).expect("child").vertex_count(), 0);
+
+    let recycled_vertex = template_for(FEATURE, vec![vertex(1, "impostor")]);
+    assert_eq!(
+        db.apply_template(&recycled_vertex, CommitSeq(4), LogicalCommandSeq(40)),
+        Err(ApplyError::VertexIdentitySpent { vid: VId(1) })
+    );
+
+    apply_at(
+        &mut db,
+        FEATURE,
+        4,
+        vec![vertex(3, "fresh-a"), vertex(4, "fresh-b")],
+    );
+    let recycled_edge = template_for(FEATURE, vec![edge(10, 3, 4)]);
+    assert_eq!(
+        db.apply_template(&recycled_edge, CommitSeq(5), LogicalCommandSeq(50)),
+        Err(ApplyError::EdgeIdentitySpent { eid: EId(10) })
+    );
+
+    apply_at(&mut db, FEATURE, 5, vec![edge(11, 3, 4)]);
+    let child = db.graph(GRAPH, FEATURE).expect("child");
+    assert_eq!(child.vertex_count(), 2, "fresh VIds remain admissible");
+    assert_eq!(child.edge_count(), 1, "a fresh EId remains admissible");
+    assert!(child.edge(EId(11)).is_some());
+    assert_eq!(
+        db.graph(GRAPH, MAIN).expect("parent").vertex_count(),
+        1,
+        "child attempts do not mutate the parent"
+    );
 }
 
 /// A boundary above the logical-command frontier is REFUSED — a fork from the
