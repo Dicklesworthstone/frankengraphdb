@@ -219,7 +219,7 @@ refuse_impossible_dirty_count() {
 }
 
 verify_exported_ids() {
-  local observed head_after
+  local observed head_after missing_declared unexpected_observed
   observed="$(changed_record_ids "$EXPORT_BASE_HEAD")" || {
     printf 'BEADS EXPORT ATTRIBUTION FAILED — the resulting JSONL delta could not be parsed.\n' >&2
     return "$EXPORT_INTENT_RC"
@@ -240,12 +240,32 @@ verify_exported_ids() {
   fi
 
   if [ "$observed" != "$EXPECTED_IDS" ]; then
+    if ! missing_declared="$(
+      LC_ALL=C comm -13 \
+        <(print_id_set "$observed") \
+        <(print_id_set "$EXPECTED_IDS")
+    )"; then
+      printf 'BEADS EXPORT ATTRIBUTION FAILED — missing-id set comparison failed.\n' >&2
+      return "$EXPORT_INTENT_RC"
+    fi
+    if ! unexpected_observed="$(
+      LC_ALL=C comm -23 \
+        <(print_id_set "$observed") \
+        <(print_id_set "$EXPECTED_IDS")
+    )"; then
+      printf 'BEADS EXPORT ATTRIBUTION FAILED — unexpected-id set comparison failed.\n' >&2
+      return "$EXPORT_INTENT_RC"
+    fi
     {
       printf 'BEADS EXPORT ATTRIBUTION FAILED — exported record ids differ from the declared intent.\n'
       printf '  expected:\n'
       format_id_set "$EXPECTED_IDS"
       printf '  observed:\n'
       format_id_set "$observed"
+      printf '  missing declared ids:\n'
+      format_id_set "$missing_declared"
+      printf '  undeclared observed ids:\n'
+      format_id_set "$unexpected_observed"
       printf 'The JSONL may have moved, but no commit is authorized. Re-run only after coordinating every observed id.\n'
     } >&2
     return "$EXPORT_INTENT_RC"

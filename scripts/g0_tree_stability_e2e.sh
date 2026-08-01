@@ -41,7 +41,8 @@
 # WHY CASES G-N EXIST. Detection alone still discarded nearly every full gate:
 # routine `br` writes rewrote the tracked JSONL every few minutes. The project
 # now disables automatic export and routes explicit export through br_sync.sh.
-# G-L prove every lease direction plus a neutered deferral. M drives the
+# G-G3 prove the free-path attribution diagnostics; H-L prove every lease
+# direction plus a neutered deferral. M drives the
 # deployed `br` binary and proves that one declared id cannot sweep a second
 # pending record, then proves that declaring both ids exports exactly both. N
 # neuters both attribution guards and requires the silent sweep to return. A
@@ -402,11 +403,18 @@ make_export_fixture() {
 
 # run_export_case <label> <state> <want_calls> <want_rc> <diagnostic|NONE>
 #                 [helper] [landing_lib] [raced_record_id]
+#                 [extra_declared_id] [second_diagnostic]
 run_export_case() {
   local label="$1" state="$2" want_calls="$3" want_rc="$4" diagnostic="$5"
   local helper="${6:-$BR_SYNC}" landing_lib="${7:-$LANDING_LIB}"
-  local raced_record_id="${8:-}"
+  local raced_record_id="${8:-}" extra_declared_id="${9:-}"
+  local second_diagnostic="${10:-}"
   local d="$RUN_DIR/$label" log token_log expected_calls out err rc calls ok=1
+  local -a declared_ids=(fgdb-export-fixture)
+
+  if [ -n "$extra_declared_id" ]; then
+    declared_ids+=("$extra_declared_id")
+  fi
 
   make_export_fixture "$d" "$state"
   if [ "$?" -ne 0 ]; then
@@ -425,7 +433,7 @@ run_export_case() {
       TOKEN_STUB_LOG="$token_log" FGDB_TOKEN_SH="$d/token-stub" \
       FGDB_TOKEN_DIR="$d/tokens" FGDB_LANDING_LIB="$landing_lib" \
       BR_STUB_APPEND_ID="$raced_record_id" \
-      bash "$helper" fgdb-export-fixture
+      bash "$helper" "${declared_ids[@]}"
   ) >"$out" 2>"$err"
   rc=$?
   calls="$(wc -l <"$log")"
@@ -445,6 +453,9 @@ run_export_case() {
       ok=0
     fi
   elif ! grep -Fq "$diagnostic" "$err"; then
+    ok=0
+  fi
+  if [ -n "$second_diagnostic" ] && ! grep -Fq "$second_diagnostic" "$err"; then
     ok=0
   fi
 
@@ -471,6 +482,12 @@ run_export_case G_export_free FREE 2 0 NONE
 # audit fail closed and names the undeclared id.
 run_export_case G2_export_race_attribution FREE 2 65 'fgdb-raced-foreign' \
   "$BR_SYNC" "$LANDING_LIB" fgdb-raced-foreign
+
+# G3: over-declaring an id is detected after the flush, and the diagnostic
+# names the exact declared record that the exporter did not emit.
+run_export_case G3_export_missing_declared FREE 2 65 'missing declared ids:' \
+  "$BR_SYNC" "$LANDING_LIB" '' fgdb-declared-but-absent \
+  fgdb-declared-but-absent
 
 # H: a live holder -> no tracked export, temporary failure for an explicit retry.
 run_export_case H_export_binding BINDING 0 75 'DEFERRED BEADS EXPORT'
@@ -708,8 +725,8 @@ run_scope_case
 if [ "$CASES_RUN" -ne 6 ]; then
   gate_unrun "expected 6 cases to execute, $CASES_RUN did"
 fi
-if [ "$EXPORT_CASES_RUN" -ne 9 ]; then
-  gate_unrun "expected 9 Beads-export cases to execute, $EXPORT_CASES_RUN did"
+if [ "$EXPORT_CASES_RUN" -ne 10 ]; then
+  gate_unrun "expected 10 Beads-export cases to execute, $EXPORT_CASES_RUN did"
 fi
 if [ "$SCOPE_CASES_RUN" -ne 1 ]; then
   gate_unrun "expected 1 aggregate-scope case to execute, $SCOPE_CASES_RUN did"
