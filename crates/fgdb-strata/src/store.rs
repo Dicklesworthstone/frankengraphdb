@@ -36,10 +36,10 @@
 //! winner's complete bytes — never the winner halfway through `write_all`.
 //!
 //! **READ-SIDE CAPABILITY CONTEXT IS STILL AN OPEN WORKSPACE CONTRACT.** `get`,
-//! `get_root`, and `reopen` perform synchronous filesystem reads without a `Cx`,
-//! matching Chronicle's current read-side precedent rather than claiming the
-//! doctrine-3 end state. `fgdb-j0ae` retains that gap until the workspace chooses
-//! one read-authority shape for both stores.
+//! `get_root`, `admit_root`, and the reopen paths perform synchronous filesystem
+//! reads without a `Cx`, matching Chronicle's current read-side precedent rather
+//! than claiming the doctrine-3 end state. `fgdb-j0ae` retains that gap until the
+//! workspace chooses one read-authority shape for both stores.
 //!
 //! **WHAT IS DELIBERATELY ABSENT.** Blocks are stored as their canonical bytes,
 //! NOT sealed into capsules. `strata_blocks_are_durable_objects.rs` proves a block
@@ -50,6 +50,7 @@
 //! honest thing: bytes on disk, addressed by identity, verified on read.
 
 use crate::{BlockError, block_id, decode_block};
+use fgdb_types::CommitSeq;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use std::fs::{File, OpenOptions};
@@ -319,6 +320,41 @@ pub struct BlockStore {
     publication_lock_path: PathBuf,
     k_oid: [u8; 32],
     namespace: DatabaseSecurityNamespaceId,
+}
+
+/// Proof that one authenticated root was checked against every block it names.
+///
+/// The token borrows the exact store that performed admission. Its fields are
+/// private and it is not cloneable, so range-based skipping cannot be requested
+/// with a caller-constructed [`crate::root::PartitionRoot`]. A fresh process must
+/// pay the full admission read once; later snapshots may act on the proven range
+/// summaries without materializing blocks that begin after the snapshot.
+#[derive(Debug)]
+pub struct AdmittedPartitionRoot<'store> {
+    store: &'store BlockStore,
+    root_id: ObjectId,
+    root: crate::root::PartitionRoot,
+}
+
+impl AdmittedPartitionRoot<'_> {
+    /// The content identity of the admitted root.
+    pub const fn root_id(&self) -> ObjectId {
+        self.root_id
+    }
+
+    /// The authenticated root whose block ranges were admitted.
+    pub const fn root(&self) -> &crate::root::PartitionRoot {
+        &self.root
+    }
+
+    /// Load the blocks that can contribute to `as_of`.
+    pub fn resolve_blocks_at(
+        &self,
+        as_of: CommitSeq,
+    ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
+        self.store
+            .resolve_admitted_root_blocks_at(&self.root, as_of)
+    }
 }
 
 impl BlockStore {
@@ -644,31 +680,74 @@ impl BlockStore {
         Ok(bytes)
     }
 
-    /// Load and validate every block named by an already-structural root.
+    fn resolve_root_block(
+        &self,
+        at: usize,
+        reference: &crate::root::BlockRef,
+    ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
+        let bytes =
+            self.get_bytes(reference.block_id)
+                .map_err(|error| StoreError::RootBlockLoad {
+                    at,
+                    error: Box::new(error),
+                })?;
+        crate::root::resolve_block_ref(&self.k_oid, self.namespace, at, reference, &bytes)
+            .map_err(StoreError::MalformedRoot)
+    }
+
+    /// Prove every block named by an already-structural root while retaining only
+    /// the caller-selected decoded blocks.
     ///
-    /// Storage failures stay outside the format-only proof, so an I/O error or
-    /// false object identity is never collapsed into `BlockError::NotABlock`.
-    /// Each encoded block is dropped before loading the next; the shared root
-    /// helper still owns block decoding and the root-to-block range proof.
+    /// Every encoded block is dropped before loading the next. This is the fresh
+    /// admission path: even a block outside the requested snapshot is checked,
+    /// because an unproved lower bound is not permission to skip that block.
+    fn inspect_root_blocks(
+        &self,
+        root: &crate::root::PartitionRoot,
+        mut retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
+    ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
+        crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
+
+        let mut blocks = Vec::new();
+        for (at, reference) in root.blocks.iter().enumerate() {
+            let entries = self.resolve_root_block(at, reference)?;
+            if retain(at, reference) {
+                blocks.push(entries);
+            }
+        }
+        Ok(blocks)
+    }
+
+    /// Load and validate every block named by an already-structural root.
     fn resolve_root_blocks(
         &self,
         root: &crate::root::PartitionRoot,
     ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
-        crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
+        self.inspect_root_blocks(root, |_, _| true)
+    }
 
-        let mut blocks = Vec::with_capacity(root.blocks.len());
+    /// Resolve only blocks selected by an already-minted admission token.
+    ///
+    /// `selected` comes from the shared root skip rule and is walked in lockstep
+    /// with publication order. Unlike fresh admission, skipped blocks are not
+    /// opened: their range summaries were proved when the token was minted.
+    fn resolve_admitted_root_blocks_at(
+        &self,
+        root: &crate::root::PartitionRoot,
+        as_of: CommitSeq,
+    ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
+        crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
+        let selected = crate::root::blocks_visible_at(root, as_of);
+        let mut selected = selected.into_iter().peekable();
+        let mut blocks = Vec::with_capacity(selected.len());
         for (at, reference) in root.blocks.iter().enumerate() {
-            let bytes =
-                self.get_bytes(reference.block_id)
-                    .map_err(|error| StoreError::RootBlockLoad {
-                        at,
-                        error: Box::new(error),
-                    })?;
-            blocks.push(
-                crate::root::resolve_block_ref(&self.k_oid, self.namespace, at, reference, &bytes)
-                    .map_err(StoreError::MalformedRoot)?,
-            );
+            if selected.peek() != Some(&at) {
+                continue;
+            }
+            selected.next();
+            blocks.push(self.resolve_root_block(at, reference)?);
         }
+        debug_assert!(selected.next().is_none());
         Ok(blocks)
     }
 
@@ -692,7 +771,7 @@ impl BlockStore {
         root: &crate::root::PartitionRoot,
     ) -> Result<ObjectId, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
-        self.resolve_root_blocks(root)?;
+        self.inspect_root_blocks(root, |_, _| false)?;
         self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
     }
 
@@ -717,6 +796,49 @@ impl BlockStore {
         let root = self.get_root(id)?;
         let blocks = self.resolve_root_blocks(&root)?;
         Ok((root, blocks))
+    }
+
+    /// Admit a stored root against every named block without retaining the
+    /// decoded partition.
+    pub fn admit_root(&self, id: ObjectId) -> Result<AdmittedPartitionRoot<'_>, StoreError> {
+        let root = self.get_root(id)?;
+        self.inspect_root_blocks(&root, |_, _| false)?;
+        Ok(AdmittedPartitionRoot {
+            store: self,
+            root_id: id,
+            root,
+        })
+    }
+
+    /// Reopen a partition for one snapshot while minting a reusable admission
+    /// token for later selective reads.
+    ///
+    /// A fresh root cannot skip I/O on the strength of its own unproved ranges,
+    /// so this first call reads and verifies every named block. It retains only
+    /// blocks that can affect `as_of`; the returned token makes later calls to
+    /// [`AdmittedPartitionRoot::resolve_blocks_at`] genuinely selective.
+    pub fn reopen_at(
+        &self,
+        id: ObjectId,
+        as_of: CommitSeq,
+    ) -> Result<(AdmittedPartitionRoot<'_>, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
+        let root = self.get_root(id)?;
+        let visible = crate::root::blocks_visible_at(&root, as_of);
+        let mut visible = visible.into_iter().peekable();
+        let blocks = self.inspect_root_blocks(&root, |at, _| {
+            if visible.peek() != Some(&at) {
+                return false;
+            }
+            visible.next();
+            true
+        })?;
+        debug_assert!(visible.next().is_none());
+        let admitted = AdmittedPartitionRoot {
+            store: self,
+            root_id: id,
+            root,
+        };
+        Ok((admitted, blocks))
     }
 
     /// Does this store hold the block named by `id`?

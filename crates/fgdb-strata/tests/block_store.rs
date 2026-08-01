@@ -626,6 +626,135 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
     });
 }
 
+/// A fresh selective reopen proves every range but retains only blocks that can
+/// affect the requested snapshot. This is the bounded-memory first-open path;
+/// the returned admission token supplies the actual I/O skip on later reads.
+#[test]
+fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
+    let dir = scratch_dir("selective-reopen");
+    under_lab(47, move |cx| {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer
+            .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
+            .expect("creates the first block");
+        writer.seal(strata_keys).expect("seals the first block");
+        writer
+            .apply(strata_keys, CommitSeq(7), &create(11, 1, 3))
+            .expect("creates the future block");
+        let (root, blocks) = writer
+            .publish(strata_keys, CommitSeq(9))
+            .expect("publishes");
+        assert_eq!(blocks.len(), 2, "the fixture needs one skippable block");
+
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        for block in &blocks {
+            store.put(cx, &block.bytes).expect("stores block");
+        }
+        let root_id = store.put_root(cx, &root).expect("stores root");
+
+        let (admitted, visible) = store
+            .reopen_at(root_id, CommitSeq(3))
+            .expect("selectively reopens");
+        assert_eq!(admitted.root_id(), root_id);
+        assert_eq!(admitted.root(), &root);
+        assert_eq!(visible.len(), 1, "the block beginning at 7 is not retained");
+        assert_eq!(
+            merge_neighbours(&visible, VId(1), REL, CommitSeq(3)).expect("merges"),
+            vec![VId(2)]
+        );
+    });
+}
+
+/// Fresh selective reopen cannot use a root's lower bounds until the actual
+/// blocks have proved them. Otherwise a forged high `first_seq` could hide live
+/// history from every early snapshot.
+#[test]
+fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
+    let dir = scratch_dir("selective-reopen-range-admission");
+    under_lab(49, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let bytes = sample();
+        let block_id = store.put(cx, &bytes).expect("stores block");
+        let lying = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(9),
+            blocks: vec![BlockRef {
+                block_id,
+                first_seq: CommitSeq(7),
+                last_seq: CommitSeq(7),
+            }],
+        };
+        let root_bytes = fgdb_strata::root::encode_root(&lying).expect("encodes root");
+        let root_id = store
+            .put(cx, &root_bytes)
+            .expect("plants an unadmitted root");
+
+        assert!(matches!(
+            store.reopen_at(root_id, CommitSeq(3)),
+            Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch {
+                at: 0,
+                declared: (CommitSeq(7), CommitSeq(7)),
+                actual: (CommitSeq(1), CommitSeq(2)),
+            }))
+        ));
+    });
+}
+
+/// Once every range has been admitted, a later snapshot read loads exactly its
+/// candidate blocks. Damage planted in a future-only block is therefore outside
+/// an earlier read, but is still detected when that block becomes relevant.
+#[test]
+fn an_admitted_root_skips_future_block_io_on_reuse() {
+    let dir = scratch_dir("admitted-root-skip");
+    under_lab(48, move |cx| {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer
+            .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
+            .expect("creates the first block");
+        writer.seal(strata_keys).expect("seals the first block");
+        writer
+            .apply(strata_keys, CommitSeq(7), &create(11, 1, 3))
+            .expect("creates the future block");
+        let (root, blocks) = writer
+            .publish(strata_keys, CommitSeq(9))
+            .expect("publishes");
+        assert_eq!(blocks.len(), 2, "the fixture needs one future block");
+
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        for block in &blocks {
+            store.put(cx, &block.bytes).expect("stores block");
+        }
+        let root_id = store.put_root(cx, &root).expect("stores root");
+        let admitted = store.admit_root(root_id).expect("admits every range");
+        let future_block_id = root
+            .blocks
+            .get(1)
+            .map(|reference| reference.block_id)
+            .expect("the writer published the future block reference");
+
+        std::fs::write(store.path(future_block_id), b"damaged after admission")
+            .expect("plants later damage");
+
+        let early = admitted
+            .resolve_blocks_at(CommitSeq(3))
+            .expect("future-only damage is skipped");
+        assert_eq!(early.len(), 1);
+        assert_eq!(
+            merge_neighbours(&early, VId(1), REL, CommitSeq(3)).expect("merges"),
+            vec![VId(2)]
+        );
+        assert!(matches!(
+            admitted.resolve_blocks_at(CommitSeq(7)),
+            Err(StoreError::RootBlockLoad { at: 1, error })
+                if matches!(*error, StoreError::IdentityMismatch { .. })
+        ));
+    });
+}
+
 /// A root naming a block the store does not hold is refused, naming the block's
 /// position — a partial partition is not a partition.
 #[test]
