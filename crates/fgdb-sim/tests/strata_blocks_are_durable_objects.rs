@@ -99,6 +99,60 @@ fn block_bytes() -> (Vec<u8>, ObjectId) {
     (sealed.bytes.clone(), sealed.block_id)
 }
 
+/// Locate the selected symbol payloads before any mutation and prove that the
+/// chosen byte ranges are disjoint.
+///
+/// Content search keeps this fixture independent of the container header width,
+/// but two byte-identical symbols would otherwise resolve to the same first
+/// occurrence and make an N-symbol campaign damage fewer than N symbols.
+fn distinct_symbol_ranges(
+    container: &[u8],
+    symbols: &[Vec<u8>],
+    count: usize,
+) -> Vec<(usize, usize)> {
+    assert!(
+        count <= symbols.len(),
+        "cannot rot {count} of {} symbols",
+        symbols.len()
+    );
+    let ranges = symbols
+        .iter()
+        .take(count)
+        .map(|symbol| {
+            assert!(!symbol.is_empty(), "capsule symbols must not be empty");
+            let start = container
+                .windows(symbol.len())
+                .position(|window| window == symbol.as_slice())
+                .expect("each symbol appears verbatim in the container");
+            let end = start
+                .checked_add(symbol.len())
+                .filter(|end| *end <= container.len())
+                .expect("a located symbol range remains inside the container");
+            (start, end)
+        })
+        .collect::<Vec<_>>();
+
+    for (index, &(left_start, left_end)) in ranges.iter().enumerate() {
+        for &(right_start, right_end) in ranges.iter().skip(index + 1) {
+            assert!(
+                left_end <= right_start || right_end <= left_start,
+                "content lookup mapped distinct symbols onto overlapping container ranges"
+            );
+        }
+    }
+    ranges
+}
+
+fn rot_distinct_symbols(container: &mut [u8], symbols: &[Vec<u8>], count: usize) {
+    for (start, end) in distinct_symbol_ranges(container, symbols, count) {
+        let midpoint = start + (end - start) / 2;
+        let byte = container
+            .get_mut(midpoint)
+            .expect("a proved symbol midpoint remains inside the container");
+        *byte ^= 0x40;
+    }
+}
+
 /// THE IDENTITY IS THE SAME OBJECT ID on both sides.
 ///
 /// Strata derives a block's name with §5.1's `logical_object_id`; the capsule layer
@@ -158,15 +212,9 @@ fn a_rotted_block_heals_and_still_decodes() {
         "the block must span more symbols than the budget, or 'within budget' and \
          'the whole object' are the same test"
     );
-    // Rot exactly the budget's worth, each in a different symbol, located by
-    // content rather than by a computed offset.
-    for symbol in symbols.iter().take(budget) {
-        let at = container
-            .windows(symbol.len())
-            .position(|w| w == symbol.as_slice())
-            .expect("each symbol appears verbatim");
-        container[at + symbol.len() / 2] ^= 0x40;
-    }
+    // Resolve every payload against the pristine container and prove the ranges
+    // disjoint before rotating exactly the budget's worth.
+    rot_distinct_symbols(&mut container, &symbols, budget);
 
     let (descriptor, damaged) = decode_container(&container).expect("still parses");
     let healed = keys()
@@ -190,13 +238,7 @@ fn a_block_rotted_beyond_the_budget_fails_closed() {
 
     let (_, symbols) = decode_container(&container).expect("decodes");
     let over = CapsuleProfile::balanced().erasure_budget() + 1;
-    for symbol in symbols.iter().take(over) {
-        let at = container
-            .windows(symbol.len())
-            .position(|w| w == symbol.as_slice())
-            .expect("each symbol appears verbatim");
-        container[at + symbol.len() / 2] ^= 0x40;
-    }
+    rot_distinct_symbols(&mut container, &symbols, over);
 
     let (descriptor, damaged) = decode_container(&container).expect("still parses");
     assert!(

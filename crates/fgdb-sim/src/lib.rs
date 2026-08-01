@@ -226,18 +226,6 @@ pub fn commit_capsule(
     })
 }
 
-/// **Materialize the durable commit stream into graph state.**
-///
-/// Walks the recovered marker chain in commit order and, for each marker,
-/// reads its capsule, proves the bytes are the ones the marker committed to,
-/// decodes the template, and applies it. Every step fails closed and names the
-/// sequence, because "the database will not open" is only actionable if it also
-/// says which commit is the problem.
-///
-/// Only markers reach this loop, so an orphan capsule — bytes on disk that no
-/// marker names — contributes nothing without needing to be excluded: it was
-/// never in the stream to begin with. That is the marker-is-the-commit rule
-/// paying off at the semantic layer rather than being restated there.
 /// What a replay produces: the materialized graph AND the delta index that
 /// tracks it.
 ///
@@ -259,7 +247,18 @@ pub fn materialize(
     replay(cx, coordinator).map(|replayed| replayed.database)
 }
 
-/// Replay the durable stream into graph state and the delta window.
+/// **Replay the durable commit stream into graph state and the delta window.**
+///
+/// Walks the recovered marker chain in commit order and, for each marker,
+/// reads its capsule, proves the bytes are the ones the marker committed to,
+/// decodes the template, and applies it. Every step fails closed and names the
+/// sequence, because "the database will not open" is only actionable if it also
+/// says which commit is the problem.
+///
+/// Only markers reach this loop, so an orphan capsule — bytes on disk that no
+/// marker names — contributes nothing without needing to be excluded: it was
+/// never in the stream to begin with. That is the marker-is-the-commit rule
+/// paying off at the semantic layer rather than being restated there.
 ///
 /// Takes `&CommitCx` because attesting a marker as committed is a
 /// capability-gated act: `CommittedMarker::attest` demands commit authority

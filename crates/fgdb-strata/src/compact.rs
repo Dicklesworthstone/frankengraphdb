@@ -128,9 +128,9 @@ fn pack_retained(
     packed.sort_by_key(|block| {
         crate::root::span_of(block)
             .map(|(first_seq, last_seq)| (last_seq, first_seq))
-            // Packing creates a block only while inserting its first entry, so the
-            // fallback is unreachable. Keeping the ordering total here avoids a
-            // production panic if that construction is ever refactored incorrectly.
+            // `retained` was proven non-empty and `chunks` never yields an empty
+            // chunk, so the fallback is unreachable. Keeping the ordering total
+            // avoids a production panic if that construction is ever refactored.
             .unwrap_or((CommitSeq(0), CommitSeq(0)))
     });
     packed

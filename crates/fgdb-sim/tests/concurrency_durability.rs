@@ -129,7 +129,11 @@ fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
         .unwrap_or_else(ReferenceGraph::new)
 }
 
-/// The sequence Chronicle will assign next, derived from the recovered stream.
+/// Fixture-only prediction for the next sequence in this single-coordinate suite.
+///
+/// Every marker produced here advances `(GRAPH, BRANCH)`, so that coordinate's
+/// recovered frontier is also the global Chronicle frontier. This is not a
+/// general way to derive a database-wide commit sequence.
 fn next_seq(cx: &CommitCx, coordinator: &CommitCoordinator) -> CommitSeq {
     let applied = recovered(cx, coordinator)
         .applied_through(GRAPH, BRANCH)
@@ -438,6 +442,13 @@ fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
         for round in 0..4u128 {
             let db = recovered(cx, &coordinator);
             let predicted = next_seq(cx, &coordinator);
+            assert_eq!(
+                coordinator
+                    .next_commit_seq()
+                    .expect("Chronicle can assign another sequence"),
+                predicted,
+                "replay's coordinate frontier must predict Chronicle's independent chain frontier"
+            );
             let mut txn = begin(&db);
             txn.execute(&[create(round + 1, round as i64)])
                 .expect("executes");
@@ -447,6 +458,15 @@ fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
                 .committed_parts()
                 .expect("each round commits");
             assert_eq!(seq, predicted);
+            assert_eq!(
+                coordinator
+                    .chain()
+                    .entries()
+                    .last()
+                    .map(|entry| CommitSeq(entry.marker.commit_seq)),
+                Some(predicted),
+                "the marker Chronicle actually appended must carry the predicted sequence"
+            );
             assert_eq!(
                 recovered(cx, &coordinator).applied_through(GRAPH, BRANCH),
                 Some(predicted),
