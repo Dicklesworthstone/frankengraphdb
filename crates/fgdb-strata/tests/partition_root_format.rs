@@ -22,6 +22,7 @@ use fgdb_strata::root::{
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, GraphId};
+use std::cell::Cell;
 
 const K_OID: [u8; 32] = [0x5a; 32];
 const GRAPH: GraphId = GraphId(1);
@@ -370,6 +371,47 @@ fn resolving_loads_every_named_block() {
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].len(), 2);
     assert_eq!(loaded[1].len(), 2);
+}
+
+/// Resolution is a public admission boundary, not merely the second half of
+/// `decode_root`. A caller can construct `PartitionRoot` directly, so the
+/// resolver must reject an impossible publication order before trusting it to
+/// choose block precedence or touching storage.
+#[test]
+fn resolution_refuses_an_unvalidated_publication_order_before_loading() {
+    let (newer_id, newer_bytes, newer_span) = block(vec![entry(1, 2, 1, Some(9))]);
+    let (older_id, older_bytes, older_span) = block(vec![entry(1, 2, 1, None)]);
+    let root = PartitionRoot {
+        graph: GRAPH,
+        branch: BRANCH,
+        partition: 0,
+        published_at: CommitSeq(10),
+        blocks: vec![
+            reference(newer_id, newer_span),
+            reference(older_id, older_span),
+        ],
+    };
+    let loads = Cell::new(0usize);
+    let blocks = [(newer_id, newer_bytes), (older_id, older_bytes)];
+
+    let result = resolve_blocks(&K_OID, namespace(), &root, |wanted| {
+        loads.set(loads.get() + 1);
+        blocks
+            .iter()
+            .find(|(id, _)| *id == wanted)
+            .map(|(_, bytes)| bytes.clone())
+    });
+
+    assert_eq!(
+        result,
+        Err(RootError::BlockOrderRegression {
+            earlier: 0,
+            later: 1,
+            earlier_last_seq: CommitSeq(9),
+            later_last_seq: CommitSeq(1),
+        })
+    );
+    assert_eq!(loads.get(), 0, "an invalid root must not reach storage");
 }
 
 /// A block the loader cannot supply is a typed failure naming its position.

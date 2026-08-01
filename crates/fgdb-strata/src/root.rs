@@ -393,6 +393,12 @@ pub fn resolve_blocks(
     root: &PartitionRoot,
     mut load: impl FnMut(ObjectId) -> Option<Vec<u8>>,
 ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, RootError> {
+    // `PartitionRoot` is public and can be constructed without passing through
+    // `decode_root`. Resolution is therefore an admission boundary of its own:
+    // block order decides tombstone precedence, so loading an invalid root first
+    // would make structurally impossible history available to the merge path.
+    validate_root(root)?;
+
     let mut out = Vec::with_capacity(root.blocks.len());
     for (index, reference) in root.blocks.iter().enumerate() {
         let bytes = load(reference.block_id).ok_or(RootError::Block {
