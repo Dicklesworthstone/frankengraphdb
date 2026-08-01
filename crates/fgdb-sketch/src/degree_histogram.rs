@@ -197,6 +197,7 @@ impl DegreeHistogram {
     }
 
     /// Encodes the complete profile and buckets into fixed canonical bytes.
+    /// Fixed-width integers use the workspace's little-endian durable law.
     pub fn to_canonical_bytes(
         &self,
     ) -> Result<[u8; DEGREE_HISTOGRAM_CANONICAL_BYTES], DegreeHistogramCodecError> {
@@ -204,20 +205,20 @@ impl DegreeHistogram {
         let mut bytes = [0_u8; DEGREE_HISTOGRAM_CANONICAL_BYTES];
         let mut offset = 0;
         copy_field(&mut bytes, &mut offset, &CANONICAL_MAGIC);
-        copy_field(&mut bytes, &mut offset, &CANONICAL_VERSION.to_be_bytes());
+        copy_field(&mut bytes, &mut offset, &CANONICAL_VERSION.to_le_bytes());
         copy_field(
             &mut bytes,
             &mut offset,
-            &(DEGREE_BUCKETS as u16).to_be_bytes(),
+            &(DEGREE_BUCKETS as u16).to_le_bytes(),
         );
         copy_field(
             &mut bytes,
             &mut offset,
-            &self.max_observations.to_be_bytes(),
+            &self.max_observations.to_le_bytes(),
         );
-        copy_field(&mut bytes, &mut offset, &self.total.to_be_bytes());
+        copy_field(&mut bytes, &mut offset, &self.total.to_le_bytes());
         for count in self.counts {
-            copy_field(&mut bytes, &mut offset, &count.to_be_bytes());
+            copy_field(&mut bytes, &mut offset, &count.to_le_bytes());
         }
         debug_assert_eq!(offset, DEGREE_HISTOGRAM_CANONICAL_BYTES);
         Ok(bytes)
@@ -463,11 +464,11 @@ impl<'bytes> DegreeHistogramDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, DegreeHistogramCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, DegreeHistogramCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), DegreeHistogramCodecError> {
@@ -559,7 +560,7 @@ mod tests {
         let reverse_bytes = reverse.to_canonical_bytes().expect("valid histogram");
         assert_eq!(forward_bytes, reverse_bytes);
         assert_eq!(&forward_bytes[..8], b"FGDBDGH1");
-        assert_eq!(&forward_bytes[8..10], &1_u16.to_be_bytes());
+        assert_eq!(&forward_bytes[8..10], &1_u16.to_le_bytes());
 
         let decoded = DegreeHistogram::try_from_canonical_bytes(&forward_bytes, 20)
             .expect("canonical histogram");
@@ -593,14 +594,14 @@ mod tests {
         ));
 
         let mut wrong_version = encoded;
-        wrong_version[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             DegreeHistogram::try_from_canonical_bytes(&wrong_version, 20),
             Err(DegreeHistogramCodecError::UnsupportedVersion { actual: 2 })
         );
 
         let mut wrong_bucket_count = encoded;
-        wrong_bucket_count[10..12].copy_from_slice(&64_u16.to_be_bytes());
+        wrong_bucket_count[10..12].copy_from_slice(&64_u16.to_le_bytes());
         assert_eq!(
             DegreeHistogram::try_from_canonical_bytes(&wrong_bucket_count, 20),
             Err(DegreeHistogramCodecError::BucketCountMismatch { actual: 64 })

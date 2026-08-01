@@ -325,6 +325,7 @@ impl ByteZoneMap {
     }
 
     /// Encodes the complete profile, count, and extrema into canonical bytes.
+    /// Fixed-width integers use the workspace's little-endian durable law.
     pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, ZoneMapCodecError> {
         validate_canonical_zone_map(
             self.profile,
@@ -787,11 +788,11 @@ fn validate_canonical_zone_map(
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct ZoneMapDecoder<'bytes> {
@@ -828,11 +829,11 @@ impl<'bytes> ZoneMapDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, ZoneMapCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, ZoneMapCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), ZoneMapCodecError> {
@@ -931,7 +932,7 @@ mod tests {
         let reverse_bytes = reverse.try_to_canonical_bytes().expect("valid zone map");
         assert_eq!(forward_bytes, reverse_bytes);
         assert_eq!(&forward_bytes[..8], b"FGDBZMP1");
-        assert_eq!(&forward_bytes[8..10], &1_u16.to_be_bytes());
+        assert_eq!(&forward_bytes[8..10], &1_u16.to_le_bytes());
         let decoded = read_fixture(&forward_bytes).expect("canonical zone map");
         assert_eq!(decoded, forward);
         assert_eq!(
@@ -954,7 +955,7 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_version),
             Err(ZoneMapCodecError::UnsupportedVersion { actual: 2 })
@@ -980,7 +981,7 @@ mod tests {
         let mut empty_with_endpoint = ByteZoneMap::new(profile())
             .try_to_canonical_bytes()
             .expect("valid empty map");
-        empty_with_endpoint[34..42].copy_from_slice(&1_u64.to_be_bytes());
+        empty_with_endpoint[34..42].copy_from_slice(&1_u64.to_le_bytes());
         empty_with_endpoint.push(b'a');
         assert_eq!(
             read_fixture(&empty_with_endpoint),

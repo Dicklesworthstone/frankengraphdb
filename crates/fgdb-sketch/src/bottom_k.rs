@@ -577,7 +577,7 @@ impl BottomKSketch {
 
     /// Encodes the complete profile and logical state into one canonical value.
     ///
-    /// The representation uses fixed-width big-endian profile and state fields,
+    /// The representation uses fixed-width little-endian profile and state fields,
     /// followed by strictly sorted `(hash, observation length, observation)`
     /// records. Equal logical states therefore produce byte-identical values
     /// without relying on host word size.
@@ -1204,11 +1204,11 @@ fn decode_hash_algorithm(actual: u8) -> Result<BottomKHashAlgorithm, BottomKCode
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct BottomKDecoder<'bytes> {
@@ -1245,7 +1245,7 @@ impl<'bytes> BottomKDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, BottomKCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u8(&mut self) -> Result<u8, BottomKCodecError> {
@@ -1253,7 +1253,7 @@ impl<'bytes> BottomKDecoder<'bytes> {
     }
 
     fn read_u64(&mut self) -> Result<u64, BottomKCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), BottomKCodecError> {
@@ -1633,7 +1633,7 @@ mod tests {
         assert_eq!(&forward_bytes[..8], b"FGDBBTK1");
         assert_eq!(
             &forward_bytes[VERSION_OFFSET..HASH_ALGORITHM_OFFSET],
-            &1_u16.to_be_bytes()
+            &1_u16.to_le_bytes()
         );
         assert_eq!(
             forward_bytes[HASH_ALGORITHM_OFFSET],
@@ -1823,7 +1823,7 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_version, value.profile()),
             Err(BottomKCodecError::UnsupportedVersion { actual: 2 })
@@ -1838,7 +1838,7 @@ mod tests {
 
         let mut count_exceeds_k = encoded.clone();
         count_exceeds_k[SAMPLE_COUNT_OFFSET..CANONICAL_HEADER_BYTES]
-            .copy_from_slice(&5_u64.to_be_bytes());
+            .copy_from_slice(&5_u64.to_le_bytes());
         assert_eq!(
             read_fixture(&count_exceeds_k, value.profile()),
             Err(BottomKCodecError::SampleCountExceedsProfile {
@@ -1849,7 +1849,7 @@ mod tests {
 
         let mut impossible_count = raw_canonical_bytes(profile(1_000_000), 0, &[]);
         impossible_count[SAMPLE_COUNT_OFFSET..CANONICAL_HEADER_BYTES]
-            .copy_from_slice(&1_000_000_u64.to_be_bytes());
+            .copy_from_slice(&1_000_000_u64.to_le_bytes());
         assert!(matches!(
             read_fixture(&impossible_count, profile(1_000_000)),
             Err(BottomKCodecError::Truncated {
@@ -1934,7 +1934,7 @@ mod tests {
         );
 
         wrong_hash[MAX_OBSERVATION_BYTES_OFFSET..MAX_SAMPLE_BYTES_OFFSET]
-            .copy_from_slice(&0_u64.to_be_bytes());
+            .copy_from_slice(&0_u64.to_le_bytes());
         let zero_observation_profile = BottomKProfile {
             max_observation_bytes: 0,
             ..state.profile
@@ -1969,7 +1969,7 @@ mod tests {
         over_limit[MAX_SAMPLE_BYTES_OFFSET..SAMPLE_BYTES_OFFSET].copy_from_slice(
             &u64::try_from(actual_bytes - 1)
                 .expect("test payload fits")
-                .to_be_bytes(),
+                .to_le_bytes(),
         );
         let over_limit_profile = BottomKProfile {
             max_sample_bytes: actual_bytes - 1,

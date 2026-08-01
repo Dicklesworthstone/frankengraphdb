@@ -510,7 +510,7 @@ impl DistinctSketch {
 
     /// Encodes the complete profile and logical state into one canonical value.
     ///
-    /// The representation uses fixed-width big-endian fields followed by the
+    /// The representation uses fixed-width little-endian fields followed by the
     /// canonically indexed one-byte register array. Equal logical states
     /// therefore produce byte-identical values without relying on host word
     /// size.
@@ -924,11 +924,11 @@ fn decode_hash_algorithm(actual: u8) -> Result<DistinctHashAlgorithm, DistinctCo
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct DistinctDecoder<'bytes> {
@@ -969,11 +969,11 @@ impl<'bytes> DistinctDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, DistinctCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, DistinctCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), DistinctCodecError> {
@@ -1170,7 +1170,7 @@ mod tests {
         assert_eq!(&forward_bytes[..VERSION_OFFSET], b"FGDBDST1");
         assert_eq!(
             &forward_bytes[VERSION_OFFSET..HASH_ALGORITHM_OFFSET],
-            &1_u16.to_be_bytes()
+            &1_u16.to_le_bytes()
         );
         assert_eq!(
             forward_bytes[HASH_ALGORITHM_OFFSET],
@@ -1179,15 +1179,15 @@ mod tests {
         assert_eq!(forward_bytes[PRECISION_OFFSET], profile().precision);
         assert_eq!(
             &forward_bytes[SEED_OFFSET..MAX_REGISTERS_OFFSET],
-            &profile().seed.to_be_bytes()
+            &profile().seed.to_le_bytes()
         );
         assert_eq!(
             &forward_bytes[MAX_REGISTERS_OFFSET..REGISTER_COUNT_OFFSET],
-            &(profile().max_registers as u64).to_be_bytes()
+            &(profile().max_registers as u64).to_le_bytes()
         );
         assert_eq!(
             &forward_bytes[REGISTER_COUNT_OFFSET..CANONICAL_HEADER_BYTES],
-            &(forward.register_count() as u64).to_be_bytes()
+            &(forward.register_count() as u64).to_le_bytes()
         );
 
         let decoded =
@@ -1415,7 +1415,7 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_version, small_profile),
             Err(DistinctCodecError::UnsupportedVersion { actual: 2 })
@@ -1449,7 +1449,7 @@ mod tests {
 
         let mut insufficient_ceiling = encoded.clone();
         insufficient_ceiling[MAX_REGISTERS_OFFSET..REGISTER_COUNT_OFFSET]
-            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_be_bytes());
+            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_le_bytes());
         let insufficient_profile = DistinctProfile {
             max_registers: (1 << MIN_PRECISION) - 1,
             ..small_profile
@@ -1466,7 +1466,7 @@ mod tests {
 
         let mut wrong_count = encoded.clone();
         wrong_count[REGISTER_COUNT_OFFSET..CANONICAL_HEADER_BYTES]
-            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_be_bytes());
+            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_count, small_profile),
             Err(DistinctCodecError::RegisterCountMismatch {
@@ -1477,7 +1477,7 @@ mod tests {
 
         let mut enormous_count = encoded.clone();
         enormous_count[REGISTER_COUNT_OFFSET..CANONICAL_HEADER_BYTES]
-            .copy_from_slice(&u64::MAX.to_be_bytes());
+            .copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(matches!(
             read_fixture(&enormous_count, small_profile),
             Err(DistinctCodecError::IntegerUnrepresentable)

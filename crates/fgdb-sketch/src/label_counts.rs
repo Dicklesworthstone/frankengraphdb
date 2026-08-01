@@ -935,6 +935,7 @@ impl LabelCounts {
     }
 
     /// Encodes the complete profile and canonical retained state.
+    /// Fixed-width integers use the workspace's little-endian durable law.
     pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, LabelCountsCodecError> {
         let layout = validate_canonical_state(
             self.profile,
@@ -1332,11 +1333,11 @@ fn decoded_usize(value: u64) -> Result<usize, LabelCountsCodecError> {
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct LabelCountsDecoder<'bytes> {
@@ -1377,11 +1378,11 @@ impl<'bytes> LabelCountsDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, LabelCountsCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, LabelCountsCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), LabelCountsCodecError> {
@@ -1738,6 +1739,7 @@ mod tests {
             (vertex(b"City"), 2),
         ]);
         let encoded = counts.try_to_canonical_bytes().expect("state encodes");
+        assert_eq!(&encoded[8..10], &1_u16.to_le_bytes());
 
         let decoded = LabelCounts::try_from_canonical_bytes(&encoded, PROFILE, limits())
             .expect("canonical bytes decode");
@@ -1776,7 +1778,7 @@ mod tests {
         );
 
         let mut future = encoded.clone();
-        future[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        future[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             LabelCounts::try_from_canonical_bytes(&future, PROFILE, limits()),
             Err(LabelCountsCodecError::UnsupportedVersion { actual: 2 })
@@ -1864,14 +1866,14 @@ mod tests {
         let count_offset = CANONICAL_HEADER_BYTES + 1 + 8;
 
         let mut zeroed = encoded.clone();
-        zeroed[count_offset..count_offset + 8].copy_from_slice(&0_u64.to_be_bytes());
+        zeroed[count_offset..count_offset + 8].copy_from_slice(&0_u64.to_le_bytes());
         assert_eq!(
             LabelCounts::try_from_canonical_bytes(&zeroed, PROFILE, limits()),
             Err(LabelCountsCodecError::ZeroCountEntry { index: 0 })
         );
 
         let mut disagreeing = encoded.clone();
-        disagreeing[count_offset..count_offset + 8].copy_from_slice(&4_u64.to_be_bytes());
+        disagreeing[count_offset..count_offset + 8].copy_from_slice(&4_u64.to_le_bytes());
         assert_eq!(
             LabelCounts::try_from_canonical_bytes(&disagreeing, PROFILE, limits()),
             Err(LabelCountsCodecError::TotalCountMismatch {
@@ -1883,7 +1885,7 @@ mod tests {
         let key_bytes_offset = CANONICAL_HEADER_BYTES - 8;
         let mut wrong_key_bytes = encoded.clone();
         wrong_key_bytes[key_bytes_offset..key_bytes_offset + 8]
-            .copy_from_slice(&7_u64.to_be_bytes());
+            .copy_from_slice(&7_u64.to_le_bytes());
         assert_eq!(
             LabelCounts::try_from_canonical_bytes(&wrong_key_bytes, PROFILE, limits()),
             Err(LabelCountsCodecError::Truncated {

@@ -265,6 +265,7 @@ impl ExactQuantileSketch {
     }
 
     /// Encodes the complete ceiling and sorted multiset into canonical bytes.
+    /// Fixed-width integers use the workspace's little-endian durable law.
     pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, ExactQuantileCodecError> {
         validate_canonical_values(self.max_observations, &self.values)?;
         let payload_bytes = self
@@ -550,11 +551,11 @@ fn decoded_usize(value: u64) -> Result<usize, ExactQuantileCodecError> {
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct ExactQuantileDecoder<'bytes> {
@@ -586,11 +587,11 @@ impl<'bytes> ExactQuantileDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, ExactQuantileCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, ExactQuantileCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), ExactQuantileCodecError> {
@@ -645,7 +646,7 @@ mod tests {
             .expect("valid sorted multiset");
         assert_eq!(forward_bytes, reverse_bytes);
         assert_eq!(&forward_bytes[..8], b"FGDBEQS1");
-        assert_eq!(&forward_bytes[8..10], &1_u16.to_be_bytes());
+        assert_eq!(&forward_bytes[8..10], &1_u16.to_le_bytes());
 
         let decoded = read_fixture(&forward_bytes).expect("canonical summary");
         assert_eq!(decoded, forward);
@@ -669,14 +670,14 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_version),
             Err(ExactQuantileCodecError::UnsupportedVersion { actual: 2 })
         );
 
         let mut above_limit = encoded.clone();
-        above_limit[18..26].copy_from_slice(&101_u64.to_be_bytes());
+        above_limit[18..26].copy_from_slice(&101_u64.to_le_bytes());
         assert_eq!(
             read_fixture(&above_limit),
             Err(ExactQuantileCodecError::ObservationLimitExceeded {
@@ -686,8 +687,8 @@ mod tests {
         );
 
         let mut out_of_order = encoded.clone();
-        out_of_order[26..34].copy_from_slice(&3_u64.to_be_bytes());
-        out_of_order[34..42].copy_from_slice(&2_u64.to_be_bytes());
+        out_of_order[26..34].copy_from_slice(&3_u64.to_le_bytes());
+        out_of_order[34..42].copy_from_slice(&2_u64.to_le_bytes());
         assert_eq!(
             read_fixture(&out_of_order),
             Err(ExactQuantileCodecError::ValuesOutOfOrder {
