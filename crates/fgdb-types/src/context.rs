@@ -1345,10 +1345,14 @@ mod tests {
             "lab oracle failed: {report:?}"
         );
         for invariant in ["obligation_leak", "quiescence"] {
-            let entry = report
-                .oracle_report
-                .entry(invariant)
-                .unwrap_or_else(|| panic!("lab report omitted {invariant}: {report:?}"));
+            let entry = report.oracle_report.entry(invariant);
+            assert!(
+                entry.is_some(),
+                "lab report omitted {invariant}: {report:?}"
+            );
+            let Some(entry) = entry else {
+                continue;
+            };
             assert!(entry.passed, "lab oracle {invariant} failed: {report:?}");
         }
         assert!(
@@ -1419,10 +1423,8 @@ mod tests {
     fn cancellation_error<T>(
         result: Result<T, ObligationCancellationError>,
     ) -> ObligationCancellationError {
-        match result {
-            Ok(_) => panic!("cancelled boundary unexpectedly succeeded"),
-            Err(error) => error,
-        }
+        assert!(result.is_err(), "cancelled boundary unexpectedly succeeded");
+        result.err().expect("error presence asserted above")
     }
 
     #[test]
@@ -1492,9 +1494,16 @@ mod tests {
             let error = match contexts.query().pin_snapshot(id(10)) {
                 Ok(obligation) => {
                     let _receipt = obligation.abort();
-                    panic!("cancelled acquisition unexpectedly succeeded")
+                    None
                 }
-                Err(error) => error,
+                Err(error) => Some(error),
+            };
+            assert!(
+                error.is_some(),
+                "cancelled acquisition unexpectedly succeeded"
+            );
+            let Some(error) = error else {
+                return;
             };
             assert_eq!(error.attempted_boundary(), ObligationBoundary::Acquisition);
             assert_eq!(contexts.outstanding_obligations(), 0);
@@ -1626,9 +1635,16 @@ mod tests {
             let error = match contexts.query().pin_snapshot(id(30)) {
                 Ok(obligation) => {
                     let _receipt = obligation.abort();
-                    panic!("cancelled context unexpectedly acquired an obligation")
+                    None
                 }
-                Err(error) => error,
+                Err(error) => Some(error),
+            };
+            assert!(
+                error.is_some(),
+                "cancelled context unexpectedly acquired an obligation"
+            );
+            let Some(error) = error else {
+                return;
             };
             assert!(
                 error
@@ -1738,7 +1754,10 @@ mod tests {
                 .unwrap()
                 .complete()
                 .unwrap(),
-            other => panic!("no terminal path at depth {other}"),
+            _ => {
+                assert!(depth <= 4, "no terminal path at depth {depth}");
+                obligation.abort()
+            }
         }
     }
 
