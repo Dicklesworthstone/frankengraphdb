@@ -10,6 +10,8 @@
 use std::fs::File;
 #[cfg(not(unix))]
 use std::io::{Read, Seek, SeekFrom};
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 /// The mapping granularity this crate assumes on the mapped path.
 ///
@@ -139,10 +141,27 @@ pub fn plan_range(file: &File, offset: u64, len: usize) -> Result<u64, VfsError>
 }
 
 /// A bounded view of a byte range, valid for as long as the view is held.
+///
+/// A view is intentionally neither [`Send`] nor [`Sync`]. The mapped backing's
+/// cross-thread contract is deliberately unclaimed and untested, so the
+/// portable API must not acquire different auto traits merely because that
+/// backing is compiled out. The zero-sized marker below keeps the contract
+/// identical on every target without adding an unsafe impl.
+///
+/// ```compile_fail,E0277
+/// fn requires_send<T: Send>() {}
+/// requires_send::<fgdb_unsafe_vfs::FileView>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<fgdb_unsafe_vfs::FileView>();
+/// ```
 #[derive(Debug)]
 pub struct FileView {
     backing: Backing,
     path: MapPath,
+    _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 #[derive(Debug)]
@@ -231,6 +250,7 @@ pub fn open_view(
             Ok(Some(FileView {
                 backing: Backing::Buffered(buffer),
                 path,
+                _not_send_or_sync: PhantomData,
             }))
         }
         #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -239,6 +259,7 @@ pub fn open_view(
             Ok(Some(FileView {
                 backing: Backing::Mapped(mapping),
                 path,
+                _not_send_or_sync: PhantomData,
             }))
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
@@ -439,36 +460,18 @@ mod sys {
 mod tests {
     use super::{COMPILED_MAP_PATHS, MapPath, VfsError, open_view, plan_range};
     use std::fs::File;
-    use std::io::Write;
 
-    fn fixture(tag: &str, bytes: &[u8]) -> (std::path::PathBuf, File) {
-        let path = std::env::temp_dir().join(format!(
-            "fgdb-unsafe-vfs-{}-{tag}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let mut file = File::create(&path).expect("create");
-        file.write_all(bytes).expect("write");
-        file.sync_all().expect("sync");
-        (path.clone(), File::open(&path).expect("open"))
-    }
-
-    fn pseudorandom(len: usize) -> Vec<u8> {
-        let mut state = 0x2545_f491_4f6c_dd1d_u64;
-        (0..len)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                u8::try_from(state & 0xff).expect("byte")
-            })
-            .collect()
+    fn fixture() -> (Vec<u8>, File) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/view.rs");
+        let bytes = std::fs::read(&path).expect("read the checked-in source fixture");
+        assert!(!bytes.is_empty(), "the checked-in source fixture is empty");
+        let file = File::open(path).expect("open the checked-in source fixture");
+        (bytes, file)
     }
 
     #[test]
     fn every_compiled_path_returns_the_same_bytes() {
-        let data = pseudorandom(3 * 4096 + 137);
-        let (_path, file) = fixture("same-bytes", &data);
+        let (data, file) = fixture();
         let mut compared = 0_usize;
         for offset in [0_u64, 1, 7, 4095, 4096, 4097, 8192, 9000] {
             for len in [1_usize, 2, 63, 4096, 4097, 5000] {
@@ -496,9 +499,20 @@ mod tests {
 
     #[test]
     fn both_paths_refuse_identically() {
-        let data = pseudorandom(100);
-        let (_path, file) = fixture("refuse", &data);
-        for (offset, len) in [(0_u64, 0_usize), (0, 101), (99, 2), (100, 1), (u64::MAX, 1)] {
+        let (data, file) = fixture();
+        let end = u64::try_from(data.len()).expect("source fixture length fits u64");
+        let last = end.checked_sub(1).expect("source fixture is nonempty");
+        let past_end = data
+            .len()
+            .checked_add(1)
+            .expect("source fixture is bounded");
+        for (offset, len) in [
+            (0_u64, 0_usize),
+            (0, past_end),
+            (last, 2),
+            (end, 1),
+            (u64::MAX, 1),
+        ] {
             let labels: Vec<&str> = COMPILED_MAP_PATHS
                 .iter()
                 .map(|&path| match open_view(&file, offset, len, path) {
@@ -517,17 +531,21 @@ mod tests {
 
     #[test]
     fn a_range_past_the_end_is_refused_before_anything_is_mapped() {
-        let (_path, file) = fixture("past-end", &[0_u8; 16]);
+        let (data, file) = fixture();
+        let file_len = u64::try_from(data.len()).expect("source fixture length fits u64");
+        let offset = file_len
+            .checked_sub(8)
+            .expect("source fixture has eight bytes");
         assert!(matches!(
-            plan_range(&file, 8, 16),
+            plan_range(&file, offset, 16),
             Err(VfsError::OutOfRange {
-                offset: 8,
+                offset: found_offset,
                 len: 16,
-                file_len: 16
-            })
+                file_len: found_file_len
+            }) if found_offset == offset && found_file_len == file_len
         ));
         assert!(matches!(plan_range(&file, 0, 0), Err(VfsError::EmptyRange)));
-        assert!(plan_range(&file, 0, 16).is_ok());
+        assert!(plan_range(&file, 0, data.len()).is_ok());
     }
 
     #[test]
@@ -551,8 +569,7 @@ mod tests {
     #[test]
     fn a_view_does_not_move_the_callers_cursor() {
         use std::io::{Read, Seek, SeekFrom};
-        let data = pseudorandom(64);
-        let (_path, file) = fixture("cursor", &data);
+        let (data, file) = fixture();
         let mut file = file;
         file.seek(SeekFrom::Start(8)).expect("seek");
         for &path in COMPILED_MAP_PATHS {

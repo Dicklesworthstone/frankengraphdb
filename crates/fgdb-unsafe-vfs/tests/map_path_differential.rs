@@ -18,30 +18,26 @@
 
 use fgdb_unsafe_vfs::{COMPILED_MAP_PATHS, FileView, MapPath, open_view};
 use std::fs::File;
-use std::io::Write;
 
 const CORPUS_BYTES: usize = 5 * 4096 + 1237;
 
 fn corpus() -> Vec<u8> {
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    (0..CORPUS_BYTES)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            u8::try_from(state & 0xff).expect("byte")
-        })
-        .collect()
+    let mut bytes = std::fs::read(corpus_path()).expect("read the checked-in source corpus");
+    assert!(
+        bytes.len() >= CORPUS_BYTES,
+        "source corpus shrank to {} bytes; the differential needs {CORPUS_BYTES}",
+        bytes.len()
+    );
+    bytes.truncate(CORPUS_BYTES);
+    bytes
 }
 
-fn fixture(tag: &str, bytes: &[u8]) -> (std::path::PathBuf, File) {
-    let path =
-        std::env::temp_dir().join(format!("fgdb-unsafe-vfs-diff-{}-{tag}", std::process::id()));
-    let mut file = File::create(&path).expect("create");
-    file.write_all(bytes).expect("write");
-    file.sync_all().expect("sync");
-    let handle = File::open(&path).expect("open");
-    (path, handle)
+fn corpus_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/view.rs")
+}
+
+fn fixture() -> File {
+    File::open(corpus_path()).expect("open the checked-in source corpus")
 }
 
 /// Ranges chosen so the intra-page delta is zero, one, most of a page, and
@@ -72,7 +68,7 @@ fn digest(bytes: &[u8]) -> u64 {
 #[test]
 fn every_compiled_path_agrees_with_the_file_bit_for_bit() {
     let data = corpus();
-    let (_path, file) = fixture("agree", &data);
+    let file = fixture();
     let cases = ranges();
     assert!(cases.len() >= 60, "only {} ranges", cases.len());
     let mut compared = 0_usize;
@@ -122,7 +118,7 @@ fn the_digest_separates_a_one_bit_change() {
 #[test]
 fn views_are_independent_and_survive_each_others_drops() {
     let data = corpus();
-    let (_path, file) = fixture("independent", &data);
+    let file = fixture();
     for &path in COMPILED_MAP_PATHS {
         let spans = [(0_u64, 4096_usize), (4096, 4096), (100, 9000), (20_000, 17)];
         let mut views: Vec<Option<FileView>> = spans
@@ -159,7 +155,7 @@ fn views_are_independent_and_survive_each_others_drops() {
 #[test]
 fn the_last_byte_of_the_file_is_readable_on_every_path() {
     let data = corpus();
-    let (_path, file) = fixture("last-byte", &data);
+    let file = fixture();
     let offset = (CORPUS_BYTES - 1) as u64;
     for &path in COMPILED_MAP_PATHS {
         let view = open_view(&file, offset, 1, path)
