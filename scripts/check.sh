@@ -2722,7 +2722,12 @@ case "${1:-}" in
 esac
 
 cd "$ROOT" || exit 1
-GATE_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-gates.XXXXXX")"
+# set -uo pipefail has no -e: an mktemp failure would leave this empty and
+# cascade into gate logs at "/core-ubs.log" — red, but unnamed and confusing.
+GATE_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-gates.XXXXXX")" || {
+  echo "QUALITY GATE RED: cannot create the gate log directory under ${TMPDIR:-/tmp}" >&2
+  exit 1
+}
 echo "gate logs: $GATE_LOG_DIR"
 
 # Hold the landing lease for this run (fgdb-eesn). gate_init acquires it and the

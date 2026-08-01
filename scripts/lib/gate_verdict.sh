@@ -490,14 +490,25 @@ gate_landing_acquire() {
   [ "${FGDB_LANDING_LEASE:-0}" = "1" ] || return 0
   local lib
   lib="${FGDB_LANDING_LIB:-$(dirname "${BASH_SOURCE[0]}")/landing_lease.sh}"
-  [ -r "$lib" ] || return 0
+  if [ ! -r "$lib" ]; then
+    gate_diag "  landing lease SKIPPED: $lib unreadable; the run is UNPROTECTED and the tripwire is the only backstop"
+    return 0
+  fi
   # shellcheck source=landing_lease.sh
-  . "$lib" 2>/dev/null || return 0
-  command -v landing_lease_acquire >/dev/null 2>&1 || return 0
+  if ! . "$lib" 2>/dev/null; then
+    gate_diag "  landing lease SKIPPED: sourcing $lib failed; the run is UNPROTECTED and the tripwire is the only backstop"
+    return 0
+  fi
+  if ! command -v landing_lease_acquire >/dev/null 2>&1; then
+    gate_diag "  landing lease SKIPPED: landing_lease_acquire missing after sourcing; the run is UNPROTECTED and the tripwire is the only backstop"
+    return 0
+  fi
   if landing_lease_acquire "${FGDB_LANDING_NAME:-gate-${GATE_NAME:-unnamed}}" \
     "${FGDB_LANDING_TTL:-45}"; then
     GATE_LANDING_HELD=1
     gate_diag "  landing lease held for this run; other panes cannot land on main"
+  else
+    gate_diag "  landing lease NOT acquired (another run holds it or the token dir is unwritable); the run is UNPROTECTED and the tripwire is the only backstop"
   fi
   return 0
 }

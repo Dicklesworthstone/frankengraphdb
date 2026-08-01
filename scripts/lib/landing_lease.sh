@@ -179,9 +179,14 @@ landing_lease_state() {
       ;;
   esac
 
-  if ! kill -0 "$pid" 2>/dev/null; then
+  # THE ONLY TEST THAT MAY BREAK A LEASE, and it must be uid-independent:
+  # kill -0 fails EPERM for a process that EXISTS under another uid, and
+  # reading that as ESRCH would reap a LIVE foreign-owned holder — two
+  # processes then believe they hold the lease. /proc answers existence
+  # regardless of ownership.
+  if [ ! -d "/proc/$pid" ]; then
     LANDING_LIVENESS=dead
-    LANDING_EVIDENCE="kill -0 $pid failed: no such live process"
+    LANDING_EVIDENCE="/proc/$pid does not exist: the holder's process is gone"
     LANDING_STATE=BREAKABLE; printf 'BREAKABLE\n'; return 0
   fi
   if [ -n "$start" ]; then
@@ -194,7 +199,7 @@ landing_lease_state() {
   fi
 
   LANDING_LIVENESS=alive
-  LANDING_EVIDENCE="kill -0 $pid succeeded and its start time matches the recorded $start; the holder is running"
+  LANDING_EVIDENCE="/proc/$pid exists (ownership-independent) and its start time matches the recorded $start; the holder is running"
   LANDING_STATE=BINDING; printf 'BINDING\n'; return 0
 }
 

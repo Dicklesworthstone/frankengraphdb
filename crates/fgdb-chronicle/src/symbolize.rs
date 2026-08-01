@@ -183,10 +183,11 @@ pub fn encode_object(
     repair_symbols: u32,
     dek: &[u8; 32],
 ) -> Result<Vec<Vec<u8>>, SymbolizeError> {
-    // The RFC 6330 systematic-index table bound (K = 4..=56403), enforced by
-    // asupersync's parameter builder with a PANIC past it. The bound lives
-    // here instead: a large object is a typed refusal, never a process
-    // panic, and the check precedes every allocation on this path.
+    // asupersync's parameter builder accepts k = 1..=56403 and PANICS outside
+    // it (k == 0 is precluded by ValidatedSourceBlock's own checks); the RFC
+    // 6330 systematic table itself starts at 4, and asupersync accepts down to
+    // 1. The bound lives here instead of in the panic: a large object is a
+    // typed refusal, and the check precedes every allocation on this path.
     let source_shape =
         ValidatedSourceBlock::try_new(protected.len(), encoding.descriptor().symbol_size)?;
     let source = source_shape.materialize(protected)?;

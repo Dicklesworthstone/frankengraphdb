@@ -129,9 +129,13 @@ verdict() {
       return 0
       ;;
   esac
-  if ! kill -0 "$M_PID" 2>/dev/null; then
+  # Existence must be uid-independent: kill -0 fails EPERM for a process that
+  # EXISTS under another uid, and reading that as ESRCH would reap a LIVE
+  # foreign-owned holder — the catastrophic direction for a lock. /proc
+  # answers existence regardless of ownership.
+  if [ ! -d "/proc/$M_PID" ]; then
     LIVENESS=dead
-    EVIDENCE="kill -0 $M_PID failed: no such live process"
+    EVIDENCE="/proc/$M_PID does not exist: the holder's process is gone"
     return 0
   fi
   if [ -n "$M_START" ]; then
@@ -144,7 +148,7 @@ verdict() {
     fi
   fi
   LIVENESS=alive
-  EVIDENCE="kill -0 $M_PID succeeded and its start time matches the recording"
+  EVIDENCE="/proc/$M_PID exists (ownership-independent) and its start time matches the recording"
   return 0
 }
 
