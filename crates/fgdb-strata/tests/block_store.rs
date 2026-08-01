@@ -48,13 +48,23 @@ fn under_lab<T: Send + 'static>(
 }
 
 fn entry(src: u128, dst: u128, created: u64) -> AdjacencyEntry {
+    edge(
+        src.wrapping_mul(1_000_000).wrapping_add(dst),
+        src,
+        dst,
+        created,
+        None,
+    )
+}
+
+fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     AdjacencyEntry {
         src: VId(src),
         relation: REL,
         dst: VId(dst),
-        eid: EId(src.wrapping_mul(1_000_000).wrapping_add(dst)),
+        eid: EId(eid),
         created_at: CommitSeq(created),
-        retired_at: None,
+        retired_at: retired.map(CommitSeq),
     }
 }
 
@@ -452,8 +462,8 @@ fn stored_bytes_that_are_not_a_block_are_refused_as_malformed() {
 
 use fgdb_delta_types::DeltaRow;
 use fgdb_strata::root::{
-    BlockRef, MAX_ENCODED_ROOT_BYTES, PartitionRoot, RootError, merge_neighbours,
-    root_id as derive_root_id,
+    BlockRef, EdgeBirth, EdgeIdentityConflict, MAX_ENCODED_ROOT_BYTES, PartitionRoot, RootError,
+    merge_neighbours, root_id as derive_root_id,
 };
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::{BranchId, GraphId};
@@ -469,6 +479,26 @@ fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
         props: vec![],
         valid_time: None,
     }
+}
+
+fn assert_identity_conflict<T>(
+    result: Result<T, StoreError>,
+    eid: EId,
+    expected: EdgeBirth,
+    found: EdgeBirth,
+) {
+    let actual = result.err().and_then(|error| match error {
+        StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
+            eid: actual,
+            conflict,
+        }) => Some((actual, *conflict)),
+        _ => None,
+    });
+    assert_eq!(
+        actual,
+        Some((eid, EdgeIdentityConflict { expected, found })),
+        "root admission must retain both incompatible births"
+    );
 }
 
 /// A root is admitted only after every named block proves the range the root
@@ -507,6 +537,72 @@ fn putting_a_root_refuses_a_false_block_range_before_publication() {
         assert!(
             !store.path(root_id).exists(),
             "a root that failed admission must not acquire a canonical path"
+        );
+    });
+}
+
+/// Root admission proves cross-block EId continuity before publication or before
+/// minting a token that may skip future block I/O. Otherwise an early snapshot
+/// could answer from the first birth while the conflicting later birth remained
+/// hidden behind a truthful future range.
+#[test]
+fn root_admission_refuses_eid_reuse_in_a_future_block() {
+    let dir = scratch_dir("root-eid-admission");
+    under_lab(50, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let early = edge(10, 1, 2, 1, Some(3));
+        let future = edge(10, 1, 2, 5, None);
+        let early_bytes = encode_block(&[early]).expect("early block encodes");
+        let future_bytes = encode_block(&[future]).expect("future block encodes");
+        let early_id = store.put(cx, &early_bytes).expect("stores early block");
+        let future_id = store.put(cx, &future_bytes).expect("stores future block");
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(6),
+            blocks: vec![
+                BlockRef {
+                    block_id: early_id,
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(3),
+                },
+                BlockRef {
+                    block_id: future_id,
+                    first_seq: CommitSeq(5),
+                    last_seq: CommitSeq(5),
+                },
+            ],
+        };
+        let expected = EdgeBirth {
+            src: VId(1),
+            relation: REL,
+            dst: VId(2),
+            created_at: CommitSeq(1),
+        };
+        let found = EdgeBirth {
+            created_at: CommitSeq(5),
+            ..expected
+        };
+
+        let root_bytes = fgdb_strata::root::encode_root(&root).expect("root encodes");
+        let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
+        assert_identity_conflict(store.put_root(cx, &root), EId(10), expected, found);
+        assert!(
+            !store.path(root_id).exists(),
+            "failed admission must not publish the malformed root"
+        );
+
+        // Plant the same well-formed root bytes through the generic object path
+        // to model a pre-existing or restored store. Fresh selective reopen reads
+        // every block before minting its skip token, even though sequence 2 would
+        // retain only the early block.
+        let planted_id = store.put(cx, &root_bytes).expect("plants raw root");
+        assert_identity_conflict(
+            store.reopen_at(cx, planted_id, CommitSeq(2)),
+            EId(10),
+            expected,
+            found,
         );
     });
 }

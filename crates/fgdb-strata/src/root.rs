@@ -24,7 +24,7 @@
 
 use crate::BlockError;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CommitSeq, GraphId};
+use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 
 /// `FGSR` — FrankenGraph Strata Root.
 pub const ROOT_MAGIC: [u8; 4] = *b"FGSR";
@@ -84,6 +84,32 @@ pub struct PartitionRoot {
     /// The commit sequence at which this root became the partition's state.
     pub published_at: CommitSeq,
     pub blocks: Vec<BlockRef>,
+}
+
+/// The immutable birth bound to one permanently spent EId.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EdgeBirth {
+    /// The edge's immutable source.
+    pub src: VId,
+    /// The edge's immutable relation.
+    pub relation: fgdb_delta_types::RelationId,
+    /// The edge's immutable destination.
+    pub dst: VId,
+    /// The commit that permanently spent the EId.
+    pub created_at: CommitSeq,
+}
+
+/// Both incompatible births reported when durable history reuses an EId.
+///
+/// Boxed inside [`RootError`] because the detailed diagnostic is needed only on
+/// the failure path; embedding two full identities in every result inflated the
+/// surrounding store and writer error types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EdgeIdentityConflict {
+    /// The first birth admitted for the EId.
+    pub expected: EdgeBirth,
+    /// The incompatible later birth.
+    pub found: EdgeBirth,
 }
 
 /// Why a root could not be encoded, decoded, or resolved.
@@ -150,15 +176,24 @@ pub enum RootError {
         declared: (CommitSeq, CommitSeq),
         actual: (CommitSeq, CommitSeq),
     },
-    /// Two versions of one stable EId are live at the same sequence.
+    /// One permanently spent EId appeared with two different births.
     ///
-    /// A merge cannot answer this: the history claims a key was in two states at
-    /// once, so it is not a sequence of states at all. Refused rather than
-    /// deduplicated — collapsing it would return a plausible answer built on an
-    /// impossible one, which is the shape of wrong that is hardest to notice.
-    OverlappingVersions {
-        eid: fgdb_types::EId,
-        as_of: CommitSeq,
+    /// `EId` is the stable identity, not a version-family key. Its source,
+    /// relation, destination, and creation sequence are therefore immutable.
+    /// A later block may only restate that exact birth to add its retirement.
+    EdgeIdentityMismatch {
+        eid: EId,
+        conflict: Box<EdgeIdentityConflict>,
+    },
+    /// A later statement tried to undo or retime an EId's retirement.
+    ///
+    /// The only lawful state change for one exact birth is live-to-retired.
+    /// Identical restatements are harmless, but resurrection and a second death
+    /// sequence would both make last-block-wins fabricate a different lifetime.
+    EdgeRetirementMismatch {
+        eid: EId,
+        expected: Option<CommitSeq>,
+        found: Option<CommitSeq>,
     },
     /// Reading one of the named blocks failed.
     Block {
@@ -219,10 +254,20 @@ impl core::fmt::Display for RootError {
                 f,
                 "block {at} spans {actual:?} but the root declares {declared:?}"
             ),
-            Self::OverlappingVersions { eid, as_of } => write!(
+            Self::EdgeIdentityMismatch { eid, conflict } => write!(
                 f,
-                "two versions of {eid:?} are live at {as_of:?}; the history is not a \
-                 sequence of states"
+                "{eid:?} was born as {:?}, then appeared as {:?}; edge identities are \
+                 permanently spent",
+                conflict.expected, conflict.found
+            ),
+            Self::EdgeRetirementMismatch {
+                eid,
+                expected,
+                found,
+            } => write!(
+                f,
+                "{eid:?} retirement changed from {expected:?} to {found:?}; retirement is \
+                 irreversible"
             ),
             Self::Block { at, error } => write!(f, "block {at}: {error}"),
         }
@@ -488,16 +533,15 @@ pub fn span_of(entries: &[crate::AdjacencyEntry]) -> Option<(CommitSeq, CommitSe
 /// exists to avoid. Tombstone supersede keeps writes append-only and moves the
 /// work to the read, which is what an LSM trades.
 ///
-/// **SUPERSEDE IS PER STABLE EDGE VERSION, NOT PER DESTINATION.** The first
+/// **SUPERSEDE IS PER STABLE EDGE IDENTITY, NOT PER DESTINATION.** The first
 /// implementation keyed the merge on `dst` alone and let the last block win. That
 /// silently collapsed parallel EIds, so retiring one edge could erase its live
-/// peer. The merge is keyed on `(eid, created_at)`: distinct EIds survive whatever
-/// topology they share, while a later tombstone for the same version supersedes
-/// its earlier live statement. Keeping `created_at` explicit also makes two
-/// overlapping births of one illegally recycled EId detectable rather than
-/// converting corruption into a plausible neighbour result.
+/// peer. The merge is keyed on `eid`: distinct EIds survive whatever topology
+/// they share, while a later tombstone for the same immutable birth supersedes its
+/// earlier live statement. Any change to that EId's topology or `created_at` is
+/// identity reuse and is refused even when the two intervals do not overlap.
 ///
-/// Among entries for one version, the LATER BLOCK wins, because the root is an
+/// Among statements of one exact birth, the LATER BLOCK wins, because the root is an
 /// ordered publication history whose upper sequence frontier never regresses.
 /// Using the entry's own interval to decide would be a second ordering rule that
 /// could disagree with the first, and two rules for one question is how they drift.
@@ -515,36 +559,126 @@ pub fn merge_neighbours(
     relation: fgdb_delta_types::RelationId,
     as_of: CommitSeq,
 ) -> Result<Vec<fgdb_types::VId>, RootError> {
-    // Keyed by (eid, created_at) — the VERSION, not merely the destination.
-    // Parallel EIds are distinct edges and must BOTH survive the merge; only
-    // entries describing the same stable edge version supersede.
-    let mut versions: std::collections::BTreeMap<(fgdb_types::EId, u64), crate::AdjacencyEntry> =
-        std::collections::BTreeMap::new();
-    for block in blocks {
-        for entry in block {
-            if entry.src != src || entry.relation != relation {
-                continue;
-            }
-            versions.insert((entry.eid, entry.created_at.0), *entry);
-        }
-    }
+    // Validate the WHOLE supplied history before applying the adjacency filter.
+    // Otherwise a malformed tombstone can move an EId to another source or
+    // relation and evade comparison merely because this read did not ask for its
+    // forged topology (fgdb-ghgt).
+    let (entries, _) = collapse_edge_history(blocks)?;
 
     let mut destinations = std::collections::BTreeSet::<fgdb_types::VId>::new();
-    let mut previous_live_eid = None;
-    for entry in versions.values().filter(|e| e.visible_at(as_of)) {
-        // TWO LIVE VERSIONS OF ONE EID AT ONE SEQUENCE IS A CORRUPT MERGE, not a
-        // duplicate to quietly collapse. Distinct EIds at one destination are
-        // legal parallel edges; one EId with overlapping births is not.
-        if previous_live_eid == Some(entry.eid) {
-            return Err(RootError::OverlappingVersions {
-                eid: entry.eid,
-                as_of,
-            });
-        }
-        previous_live_eid = Some(entry.eid);
+    for entry in entries
+        .values()
+        .filter(|entry| entry.src == src && entry.relation == relation)
+        .filter(|entry| entry.visible_at(as_of))
+    {
         destinations.insert(entry.dst);
     }
     Ok(destinations.into_iter().collect())
+}
+
+/// Incremental proof that every block in one publication history agrees on EId
+/// identity and lifecycle.
+///
+/// Root admission uses this without retaining decoded future blocks; merge and
+/// compaction consume the same state into their canonical one-entry-per-EId map.
+#[derive(Default)]
+pub(crate) struct EdgeHistoryValidator {
+    entries: std::collections::BTreeMap<EId, crate::AdjacencyEntry>,
+    seen: usize,
+}
+
+impl EdgeHistoryValidator {
+    /// Admit one block at its publication position.
+    pub(crate) fn observe_block(
+        &mut self,
+        block_at: usize,
+        block: &[crate::AdjacencyEntry],
+    ) -> Result<(), RootError> {
+        let declared = u32::try_from(block.len()).unwrap_or(u32::MAX);
+        if declared > crate::MAX_BLOCK_ENTRIES {
+            return Err(RootError::Block {
+                at: block_at,
+                error: BlockError::ImplausibleEntryCount { declared },
+            });
+        }
+        let mut previous_key = None;
+        for (entry_at, entry) in block.iter().enumerate() {
+            crate::validate_entry(entry_at, entry).map_err(|error| RootError::Block {
+                at: block_at,
+                error,
+            })?;
+            let found_key = (entry.src, entry.relation, entry.dst, entry.eid);
+            if previous_key.is_some_and(|previous| previous >= found_key) {
+                return Err(RootError::Block {
+                    at: block_at,
+                    error: BlockError::NonCanonicalOrder { at: entry_at },
+                });
+            }
+            previous_key = Some(found_key);
+            self.seen += 1;
+            if let Some(existing) = self.entries.get(&entry.eid) {
+                let expected = EdgeBirth {
+                    src: existing.src,
+                    relation: existing.relation,
+                    dst: existing.dst,
+                    created_at: existing.created_at,
+                };
+                let found = EdgeBirth {
+                    src: entry.src,
+                    relation: entry.relation,
+                    dst: entry.dst,
+                    created_at: entry.created_at,
+                };
+                if found != expected {
+                    return Err(RootError::EdgeIdentityMismatch {
+                        eid: entry.eid,
+                        conflict: Box::new(EdgeIdentityConflict { expected, found }),
+                    });
+                }
+                if existing.retired_at.is_some() && entry.retired_at != existing.retired_at {
+                    return Err(RootError::EdgeRetirementMismatch {
+                        eid: entry.eid,
+                        expected: existing.retired_at,
+                        found: entry.retired_at,
+                    });
+                }
+            }
+            self.entries.insert(entry.eid, *entry);
+        }
+        Ok(())
+    }
+
+    fn into_canonical(
+        self,
+    ) -> (
+        std::collections::BTreeMap<EId, crate::AdjacencyEntry>,
+        usize,
+    ) {
+        let superseded = self.seen - self.entries.len();
+        (self.entries, superseded)
+    }
+}
+
+/// Validate and collapse a block publication history to one statement per EId.
+///
+/// Later blocks may restate one exact birth to add its retirement, and the later
+/// statement wins. Nothing may change the birth itself: EIds are permanently
+/// spent, so treating `created_at` as a version discriminator would silently make
+/// reuse legal in the durable read and compaction paths.
+pub(crate) fn collapse_edge_history(
+    blocks: &[Vec<crate::AdjacencyEntry>],
+) -> Result<
+    (
+        std::collections::BTreeMap<EId, crate::AdjacencyEntry>,
+        usize,
+    ),
+    RootError,
+> {
+    let mut validator = EdgeHistoryValidator::default();
+    for (block_at, block) in blocks.iter().enumerate() {
+        validator.observe_block(block_at, block)?;
+    }
+    Ok(validator.into_canonical())
 }
 
 /// Which of a root's blocks can contribute to a read at `as_of`.

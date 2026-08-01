@@ -265,7 +265,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
         let compacted_root_id = {
             let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
             let (root, blocks) = store.reopen(cx, root_id).expect("reopens");
-            let result = compact(&blocks, frontier);
+            let result = compact(&blocks, frontier).expect("the persisted history compacts");
             assert!(
                 result.blocks.len() <= root.blocks.len(),
                 "compaction must not grow the partition"

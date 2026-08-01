@@ -730,9 +730,12 @@ impl BlockStore {
     /// Prove every block named by an already-structural root while retaining only
     /// the caller-selected decoded blocks.
     ///
-    /// Every encoded block is dropped before loading the next. This is the fresh
-    /// admission path: even a block outside the requested snapshot is checked,
-    /// because an unproved lower bound is not permission to skip that block.
+    /// Every encoded block is dropped before loading the next. One canonical
+    /// statement per EId remains in the incremental history validator so a future
+    /// block cannot reuse an identity and still mint a selective-read token. This
+    /// is the fresh admission path: even a block outside the requested snapshot is
+    /// checked, because neither an unproved range nor an unproved identity is
+    /// permission to skip that block.
     fn inspect_root_blocks(
         &self,
         cx: &impl StorageReadCx,
@@ -742,8 +745,12 @@ impl BlockStore {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
 
         let mut blocks = Vec::new();
+        let mut history = crate::root::EdgeHistoryValidator::default();
         for (at, reference) in root.blocks.iter().enumerate() {
             let entries = self.resolve_root_block(cx, at, reference)?;
+            history
+                .observe_block(at, &entries)
+                .map_err(StoreError::MalformedRoot)?;
             if retain(at, reference) {
                 blocks.push(entries);
             }

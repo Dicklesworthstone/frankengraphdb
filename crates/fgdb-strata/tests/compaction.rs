@@ -11,13 +11,16 @@
 //! and it silently empties a graph whose edges were all created long ago, so it
 //! gets its own law with a deliberately ancient live edge.
 //!
-//! The one-version-per-key-per-block rule is what makes compaction need a floor at
-//! all, and the laws about block COUNT are what hold the packing to the minimum
-//! that rule permits.
+//! EIds are permanently spent. A later block may restate one exact birth to add a
+//! retirement, but a changed topology or `created_at` is malformed history and
+//! compaction must refuse it rather than minting plausible replacement blocks.
 
 use fgdb_delta_types::RelationId;
 use fgdb_strata::compact::compact;
-use fgdb_strata::root::{BlockRef, PartitionRoot, encode_root, merge_neighbours, span_of};
+use fgdb_strata::root::{
+    BlockRef, EdgeBirth, EdgeIdentityConflict, PartitionRoot, RootError, encode_root,
+    merge_neighbours, span_of,
+};
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
@@ -43,6 +46,22 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
         eid: EId(eid),
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
+    }
+}
+
+fn identity_mismatch(expected: AdjacencyEntry, found: AdjacencyEntry) -> RootError {
+    let birth = |entry: AdjacencyEntry| EdgeBirth {
+        src: entry.src,
+        relation: entry.relation,
+        dst: entry.dst,
+        created_at: entry.created_at,
+    };
+    RootError::EdgeIdentityMismatch {
+        eid: expected.eid,
+        conflict: Box::new(EdgeIdentityConflict {
+            expected: birth(expected),
+            found: birth(found),
+        }),
     }
 }
 
@@ -107,7 +126,7 @@ fn disjoint_blocks_collapse_into_one() {
         vec![entry(1, 3, 2, None)],
         vec![entry(2, 3, 3, None)],
     ];
-    let result = compact(&before, CommitSeq(1));
+    let result = compact(&before, CommitSeq(1)).expect("valid history compacts");
     assert_eq!(
         result.blocks.len(),
         1,
@@ -127,7 +146,7 @@ fn compaction_preserves_parallel_edge_identities() {
         vec![edge(20, 1, 2, 2, None)],
         vec![edge(10, 1, 2, 1, Some(4))],
     ];
-    let result = compact(&before, CommitSeq(2));
+    let result = compact(&before, CommitSeq(2)).expect("valid history compacts");
     assert_eq!(result.superseded, 1, "only e10's creation was restated");
     assert_eq!(result.dropped, 0);
     assert_eq!(result.blocks.len(), 1, "distinct EIds may share one block");
@@ -146,19 +165,60 @@ fn compaction_preserves_parallel_edge_identities() {
     );
 }
 
+/// Compaction validates the same immutable EId birth as the read merge. It must
+/// not turn either topology drift or a later reuse into canonical output blocks.
+#[test]
+fn compaction_refuses_eid_history_corruption() {
+    let topology_drift = vec![
+        vec![edge(10, 1, 2, 1, None)],
+        vec![edge(10, 1, 3, 1, Some(4))],
+    ];
+    assert_eq!(
+        compact(&topology_drift, CommitSeq(2)),
+        Err(identity_mismatch(
+            edge(10, 1, 2, 1, None),
+            edge(10, 1, 3, 1, Some(4)),
+        ))
+    );
+
+    let rebirth = vec![
+        vec![edge(10, 1, 2, 1, Some(3))],
+        vec![edge(10, 1, 2, 5, None)],
+    ];
+    assert_eq!(
+        compact(&rebirth, CommitSeq(4)),
+        Err(identity_mismatch(
+            edge(10, 1, 2, 1, Some(3)),
+            edge(10, 1, 2, 5, None),
+        ))
+    );
+
+    let resurrection = vec![
+        vec![edge(10, 1, 2, 1, Some(3))],
+        vec![edge(10, 1, 2, 1, None)],
+    ];
+    assert_eq!(
+        compact(&resurrection, CommitSeq(4)),
+        Err(RootError::EdgeRetirementMismatch {
+            eid: EId(10),
+            expected: Some(CommitSeq(3)),
+            found: None,
+        })
+    );
+}
+
 /// **A RETIRED VERSION BELOW THE FLOOR IS DROPPED, AND THAT IS WHAT LETS TWO
 /// BLOCKS BECOME ONE.**
 ///
-/// The key has two versions across two blocks, so before compaction they cannot
-/// share a block at all. Dropping the version whose life ended below the floor is
-/// exactly what makes the merge possible — which is why compaction needs a floor.
+/// The old and replacement edges have distinct EIds. Dropping the identity whose
+/// life ended below the floor reclaims exactly that unobservable history.
 #[test]
 fn a_version_retired_below_the_floor_is_dropped_and_the_blocks_merge() {
     let before = vec![
-        vec![entry(1, 2, 1, Some(4))],
-        vec![entry(1, 2, 6, None), entry(1, 3, 6, None)],
+        vec![edge(10, 1, 2, 1, Some(4))],
+        vec![edge(20, 1, 2, 6, None), edge(30, 1, 3, 6, None)],
     ];
-    let result = compact(&before, CommitSeq(5));
+    let result = compact(&before, CommitSeq(5)).expect("valid history compacts");
     assert_eq!(
         result.dropped, 1,
         "the version that ended at 4 is unobservable"
@@ -166,7 +226,7 @@ fn a_version_retired_below_the_floor_is_dropped_and_the_blocks_merge() {
     assert_eq!(
         result.blocks.len(),
         1,
-        "and with it gone the key has one version, so one block holds everything"
+        "the retained identities fit in one block"
     );
     assert_blocks_are_lawful(&result.blocks);
     assert_answers_preserved(&before, &result.blocks, CommitSeq(5), 9, &[1]);
@@ -181,7 +241,7 @@ fn a_version_retired_below_the_floor_is_dropped_and_the_blocks_merge() {
 #[test]
 fn an_ancient_but_live_version_is_never_dropped() {
     let before = vec![vec![entry(1, 2, 1, None), entry(1, 3, 2, Some(3))]];
-    let result = compact(&before, CommitSeq(1_000));
+    let result = compact(&before, CommitSeq(1_000)).expect("valid history compacts");
     assert_eq!(result.dropped, 1, "only the retired one goes");
     assert_eq!(
         merge_neighbours(&result.blocks, VId(1), REL, CommitSeq(1_000)).expect("merges"),
@@ -198,55 +258,56 @@ fn the_floor_is_the_exact_drop_boundary() {
     let at = vec![vec![entry(1, 2, 1, Some(5))]];
     let past = vec![vec![entry(1, 2, 1, Some(6))]];
     assert_eq!(
-        compact(&at, CommitSeq(5)).dropped,
+        compact(&at, CommitSeq(5))
+            .expect("valid history compacts")
+            .dropped,
         1,
         "retired AT the floor is unobservable — intervals are half-open"
     );
     assert_eq!(
-        compact(&past, CommitSeq(5)).dropped,
+        compact(&past, CommitSeq(5))
+            .expect("valid history compacts")
+            .dropped,
         0,
         "retired after the floor is still visible at the floor"
     );
 }
 
-/// TWO LIVE VERSIONS ABOVE THE FLOOR CANNOT SHARE A BLOCK, so compaction keeps
-/// two — and says so by producing two rather than by producing one that is
-/// unencodable.
-///
-/// This is the case where compaction genuinely cannot help, and the honest
-/// outcome is a smaller improvement rather than a broken block.
+/// A replacement topology uses a fresh EId. Both identities remain observable
+/// above a low floor and can share one canonical block because their durable keys
+/// are distinct.
 #[test]
-fn two_versions_above_the_floor_stay_in_two_blocks() {
+fn fresh_identity_after_retirement_packs_with_its_predecessor() {
     let before = vec![
-        vec![entry(1, 2, 1, Some(4)), entry(1, 3, 1, None)],
-        vec![entry(1, 2, 6, None)],
+        vec![edge(10, 1, 2, 1, Some(4)), edge(11, 1, 3, 1, None)],
+        vec![edge(20, 1, 2, 6, None)],
     ];
-    // A floor of 2 leaves the first version observable (it lives until 4).
-    let result = compact(&before, CommitSeq(2));
+    // A floor of 2 leaves the old identity observable (it lives until 4).
+    let result = compact(&before, CommitSeq(2)).expect("valid history compacts");
     assert_eq!(result.dropped, 0);
     assert_eq!(
         result.blocks.len(),
-        2,
-        "one key with two observable versions needs two blocks"
+        1,
+        "fresh EIds are distinct keys and fit in one block"
     );
     assert_blocks_are_lawful(&result.blocks);
     assert_answers_preserved(&before, &result.blocks, CommitSeq(2), 9, &[1]);
 }
 
-/// Compaction PRESERVES ANSWERS across a history with creations, retirements and a
-/// re-creation, swept at every sequence at or above the floor.
+/// Compaction PRESERVES ANSWERS across creations, retirements and fresh-identity
+/// topology replacements, swept at every sequence at or above the floor.
 ///
 /// The composite case: if any of the drop rule, the packing, or the supersede
 /// precedence is wrong, one of these sequences disagrees.
 #[test]
 fn a_mixed_history_compacts_without_moving_any_answer() {
     let before = vec![
-        vec![entry(1, 2, 1, Some(4)), entry(1, 3, 2, None)],
-        vec![entry(1, 2, 5, Some(8)), entry(2, 3, 5, None)],
-        vec![entry(1, 2, 9, None), entry(1, 4, 9, None)],
+        vec![edge(10, 1, 2, 1, Some(4)), edge(11, 1, 3, 2, None)],
+        vec![edge(20, 1, 2, 5, Some(8)), edge(21, 2, 3, 5, None)],
+        vec![edge(30, 1, 2, 9, None), edge(31, 1, 4, 9, None)],
     ];
     for floor in [1u64, 5, 8, 9] {
-        let result = compact(&before, CommitSeq(floor));
+        let result = compact(&before, CommitSeq(floor)).expect("valid history compacts");
         assert_blocks_are_lawful(&result.blocks);
         assert_answers_preserved(&before, &result.blocks, CommitSeq(floor), 12, &[1, 2]);
         assert!(
@@ -271,7 +332,9 @@ fn dropping_is_monotone_in_the_floor() {
     ]];
     let mut previous = 0usize;
     for floor in [1u64, 3, 5, 7, 9, 100] {
-        let dropped = compact(&before, CommitSeq(floor)).dropped;
+        let dropped = compact(&before, CommitSeq(floor))
+            .expect("valid history compacts")
+            .dropped;
         assert!(
             dropped >= previous,
             "floor {floor} dropped {dropped}, fewer than a lower floor's {previous}"
@@ -285,11 +348,11 @@ fn dropping_is_monotone_in_the_floor() {
 #[test]
 fn compaction_is_idempotent() {
     let before = vec![
-        vec![entry(1, 2, 1, Some(4))],
-        vec![entry(1, 2, 6, None), entry(1, 3, 6, None)],
+        vec![edge(10, 1, 2, 1, Some(4))],
+        vec![edge(20, 1, 2, 6, None), edge(30, 1, 3, 6, None)],
     ];
-    let once = compact(&before, CommitSeq(5));
-    let twice = compact(&once.blocks, CommitSeq(5));
+    let once = compact(&before, CommitSeq(5)).expect("valid history compacts");
+    let twice = compact(&once.blocks, CommitSeq(5)).expect("compacted history stays valid");
     assert_eq!(
         twice.blocks, once.blocks,
         "a second pass changed the blocks"
@@ -300,12 +363,12 @@ fn compaction_is_idempotent() {
 /// Compacting nothing produces nothing, rather than an empty block.
 #[test]
 fn compacting_nothing_produces_nothing() {
-    let result = compact(&[], CommitSeq(1));
+    let result = compact(&[], CommitSeq(1)).expect("empty history compacts");
     assert!(result.blocks.is_empty() && result.dropped == 0);
     // And a partition whose every version is below the floor compacts away
     // entirely — an empty partition is a legitimate state, not an empty block.
     let all_dead = vec![vec![entry(1, 2, 1, Some(2))]];
-    let result = compact(&all_dead, CommitSeq(5));
+    let result = compact(&all_dead, CommitSeq(5)).expect("valid history compacts");
     assert_eq!(result.dropped, 1);
     assert!(
         result.blocks.is_empty(),
@@ -332,7 +395,7 @@ fn compaction_supersedes_by_last_block_like_the_merge_does() {
         // The SAME version of (1,REL,2) — same created_at — now retired.
         vec![entry(1, 2, 1, Some(6))],
     ];
-    let result = compact(&before, CommitSeq(2));
+    let result = compact(&before, CommitSeq(2)).expect("valid history compacts");
     assert_eq!(result.dropped, 0, "nothing ended below the floor");
     assert_eq!(
         result.superseded, 1,
@@ -351,7 +414,7 @@ fn compaction_supersedes_by_last_block_like_the_merge_does() {
     // The retired version also compacts away once the floor passes it, which the
     // first-wins bug could not do either — it would keep resurrecting the live
     // statement instead.
-    let later = compact(&before, CommitSeq(6));
+    let later = compact(&before, CommitSeq(6)).expect("valid history compacts");
     assert_eq!(later.dropped, 1);
     assert_eq!(
         merge_neighbours(&later.blocks, VId(1), REL, CommitSeq(6)).expect("merges"),
@@ -359,18 +422,21 @@ fn compaction_supersedes_by_last_block_like_the_merge_does() {
     );
 }
 
-/// Packing by per-key version DEPTH can put an old third version after another
-/// key's much newer second version. Compaction must reorder the finished blocks by
-/// upper sequence frontier before a partition root can name them.
+/// Compaction emits entries in canonical key order and its finished blocks in
+/// nondecreasing upper-frontier order before a partition root can name them.
 #[test]
-fn compacted_blocks_have_a_rootable_publication_order() {
+fn compacted_entries_have_a_rootable_publication_order() {
     let before = vec![
-        vec![entry(1, 2, 1, Some(10)), entry(2, 3, 2, Some(1_000))],
-        vec![entry(1, 2, 20, Some(30)), entry(2, 3, 1_001, None)],
-        vec![entry(1, 2, 40, None)],
+        vec![edge(10, 1, 2, 1, Some(10)), edge(20, 2, 3, 2, Some(1_000))],
+        vec![edge(30, 1, 2, 20, Some(30)), edge(40, 2, 3, 1_001, None)],
+        vec![edge(50, 1, 2, 40, None)],
     ];
-    let result = compact(&before, CommitSeq(1));
-    assert_eq!(result.blocks.len(), 3, "one key still needs three blocks");
+    let result = compact(&before, CommitSeq(1)).expect("valid history compacts");
+    assert_eq!(
+        result.blocks.len(),
+        1,
+        "five immutable identities fit below the durable capacity"
+    );
     assert_blocks_are_lawful(&result.blocks);
 
     let upper_frontiers = result

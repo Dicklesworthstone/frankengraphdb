@@ -16,12 +16,12 @@
 //! gaps and overlapping lower bounds are both legal.
 
 use fgdb_strata::root::{
-    BlockRef, PartitionRoot, ROOT_FORMAT_V1, RootError, decode_root, encode_root, read_root,
-    resolve_blocks, root_id, span_of,
+    BlockRef, EdgeBirth, EdgeIdentityConflict, PartitionRoot, ROOT_FORMAT_V1, RootError,
+    decode_root, encode_root, read_root, resolve_blocks, root_id, span_of,
 };
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CommitSeq, EId, GraphId};
+use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 use std::cell::Cell;
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -51,6 +51,22 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
         eid: EId(eid),
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
+    }
+}
+
+fn identity_mismatch(expected: AdjacencyEntry, found: AdjacencyEntry) -> RootError {
+    let birth = |entry: AdjacencyEntry| EdgeBirth {
+        src: entry.src,
+        relation: entry.relation,
+        dst: entry.dst,
+        created_at: entry.created_at,
+    };
+    RootError::EdgeIdentityMismatch {
+        eid: expected.eid,
+        conflict: Box::new(EdgeIdentityConflict {
+            expected: birth(expected),
+            found: birth(found),
+        }),
     }
 }
 
@@ -576,8 +592,7 @@ fn a_later_block_retires_an_earlier_blocks_edge() {
     );
 }
 
-/// A RE-CREATION after a retirement is visible again: supersede is by block
-/// order, so the newest state for a key wins whatever its interval says.
+/// A TOPOLOGY re-created under a fresh EId after retirement is visible again.
 #[test]
 fn a_re_creation_after_retirement_is_visible_again() {
     let blocks = vec![
@@ -599,17 +614,16 @@ fn a_re_creation_after_retirement_is_visible_again() {
     }
 }
 
-/// SUPERSEDE IS PER EID VERSION: entries for the SAME stable edge version
+/// SUPERSEDE IS PER EID IDENTITY: entries for the SAME stable edge identity
 /// supersede by block order, and distinct EIds at one topology both survive.
 ///
 /// The distinction is the whole model, and getting it wrong loses history. A
 /// merge keyed on `dst` alone is wrong: it collapses distinct parallel EIds and a
-/// later tombstone for one can erase the other. Keying by stable edge version
-/// preserves both the old interval and the fresh EId that later occupies the same
-/// topology.
+/// later tombstone for one can erase the other. Keying by stable edge identity
+/// preserves the tombstone while a fresh EId may later occupy the same topology.
 #[test]
-fn supersede_is_per_eid_version_not_destination() {
-    // SAME version (both created at 1): the later block's retirement wins.
+fn supersede_is_per_eid_identity_not_destination() {
+    // SAME identity (both created at 1): the later block's retirement wins.
     let same = vec![vec![entry(1, 2, 1, None)], vec![entry(1, 2, 1, Some(4))]];
     assert_eq!(
         fgdb_strata::root::merge_neighbours(&same, fgdb_types::VId(1), REL, CommitSeq(5))
@@ -618,7 +632,7 @@ fn supersede_is_per_eid_version_not_destination() {
         "a later block retiring the same version must win"
     );
 
-    // DIFFERENT versions: both survive, and each answers for its own interval.
+    // DIFFERENT identities: both survive, and each answers for its own interval.
     let different = vec![
         vec![edge(10, 1, 2, 1, Some(3))],
         vec![edge(20, 1, 2, 7, None)],
@@ -637,31 +651,108 @@ fn supersede_is_per_eid_version_not_destination() {
     );
 }
 
-/// TWO LIVE VERSIONS OF ONE EID AT ONE SEQUENCE IS REFUSED, not deduplicated.
-///
-/// It means the stream retired a version and created its successor with
-/// overlapping intervals, so the history is not a sequence of states. Collapsing
-/// it would return a plausible answer built on an impossible one — the shape of
-/// wrong that is hardest to notice.
+/// fgdb-ghgt — EId is a permanently spent stable identity, not merely a merge
+/// discriminator. Individually canonical blocks must not be able to change its
+/// topology or introduce a later second birth. Both histories used to return a
+/// plausible neighbour answer because merge filtered by adjacency before it
+/// compared the cross-block identity.
 #[test]
-fn two_live_versions_of_one_eid_are_refused() {
+fn eid_topology_drift_and_nonoverlapping_rebirth_are_refused() {
+    let source_drift = vec![
+        vec![edge(10, 1, 2, 1, None)],
+        vec![edge(10, 9, 2, 1, Some(4))],
+    ];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&source_drift, VId(1), REL, CommitSeq(2),),
+        Err(identity_mismatch(
+            edge(10, 1, 2, 1, None),
+            edge(10, 9, 2, 1, Some(4)),
+        )),
+    );
+
+    let mut changed_relation = edge(10, 1, 2, 1, Some(4));
+    changed_relation.relation = fgdb_delta_types::RelationId(9);
+    let relation_drift = vec![vec![edge(10, 1, 2, 1, None)], vec![changed_relation]];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&relation_drift, VId(1), REL, CommitSeq(2),),
+        Err(identity_mismatch(edge(10, 1, 2, 1, None), changed_relation,)),
+    );
+
+    let topology_drift = vec![
+        vec![edge(10, 1, 2, 1, None)],
+        vec![edge(10, 1, 3, 1, Some(4))],
+    ];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&topology_drift, VId(1), REL, CommitSeq(2),),
+        Err(identity_mismatch(
+            edge(10, 1, 2, 1, None),
+            edge(10, 1, 3, 1, Some(4)),
+        )),
+    );
+
+    let nonoverlapping_rebirth = vec![
+        vec![edge(10, 1, 2, 1, Some(3))],
+        vec![edge(10, 1, 2, 5, None)],
+    ];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&nonoverlapping_rebirth, VId(1), REL, CommitSeq(4),),
+        Err(identity_mismatch(
+            edge(10, 1, 2, 1, Some(3)),
+            edge(10, 1, 2, 5, None),
+        )),
+    );
+}
+
+/// Once an exact EId birth is retired, later blocks may neither resurrect it nor
+/// move its death. Last-block-wins is a precedence rule for a lawful tombstone,
+/// not permission to rewrite an edge's lifetime.
+#[test]
+fn eid_retirement_is_irreversible_and_immutable() {
+    let resurrection = vec![
+        vec![edge(10, 1, 2, 1, Some(4))],
+        vec![edge(10, 1, 2, 1, None)],
+    ];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&resurrection, VId(1), REL, CommitSeq(5)),
+        Err(fgdb_strata::root::RootError::EdgeRetirementMismatch {
+            eid: EId(10),
+            expected: Some(CommitSeq(4)),
+            found: None,
+        })
+    );
+
+    let retimed = vec![
+        vec![edge(10, 1, 2, 1, None)],
+        vec![edge(10, 1, 2, 1, Some(4))],
+        vec![edge(10, 1, 2, 1, Some(5))],
+    ];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&retimed, VId(1), REL, CommitSeq(2)),
+        Err(fgdb_strata::root::RootError::EdgeRetirementMismatch {
+            eid: EId(10),
+            expected: Some(CommitSeq(4)),
+            found: Some(CommitSeq(5)),
+        })
+    );
+}
+
+/// ANY SECOND BIRTH OF ONE EID IS REFUSED, not only an overlapping one.
+///
+/// The allocator slot is permanently spent at first creation. Whether a chosen
+/// snapshot happens to intersect both intervals cannot decide if the durable
+/// history is lawful.
+#[test]
+fn a_second_birth_of_one_eid_is_refused_at_every_snapshot() {
     let overlapping = vec![
         vec![edge(10, 1, 2, 1, Some(9))],
         vec![edge(10, 1, 2, 5, None)],
     ];
     assert_eq!(
-        fgdb_strata::root::merge_neighbours(&overlapping, fgdb_types::VId(1), REL, CommitSeq(6)),
-        Err(fgdb_strata::root::RootError::OverlappingVersions {
-            eid: EId(10),
-            as_of: CommitSeq(6),
-        })
-    );
-    // Outside the overlap the same history answers normally, so the refusal is
-    // about the instant rather than about the pair existing.
-    assert_eq!(
-        fgdb_strata::root::merge_neighbours(&overlapping, fgdb_types::VId(1), REL, CommitSeq(2))
-            .expect("merges"),
-        vec![fgdb_types::VId(2)]
+        fgdb_strata::root::merge_neighbours(&overlapping, VId(1), REL, CommitSeq(2)),
+        Err(identity_mismatch(
+            edge(10, 1, 2, 1, Some(9)),
+            edge(10, 1, 2, 5, None),
+        ))
     );
 }
 
