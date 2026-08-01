@@ -18,9 +18,13 @@
 //! already expresses. Everything a region allocator does — carving a fixed
 //! chunk into blocks, aligning a block, tracking generations, refusing a stale
 //! handle, counting bytes in and out — is written here in safe code with no
-//! relaxation at all. Alignment in particular: [`Region`] reads the chunk's
-//! base address with `as_ptr()`, which is safe, and picks the offset that makes
-//! `base + offset` aligned, so an aligned block needs no unsafe to hand out.
+//! relaxation at all. Alignment in particular: every chunk is over-allocated
+//! by `MAX_BLOCK_ALIGN - 1` and its `base_pad` recorded once at creation, so
+//! each chunk's usable window starts at an address that is `0 mod
+//! MAX_BLOCK_ALIGN` and placement padding derives only from offsets the
+//! region itself assigned — never from where the global allocator happened
+//! to put the chunk. Fit decisions are therefore heap-history independent
+//! (fgdb-owje), and they need no unsafe to be made.
 //!
 //! One operation cannot be written safely, and it is the one ART needs
 //! most: **N simultaneous exclusive views into disjoint blocks of the same
