@@ -66,7 +66,8 @@ use fgdb_types::ObjectId;
 use crate::{
     ann_recall::{
         AnnRecallAction, AnnRecallActionReason, AnnRecallAssumptions, AnnRecallEvidence,
-        AnnRecallProfile, QuerySampleDesign, RECALL_SCALE,
+        AnnRecallProfile, QuerySampleDesign,
+        confidence_interval as derive_ann_recall_confidence_interval,
     },
     conformal::{
         AssessmentEvidence as ConformalEvidence, MetricThresholdMode,
@@ -476,9 +477,10 @@ pub enum StatisticalStatistic {
         maximum_total_result_ids: u64,
         /// `q` in the interval failure-probability bound `2^-q`.
         confidence_exponent: u8,
-        /// Candidate lower-confidence-bound gate over [`RECALL_SCALE`].
+        /// Candidate lower-confidence-bound gate over
+        /// [`crate::ann_recall::RECALL_SCALE`].
         candidate_recall_threshold_units: u64,
-        /// Rebuild upper-confidence-bound gate over [`RECALL_SCALE`].
+        /// Rebuild upper-confidence-bound gate over [`crate::ann_recall::RECALL_SCALE`].
         rebuild_recall_threshold_units: u64,
         /// Declared query-sampling design.
         sample_design: QuerySampleDesign,
@@ -3437,47 +3439,48 @@ fn validate_ann_recall_statistic(
         );
     }
 
-    let expected_interval = recompute_ann_recall_interval(
+    let expected_interval = derive_ann_recall_confidence_interval(
         intersection_hits,
         exact_baseline_results,
         query_observations,
         confidence_exponent,
-    )?;
+    )
+    .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
     for (field, actual, expected) in [
         (
             StatisticField::AnnIntervalScale,
             interval_scale,
-            expected_interval.scale,
+            expected_interval.scale(),
         ),
         (
             StatisticField::AnnIntervalPointEstimate,
             interval_point_estimate_units,
-            expected_interval.point_estimate_units,
+            expected_interval.point_estimate_units(),
         ),
         (
             StatisticField::AnnIntervalLower,
             interval_lower_units,
-            expected_interval.lower_units,
+            expected_interval.lower_units(),
         ),
         (
             StatisticField::AnnIntervalUpper,
             interval_upper_units,
-            expected_interval.upper_units,
+            expected_interval.upper_units(),
         ),
         (
             StatisticField::AnnIntervalRadius,
             interval_radius_units,
-            expected_interval.radius_units,
+            expected_interval.radius_units(),
         ),
         (
             StatisticField::AnnIntervalConfidenceExponent,
             u64::from(interval_confidence_exponent),
-            u64::from(expected_interval.confidence_exponent),
+            u64::from(expected_interval.failure_probability_power_of_two_exponent()),
         ),
         (
             StatisticField::AnnIntervalQueryObservations,
             interval_query_observations,
-            expected_interval.query_observations,
+            expected_interval.query_observations(),
         ),
     ] {
         validate_ann_derived_field(field, actual, expected)?;
@@ -3537,95 +3540,6 @@ fn validate_ann_derived_field(
         });
     }
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-struct RecomputedAnnRecallInterval {
-    scale: u64,
-    point_estimate_units: u64,
-    lower_units: u64,
-    upper_units: u64,
-    radius_units: u64,
-    confidence_exponent: u8,
-    query_observations: u64,
-}
-
-fn recompute_ann_recall_interval(
-    hits: u64,
-    baseline_results: u64,
-    queries: u64,
-    confidence_exponent: u8,
-) -> Result<RecomputedAnnRecallInterval, StatisticalLogRecordError> {
-    let scaled_hits = u128::from(hits)
-        .checked_mul(u128::from(RECALL_SCALE))
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    let denominator = u128::from(baseline_results);
-    if denominator == 0 || queries == 0 {
-        return Err(StatisticalLogRecordError::EvidenceHasNoObservations {
-            monitor: StatisticalMonitorKind::AnnRecall,
-        });
-    }
-    let point_floor = scaled_hits / denominator;
-    let point_ceil = ann_ceil_div(scaled_hits, denominator)?;
-    let radius_numerator = u128::from(confidence_exponent)
-        .checked_add(1)
-        .and_then(|factor| factor.checked_mul(u128::from(RECALL_SCALE)))
-        .and_then(|value| value.checked_mul(u128::from(RECALL_SCALE)))
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    let radius_denominator = u128::from(queries)
-        .checked_mul(2)
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    let squared_radius_ceiling = ann_ceil_div(radius_numerator, radius_denominator)?;
-    let radius = ann_ceil_sqrt(squared_radius_ceiling).min(u128::from(RECALL_SCALE));
-    let lower = point_floor.saturating_sub(radius);
-    let upper = point_ceil
-        .checked_add(radius)
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?
-        .min(u128::from(RECALL_SCALE));
-
-    Ok(RecomputedAnnRecallInterval {
-        scale: RECALL_SCALE,
-        point_estimate_units: u64::try_from(point_floor)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        lower_units: u64::try_from(lower)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        upper_units: u64::try_from(upper)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        radius_units: u64::try_from(radius)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        confidence_exponent,
-        query_observations: queries,
-    })
-}
-
-fn ann_ceil_div(numerator: u128, denominator: u128) -> Result<u128, StatisticalLogRecordError> {
-    let adjusted = numerator
-        .checked_add(
-            denominator
-                .checked_sub(1)
-                .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        )
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    Ok(adjusted / denominator)
-}
-
-fn ann_ceil_sqrt(value: u128) -> u128 {
-    if value <= 1 {
-        return value;
-    }
-    let mut low = 1_u128;
-    let mut high = value.min(u128::from(u64::MAX) + 1);
-    while low < high {
-        let midpoint = low + (high - low) / 2;
-        if midpoint > value / midpoint {
-            high = midpoint;
-        } else if midpoint * midpoint == value {
-            return midpoint;
-        } else {
-            low = midpoint + 1;
-        }
-    }
-    low
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5823,6 +5737,13 @@ mod tests {
         const ANN_PAYLOAD_OFFSET: usize = RECORD_FIXED_BYTES;
         const COMPLETE_OFFSET: usize = ANN_PAYLOAD_OFFSET + 333;
         const EXACT_RECALL_HITS_OFFSET: usize = ANN_PAYLOAD_OFFSET + 334;
+        const INTERVAL_SCALE_OFFSET: usize = ANN_PAYLOAD_OFFSET + 350;
+        const INTERVAL_POINT_OFFSET: usize = ANN_PAYLOAD_OFFSET + 358;
+        const INTERVAL_LOWER_OFFSET: usize = ANN_PAYLOAD_OFFSET + 366;
+        const INTERVAL_UPPER_OFFSET: usize = ANN_PAYLOAD_OFFSET + 374;
+        const INTERVAL_RADIUS_OFFSET: usize = ANN_PAYLOAD_OFFSET + 382;
+        const INTERVAL_EXPONENT_OFFSET: usize = ANN_PAYLOAD_OFFSET + 390;
+        const INTERVAL_QUERIES_OFFSET: usize = ANN_PAYLOAD_OFFSET + 391;
         const ACTION_OFFSET: usize = ANN_PAYLOAD_OFFSET + 400;
         const CANDIDATE_OID_OFFSET: usize = 216;
         const SELECTED_OID_OFFSET: usize = 280;
@@ -5849,6 +5770,40 @@ mod tests {
                 }
             ))
         ));
+
+        for (offset, field) in [
+            (INTERVAL_SCALE_OFFSET, StatisticField::AnnIntervalScale),
+            (
+                INTERVAL_POINT_OFFSET,
+                StatisticField::AnnIntervalPointEstimate,
+            ),
+            (INTERVAL_LOWER_OFFSET, StatisticField::AnnIntervalLower),
+            (INTERVAL_UPPER_OFFSET, StatisticField::AnnIntervalUpper),
+            (INTERVAL_RADIUS_OFFSET, StatisticField::AnnIntervalRadius),
+            (
+                INTERVAL_EXPONENT_OFFSET,
+                StatisticField::AnnIntervalConfidenceExponent,
+            ),
+            (
+                INTERVAL_QUERIES_OFFSET,
+                StatisticField::AnnIntervalQueryObservations,
+            ),
+        ] {
+            let mut inconsistent_interval = ann_recall_record()?.encode_canonical()?;
+            inconsistent_interval[offset] ^= 1;
+            assert!(matches!(
+                StatisticalLogRecord::decode_canonical(
+                    &inconsistent_interval,
+                    &TEST_IDENTITY_AUTHORITY
+                ),
+                Err(StatisticalLogCodecError::InvalidRecord(
+                    StatisticalLogRecordError::AnnRecallDerivedFieldMismatch {
+                        field: actual_field,
+                        ..
+                    }
+                )) if actual_field == field
+            ));
+        }
 
         let mut unknown_action = encoded;
         unknown_action[ACTION_OFFSET] = 0;

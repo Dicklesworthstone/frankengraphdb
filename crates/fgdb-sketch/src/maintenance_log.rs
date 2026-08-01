@@ -603,20 +603,14 @@ fn encoded_log_len(record_count: usize) -> Result<usize, SketchMaintenanceCodecE
 }
 
 fn domain_separated_digest(domain: &[u8], canonical_bytes: &[u8]) -> [u8; 32] {
-    let mut transcript = Vec::with_capacity(
-        domain
-            .len()
-            .saturating_add(core::mem::size_of::<u64>())
-            .saturating_add(canonical_bytes.len()),
-    );
-    transcript.extend_from_slice(domain);
-    transcript.extend_from_slice(
-        &u64::try_from(canonical_bytes.len())
-            .unwrap_or(u64::MAX)
-            .to_le_bytes(),
-    );
-    transcript.extend_from_slice(canonical_bytes);
-    asupersync::atp::object::compute_hash(&transcript)
+    let canonical_len = u64::try_from(canonical_bytes.len())
+        .unwrap_or(u64::MAX)
+        .to_le_bytes();
+    let mut hasher = asupersync::atp::object::ContentId::streaming();
+    hasher.update(domain);
+    hasher.update(&canonical_len);
+    hasher.update(canonical_bytes);
+    *hasher.finalize().hash()
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
@@ -646,9 +640,10 @@ fn read_array_32(bytes: &[u8], offset: usize) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOG_HEADER_BYTES, RECORD_BYTES, SketchFamily, SketchMaintenanceCodecError,
-        SketchMaintenanceLog, SketchMaintenanceLogDecodeLimits, SketchMaintenanceLogError,
-        SketchMaintenanceOutcome, SketchMaintenanceRecord,
+        INPUT_DIGEST_DOMAIN, LOG_HEADER_BYTES, RECORD_BYTES, STATE_DIGEST_DOMAIN, SketchFamily,
+        SketchMaintenanceCodecError, SketchMaintenanceLog, SketchMaintenanceLogDecodeLimits,
+        SketchMaintenanceLogError, SketchMaintenanceOutcome, SketchMaintenanceRecord,
+        domain_separated_digest,
     };
     use fgdb_types::ObjectId;
 
@@ -668,6 +663,28 @@ mod tests {
             b"canonical-operand",
             b"canonical-after",
         )
+    }
+
+    #[test]
+    fn streamed_digest_matches_the_materialized_canonical_transcript() {
+        let long_payload = [0xa5; 257];
+        let payloads: [&[u8]; 4] = [b"", b"x", b"canonical-payload", &long_payload];
+        for domain in [STATE_DIGEST_DOMAIN, INPUT_DIGEST_DOMAIN] {
+            for payload in payloads {
+                let mut transcript = Vec::new();
+                transcript.extend_from_slice(domain);
+                transcript.extend_from_slice(
+                    &u64::try_from(payload.len())
+                        .expect("test payload length fits u64")
+                        .to_le_bytes(),
+                );
+                transcript.extend_from_slice(payload);
+                assert_eq!(
+                    domain_separated_digest(domain, payload),
+                    asupersync::atp::object::compute_hash(&transcript)
+                );
+            }
+        }
     }
 
     #[test]

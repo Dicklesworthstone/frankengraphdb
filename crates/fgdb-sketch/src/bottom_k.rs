@@ -53,6 +53,12 @@ pub struct BottomKProfile {
     /// Maximum accepted length of one canonical observation.
     pub max_observation_bytes: usize,
     /// Maximum sum of observation bytes retained in the sample.
+    ///
+    /// A sufficient profile-local condition for closure under every legal
+    /// bottom-k merge is room for `k` observations of
+    /// `max_observation_bytes` each. Profiles below that conservative bound
+    /// remain useful, but an intermediate merge can exceed this ceiling even
+    /// when a later merge would evict the oversized samples.
     pub max_sample_bytes: usize,
 }
 
@@ -777,8 +783,13 @@ impl BottomKSketch {
     ///
     /// The complete result is built in private fallible storage before the
     /// receiver changes, making profile, resource, and allocation failures
-    /// atomic. The algebra is commutative, associative, and idempotent over
-    /// successful identical-profile merges.
+    /// atomic. Every successful identical-profile merge returns the exact
+    /// bottom-k union, so successful results are commutative, associative, and
+    /// idempotent. For a profile below the conservative byte-closure bound
+    /// documented on [`BottomKProfile::max_sample_bytes`], whether a reduction
+    /// succeeds can depend on grouping because an oversized intermediate is
+    /// rejected before later operands can evict it. No failed merge changes the
+    /// receiver.
     pub fn try_merge(&mut self, other: &Self) -> Result<(), BottomKError> {
         if self.profile != other.profile {
             return Err(BottomKError::ProfileMismatch);
@@ -2031,6 +2042,82 @@ mod tests {
             .try_merge(&before)
             .expect("identical profile and state");
         assert_eq!(idempotent, before);
+    }
+
+    #[test]
+    fn non_closed_byte_profile_has_grouping_dependent_failure_outcomes() {
+        let profile = BottomKProfile::new(2, 7, 6, 10);
+        let compare_rank = |left: &[u8], right: &[u8]| {
+            stable_hash(profile.hash_algorithm, profile.seed, left)
+                .expect("bounded left observation")
+                .cmp(
+                    &stable_hash(profile.hash_algorithm, profile.seed, right)
+                        .expect("bounded right observation"),
+                )
+                .then_with(|| left.cmp(right))
+        };
+        let sort_by_rank = |values: &mut Vec<Vec<u8>>| {
+            values.sort_by(|left, right| compare_rank(left, right));
+        };
+
+        let mut one_byte = (u8::MIN..=u8::MAX)
+            .map(|value| vec![value])
+            .collect::<Vec<_>>();
+        sort_by_rank(&mut one_byte);
+        let c_values = one_byte.into_iter().take(2).collect::<Vec<_>>();
+
+        let mut six_byte = (0_u32..4_096)
+            .map(|nonce| {
+                let mut observation = vec![0x66; 6];
+                observation[..4].copy_from_slice(&nonce.to_le_bytes());
+                observation
+            })
+            .filter(|observation| compare_rank(observation, &c_values[1]).is_gt())
+            .collect::<Vec<_>>();
+        sort_by_rank(&mut six_byte);
+        assert!(six_byte.len() >= 2, "fixture needs two six-byte ranks");
+        let x = six_byte[0].clone();
+        let z = six_byte[1].clone();
+
+        let mut four_byte = (0_u32..4_096)
+            .map(|nonce| nonce.to_le_bytes().to_vec())
+            .filter(|observation| compare_rank(observation, &z).is_gt())
+            .collect::<Vec<_>>();
+        sort_by_rank(&mut four_byte);
+        assert!(four_byte.len() >= 2, "fixture needs two four-byte ranks");
+        let y = four_byte[0].clone();
+        let w = four_byte[1].clone();
+
+        let part = |observations: &[Vec<u8>]| {
+            let mut sketch = BottomKSketch::try_new(profile).expect("bounded profile");
+            for observation in observations {
+                sketch
+                    .try_observe(observation)
+                    .expect("individual partition fits");
+            }
+            sketch
+        };
+        let a = part(&[x, y]);
+        let b = part(&[z, w]);
+        let c = part(&c_values);
+
+        let mut ab = a.clone();
+        assert_eq!(
+            ab.try_merge(&b),
+            Err(BottomKError::SampleByteLimitExceeded {
+                requested: 12,
+                maximum: 10,
+            })
+        );
+        assert_eq!(ab, a, "the failed grouping must remain atomic");
+
+        let mut bc = b;
+        bc.try_merge(&c)
+            .expect("the one-byte samples evict both large samples");
+        let mut a_bc = a;
+        a_bc.try_merge(&bc)
+            .expect("the true bottom two fit the byte ceiling");
+        assert_eq!(a_bc, c);
     }
 
     #[test]

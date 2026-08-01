@@ -2164,7 +2164,8 @@ fn sorted_intersection_count(
     Ok(hits)
 }
 
-fn confidence_interval(
+/// Derives the canonical outward-rounded interval used by evidence and log validation.
+pub(crate) fn confidence_interval(
     hits: u64,
     baseline_results: u64,
     queries: u64,

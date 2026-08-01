@@ -423,11 +423,11 @@ impl ExactQuantileSketch {
                 maximum: self.max_observations,
             });
         }
-        self.values.try_reserve(1).map_err(|_: TryReserveError| {
-            ExactQuantileError::AllocationFailed {
+        self.values
+            .try_reserve_exact(1)
+            .map_err(|_: TryReserveError| ExactQuantileError::AllocationFailed {
                 requested: attempted,
-            }
-        })?;
+            })?;
         let insertion = self.values.partition_point(|existing| *existing <= value);
         self.values.insert(insertion, value);
         Ok(())
@@ -632,6 +632,15 @@ mod tests {
         let reverse = summary(&[0, u64::MAX, 2, 5, 5, 1, 9]);
         assert_eq!(forward, reverse);
         assert_eq!(forward.canonical_values(), &[0, 1, 2, 5, 5, 9, u64::MAX]);
+    }
+
+    #[test]
+    fn incremental_growth_never_reserves_past_the_profile_ceiling() {
+        let mut sketch = ExactQuantileSketch::new(17);
+        for value in 0_u64..17 {
+            sketch.try_observe(value).expect("observation fits");
+            assert!(sketch.values.capacity() <= sketch.max_observations);
+        }
     }
 
     #[test]

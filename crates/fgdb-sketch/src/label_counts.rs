@@ -412,11 +412,8 @@ pub enum LabelCountsCodecError {
     },
     /// Exact encoded-size arithmetic overflowed.
     LengthOverflow,
-    /// A canonical scalar does not fit its platform representation.
-    IntegerUnrepresentable {
-        /// Value found in the input.
-        actual: u64,
-    },
+    /// A canonical scalar and its platform representation cannot be converted.
+    IntegerUnrepresentable,
     /// Input ended before a complete field could be read.
     Truncated {
         /// Byte offset of the field.
@@ -490,8 +487,8 @@ impl fmt::Display for LabelCountsCodecError {
                 "declared label-count key bytes {declared} differ from the summed {actual}"
             ),
             Self::LengthOverflow => formatter.write_str("label-count length arithmetic overflowed"),
-            Self::IntegerUnrepresentable { actual } => {
-                write!(formatter, "label-count scalar {actual} is unrepresentable")
+            Self::IntegerUnrepresentable => {
+                formatter.write_str("label-count scalar is unrepresentable")
             }
             Self::Truncated {
                 offset,
@@ -715,12 +712,12 @@ impl LabelCounts {
                     .key_bytes
                     .checked_add(key.name.len())
                     .ok_or(LabelCountsError::KeyByteCountOverflow)?;
-                self.entries.try_reserve(1).map_err(|_: TryReserveError| {
-                    LabelCountsError::AllocationFailed {
+                self.entries
+                    .try_reserve_exact(1)
+                    .map_err(|_: TryReserveError| LabelCountsError::AllocationFailed {
                         target: LabelCountsAllocationTarget::Directory,
                         requested: next_distinct_keys,
-                    }
-                })?;
+                    })?;
                 let name = try_clone_key(key.name, LabelCountsAllocationTarget::Key)?;
                 self.entries.insert(
                     index,
@@ -1324,12 +1321,11 @@ fn enforce_decode_limit(
 }
 
 fn canonical_usize(value: usize) -> Result<u64, LabelCountsCodecError> {
-    u64::try_from(value).map_err(|_| LabelCountsCodecError::LengthOverflow)
+    u64::try_from(value).map_err(|_| LabelCountsCodecError::IntegerUnrepresentable)
 }
 
 fn decoded_usize(value: u64) -> Result<usize, LabelCountsCodecError> {
-    usize::try_from(value)
-        .map_err(|_| LabelCountsCodecError::IntegerUnrepresentable { actual: value })
+    usize::try_from(value).map_err(|_| LabelCountsCodecError::IntegerUnrepresentable)
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
@@ -1465,6 +1461,18 @@ mod tests {
         assert_eq!(counts.distinct_keys(), 2);
         assert_eq!(counts.key_bytes(), b"Person".len() + b"KNOWS".len());
         assert!(!counts.is_empty());
+    }
+
+    #[test]
+    fn incremental_directory_growth_never_reserves_past_the_profile_ceiling() {
+        let profile = LabelCountsProfile::new(17, 17, 17);
+        let mut counts = LabelCounts::try_new(profile).expect("profile is valid");
+        for name in 0_u8..17 {
+            counts
+                .try_observe(vertex(&[name]), 1)
+                .expect("distinct key fits");
+            assert!(counts.entries.capacity() <= profile.max_distinct_keys);
+        }
     }
 
     #[test]
