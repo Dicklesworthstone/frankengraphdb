@@ -963,23 +963,31 @@ impl GraphMetricConformal {
         } else {
             match self.core.check(FOUNDATION_METRIC_SLOT, value) {
                 Some(check) => {
+                    let foundation_statistics_finite = check.threshold.is_finite()
+                        && check.nonconformity_score.is_finite()
+                        && check.coverage_target.is_finite();
+                    let foundation_calibration_count_matches =
+                        check.calibration_n == self.calibration_samples;
+                    // A malformed ready result remains an observed failure in
+                    // the denominator, but it cannot inflate realized coverage.
+                    let covered = value.is_finite()
+                        && foundation_statistics_finite
+                        && foundation_calibration_count_matches
+                        && check.conforming;
                     let next_ready = self
                         .ready_assessments
                         .checked_add(1)
                         .ok_or(InputError::ReadyAssessmentCounterExhausted)?;
                     let next_covered = self
                         .covered_ready_assessments
-                        .checked_add(u64::from(check.conforming))
+                        .checked_add(u64::from(covered))
                         .ok_or(InputError::CoveredAssessmentCounterExhausted)?;
                     let realized_coverage = (next_covered as f64) / (next_ready as f64);
                     let disposition = if !value.is_finite() {
                         AssessmentDisposition::NonFiniteValue
-                    } else if !check.threshold.is_finite()
-                        || !check.nonconformity_score.is_finite()
-                        || !check.coverage_target.is_finite()
-                    {
+                    } else if !foundation_statistics_finite {
                         AssessmentDisposition::NonFiniteFoundationStatistic
-                    } else if check.calibration_n != self.calibration_samples {
+                    } else if !foundation_calibration_count_matches {
                         AssessmentDisposition::FoundationCalibrationCountMismatch
                     } else if !check.conforming {
                         AssessmentDisposition::OutsideCalibratedSet
@@ -1452,6 +1460,33 @@ mod tests {
             identity()?.pinned_fallback_oid()
         );
         assert_eq!(evidence.threshold_bits(), Some(f64::INFINITY.to_bits()));
+        assert_eq!(evidence.ready_assessments(), 1);
+        assert_eq!(evidence.covered_ready_assessments(), 0);
+        assert_eq!(evidence.realized_coverage_bits(), Some(0.0_f64.to_bits()));
+        Ok(())
+    }
+
+    #[test]
+    fn foundation_count_mismatch_is_uncovered_and_selects_fallback() -> TestResult {
+        let mut trial = trial()?;
+        calibrate_normal_range(&mut trial)?;
+        trial.calibration_samples = trial
+            .calibration_samples
+            .checked_sub(1)
+            .ok_or("calibration fixture must contain at least one sample")?;
+
+        let evidence = assess(&mut trial, 110, 5.0)?;
+        assert_eq!(
+            evidence.disposition(),
+            AssessmentDisposition::FoundationCalibrationCountMismatch
+        );
+        assert_eq!(evidence.selection(), PolicySelection::PinnedFallback);
+        assert_eq!(evidence.conforming(), Some(true));
+        assert_eq!(evidence.foundation_calibration_samples(), Some(10));
+        assert_eq!(evidence.calibration_samples(), 9);
+        assert_eq!(evidence.ready_assessments(), 1);
+        assert_eq!(evidence.covered_ready_assessments(), 0);
+        assert_eq!(evidence.realized_coverage_bits(), Some(0.0_f64.to_bits()));
         Ok(())
     }
 
