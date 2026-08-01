@@ -241,6 +241,60 @@ const REGISTRY: &[(&str, Coverage)] = &[
             trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
         },
     ),
+    // ---- role-selected projection family (fgdb-ap4t) -------------------------------
+    // The real-corpus fixture pairs the released five-row bijection with one
+    // mutation for every diagnostic.  The deliberately minimal [`base`]
+    // registry below contains no Appendix A projection families, so its helper
+    // filters only the global missing-branch census while leaving every
+    // row-local role-projection diagnostic observable.
+    (
+        "role_projection_claim_unparseable",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
+    (
+        "role_projection_source_unapproved",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
+    (
+        "role_projection_contract_mismatch",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
+    (
+        "role_projection_role_out_of_bound",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
+    (
+        "role_projection_role_missing",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
+    (
+        "role_projection_role_duplicate",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
+    (
+        "role_projection_branch_mismatch",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
+    (
+        "role_projection_refinement_syntax_forbidden",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_role_selected_restore_projections_are_exact_and_role_erased"],
+        },
+    ),
     // ---- payload-value family (fgdb-payload-bearing-arm-values-5u56) -------------------
     // All seven land witnessed rather than on the backlog:
     // `idr_payload_bearing_arm_values_preserve_the_complete_payload` strips the
@@ -437,13 +491,18 @@ fn codes(r: &IdentityRegistries) -> Vec<String> {
     identity::validate_identity(r)
         .into_iter()
         // Assignment epochs and pins describe the complete released registry,
-        // so any deliberately minimal synthetic fixture necessarily differs.
-        // Both codes carry explicit Coverage::Exempt rows above; all other
-        // violations remain fatal to a supposedly satisfying witness.
+        // and the role-projection missing-branch census describes two complete
+        // released Appendix A families, so any deliberately minimal synthetic
+        // fixture necessarily differs.  The assignment codes carry explicit
+        // Coverage::Exempt rows; the role census has a real-corpus
+        // WitnessedElsewhere row. All other violations remain fatal to a
+        // supposedly satisfying witness.
         .filter(|violation| {
             !matches!(
                 violation.code.as_str(),
-                "registry_epoch_mismatch" | "registry_assignment_drift"
+                "registry_epoch_mismatch"
+                    | "registry_assignment_drift"
+                    | "role_projection_role_missing"
             )
         })
         .map(|violation| violation.code)

@@ -16749,11 +16749,39 @@ fn idr_role_selected_restore_projections_are_exact_and_role_erased() {
         "the concrete role-projection population moved"
     );
 
+    // The structured metadata is closed: losing one delimiter must not turn
+    // the row back into unaudited prose.
+    let mut malformed = real_identity();
+    replace_context(
+        &mut malformed,
+        "AwaitingSourceReleaseLocalRestorePhase",
+        "; formal=Role;",
+        "; formal=Role",
+    );
+    assert!(
+        role_codes(&malformed).contains("role_projection_claim_unparseable"),
+        "malformed structured role metadata must fail closed"
+    );
+
+    // A syntactically valid projection still needs an independently released
+    // generic source contract.
+    let mut unapproved_source = real_identity();
+    replace_context(
+        &mut unapproved_source,
+        "LocalInitialRestoreRegistryRef",
+        "source=top|InitialRestoreRegistryRef<Role>",
+        "source=top|UnknownRoleProjection<Role>",
+    );
+    assert!(
+        role_codes(&unapproved_source).contains("role_projection_source_unapproved"),
+        "an unapproved generic role source must fail"
+    );
+
     // Removing one branch makes the generic-source expansion incomplete.
     let mut missing = real_identity();
     missing
         .wire
-        .retain(|row| row.name != "AwaitingSourceReleaseMetaRestorePhase");
+        .retain(|row| row.name != "AwaitingSourceReleaseMetaRestorePhase"); // ubs:ignore -- public registry-row name inequality in a mutation fixture.
     assert!(
         role_codes(&missing).contains("role_projection_role_missing"),
         "removing Meta from AuthorityOwningRole coverage must fail"
