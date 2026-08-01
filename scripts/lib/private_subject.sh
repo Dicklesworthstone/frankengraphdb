@@ -48,9 +48,12 @@
 # per-run evidence written by the sourcing gates and is fgdb-kwoz, not this file.
 #
 # The subject is now CONTENT-KEYED AND SHARED. `subject_acquire` builds into
-# <cache>/subject-<sha of every checker source>, and every gate wanting that same
-# tree state reuses it. MEASURED: cold 8.2s, warm 0.024s and zero new bytes, so
-# one scripts/check.sh goes from 3 x 75MB to 75MB.
+# <cache>/subject-<sha of every compiler input>, and every gate wanting that same
+# tree state reuses it. The key includes framed source paths and bytes, this
+# build recipe, the pinned toolchain file, and the resolved compiler identity;
+# the published manifest binds that key to every artifact hash. MEASURED: cold
+# 8.2s, warm 0.024s and zero new bytes, so one scripts/check.sh goes from 3 x
+# 75MB to 75MB.
 #
 # STILL NOTHING HERE DELETES A FILE, and that is deliberate (RULE 1). The publish
 # step is `mv -T` onto a path that does not exist; a pane losing that race keeps
@@ -69,12 +72,62 @@
 # is fgdb-1j16 option 2, not this library's business.
 # =============================================================================
 
-# subject_newest_source <root> -> prints the most recently modified checker source
-subject_newest_source() {
-  ls -t "$1"/tools/registry-check/src/*.rs "$1"/tools/registry-check/src/bin/*.rs | head -1
+# subject_input_files <root> -> NUL-delimited, sorted compiler input paths
+subject_input_files() {
+  local root="$1"
+  [ -d "$root/tools/registry-check/src" ] || return 1
+  [ -f "$root/scripts/lib/private_subject.sh" ] || return 1
+  [ -f "$root/rust-toolchain.toml" ] || return 1
+  {
+    find "$root/tools/registry-check/src" -type f -name '*.rs' -print0
+    printf '%s\0' \
+      "$root/scripts/lib/private_subject.sh" \
+      "$root/rust-toolchain.toml"
+  } | LC_ALL=C sort -z
 }
 
-# subject_is_fresh <bin> <root> -> 0 when <bin> is newer than every checker source
+# subject_rustc_identity <root> -> the compiler selected for this tree
+subject_rustc_identity() {
+  (cd "$1" && rustc -vV)
+}
+
+# subject_input_stream <root> -> framed bytes hashed by subject_key
+#
+# Raw concatenation is ambiguous: changing `ab` + `c` into `a` + `bc` preserves
+# the byte stream, and omitting paths makes a rename invisible. Every record is
+# therefore NUL-framed by kind, repository-relative path, byte length, and
+# bytes. The resolved compiler is a separate framed record because its identity
+# is not necessarily represented by a tracked file.
+subject_input_stream() {
+  local root="$1" file relative byte_count rustc_identity
+  printf 'fgdb-private-subject-input-v1\0'
+  while IFS= read -r -d '' file; do
+    relative="${file#"$root"/}"
+    [ "$relative" != "$file" ] || return 1
+    read -r byte_count < <(wc -c <"$file")
+    printf 'file\0%s\0%s\0' "$relative" "$byte_count"
+    cat -- "$file"
+    printf '\0'
+  done < <(subject_input_files "$root")
+
+  rustc_identity="$(subject_rustc_identity "$root")" || return 1
+  read -r byte_count < <(printf '%s' "$rustc_identity" | wc -c)
+  printf 'rustc-vV\0%s\0%s\0' "$byte_count" "$rustc_identity"
+}
+
+# subject_newest_source <root> -> prints the newest tracked compiler input
+subject_newest_source() {
+  local root="$1" file newest=""
+  while IFS= read -r -d '' file; do
+    if [ -z "$newest" ] || [ "$file" -nt "$newest" ]; then
+      newest="$file"
+    fi
+  done < <(subject_input_files "$root")
+  [ -n "$newest" ] || return 1
+  printf '%s\n' "$newest"
+}
+
+# subject_is_fresh <bin> <root> -> 0 when <bin> is newer than every file input
 #
 # THE predicate, and the only one. It is an mtime rule, and it is the exact
 # property the old cargo step lacked: cargo printed an error, exited 0, left the
@@ -118,15 +171,16 @@ subject_cache_dir() {
   printf '%s' "${FGDB_SUBJECT_CACHE:-${TMPDIR:-/tmp}/fgdb-subject}"
 }
 
-# subject_key <root> -> a content key over EVERY checker source
+# subject_key <root> -> a full-width content key over EVERY compiler input
 #
-# The glob set is the SAME set `subject_newest_source` walks, and that is load
-# bearing: a source the key cannot see is a source whose change cannot invalidate
-# the cache. Verified 2026-07-27 -- zero `.rs` files under
-# tools/registry-check/src fall outside `src/*.rs` plus `src/bin/*.rs`.
+# `subject_input_files` is the ONE file enumerator shared with the freshness
+# rule, and `find` deliberately covers nested modules rather than assuming the
+# current two-level layout. The full 256 bits are retained: cache provenance is
+# not the place to introduce a silent 64-bit collision domain.
 subject_key() {
-  cat "$1"/tools/registry-check/src/*.rs "$1"/tools/registry-check/src/bin/*.rs \
-    | sha256sum | cut -c1-16
+  local digest
+  digest="$(subject_input_stream "$1" | sha256sum)" || return 1
+  printf '%s' "${digest%% *}"
 }
 
 # subject_dir <root> -> where this tree state's subject belongs
