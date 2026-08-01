@@ -90,6 +90,10 @@ pub enum IndexError {
     /// commits. A decoder must preserve both values independently so
     /// verification can bind the map structure to the batch identity.
     WrongEntryKey { stored: CommitSeq, batch: CommitSeq },
+    /// The declared index format is not one this build reads. Format is the
+    /// first law verification enforces, because every other law is written
+    /// against a format it does not know it has (fgdb-dzh4 item 1).
+    UnsupportedFormat { format: u16 },
     /// A retirement that would move the retained floor past the frontier, or
     /// backwards. Either would leave the window describing an interval it does
     /// not hold.
@@ -130,6 +134,9 @@ impl core::fmt::Display for IndexError {
                 f,
                 "wrong entry key: index key {stored:?} stores a batch for {batch:?}"
             ),
+            Self::UnsupportedFormat { format } => {
+                write!(f, "index format {format} is not implemented")
+            }
             Self::UnretirableInterval {
                 retained_after,
                 frontier,
@@ -359,6 +366,15 @@ impl LocalDeltaBatchIndex {
     /// of the claimed interval. A corrupt frontier near `u64::MAX` therefore
     /// cannot turn verification of a small decoded value into a vast loop.
     pub fn verify(&self) -> Result<(), IndexError> {
+        // The format law is first, the same order the template validate gives
+        // its own format arm (canonical.rs): a decoder-shaped index carrying
+        // an unknown format must not verify clean because every OTHER law
+        // happens to hold (fgdb-dzh4 item 1).
+        if self.format != INDEX_FORMAT_V1 {
+            return Err(IndexError::UnsupportedFormat {
+                format: self.format,
+            });
+        }
         if self.retained_after_commit_seq.0 > self.frontier.0 {
             return Err(IndexError::UnretirableInterval {
                 retained_after: self.retained_after_commit_seq,
@@ -402,5 +418,25 @@ impl LocalDeltaBatchIndex {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IndexError, LocalDeltaBatchIndex};
+
+    /// The format law is the FIRST law verify enforces: a window carrying an
+    /// unknown format must not verify clean because every other law holds
+    /// (fgdb-dzh4 item 1). Private-field access is exactly why this lives in
+    /// the crate rather than the integration suite — the durable decoder
+    /// path is what the format field exists for.
+    #[test]
+    fn verify_refuses_an_unknown_format() {
+        let mut index = LocalDeltaBatchIndex::new();
+        index.format = 99;
+        assert_eq!(
+            index.verify(),
+            Err(IndexError::UnsupportedFormat { format: 99 })
+        );
     }
 }
