@@ -112,10 +112,11 @@ path is a layer whose integration risk is unmeasured.
   `Database::open_in_memory()`, a session handle, and a `close`. Internally: open a
   Chronicle coordinator, recover, and expose a read handle over Strata. This is the
   first place the three islands meet in *production* code rather than in a test.
-- **A2. Root manifest** — currently blocked and blocking. `RootSlot.root_manifest_oid`
-  points at an object nobody has defined, so a database cannot find its partitions on
-  open. Needs an Appendix A catalog row; the Strata side already guarantees a
-  partition reopens from a 32-byte identity.
+- **A2. Bind Strata into the durable object graph** — currently blocked and blocking.
+  Neither `DeltaBlockVersion` nor `PartitionRoot` is a landed Appendix A kind, and no
+  field anywhere references a partition root, so a database cannot find its partitions
+  on open. Register both formats first, *then* add the binding; the Strata side already
+  guarantees a partition reopens from a 32-byte identity. See `fgdb-ge6a`.
 - **A3. Write path in the library** — `Database::write(|txn| ...)` producing a real
   commit, using the effect vocabulary that already exists.
 - **A4. Read path in the library** — adjacency and vertex reads at a snapshot, served
@@ -252,7 +253,7 @@ record rather than a dependency. Nobody should have to read it to do the work.
 | Bead | P | What it is |
 |---|---|---|
 | `fgdb-j0vu` | **P1** | **THE SPINE** — a minimal end-to-end slice a human can run, long before W10. |
-| `fgdb-ge6a` | **P1** (bug) | `RootSlot.root_manifest_oid` dangles — no object kind defines what it resolves to, so **no database can currently be reopened**. |
+| `fgdb-ge6a` | **P1** (bug) | Strata's two durable formats (`DeltaBlockVersion`, `PartitionRoot`) are **outside the Appendix A catalog**, and no field anywhere references a partition root — so **no database can currently be reopened**. |
 | `fgdb-lc1t` | **P0** | Persistent structures decision, recorded *before* tier R is written. Added as a **blocker on `fgdb-w3-tier-r-0tj`**. |
 | `fgdb-p95p` | P1 | Adversarial benchmark harness. Activates the planned `fgdb-bench` crate. |
 | `fgdb-z5y0` | P1 | Model-based history generator with shrinking, driving both engines. |
@@ -300,19 +301,42 @@ slice is absorbed into it rather than left beside it.
 
 ### The blocker underneath it: nothing can be reopened
 
-Scoping the spine surfaced a defect rather than a task. `RootSlot` is an **active**
-row and carries `root_manifest_oid` — and no object kind defines what that OID
-resolves to. Recovery can select a credible root slot, authenticate it, read the OID,
-and then has nothing to resolve it against. **No database can be reopened today.**
-Everything that currently looks like a reopen is a test holding a `PartitionRoot`
-identity in memory across the close. Filed as `fgdb-ge6a`.
+Scoping the spine surfaced a defect rather than a task. **No database can be reopened
+today.** Everything that currently looks like a reopen is a test holding a
+`PartitionRoot` identity in memory across the close. Filed as `fgdb-ge6a`.
 
-It is small: Strata already guarantees a partition reopens from a 32-byte identity, so
-the manifest needs only the `(graph, partition)` coordinate and the root's object id.
-It is a durable format, so it owes an Appendix A catalog row — and that is worth
-naming, because it puts G0 catalog work on the critical path of the first runnable
-engine. **That is the one place where "catalog blocks engine" is true.** It should not
-become a precedent for the general case.
+> **Corrected 2026-08-01.** The first version of this section — and of the bead —
+> said `RootSlot.root_manifest_oid` "points at an object nobody has defined". **That
+> is false**, and it was written from a code grep when the definition lives in the
+> registries. `RootManifest` is a landed, active kind (`object_kind = 0x0007`) and
+> the chain resolves the whole way: `RootSlot.root_manifest_oid → RootManifest →
+> LogicalStateRoot → LogicalStatePayload`. Nothing dangles. Leaving the wrong version
+> standing would send whoever picks the bead up at the wrong target entirely.
+
+The real defect is larger. Follow that chain to its end and it terminates in
+`LogicalStatePayload`, whose **entire** field set is two scalars —
+`applied_logical_command_seq` and `applied_commit_seq`. A recovered database learns
+which sequence it had applied and nothing at all about where its graph data lives.
+Measured against the registries:
+
+- `target_schema_id = "PartitionRoot"` over `durable_fields.toml`: **zero hits**. No
+  field of any schema references a Strata partition root.
+- `PartitionRoot` appears in **no registry at all** — not a kind, not a wire type, not
+  even a reservation.
+- `DeltaBlockVersion` has a **reservation only** (`0x04d4`, `disposition =
+  "reserved"`); it is not among the 555 landed `[[kind]]` rows.
+- Neither `FGSB` nor `FGSR` — the magic numbers Strata actually writes — appears
+  anywhere under `registries/`.
+
+So Strata writes two durable on-disk formats with versioned headers and canonical
+encodings, and **neither is in the Appendix A catalog**. The tier sits outside the
+normative format contract, which means none of the catalog's cross-cutting machinery
+— identity class, construction order, retention and cut rules, golden corpora, GC
+reachability under FG-INV-14 — currently applies to the only place graph data lives.
+
+That does put G0 catalog work on the critical path of the first runnable engine, and
+it is worth naming precisely because it is the **one** place where "catalog blocks
+engine" is true. It should not become a precedent for the general case.
 
 A second refinement caught an edge I had just drawn too coarsely: the spine was
 initially blocked on all of `fgdb-w3-tier-d-ctj`, a large bead with several in-flight
@@ -346,9 +370,13 @@ gate on shipping, not a gate on building.
 ## Revision history
 
 - **2026-07-31, pass 1** — initial measurement and bridge plan (JadeSnow).
+- **2026-08-01, pass 3** — `fgdb-z5y0` landed (`8c53adb`), and `fgdb-ge6a`'s premise
+  was re-derived by its own author and found **wrong**: the root-manifest chain does
+  not dangle. The real defect is larger and is corrected in place above. A reality
+  check whose own findings are exempt from re-derivation is just a longer opinion.
 - **2026-07-31, pass 2** — ambition rounds 1–3 revised in place; Phase 3a and Phase 5
-  added. Phase 5 found the spine-scheduling gap (`fgdb-j0vu`), the dangling root
-  manifest (`fgdb-ge6a`), the oracle's identity-recycling hole (`fgdb-s50d`) and a
+  added. Phase 5 found the spine-scheduling gap (`fgdb-j0vu`), the uncatalogued Strata
+  formats (`fgdb-ge6a`), the oracle's identity-recycling hole (`fgdb-s50d`) and a
   repo-wide red ratchet (`fgdb-teqw`). Landing this document also required registering
   it in `claims_lint.toml` and `check.sh` — pass 1 had left `registry-check all` red
   repo-wide with `unclaimed_prose`, which is a small lesson in its own right about
