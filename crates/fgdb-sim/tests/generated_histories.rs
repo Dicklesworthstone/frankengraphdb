@@ -26,10 +26,21 @@
 //! **SHRINKING IS NOT OPTIONAL.** A failing 200-step history is a curiosity; a
 //! shrunk 3-step one is a bug report. Without shrinking this tool would be built,
 //! would find something once, and would be abandoned.
+//!
+//! Branches are generated below by a **separate action language and model**.
+//! A fork changes the history topology, so treating it as another row-shaped
+//! `Step` would hide the parent boundary and make branch-aware shrinking
+//! impossible. The branch differential independently folds a forest, then checks
+//! current state, historical snapshots, origins, frontiers, and inherited
+//! conflict windows against `ReferenceDatabase` after every action.
 
 mod common;
 
-use common::{Step, check_agrees, try_build};
+use common::{GRAPH, LABEL, PROP, REL, Step, check_agrees, try_build};
+use fgdb_delta_types::{CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, SchemaEpoch};
+use fgdb_reference::{BranchOrigin, ConflictKey, ReferenceDatabase, ReferenceGraph};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, LogicalCommandSeq, ObjectId, VId};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // A deterministic PRNG, in-house because the dependency universe is closed.
@@ -576,5 +587,1305 @@ fn shrinking_preserves_the_failure_and_reduces_the_history() {
             .any(|(_, s)| matches!(s, Step::DeleteEdge(9_999))),
         "shrinker removed the very step that causes the failure: {:?}",
         minimal.history
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A separate generator for branch forests.
+// ---------------------------------------------------------------------------
+
+/// Branching changes the shape of the generated object, not merely the set of
+/// row operations. Keeping it in a separate language prevents a fork from being
+/// mistaken for one more [`Step`] that a single-coordinate harness can apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchAction {
+    Write {
+        logical_seq: u64,
+        branch: u128,
+        step: Step,
+    },
+    Fork {
+        parent: u128,
+        child: u128,
+        /// An observed logical-command position, or zero for the empty prefix.
+        boundary: u64,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct BranchGenerated {
+    actions: Vec<BranchAction>,
+    coverage: BranchCoverage,
+}
+
+/// Coverage over the dimensions that make a branch generator more than a
+/// collection of single-branch histories.
+#[derive(Clone, Copy, Debug, Default)]
+struct BranchCoverage {
+    current_forks: usize,
+    historical_forks: usize,
+    zero_forks: usize,
+    nested_forks: usize,
+    fork_branch_writes: usize,
+    inherited_mutations: usize,
+    divergent_siblings: usize,
+    inherited_conflict_windows: usize,
+}
+
+impl BranchCoverage {
+    fn merge(&mut self, other: &Self) {
+        self.current_forks += other.current_forks;
+        self.historical_forks += other.historical_forks;
+        self.zero_forks += other.zero_forks;
+        self.nested_forks += other.nested_forks;
+        self.fork_branch_writes += other.fork_branch_writes;
+        self.inherited_mutations += other.inherited_mutations;
+        self.divergent_siblings += other.divergent_siblings;
+        self.inherited_conflict_windows += other.inherited_conflict_windows;
+    }
+}
+
+/// A deliberately plain graph used only by the branch oracle below.
+///
+/// It knows identities and endpoints, but no MVCC representation, version
+/// digest, branch metadata, or `ReferenceGraph` implementation detail. That is
+/// enough to answer what each branch should contain after recursively applying
+/// its ancestor prefix and own commits.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NaiveGraph {
+    vertices: BTreeSet<u128>,
+    edges: BTreeMap<u128, (u128, u128)>,
+}
+
+impl NaiveGraph {
+    fn apply(&mut self, step: Step) -> Result<BTreeSet<ConflictKey>, String> {
+        let mut conflicts = BTreeSet::new();
+        match step {
+            Step::CreateVertex(vid) => {
+                if !self.vertices.insert(vid) {
+                    return Err(format!("CreateVertex({vid}) reuses a live identity"));
+                }
+                conflicts.insert(ConflictKey::Element(ElementId::Vertex(VId(vid))));
+            }
+            Step::AddEdge { eid, src, dst } => {
+                if !self.vertices.contains(&src) || !self.vertices.contains(&dst) {
+                    return Err(format!(
+                        "AddEdge({eid}) names a dead endpoint ({src}, {dst})"
+                    ));
+                }
+                if self.edges.insert(eid, (src, dst)).is_some() {
+                    return Err(format!("AddEdge({eid}) reuses a live identity"));
+                }
+                conflicts.insert(ConflictKey::Element(ElementId::Edge(EId(eid))));
+            }
+            Step::DeleteEdge(eid) => {
+                if self.edges.remove(&eid).is_none() {
+                    return Err(format!("DeleteEdge({eid}) names a dead edge"));
+                }
+                conflicts.insert(ConflictKey::Element(ElementId::Edge(EId(eid))));
+            }
+            Step::DeleteVertex(vid) => {
+                if !self.vertices.remove(&vid) {
+                    return Err(format!("DeleteVertex({vid}) names a dead vertex"));
+                }
+                conflicts.insert(ConflictKey::Element(ElementId::Vertex(VId(vid))));
+                let retired = self
+                    .edges
+                    .iter()
+                    .filter_map(|(eid, (src, dst))| (*src == vid || *dst == vid).then_some(*eid))
+                    .collect::<Vec<_>>();
+                for eid in retired {
+                    self.edges.remove(&eid);
+                    conflicts.insert(ConflictKey::Element(ElementId::Edge(EId(eid))));
+                }
+            }
+        }
+        Ok(conflicts)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NaiveOrigin {
+    Genesis,
+    Fork { parent: u128, boundary: u64 },
+}
+
+#[derive(Clone, Debug)]
+struct NaiveCommit {
+    commit_seq: u64,
+    logical_seq: u64,
+    step: Step,
+    conflicts: BTreeSet<ConflictKey>,
+}
+
+#[derive(Clone, Debug)]
+struct NaiveBranch {
+    origin: NaiveOrigin,
+    commits: Vec<NaiveCommit>,
+}
+
+/// Independent, intentionally slow branch semantics.
+///
+/// Every read recursively folds the parent at the fork boundary and then this
+/// branch's own records. There is no cached materialized branch state, so a bug
+/// in `ReferenceDatabase`'s eager coordinate map cannot make both sides agree.
+#[derive(Clone, Debug, Default)]
+struct NaiveBranchDatabase {
+    branches: BTreeMap<u128, NaiveBranch>,
+    /// Global commit sequence paired with its independently advancing logical
+    /// command position. Index `n - 1` is commit `n`.
+    positions: Vec<u64>,
+}
+
+impl NaiveBranchDatabase {
+    fn logical_frontier(&self) -> u64 {
+        self.positions.last().copied().unwrap_or(0)
+    }
+
+    fn logical_for_commit(&self, commit_seq: u64) -> Option<u64> {
+        if commit_seq == 0 {
+            Some(0)
+        } else {
+            let index = usize::try_from(commit_seq - 1).ok()?;
+            self.positions.get(index).copied()
+        }
+    }
+
+    fn commit_frontier_at(&self, boundary: u64) -> u64 {
+        self.positions
+            .iter()
+            .rposition(|logical| *logical <= boundary)
+            .map_or(0, |index| {
+                u64::try_from(index + 1).expect("model position count was admitted as u64")
+            })
+    }
+
+    fn observed_boundaries(&self) -> Vec<u64> {
+        let mut boundaries = Vec::with_capacity(self.positions.len() + 1);
+        boundaries.push(0);
+        boundaries.extend(self.positions.iter().copied());
+        boundaries
+    }
+
+    fn branch_ids(&self) -> Vec<u128> {
+        self.branches.keys().copied().collect()
+    }
+
+    fn branch_depth(&self, branch: u128) -> Result<usize, String> {
+        let mut current = branch;
+        let mut seen = BTreeSet::new();
+        let mut depth = 0usize;
+        loop {
+            if !seen.insert(current) {
+                return Err(format!("branch lineage cycles at {current}"));
+            }
+            let record = self
+                .branches
+                .get(&current)
+                .ok_or_else(|| format!("branch {current} does not exist"))?;
+            match record.origin {
+                NaiveOrigin::Genesis => return Ok(depth),
+                NaiveOrigin::Fork { parent, .. } => {
+                    current = parent;
+                    depth += 1;
+                }
+            }
+        }
+    }
+
+    fn fork(&mut self, parent: u128, child: u128, boundary: u64) -> Result<(), String> {
+        if parent == child {
+            return Err(format!("branch {child} cannot fork from itself"));
+        }
+        if !self.branches.contains_key(&parent) {
+            return Err(format!("parent branch {parent} does not exist"));
+        }
+        if self.branches.contains_key(&child) {
+            return Err(format!("child branch {child} already exists"));
+        }
+        if boundary > self.logical_frontier() {
+            return Err(format!(
+                "fork boundary {boundary} exceeds logical frontier {}",
+                self.logical_frontier()
+            ));
+        }
+        if boundary != 0 && !self.positions.contains(&boundary) {
+            return Err(format!("fork boundary {boundary} was never observed"));
+        }
+        // Materialize once as a validity check. The result is deliberately not
+        // stored: every model read below must walk lineage afresh.
+        self.materialize(parent, boundary)?;
+        self.branches.insert(
+            child,
+            NaiveBranch {
+                origin: NaiveOrigin::Fork { parent, boundary },
+                commits: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+
+    fn apply_write(&mut self, branch: u128, logical_seq: u64, step: Step) -> Result<u64, String> {
+        if logical_seq <= self.logical_frontier() {
+            return Err(format!(
+                "logical sequence {logical_seq} does not advance {}",
+                self.logical_frontier()
+            ));
+        }
+        let mut state = if self.branches.contains_key(&branch) {
+            self.materialize(branch, self.logical_frontier())?
+        } else {
+            NaiveGraph::default()
+        };
+        let conflicts = state.apply(step)?;
+        let commit_seq = u64::try_from(self.positions.len())
+            .map_err(|_| "model commit sequence exceeds u64".to_string())?
+            .checked_add(1)
+            .ok_or_else(|| "model commit sequence is exhausted".to_string())?;
+        self.positions.push(logical_seq);
+        self.branches
+            .entry(branch)
+            .or_insert_with(|| NaiveBranch {
+                origin: NaiveOrigin::Genesis,
+                commits: Vec::new(),
+            })
+            .commits
+            .push(NaiveCommit {
+                commit_seq,
+                logical_seq,
+                step,
+                conflicts,
+            });
+        Ok(commit_seq)
+    }
+
+    fn materialize(&self, branch: u128, logical_high: u64) -> Result<NaiveGraph, String> {
+        self.materialize_inner(branch, logical_high, &mut BTreeSet::new())
+    }
+
+    fn materialize_inner(
+        &self,
+        branch: u128,
+        logical_high: u64,
+        visiting: &mut BTreeSet<u128>,
+    ) -> Result<NaiveGraph, String> {
+        if !visiting.insert(branch) {
+            return Err(format!("branch lineage cycles at {branch}"));
+        }
+        let record = self
+            .branches
+            .get(&branch)
+            .ok_or_else(|| format!("branch {branch} does not exist"))?;
+        let mut graph = match record.origin {
+            NaiveOrigin::Genesis => NaiveGraph::default(),
+            NaiveOrigin::Fork { parent, boundary } => {
+                self.materialize_inner(parent, logical_high.min(boundary), visiting)?
+            }
+        };
+        visiting.remove(&branch);
+        for commit in &record.commits {
+            if commit.logical_seq > logical_high {
+                break;
+            }
+            graph.apply(commit.step)?;
+        }
+        Ok(graph)
+    }
+
+    fn applied_through(&self, branch: u128) -> Result<u64, String> {
+        let record = self
+            .branches
+            .get(&branch)
+            .ok_or_else(|| format!("branch {branch} does not exist"))?;
+        let inherited = match record.origin {
+            NaiveOrigin::Genesis => 0,
+            NaiveOrigin::Fork { boundary, .. } => self.commit_frontier_at(boundary),
+        };
+        Ok(record
+            .commits
+            .last()
+            .map_or(inherited, |commit| commit.commit_seq))
+    }
+
+    fn all_vertex_ids(&self) -> BTreeSet<u128> {
+        self.branches
+            .values()
+            .flat_map(|branch| branch.commits.iter())
+            .filter_map(|commit| match commit.step {
+                Step::CreateVertex(vid) => Some(vid),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn all_edge_ids(&self) -> BTreeSet<u128> {
+        self.branches
+            .values()
+            .flat_map(|branch| branch.commits.iter())
+            .filter_map(|commit| match commit.step {
+                Step::AddEdge { eid, .. } => Some(eid),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn branch_owns_vertex(&self, branch: u128, vid: u128) -> bool {
+        self.branches.get(&branch).is_some_and(|record| {
+            record
+                .commits
+                .iter()
+                .any(|commit| commit.step == Step::CreateVertex(vid))
+        })
+    }
+
+    fn branch_owns_edge(&self, branch: u128, eid: u128) -> bool {
+        self.branches.get(&branch).is_some_and(|record| {
+            record.commits.iter().any(
+                |commit| matches!(commit.step, Step::AddEdge { eid: found, .. } if found == eid),
+            )
+        })
+    }
+
+    fn expected_conflicts_since(
+        &self,
+        branch: u128,
+        since: u64,
+    ) -> Result<BTreeSet<ConflictKey>, String> {
+        let record = self
+            .branches
+            .get(&branch)
+            .ok_or_else(|| format!("branch {branch} does not exist"))?;
+        let mut conflicts = BTreeSet::new();
+        let born_by_commit = record
+            .commits
+            .first()
+            .is_some_and(|first| first.commit_seq > since);
+        let born_by_origin = !record
+            .commits
+            .iter()
+            .any(|commit| commit.commit_seq <= since);
+        if born_by_commit || born_by_origin {
+            conflicts.insert(ConflictKey::CoordinateExistence);
+        }
+
+        let commit_high = self.applied_through(branch)?;
+        let logical_high = self
+            .logical_for_commit(commit_high)
+            .ok_or_else(|| format!("commit {commit_high} has no logical position"))?;
+        for (ancestor, ancestor_commit_high, ancestor_logical_high) in
+            self.lineage_caps(branch, commit_high, logical_high)?
+        {
+            let ancestor_record = self
+                .branches
+                .get(&ancestor)
+                .ok_or_else(|| format!("ancestor branch {ancestor} disappeared"))?;
+            for commit in &ancestor_record.commits {
+                if commit.commit_seq <= since {
+                    continue;
+                }
+                if commit.commit_seq > ancestor_commit_high
+                    || commit.logical_seq > ancestor_logical_high
+                {
+                    break;
+                }
+                conflicts.extend(commit.conflicts.iter().copied());
+            }
+        }
+        Ok(conflicts)
+    }
+
+    fn lineage_caps(
+        &self,
+        branch: u128,
+        mut commit_high: u64,
+        mut logical_high: u64,
+    ) -> Result<Vec<(u128, u64, u64)>, String> {
+        let mut chain = Vec::new();
+        let mut current = branch;
+        let mut seen = BTreeSet::new();
+        loop {
+            if !seen.insert(current) {
+                return Err(format!("branch lineage cycles at {current}"));
+            }
+            chain.push((current, commit_high, logical_high));
+            let record = self
+                .branches
+                .get(&current)
+                .ok_or_else(|| format!("branch {current} does not exist"))?;
+            match record.origin {
+                NaiveOrigin::Genesis => break,
+                NaiveOrigin::Fork { parent, boundary } => {
+                    logical_high = logical_high.min(boundary);
+                    commit_high = commit_high.min(self.commit_frontier_at(boundary));
+                    current = parent;
+                }
+            }
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+}
+
+fn generate_branch_forest(seed: u64, action_budget: usize) -> BranchGenerated {
+    let mut rng = SplitMix64(seed);
+    let mut model = NaiveBranchDatabase::default();
+    let mut actions = Vec::with_capacity(action_budget);
+    let mut coverage = BranchCoverage::default();
+    let mut next_branch = 2u128;
+    let mut next_vid = 1u128;
+    let mut next_eid = 1_000u128;
+    let mut logical_seq = 0u64;
+
+    for _ in 0..action_budget {
+        if !model.branches.is_empty() && model.branches.len() < 8 && rng.chance(30) {
+            let branches = model.branch_ids();
+            let parent = branches[rng.below(branches.len())];
+            let child = next_branch;
+            next_branch += 1;
+            let boundaries = model.observed_boundaries();
+            let boundary = if rng.chance(35) {
+                model.logical_frontier()
+            } else {
+                boundaries[rng.below(boundaries.len())]
+            };
+            if boundary == model.logical_frontier() {
+                coverage.current_forks += 1;
+            } else {
+                coverage.historical_forks += 1;
+            }
+            if boundary == 0 {
+                coverage.zero_forks += 1;
+            }
+            if model.branch_depth(parent).expect("generated parent exists") > 0 {
+                coverage.nested_forks += 1;
+            }
+            if boundary > 0
+                && !model
+                    .materialize(parent, boundary)
+                    .expect("generated boundary materializes")
+                    .vertices
+                    .is_empty()
+            {
+                coverage.inherited_conflict_windows += 1;
+            }
+            model
+                .fork(parent, child, boundary)
+                .expect("generated fork is reachable");
+            actions.push(BranchAction::Fork {
+                parent,
+                child,
+                boundary,
+            });
+            continue;
+        }
+
+        let branch = if model.branches.is_empty() {
+            1
+        } else {
+            let branches = model.branch_ids();
+            branches[rng.below(branches.len())]
+        };
+        let state = if model.branches.contains_key(&branch) {
+            model
+                .materialize(branch, model.logical_frontier())
+                .expect("generated branch materializes")
+        } else {
+            NaiveGraph::default()
+        };
+        let step = loop {
+            match rng.below(100) {
+                0..=29 => {
+                    let vid = next_vid;
+                    next_vid += 1;
+                    break Step::CreateVertex(vid);
+                }
+                30..=69 => {
+                    if state.vertices.is_empty() {
+                        continue;
+                    }
+                    let vertices = state.vertices.iter().copied().collect::<Vec<_>>();
+                    let src = vertices[rng.below(vertices.len())];
+                    let dst = vertices[rng.below(vertices.len())];
+                    let eid = next_eid;
+                    next_eid += 1;
+                    break Step::AddEdge { eid, src, dst };
+                }
+                70..=84 => {
+                    if state.edges.is_empty() {
+                        continue;
+                    }
+                    let edges = state.edges.keys().copied().collect::<Vec<_>>();
+                    let eid = edges[rng.below(edges.len())];
+                    if model.branches.contains_key(&branch) && !model.branch_owns_edge(branch, eid)
+                    {
+                        coverage.inherited_mutations += 1;
+                    }
+                    break Step::DeleteEdge(eid);
+                }
+                _ => {
+                    if state.vertices.is_empty() {
+                        continue;
+                    }
+                    let vertices = state.vertices.iter().copied().collect::<Vec<_>>();
+                    let vid = vertices[rng.below(vertices.len())];
+                    if model.branches.contains_key(&branch)
+                        && !model.branch_owns_vertex(branch, vid)
+                    {
+                        coverage.inherited_mutations += 1;
+                    }
+                    break Step::DeleteVertex(vid);
+                }
+            }
+        };
+        logical_seq += u64::try_from(1 + rng.below(4)).expect("small logical increment");
+        if model
+            .branches
+            .get(&branch)
+            .is_some_and(|record| matches!(record.origin, NaiveOrigin::Fork { .. }))
+        {
+            coverage.fork_branch_writes += 1;
+        }
+        model
+            .apply_write(branch, logical_seq, step)
+            .expect("generated write is reachable");
+        actions.push(BranchAction::Write {
+            logical_seq,
+            branch,
+            step,
+        });
+    }
+
+    for (fork_index, action) in actions.iter().enumerate() {
+        let BranchAction::Fork { parent, child, .. } = *action else {
+            continue;
+        };
+        let suffix = &actions[fork_index + 1..];
+        let parent_written = suffix.iter().any(|candidate| {
+            matches!(candidate, BranchAction::Write { branch, .. } if *branch == parent)
+        });
+        let child_written = suffix.iter().any(
+            |candidate| matches!(candidate, BranchAction::Write { branch, .. } if *branch == child),
+        );
+        if parent_written && child_written {
+            coverage.divergent_siblings += 1;
+        }
+    }
+
+    BranchGenerated { actions, coverage }
+}
+
+fn delta_row_for_branch(
+    db: &ReferenceDatabase,
+    branch: BranchId,
+    step: Step,
+) -> Result<DeltaRow, String> {
+    match step {
+        Step::CreateVertex(vid) => {
+            let birth_ordinal = u64::try_from(vid)
+                .map_err(|_| format!("vertex identity {vid} exceeds the birth-ordinal domain"))?;
+            let value = i64::try_from(vid)
+                .map_err(|_| format!("vertex identity {vid} exceeds the test scalar domain"))?;
+            Ok(DeltaRow::CreateVertex {
+                vid: VId(vid),
+                birth_ordinal,
+                labels: vec![LABEL],
+                props: vec![(PROP, CanonicalScalar::Int(value))],
+                valid_time: None,
+            })
+        }
+        Step::AddEdge { eid, src, dst } => Ok(DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal: u64::try_from(eid)
+                .map_err(|_| format!("edge identity {eid} exceeds the birth-ordinal domain"))?,
+            src: VId(src),
+            relation: REL,
+            dst: VId(dst),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        }),
+        Step::DeleteEdge(eid) => {
+            let graph = db
+                .graph(GRAPH, branch)
+                .ok_or_else(|| format!("DeleteEdge({eid}) names an absent branch"))?;
+            let before_version = graph
+                .element_version(ElementId::Edge(EId(eid)))
+                .ok_or_else(|| format!("DeleteEdge({eid}) names a dead edge"))?;
+            Ok(DeltaRow::DeleteEdge {
+                eid: EId(eid),
+                before_version,
+            })
+        }
+        Step::DeleteVertex(vid) => {
+            let graph = db
+                .graph(GRAPH, branch)
+                .ok_or_else(|| format!("DeleteVertex({vid}) names an absent branch"))?;
+            let before_version = graph
+                .element_version(ElementId::Vertex(VId(vid)))
+                .ok_or_else(|| format!("DeleteVertex({vid}) names a dead vertex"))?;
+            Ok(DeltaRow::DeleteVertex {
+                vid: VId(vid),
+                before_version,
+                sorted_retired_incident_edges: graph.incident_edges(VId(vid)),
+            })
+        }
+    }
+}
+
+fn branch_template(branch: BranchId, row: DeltaRow) -> Result<LogicalDeltaTemplate, String> {
+    LogicalDeltaTemplate::build(
+        ObjectId([0x31; 32]),
+        [0x42; 32],
+        vec![CoordinateEntry {
+            graph: GRAPH,
+            branch,
+            relation: REL,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: None,
+            rows: vec![row],
+        }],
+    )
+    .map_err(|error| format!("branch template is not canonical: {error}"))
+}
+
+fn run_branch_forest(case: &BranchGenerated) -> Result<(), String> {
+    run_branch_actions(&case.actions)
+}
+
+fn run_branch_actions(actions: &[BranchAction]) -> Result<(), String> {
+    let mut subject = ReferenceDatabase::new();
+    let mut model = NaiveBranchDatabase::default();
+
+    for (index, action) in actions.iter().copied().enumerate() {
+        match action {
+            BranchAction::Write {
+                logical_seq,
+                branch,
+                step,
+            } => {
+                let mut candidate = model.clone();
+                let commit_seq = candidate
+                    .apply_write(branch, logical_seq, step)
+                    .map_err(|error| format!("action {index}: model refused write: {error}"))?;
+                let branch_id = BranchId(branch);
+                let row = delta_row_for_branch(&subject, branch_id, step)
+                    .map_err(|error| format!("action {index}: {error}"))?;
+                let template = branch_template(branch_id, row)
+                    .map_err(|error| format!("action {index}: {error}"))?;
+                subject
+                    .apply_template(
+                        &template,
+                        CommitSeq(commit_seq),
+                        LogicalCommandSeq(logical_seq),
+                    )
+                    .map_err(|error| {
+                        format!("action {index}: reference refused reachable write: {error}")
+                    })?;
+                model = candidate;
+            }
+            BranchAction::Fork {
+                parent,
+                child,
+                boundary,
+            } => {
+                let mut candidate = model.clone();
+                candidate
+                    .fork(parent, child, boundary)
+                    .map_err(|error| format!("action {index}: model refused fork: {error}"))?;
+                let result = if boundary == model.logical_frontier() {
+                    subject.fork_branch(GRAPH, BranchId(parent), BranchId(child))
+                } else {
+                    subject.fork_branch_at(
+                        GRAPH,
+                        BranchId(parent),
+                        BranchId(child),
+                        LogicalCommandSeq(boundary),
+                    )
+                };
+                result.map_err(|error| {
+                    format!("action {index}: reference refused reachable fork: {error}")
+                })?;
+                model = candidate;
+            }
+        }
+        check_branch_model(&subject, &model).map_err(|error| format!("action {index}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn check_branch_model(
+    subject: &ReferenceDatabase,
+    model: &NaiveBranchDatabase,
+) -> Result<(), String> {
+    if subject.coordinate_count() != model.branches.len() {
+        return Err(format!(
+            "coordinate count differs: reference {} vs model {}",
+            subject.coordinate_count(),
+            model.branches.len()
+        ));
+    }
+    let all_vertices = model.all_vertex_ids();
+    let all_edges = model.all_edge_ids();
+
+    for (branch, expected_branch) in &model.branches {
+        let branch_id = BranchId(*branch);
+        let expected_origin = match expected_branch.origin {
+            NaiveOrigin::Genesis => BranchOrigin::Genesis,
+            NaiveOrigin::Fork { parent, boundary } => BranchOrigin::Fork {
+                parent_branch: BranchId(parent),
+                fork_boundary: LogicalCommandSeq(boundary),
+            },
+        };
+        if subject.branch_origin(GRAPH, branch_id) != Some(expected_origin) {
+            return Err(format!(
+                "branch {branch} origin differs: reference {:?} vs model {expected_origin:?}",
+                subject.branch_origin(GRAPH, branch_id)
+            ));
+        }
+        let expected_frontier = model.applied_through(*branch)?;
+        if subject.applied_through(GRAPH, branch_id) != Some(CommitSeq(expected_frontier)) {
+            return Err(format!(
+                "branch {branch} frontier differs: reference {:?} vs model {expected_frontier}",
+                subject.applied_through(GRAPH, branch_id)
+            ));
+        }
+        if subject.recorded_commits(GRAPH, branch_id) != expected_branch.commits.len() {
+            return Err(format!(
+                "branch {branch} own-commit count differs: reference {} vs model {}",
+                subject.recorded_commits(GRAPH, branch_id),
+                expected_branch.commits.len()
+            ));
+        }
+
+        let expected_current = model.materialize(*branch, model.logical_frontier())?;
+        let actual_current = subject
+            .graph(GRAPH, branch_id)
+            .ok_or_else(|| format!("branch {branch} has no reference graph"))?;
+        compare_branch_graph(
+            actual_current,
+            &expected_current,
+            &all_vertices,
+            &all_edges,
+            &format!("branch {branch} current state"),
+        )?;
+
+        for high in 0..=expected_frontier {
+            let snapshot = subject
+                .snapshot_at(GRAPH, branch_id, CommitSeq(high))
+                .map_err(|error| format!("branch {branch} snapshot {high} failed: {error}"))?;
+            let actual = subject
+                .read(&snapshot)
+                .map_err(|error| format!("branch {branch} read {high} failed: {error}"))?;
+            let logical_high = model
+                .logical_for_commit(high)
+                .ok_or_else(|| format!("commit {high} has no model logical position"))?;
+            let expected = model.materialize(*branch, logical_high)?;
+            compare_branch_graph(
+                &actual,
+                &expected,
+                &all_vertices,
+                &all_edges,
+                &format!("branch {branch} at commit {high}"),
+            )?;
+
+            let actual_conflicts = subject
+                .conflict_keys_since(GRAPH, branch_id, CommitSeq(high))
+                .map_err(|error| {
+                    format!("branch {branch} conflict window after {high} failed: {error}")
+                })?;
+            let expected_conflicts = model.expected_conflicts_since(*branch, high)?;
+            if actual_conflicts != expected_conflicts {
+                return Err(format!(
+                    "branch {branch} conflicts after {high} differ: reference \
+                     {actual_conflicts:?} vs model {expected_conflicts:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compare_branch_graph(
+    actual: &ReferenceGraph,
+    expected: &NaiveGraph,
+    all_vertices: &BTreeSet<u128>,
+    all_edges: &BTreeSet<u128>,
+    context: &str,
+) -> Result<(), String> {
+    if actual.vertex_count() != expected.vertices.len()
+        || actual.edge_count() != expected.edges.len()
+    {
+        return Err(format!(
+            "{context}: cardinality differs: reference ({}, {}) vs model ({}, {})",
+            actual.vertex_count(),
+            actual.edge_count(),
+            expected.vertices.len(),
+            expected.edges.len()
+        ));
+    }
+    for vid in all_vertices {
+        let expected_live = expected.vertices.contains(vid);
+        let found = actual.vertex(VId(*vid));
+        if found.is_some() != expected_live {
+            return Err(format!(
+                "{context}: vertex {vid} liveness differs: reference {} vs model {expected_live}",
+                found.is_some()
+            ));
+        }
+        if let Some(vertex) = found {
+            let birth = u64::try_from(*vid)
+                .map_err(|_| format!("{context}: vertex {vid} exceeds birth domain"))?;
+            let scalar = i64::try_from(*vid)
+                .map_err(|_| format!("{context}: vertex {vid} exceeds scalar domain"))?;
+            if vertex.birth_ordinal != birth
+                || vertex.labels != BTreeSet::from([LABEL])
+                || vertex.props != BTreeMap::from([(PROP, CanonicalScalar::Int(scalar))])
+            {
+                return Err(format!(
+                    "{context}: vertex {vid} payload differs: {vertex:?}"
+                ));
+            }
+        }
+        let expected_out = expected
+            .edges
+            .iter()
+            .filter_map(|(eid, (src, _))| (*src == *vid).then_some(EId(*eid)))
+            .collect::<Vec<_>>();
+        if actual.out_edges(VId(*vid)) != expected_out {
+            return Err(format!(
+                "{context}: outgoing edges of {vid} differ: reference {:?} vs model {expected_out:?}",
+                actual.out_edges(VId(*vid))
+            ));
+        }
+    }
+    for eid in all_edges {
+        let expected_edge = expected.edges.get(eid);
+        let found = actual.edge(EId(*eid));
+        if found.is_some() != expected_edge.is_some() {
+            return Err(format!(
+                "{context}: edge {eid} liveness differs: reference {} vs model {}",
+                found.is_some(),
+                expected_edge.is_some()
+            ));
+        }
+        if let (Some(edge), Some((src, dst))) = (found, expected_edge) {
+            let birth = u64::try_from(*eid)
+                .map_err(|_| format!("{context}: edge {eid} exceeds birth domain"))?;
+            if edge.birth_ordinal != birth
+                || edge.src != VId(*src)
+                || edge.dst != VId(*dst)
+                || edge.relation != REL
+                || edge.canonical_key.is_some()
+                || !edge.props.is_empty()
+            {
+                return Err(format!("{context}: edge {eid} payload differs: {edge:?}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn branch_failure_kind(error: &str) -> &str {
+    match error.find(": ") {
+        Some(cut) if error.starts_with("action ") => &error[cut + 2..],
+        _ => error,
+    }
+}
+
+fn shrink_branch_forest(case: &BranchGenerated) -> BranchGenerated {
+    let Err(original) = run_branch_forest(case) else {
+        return case.clone();
+    };
+    let target = branch_failure_kind(&original).to_string();
+    let mut best = case.actions.clone();
+
+    // First remove whole branch subtrees. A one-action shrinker cannot do this:
+    // deleting only the fork leaves every descendant action unreachable.
+    let children = best
+        .iter()
+        .filter_map(|action| match action {
+            BranchAction::Fork { child, .. } => Some(*child),
+            BranchAction::Write { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    for child in children.into_iter().rev() {
+        let candidate = drop_branch_subtree(&best, child);
+        if candidate.len() < best.len()
+            && run_branch_actions(&candidate)
+                .is_err_and(|error| branch_failure_kind(&error) == target)
+        {
+            best = candidate;
+        }
+    }
+
+    // Then shorten ancestry without deleting the child. The boundary remains an
+    // observed global position; only the redundant intermediate parent changes.
+    for index in (0..best.len()).rev() {
+        let Some(candidate) = lower_fork_depth_once(&best, index) else {
+            continue;
+        };
+        if run_branch_actions(&candidate).is_err_and(|error| branch_failure_kind(&error) == target)
+        {
+            best = candidate;
+        }
+    }
+
+    // Finally use ordinary delta debugging inside the surviving forest.
+    for index in (0..best.len()).rev() {
+        let mut candidate = best.clone();
+        candidate.remove(index);
+        if run_branch_actions(&candidate).is_err_and(|error| branch_failure_kind(&error) == target)
+        {
+            best = candidate;
+        }
+    }
+
+    BranchGenerated {
+        actions: best,
+        coverage: BranchCoverage::default(),
+    }
+}
+
+fn drop_branch_subtree(actions: &[BranchAction], root: u128) -> Vec<BranchAction> {
+    let mut removed = BTreeSet::from([root]);
+    loop {
+        let before = removed.len();
+        for action in actions {
+            if let BranchAction::Fork { parent, child, .. } = *action
+                && removed.contains(&parent)
+            {
+                removed.insert(child);
+            }
+        }
+        if removed.len() == before {
+            break;
+        }
+    }
+    actions
+        .iter()
+        .copied()
+        .filter(|action| match *action {
+            BranchAction::Write { branch, .. } => !removed.contains(&branch),
+            BranchAction::Fork { child, .. } => !removed.contains(&child),
+        })
+        .collect()
+}
+
+fn lower_fork_depth_once(actions: &[BranchAction], index: usize) -> Option<Vec<BranchAction>> {
+    let BranchAction::Fork {
+        parent,
+        child,
+        boundary,
+    } = *actions.get(index)?
+    else {
+        return None;
+    };
+    let grandparent = actions[..index]
+        .iter()
+        .rev()
+        .find_map(|action| match *action {
+            BranchAction::Fork {
+                parent: candidate,
+                child: forked,
+                ..
+            } if forked == parent => Some(candidate),
+            BranchAction::Write { .. } | BranchAction::Fork { .. } => None,
+        })?;
+    let mut lowered = actions.to_vec();
+    lowered[index] = BranchAction::Fork {
+        parent: grandparent,
+        child,
+        boundary,
+    };
+    Some(lowered)
+}
+
+fn report_branch_failure(seed: u64, case: &BranchGenerated, error: &str) -> String {
+    let mut out = format!(
+        "\n=== GENERATED BRANCH DIFFERENTIAL FAILURE ===\nseed: {seed}\nerror: {error}\n\n\
+         Paste this into generated_histories.rs as a permanent law:\n\n\
+         #[test]\nfn regression_branch_seed_{seed}() {{\n    let actions = [\n"
+    );
+    for action in &case.actions {
+        match action {
+            BranchAction::Write {
+                logical_seq,
+                branch,
+                step,
+            } => out.push_str(&format!(
+                "        BranchAction::Write {{ logical_seq: {logical_seq}, branch: {branch}, step: {} }},\n",
+                render_branch_step(*step)
+            )),
+            BranchAction::Fork {
+                parent,
+                child,
+                boundary,
+            } => out.push_str(&format!(
+                "        BranchAction::Fork {{ parent: {parent}, child: {child}, boundary: {boundary} }},\n"
+            )),
+        }
+    }
+    out.push_str(
+        "    ];\n    run_branch_actions(&actions).expect(\"branch history agrees\");\n}\n",
+    );
+    out
+}
+
+fn render_branch_step(step: Step) -> String {
+    match step {
+        Step::CreateVertex(vid) => format!("Step::CreateVertex({vid})"),
+        Step::AddEdge { eid, src, dst } => {
+            format!("Step::AddEdge {{ eid: {eid}, src: {src}, dst: {dst} }}")
+        }
+        Step::DeleteEdge(eid) => format!("Step::DeleteEdge({eid})"),
+        Step::DeleteVertex(vid) => format!("Step::DeleteVertex({vid})"),
+    }
+}
+
+/// A green differential needs a control proving that its independent side can
+/// disagree. Substitute the parent's present for a historical boundary: both
+/// graphs are internally valid, but the child gains one vertex it must not see.
+#[test]
+fn branch_differential_detects_current_state_substituted_for_a_historical_fork() {
+    let mut subject = ReferenceDatabase::new();
+    let mut model = NaiveBranchDatabase::default();
+    for (logical_seq, vid) in [(1u64, 1u128), (2, 2)] {
+        let step = Step::CreateVertex(vid);
+        let commit_seq = model
+            .apply_write(1, logical_seq, step)
+            .expect("model accepts reachable write");
+        let row = delta_row_for_branch(&subject, BranchId(1), step).expect("row builds");
+        subject
+            .apply_template(
+                &branch_template(BranchId(1), row).expect("template builds"),
+                CommitSeq(commit_seq),
+                LogicalCommandSeq(logical_seq),
+            )
+            .expect("reference accepts reachable write");
+    }
+
+    model.fork(1, 2, 1).expect("model forks at history");
+    subject
+        .fork_branch(GRAPH, BranchId(1), BranchId(2))
+        .expect("planted mutant forks at the present");
+
+    let expected = model
+        .materialize(2, model.logical_frontier())
+        .expect("model child materializes");
+    let error = compare_branch_graph(
+        subject
+            .graph(GRAPH, BranchId(2))
+            .expect("mutant child exists"),
+        &expected,
+        &model.all_vertex_ids(),
+        &model.all_edge_ids(),
+        "planted current-for-history mutant",
+    )
+    .expect_err("the differential must detect the planted boundary substitution");
+    assert!(
+        error.contains("cardinality differs") || error.contains("vertex 2 liveness differs"),
+        "the planted state divergence should be named, got {error}"
+    );
+}
+
+#[test]
+fn generated_branch_forests_match_the_naive_lineage_model() -> Result<(), String> {
+    let mut coverage = BranchCoverage::default();
+    for seed in 0..128u64 {
+        let case = generate_branch_forest(seed, 32);
+        coverage.merge(&case.coverage);
+        if let Err(original) = run_branch_forest(&case) {
+            let minimal = shrink_branch_forest(&case);
+            let minimal_error = run_branch_forest(&minimal)
+                .err()
+                .unwrap_or_else(|| "shrunk branch case no longer fails".to_string());
+            assert_eq!(
+                branch_failure_kind(&minimal_error),
+                branch_failure_kind(&original),
+                "seed {seed}: branch shrinking changed the defect ({original} -> {minimal_error})"
+            );
+            return Err(report_branch_failure(seed, &minimal, &minimal_error));
+        }
+    }
+
+    assert!(coverage.current_forks > 0, "no current fork: {coverage:?}");
+    assert!(
+        coverage.historical_forks > 0,
+        "no historical fork: {coverage:?}"
+    );
+    assert!(
+        coverage.zero_forks > 0,
+        "no zero-boundary fork: {coverage:?}"
+    );
+    assert!(coverage.nested_forks > 0, "no nested fork: {coverage:?}");
+    assert!(
+        coverage.fork_branch_writes > 0,
+        "no write to a forked branch: {coverage:?}"
+    );
+    assert!(
+        coverage.inherited_mutations > 0,
+        "no mutation of inherited state: {coverage:?}"
+    );
+    assert!(
+        coverage.divergent_siblings > 0,
+        "no parent/child divergence: {coverage:?}"
+    );
+    assert!(
+        coverage.inherited_conflict_windows > 0,
+        "no inherited conflict window: {coverage:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_generated_branch_forest_is_reachable() -> Result<(), String> {
+    for seed in 500..560u64 {
+        let case = generate_branch_forest(seed, 28);
+        let mut model = NaiveBranchDatabase::default();
+        for (index, action) in case.actions.iter().copied().enumerate() {
+            let result = match action {
+                BranchAction::Write {
+                    logical_seq,
+                    branch,
+                    step,
+                } => model.apply_write(branch, logical_seq, step).map(|_| ()),
+                BranchAction::Fork {
+                    parent,
+                    child,
+                    boundary,
+                } => model.fork(parent, child, boundary),
+            };
+            result.map_err(|error| {
+                format!("seed {seed} action {index} is unreachable: {error}: {action:?}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_seed_reproduces_its_branch_forest_exactly() {
+    for seed in [13u64, 101, 9_001] {
+        assert_eq!(
+            generate_branch_forest(seed, 36).actions,
+            generate_branch_forest(seed, 36).actions,
+            "branch seed {seed} drifted"
+        );
+    }
+}
+
+#[test]
+fn branch_shrink_moves_drop_subtrees_and_lower_fork_depth() {
+    let actions = vec![
+        BranchAction::Write {
+            logical_seq: 1,
+            branch: 1,
+            step: Step::CreateVertex(1),
+        },
+        BranchAction::Fork {
+            parent: 1,
+            child: 2,
+            boundary: 1,
+        },
+        BranchAction::Fork {
+            parent: 2,
+            child: 3,
+            boundary: 1,
+        },
+        BranchAction::Write {
+            logical_seq: 2,
+            branch: 3,
+            step: Step::CreateVertex(2),
+        },
+        BranchAction::Fork {
+            parent: 1,
+            child: 4,
+            boundary: 1,
+        },
+    ];
+
+    let dropped = drop_branch_subtree(&actions, 2);
+    assert!(
+        dropped.iter().all(|action| match action {
+            BranchAction::Write { branch, .. } => !matches!(*branch, 2 | 3),
+            BranchAction::Fork { child, .. } => !matches!(*child, 2 | 3),
+        }),
+        "dropping branch 2 must also drop descendant 3: {dropped:?}"
+    );
+    assert!(
+        dropped
+            .iter()
+            .any(|action| matches!(action, BranchAction::Fork { child: 4, .. })),
+        "an unrelated sibling must survive: {dropped:?}"
+    );
+
+    let lowered = lower_fork_depth_once(&actions, 2).expect("branch 3 has a grandparent");
+    assert_eq!(
+        lowered[2],
+        BranchAction::Fork {
+            parent: 1,
+            child: 3,
+            boundary: 1,
+        },
+        "the depth move reparents one level without changing the child or boundary"
+    );
+}
+
+#[test]
+fn branch_shrinker_preserves_the_failure_and_reduces_the_forest() {
+    let case = BranchGenerated {
+        actions: vec![
+            BranchAction::Write {
+                logical_seq: 1,
+                branch: 1,
+                step: Step::CreateVertex(1),
+            },
+            BranchAction::Fork {
+                parent: 1,
+                child: 2,
+                boundary: 1,
+            },
+            BranchAction::Fork {
+                parent: 2,
+                child: 3,
+                boundary: 1,
+            },
+            BranchAction::Write {
+                logical_seq: 2,
+                branch: 3,
+                step: Step::DeleteEdge(9_999),
+            },
+            BranchAction::Fork {
+                parent: 1,
+                child: 4,
+                boundary: 1,
+            },
+        ],
+        coverage: BranchCoverage::default(),
+    };
+    let original = run_branch_forest(&case).expect_err("the planted branch case must fail");
+    let minimal = shrink_branch_forest(&case);
+    let shrunk = run_branch_forest(&minimal).expect_err("the shrunk branch case must still fail");
+    assert_eq!(
+        branch_failure_kind(&shrunk),
+        branch_failure_kind(&original),
+        "branch shrinking changed which defect fires: {original} -> {shrunk}"
+    );
+    assert!(
+        minimal.actions.len() < case.actions.len(),
+        "branch shrinker returned {} actions from {}",
+        minimal.actions.len(),
+        case.actions.len()
+    );
+    assert!(
+        minimal.actions.iter().any(|action| matches!(
+            action,
+            BranchAction::Write {
+                step: Step::DeleteEdge(9_999),
+                ..
+            }
+        )),
+        "branch shrinker removed the failing operation: {:?}",
+        minimal.actions
     );
 }
