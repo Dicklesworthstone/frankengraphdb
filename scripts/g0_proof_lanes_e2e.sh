@@ -111,6 +111,10 @@ while IFS=$'\t' read -r id kind artifact status; do
     continue
   fi
 
+  # Per-iteration log under mktemp: a predictable world-writable /tmp path is
+  # a symlink-clobber hazard on shared hosts and leaks on SIGKILL.
+  lane_log="$(mktemp "${TMPDIR:-/tmp}/fgdb-lane-log.XXXXXX")"
+
   case "$kind" in
     lean)
       if ! command -v lean >/dev/null 2>&1; then
@@ -153,7 +157,7 @@ while IFS=$'\t' read -r id kind artifact status; do
           ;;
       esac
 
-      if (cd "$lane_dir" && lean "$lane_file") >/tmp/lane_$$.log 2>&1; then
+      if (cd "$lane_dir" && lean "$lane_file") >"$lane_log" 2>&1; then
         # LEAN EXITS 0 ON `sorry`. It is a warning, not an error: a file whose
         # every theorem is admitted typechecks and returns success. Measured by
         # red-proof — appending `theorem cheat : False := by sorry` left this
@@ -169,16 +173,16 @@ while IFS=$'\t' read -r id kind artifact status; do
         # one spelling silently stops detecting admits when the prover moves,
         # which is why the pin above exists and why this pattern accepts either
         # quoting. Both spellings are measured, not guessed.
-        if grep -qE "$ADMIT_PATTERN" /tmp/lane_$$.log; then
-          fail "$id: lean exited 0 but the proof is ADMITTED — $(grep -cE "$ADMIT_PATTERN" /tmp/lane_$$.log) declaration(s) use sorry"
+        if grep -qE "$ADMIT_PATTERN" "$lane_log"; then
+          fail "$id: lean exited 0 but the proof is ADMITTED — $(grep -cE "$ADMIT_PATTERN" "$lane_log") declaration(s) use sorry"
         else
           pass "$id: lean accepted $artifact under pinned $pin_version"
         fi
       else
         fail "$id: lean REJECTED $artifact"
-        sed 's/^/        /' /tmp/lane_$$.log >&2
+        sed 's/^/        /' "$lane_log" >&2
       fi
-      rm -f /tmp/lane_$$.log
+      rm -f "$lane_log"
       ;;
     tlaplus)
       # TLC is not installed on this host and no tla2tools.jar is on disk. That
@@ -200,18 +204,19 @@ while IFS=$'\t' read -r id kind artifact status; do
       else
         runner=(tlc -config "$ROOT/$cfg" "$ROOT/$artifact")
       fi
-      if "${runner[@]}" >/tmp/lane_$$.log 2>&1; then
+      if "${runner[@]}" >"$lane_log" 2>&1; then
         pass "$id: TLC accepted $artifact"
       else
         fail "$id: TLC REJECTED $artifact"
-        tail -20 /tmp/lane_$$.log | sed 's/^/        /' >&2
+        tail -20 "$lane_log" | sed 's/^/        /' >&2
       fi
-      rm -f /tmp/lane_$$.log
+      rm -f "$lane_log"
       ;;
     *)
       fail "$id: unknown lane system '$kind' — no runner exists for it, so it cannot be checked"
       ;;
   esac
+  rm -f "$lane_log"
 done <<< "$LANE_RECORDS"
 
 # CONTROL. See the header: a proof-lane runner that checks nothing and reports

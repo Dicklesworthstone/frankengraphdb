@@ -552,7 +552,12 @@ run_project_config_case() {
   local before after_refuse after_flush lines br_bin id_one id_two
   local refuse_rc flush_rc rc=0
   br_bin="$(command -v br 2>/dev/null)"
-  [ -n "$br_bin" ] || rc=1
+  # A missing tool is an environment deficiency, not a doctrine failure —
+  # this gate's own anti-misattribution doctrine says UNRUN, never FAIL.
+  if [ -z "$br_bin" ]; then
+    gate_unrun "case M: the br binary is not on PATH; the project-config export case did not run"
+    exit 2
+  fi
 
   if [ "$rc" -eq 0 ]; then
     make_real_attribution_fixture "$d" "$br_bin" || rc=1
@@ -623,7 +628,10 @@ run_attribution_mutation_case() {
   local br_bin mutant before after id_one id_two lines mutation_count rc=0
 
   br_bin="$(command -v br 2>/dev/null)"
-  [ -n "$br_bin" ] || rc=1
+  if [ -z "$br_bin" ]; then
+    gate_unrun "case N: the br binary is not on PATH; the attribution-mutation control did not run"
+    exit 2
+  fi
   if [ "$rc" -eq 0 ]; then
     make_real_attribution_fixture "$d" "$br_bin" || rc=1
   fi

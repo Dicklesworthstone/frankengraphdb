@@ -85,15 +85,18 @@ canonical_revert_target() { # repository-root commit
   local repository="$1"
   local commit="$2"
 
-  # Git's own revert message is an exact, target-bearing declaration. Parse the
-  # complete line, not a subject word: "write reverted" can describe work that
-  # was withdrawn before the commit and therefore changed no repository bytes.
+  # Git's own revert message is an exact, target-bearing declaration — and it
+  # is the FINAL paragraph: subject `Revert "..."`, blank line, then
+  # `This reverts commit <sha>.` Requiring the final-paragraph position keeps
+  # a commit that merely QUOTES the line in its body out of the operation
+  # population: quoting is not reverting, and the inverse check would red a
+  # quote as a malformed revert (fresh-eyes M9).
   git -C "$repository" show -s --format=%B "$commit" \
-    | sed -nE 's/^This reverts commit ([0-9a-f]{40})\.$/\1/p' \
     | awk '
-        NR == 1 { target = $0 }
+        /^This reverts commit [0-9a-f]{40}\.$/ { found = $4; last = NR }
+        NF { last_text = NR }
         END {
-          if (NR == 1) print target
+          if (found != "" && last == last_text) { sub(/\.$/, "", found); print found }
           else exit 1
         }
       '
@@ -592,9 +595,9 @@ while IFS= read -r sha || [ -n "$sha" ]; do
     fail "revert commit has no disposition in the ledger: $sha — $subject"
     missing_reverts=$((missing_reverts + 1))
   }
-done < <(git -C "$ROOT" log --all --pretty=format:'%H' --extended-regexp \
-           --grep='^Revert ".*"$' \
-           --grep='^This reverts commit .*$')
+done < <(git -C "$ROOT" log --all --pretty=format:'%H|%s' --extended-regexp \
+           --grep='^Revert "' \
+           | cut -d'|' -f1)
 
 if [ "$n_candidates" -eq 0 ] || [ "$n_reverts" -eq 0 ]; then
   fail "found ZERO structurally verified reverts — this repository contains exact inverse 46e654e, so the scan is broken"

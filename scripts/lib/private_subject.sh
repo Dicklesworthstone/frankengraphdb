@@ -104,8 +104,10 @@ subject_build() {
     && rustc --edition 2024 -C strip=symbols tools/registry-check/src/main.rs \
          --extern "registry_check=$outdir/libregistry_check.rlib" \
          -o "$outdir/registry-check" \
-    && for gate_bin in topology-check threat-check architecture-check; do
-         rustc --edition 2024 -C strip=symbols "tools/registry-check/src/bin/$gate_bin.rs" \
+    && for gate_src in tools/registry-check/src/bin/*-check.rs; do
+         [ -e "$gate_src" ] || continue
+         gate_bin="$(basename "$gate_src" .rs)"
+         rustc --edition 2024 -C strip=symbols "$gate_src" \
            --extern "registry_check=$outdir/libregistry_check.rlib" \
            -o "$outdir/$gate_bin" || exit 1
        done) >"$outdir/build.log" 2>&1
@@ -146,7 +148,18 @@ subject_dir() {
 subject_acquire() {
   local root="$1" dir stage
   dir="$(subject_dir "$root")"
-  if subject_is_fresh "$dir/registry-check" "$root"; then
+  # The fast path must test the WHOLE promised artifact set, and the set is
+  # what this tree's sources provide: a cache entry written before the set
+  # grew is not a hit no matter how fresh its registry-check is (fresh-eyes
+  # I5 follow-up), and a fixture crate with no gate-checker sources promises
+  # none (the residue control builds exactly one of those).
+  local gate_src gate_bin complete=0
+  for gate_src in "$root"/tools/registry-check/src/bin/*-check.rs; do
+    [ -e "$gate_src" ] || continue
+    gate_bin="$dir/$(basename "$gate_src" .rs)"
+    subject_is_fresh "$gate_bin" "$root" || complete=1
+  done
+  if subject_is_fresh "$dir/registry-check" "$root" && [ "$complete" -eq 0 ]; then
     printf '%s' "$dir"
     return 0
   fi
