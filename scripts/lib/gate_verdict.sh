@@ -175,7 +175,20 @@ gate_tree_listing() {
   # classifies those lines SEPARATELY from content changes, because "the file
   # could not be read at this instant" and "the file's bytes are different" are
   # different facts and folding them into one digest made them the same fact.
-  git ls-files -z 2>/dev/null | xargs -0 sha256sum 2>&1
+  # Both guards are load-bearing. `--` keeps a tracked `--help` from becoming
+  # an option; the `./` prefix keeps a tracked file literally named `-` from
+  # becoming sha256sum's stdin operand. xargs may split at ARG_MAX, so each
+  # batch prefixes its own positional arguments and strips only that display
+  # prefix afterward. Newlines and other odd bytes stay protected by the NUL
+  # transport and sha256sum's escaped record form (fresh-eyes fgdb-3e12).
+  git ls-files -z 2>/dev/null \
+    | xargs -0 bash -c '
+        set -o pipefail
+        [ "$#" -gt 0 ] || exit 0
+        paths=()
+        for path; do paths+=("./$path"); done
+        sha256sum -- "${paths[@]}" | sed "s#  \\./#  #"
+      ' _ 2>&1
 }
 
 gate_tree_fingerprint() {

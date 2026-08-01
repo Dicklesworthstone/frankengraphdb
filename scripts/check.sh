@@ -136,6 +136,7 @@ CORE_GATE_ROSTER=(
 GATE_SCOPE_TRACKING=0
 GATE_SCOPE_COUNT=0
 GATE_SCOPE_FATAL=0
+GATE_SCOPE_ABORTED=0
 declare -a GATE_SCOPE_CLASS=()
 declare -a GATE_SCOPE_KIND=()
 declare -a GATE_SCOPE_LABEL=()
@@ -185,6 +186,7 @@ gate_scope_record() {
 gate_scope_reset() {
   GATE_SCOPE_COUNT=0
   GATE_SCOPE_FATAL=0
+  GATE_SCOPE_ABORTED=0
   GATE_SCOPE_CLASS=()
   GATE_SCOPE_KIND=()
   GATE_SCOPE_LABEL=()
@@ -207,6 +209,14 @@ run_core_gate() {
       gate_scope_record core "" "$label" unrun all-tracked
       return 0
     fi
+  fi
+
+  if [ "$GATE_SCOPE_ABORTED" -eq 1 ]; then
+    CORE_UNRUN=$((CORE_UNRUN + 1))
+    LAST_GATE_RC="$GATE_EXIT_UNRUN"
+    gate_unrun "core: $label — skipped after tracked tree movement"
+    gate_scope_record core "" "$label" unrun "$domain"
+    return 0
   fi
 
   CORE_EXECUTED=$((CORE_EXECUTED + 1))
@@ -1030,7 +1040,7 @@ live_gate_inventory() {
 
 gate_domain_wiring_complete() {
   local source="$1"
-  local tracking_calls finalize_calls closure_calls ledger_calls failures=0
+  local tracking_calls finalize_calls closure_calls ledger_calls checkpoint_calls failures=0
 
   if [ ! -r "$source" ]; then
     echo "ERROR: gate-domain wiring source is unreadable: $source" >&2
@@ -1042,6 +1052,7 @@ gate_domain_wiring_complete() {
     '^run_core_gate "\$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure$' \
     "$source")"
   ledger_calls="$(grep -c '^  if ! gate_scope_records_complete; then$' "$source")"
+  checkpoint_calls="$(grep -c '^[[:space:]]*gate_scope_abort_if_tree_moved ' "$source")"
   if [ "$tracking_calls" -ne 1 ]; then
     echo "ERROR: check.sh enables scoped result recording $tracking_calls time(s), expected 1" >&2
     failures=$((failures + 1))
@@ -1056,6 +1067,13 @@ gate_domain_wiring_complete() {
   fi
   if [ "$ledger_calls" -ne 1 ]; then
     echo "ERROR: check.sh checks scoped result-ledger closure $ledger_calls time(s), expected 1" >&2
+    failures=$((failures + 1))
+  fi
+  # Nine core gates, all three registered-artifact control-flow exits, and one
+  # after the registered inventory runner returns. A moved worktree must stop
+  # the remaining chain at the first completed boundary (fgdb-3e12).
+  if [ "$checkpoint_calls" -ne 13 ]; then
+    echo "ERROR: check.sh wires $checkpoint_calls early tree checkpoint(s), expected 13" >&2
     failures=$((failures + 1))
   fi
   [ "$failures" -eq 0 ]
@@ -1509,15 +1527,23 @@ run_registered_gates() {
     kind=""
     artifact=""
     IFS=$'\t' read -r kind artifact <<<"$row"
+    if [ "$GATE_SCOPE_ABORTED" -eq 1 ]; then
+      record_registered_result "${kind:-missing-kind}" \
+        "${artifact:-missing-artifact}" unrun \
+        "skipped after tracked tree movement"
+      continue
+    fi
     if ! safe_artifact "$artifact"; then
       record_registered_result "${kind:-missing-kind}" \
         "${artifact:-missing-artifact}" unrun \
         "artifact path is missing or unsafe"
+      gate_scope_abort_if_tree_moved "registered ${kind:-missing-kind} ${artifact:-missing-artifact}"
       continue
     fi
     if [ ! -f "$root/$artifact" ]; then
       record_registered_result "$kind" "$artifact" unrun \
         "artifact does not exist"
+      gate_scope_abort_if_tree_moved "registered $kind $artifact"
       continue
     fi
     case "$kind" in
@@ -1563,6 +1589,7 @@ run_registered_gates() {
           "live checker kind has no runner"
         ;;
     esac
+    gate_scope_abort_if_tree_moved "registered $kind $artifact"
   done
 }
 
@@ -1785,14 +1812,16 @@ gate_scope_apply_tree_change() {
 # sample still produces the older conservative whole-run UNRUN instead of
 # slipping through because GATE_TREE_CHECKED was set early.
 gate_scope_finalize_tree_stability() {
-  local list_end fp_end head_end
+  local list_end fp_end head_end unstable=0
   if ! gate_scope_records_complete; then
     GATE_SCOPE_FATAL=1
+    unstable=1
     gate_unrun "check.sh: scoped result ledger is incomplete; attribution is unsafe"
   fi
   gate_tree_snapshot_into list_end fp_end
   head_end="$(gate_tree_head)"
   if [ "$fp_end" != "$GATE_TREE_FP_START" ]; then
+    unstable=1
     gate_diag "  tree moved during check.sh; attributing the movement by declared child domain:"
     gate_diag "    HEAD at start: $GATE_TREE_HEAD_START"
     gate_diag "    HEAD at end:   $head_end"
@@ -1809,7 +1838,26 @@ gate_scope_finalize_tree_stability() {
   GATE_TREE_HEAD_START="$head_end"
   # shellcheck disable=SC2034 # consumed by gate_on_exit in the sourced library
   GATE_TREE_CHECKED=0
-  return 0
+  return "$unstable"
+}
+
+# Stop expensive execution after the first completed phase that observes a
+# tracked-tree move. The main driver still visits later wrappers so each
+# expected core and registered artifact receives an explicit UNRUN; silently
+# exiting here would save time by breaking verdict-accounting closure. The final
+# scoped attribution remains authoritative (fgdb-3e12).
+gate_scope_abort_if_tree_moved() {
+  local completed="$1"
+  [ "$GATE_SCOPE_TRACKING" -eq 1 ] || return 0
+  [ "$GATE_SCOPE_ABORTED" -eq 0 ] || return 0
+  if gate_scope_finalize_tree_stability; then
+    return 0
+  fi
+  GATE_SCOPE_ABORTED=1
+  gate_unrun "check.sh: tracked tree moved after $completed; remaining gates did not run"
+  gate_diag "  Expensive execution stops here; remaining gates are accounted as UNRUN."
+  gate_diag "  Re-run from a settled main checkout, or run in a scratch worktree."
+  return 1
 }
 
 # THE CONTROL FOR THE REPORTING CONTRACT (bead fgdb-checksh-red-not-fail-vbhd).
@@ -2241,9 +2289,163 @@ tree_scope_gate_source_fixture() {
   return 0
 }
 
+tree_listing_option_path_fixture() {
+  local work="$1" first_listing second_listing third_listing
+  local first_fp second_fp third_fp
+  mkdir -p "$work" || return 1
+  (
+    cd "$work" || exit 1
+    git init -q || exit 1
+    git config user.email gate@example.invalid || exit 1
+    git config user.name fgdb-gate || exit 1
+    git config commit.gpgsign false || exit 1
+    printf 'first tracked bytes\n' > ./--help
+    printf 'first stdin-shaped bytes\n' > ./-
+    git add -- --help - || exit 1
+    git commit -qm 'fixture: option-shaped tracked paths' || exit 1
+    first_listing="$(gate_tree_listing)" || exit 1
+    printf 'second tracked bytes\n' > ./--help
+    second_listing="$(gate_tree_listing)" || exit 1
+    printf 'second stdin-shaped bytes\n' > ./-
+    third_listing="$(gate_tree_listing)" || exit 1
+    first_fp="$(gate_tree_fp_of "$first_listing")"
+    second_fp="$(gate_tree_fp_of "$second_listing")"
+    third_fp="$(gate_tree_fp_of "$third_listing")"
+    [ "$first_fp" != "$second_fp" ] \
+      && [ "$second_fp" != "$third_fp" ] \
+      && printf '%s\n' "$first_listing" | grep -q '  --help$' \
+      && printf '%s\n' "$second_listing" | grep -q '  --help$' \
+      && printf '%s\n' "$third_listing" | grep -q '  -$'
+  )
+}
+
+tree_listing_hash_failure_fixture() {
+  local work="$1" listing rc=0
+  mkdir -p "$work/bin" || return 1
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "injected sha256sum failure\\n" >&2\n'
+    printf 'exit 17\n'
+  } >"$work/bin/sha256sum" || return 1
+  chmod +x "$work/bin/sha256sum" || return 1
+  (
+    cd "$ROOT" || exit 1
+    PATH="$work/bin:$PATH" gate_tree_listing
+  ) >"$work/listing.out" 2>"$work/listing.err" || rc=$?
+  listing="$(<"$work/listing.out")"
+  [ "$rc" -ne 0 ] \
+    && printf '%s\n' "$listing" | grep -Fq 'injected sha256sum failure'
+}
+
+# Prove the checkpoint wrapper's control flow without racing the live worktree.
+# The finalizer is the authority for stable versus moved; this fixture supplies
+# both outcomes and asserts that moved skips expensive work while retaining the
+# lightweight downstream accounting pass.
+tree_scope_early_abort_fixture() {
+  local work="$1" checkpoint_fn=gate_scope_abort_if_tree_moved rc=0
+  mkdir -p "$work" || return 1
+
+  (
+    GATE_SCOPE_TRACKING=1
+    GATE_SCOPE_ABORTED=0
+    GATE_EXIT_UNRUN=2
+    gate_scope_finalize_tree_stability() { return 1; }
+    gate_unrun() { printf 'UNRUN %s\nFAIL %s\n' "$1" "$1"; }
+    gate_diag() { :; }
+    "$checkpoint_fn" "fixture boundary" || rc=$?
+    if [ "$GATE_SCOPE_ABORTED" -eq 1 ]; then
+      printf 'ACCOUNTED LATER WORK AS UNRUN\n'
+    else
+      printf 'REACHED EXPENSIVE LATER WORK\n'
+    fi
+    exit "$rc"
+  ) >"$work/moved.out" 2>"$work/moved.err" || rc=$?
+  [ "$rc" -eq 1 ] || return 1
+  grep -Fq 'UNRUN check.sh: tracked tree moved after fixture boundary' \
+    "$work/moved.out" || return 1
+  grep -Fq 'ACCOUNTED LATER WORK AS UNRUN' "$work/moved.out" || return 1
+  ! grep -Fq 'REACHED EXPENSIVE LATER WORK' "$work/moved.out" || return 1
+
+  (
+    GATE_SCOPE_TRACKING=1
+    GATE_SCOPE_ABORTED=0
+    gate_scope_finalize_tree_stability() { return 0; }
+    gate_unrun() { printf 'UNEXPECTED UNRUN %s\n' "$1"; }
+    gate_diag() { :; }
+    "$checkpoint_fn" "stable fixture boundary" || exit 1
+    if [ "$GATE_SCOPE_ABORTED" -eq 0 ]; then
+      printf 'REACHED EXPENSIVE LATER WORK\n'
+    fi
+  ) >"$work/stable.out" 2>"$work/stable.err" || return 1
+  grep -Fq 'REACHED EXPENSIVE LATER WORK' "$work/stable.out" \
+    && ! grep -Fq 'UNEXPECTED UNRUN' "$work/stable.out"
+}
+
+tree_scope_abort_accounting_fixture() {
+  local work="$1" core_marker="$1/core-executed" registered_marker="$1/registered-executed"
+  local registry="$1/checker-index.toml" root="$1/root"
+  mkdir -p "$root/scripts" || return 1
+  {
+    printf '[[checker]]\n'
+    printf 'symbol = "abort_accounting_fixture"\n'
+    printf 'kind = "script"\n'
+    printf 'artifact = "scripts/should-not-run.sh"\n'
+    printf 'status = "live"\n'
+  } >"$registry" || return 1
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf ': > "$ABORT_ACCOUNTING_REGISTERED_MARKER"\n'
+  } >"$root/scripts/should-not-run.sh" || return 1
+  chmod +x "$root/scripts/should-not-run.sh" || return 1
+
+  (
+    abort_accounting_core() { : >"$core_marker"; }
+    CORE_EXPECTED=0
+    CORE_EXECUTED=0
+    CORE_PASSED=0
+    CORE_RED=0
+    CORE_UNRUN=0
+    reset_registered_counters
+    gate_scope_reset
+    GATE_SCOPE_TRACKING=1
+    GATE_SCOPE_ABORTED=1
+    export ABORT_ACCOUNTING_REGISTERED_MARKER="$registered_marker"
+    run_core_gate "$CORE_GATE_FMT" abort_accounting_core
+    run_registered_gates "$root" "$registry" "$GATE_EXIT_UNRUN" /dev/null
+    [ "$CORE_EXPECTED" -eq 1 ] \
+      && [ "$CORE_EXECUTED" -eq 0 ] \
+      && [ "$CORE_UNRUN" -eq 1 ] \
+      && [ "$REGISTERED_EXPECTED" -eq 1 ] \
+      && [ "$REGISTERED_EXECUTED" -eq 0 ] \
+      && [ "$REGISTERED_UNRUN" -eq 1 ] \
+      && [ "$GATE_SCOPE_COUNT" -eq 2 ] \
+      && gate_scope_records_complete
+  ) >"$work/accounting.out" 2>"$work/accounting.err" || return 1
+  [ ! -e "$core_marker" ] && [ ! -e "$registered_marker" ]
+}
+
+landing_guidance_complete() {
+  local source="$1"
+  [ -r "$source" ] \
+    && grep -Fq 'DO NOT EDIT TRACKED FILES IN THE MAIN' "$source" \
+    && grep -Fq 'voids the in-flight run even before commit' "$source" \
+    && grep -Fq 'in your own scratch worktree' "$source"
+}
+
+landing_guidance_control() {
+  local work="$1" source mutant
+  source="$ROOT/scripts/git_hooks/pre-commit.sh"
+  mutant="$work/pre-commit-no-main-edit-warning.sh"
+  landing_guidance_complete "$source" || return 1
+  sed '/DO NOT EDIT TRACKED FILES IN THE MAIN/d' "$source" >"$mutant" \
+    || return 1
+  ! landing_guidance_complete "$mutant"
+}
+
 tree_scope_control() {
   local work="$1"
   local closure_listing _closure_fp mutant_source ledger_mutant_source
+  local checkpoint_mutant_source mutated_abort mutation_count
 
   gate_tree_snapshot_into closure_listing _closure_fp
   GATE_TREE_LIST_START="$closure_listing"
@@ -2278,6 +2480,44 @@ tree_scope_control() {
   if gate_domain_wiring_complete "$ledger_mutant_source" \
       >"$work/ledger-wiring-mutant.out" 2>"$work/ledger-wiring-mutant.err"; then
     echo "SELF-TEST RED: deleting live scoped ledger closure left wiring green" >&2
+    return 1
+  fi
+  checkpoint_mutant_source="$work/check-no-early-checkpoints.sh"
+  if ! sed '/^[[:space:]]*gate_scope_abort_if_tree_moved /d' \
+      "$ROOT/scripts/check.sh" >"$checkpoint_mutant_source"; then
+    echo "SELF-TEST RED: could not construct the missing-checkpoints control" >&2
+    return 1
+  fi
+  if grep -q '^[[:space:]]*gate_scope_abort_if_tree_moved ' "$checkpoint_mutant_source"; then
+    echo "SELF-TEST RED: the missing-checkpoints control did not apply" >&2
+    return 1
+  fi
+  if gate_domain_wiring_complete "$checkpoint_mutant_source" \
+      >"$work/checkpoint-wiring-mutant.out" 2>"$work/checkpoint-wiring-mutant.err"; then
+    echo "SELF-TEST RED: deleting every early tree checkpoint left wiring green" >&2
+    return 1
+  fi
+  if ! tree_scope_early_abort_fixture "$work/early-abort"; then
+    echo "SELF-TEST RED: the early tree checkpoint did not stop moved input or retain stable input" >&2
+    return 1
+  fi
+  if ! tree_scope_abort_accounting_fixture "$work/abort-accounting"; then
+    echo "SELF-TEST RED: early abort did not account downstream core and registered gates as UNRUN" >&2
+    return 1
+  fi
+  mutated_abort="$(declare -f gate_scope_abort_if_tree_moved \
+    | sed 's/GATE_SCOPE_ABORTED=1/GATE_SCOPE_ABORTED=0/')"
+  mutation_count="$(printf '%s\n' "$mutated_abort" | grep -c 'GATE_SCOPE_ABORTED=0')"
+  if [ "$mutation_count" -ne 1 ] \
+      || printf '%s\n' "$mutated_abort" | grep -q 'GATE_SCOPE_ABORTED=1'; then
+    echo "SELF-TEST RED: could not construct the early-abort flag mutation" >&2
+    return 1
+  fi
+  if (
+    eval "$mutated_abort"
+    tree_scope_early_abort_fixture "$work/early-abort-mutant"
+  ); then
+    echo "SELF-TEST RED: disabling the checkpoint abort flag left its control green" >&2
     return 1
   fi
   # One emitted core verdict with no ledger record must fail cardinality
@@ -2325,6 +2565,24 @@ tree_scope_control() {
   fi
   if ! tree_scope_gate_source_fixture; then
     echo "SELF-TEST RED: moving check.sh did not invalidate every declared domain" >&2
+    return 1
+  fi
+  if ! tree_listing_option_path_fixture "$work/option-path"; then
+    echo "SELF-TEST RED: an option-shaped tracked path was not content-fingerprinted" >&2
+    return 1
+  fi
+  if ! tree_listing_hash_failure_fixture "$work/hash-failure"; then
+    echo "SELF-TEST RED: a content-hash failure was swallowed by tree listing" >&2
+    return 1
+  fi
+  if (
+    gate_tree_listing() {
+      git rev-parse HEAD 2>&1
+      git ls-files -z 2>/dev/null | xargs -0 sha256sum 2>&1
+    }
+    tree_listing_option_path_fixture "$work/option-path-mutant"
+  ); then
+    echo "SELF-TEST RED: removing sha256sum option termination left option-path control green" >&2
     return 1
   fi
   # Neuter the intersection predicate. The Rust fixture must stop passing,
@@ -2721,6 +2979,7 @@ EOF
   verdict_stream_control "$work" || return 1
   verdict_contract_control "$work" || return 1
   tree_scope_control "$work" || return 1
+  landing_guidance_control "$work" || return 1
 
   echo "CHECK.SH MUTATION SELF-TEST PASS"
   echo "  failing registered gate: RED"
@@ -2739,7 +2998,9 @@ EOF
   echo "    PASS, and exits nonzero; gate_unrun emits both tokens exactly once"
   echo "  tree-domain scoping: Beads, Rust, shell, and gate-driver movements separate"
   echo "    correctly; missing declarations, live wiring, ledger records, and the"
-  echo "    intersection each red under mutation"
+  echo "    intersection each red under mutation; option-shaped paths stay hashed;"
+  echo "    early checkpoints stop on UNRUN"
+  echo "  landing guidance: main-checkout edits warn before commit; scratch remedy pinned"
   echo "  evidence retained at $work"
 }
 
@@ -2789,19 +3050,29 @@ gate_init "check.sh"
 GATE_SCOPE_TRACKING=1
 
 run_core_gate "$CORE_GATE_FILE_COVERAGE" run_file_coverage
+gate_scope_abort_if_tree_moved "$CORE_GATE_FILE_COVERAGE"
 run_core_gate "$CORE_GATE_SHELL_LINT" run_shell_lint
+gate_scope_abort_if_tree_moved "$CORE_GATE_SHELL_LINT"
 run_core_gate "$CORE_GATE_VERDICT_CONTRACT" run_verdict_contract
+gate_scope_abort_if_tree_moved "$CORE_GATE_VERDICT_CONTRACT"
 run_core_gate "$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure
+gate_scope_abort_if_tree_moved "$CORE_GATE_DOMAIN_CLOSURE"
 run_core_gate "$CORE_GATE_FMT" cargo fmt --check
+gate_scope_abort_if_tree_moved "$CORE_GATE_FMT"
 run_core_gate "$CORE_GATE_CHECK" cargo check --all-targets
+gate_scope_abort_if_tree_moved "$CORE_GATE_CHECK"
 run_core_gate "$CORE_GATE_CLIPPY" \
   cargo clippy --all-targets -- -D warnings
+gate_scope_abort_if_tree_moved "$CORE_GATE_CLIPPY"
 CARGO_TEST_LOG="$GATE_LOG_DIR/core-cargo-test.log"
 run_core_gate "$CORE_GATE_TEST" run_cargo_test_workspace
 CARGO_TEST_RC="$LAST_GATE_RC"
+gate_scope_abort_if_tree_moved "$CORE_GATE_TEST"
 run_core_gate "$CORE_GATE_UBS" run_ubs
+gate_scope_abort_if_tree_moved "$CORE_GATE_UBS"
 
 run_registered_gates "$ROOT" "$CHECKER_INDEX" "$CARGO_TEST_RC"
+gate_scope_abort_if_tree_moved "registered gate inventory"
 
 # The aggregate sample comes after every child gate, but before the summary so
 # affected verdicts can be reclassified as UNRUN while disjoint real reds stay
