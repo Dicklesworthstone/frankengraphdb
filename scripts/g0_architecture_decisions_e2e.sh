@@ -23,12 +23,6 @@ gate_init "g0_architecture_decisions_e2e"
 EVIDENCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-architecture-e2e.XXXXXX")"
 FIRST="$EVIDENCE_DIR/first.ndjson"
 SECOND="$EVIDENCE_DIR/second.ndjson"
-TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-case "$TARGET_DIR" in
-  /*) ;;
-  *) TARGET_DIR="$ROOT/$TARGET_DIR" ;;
-esac
-BIN="$TARGET_DIR/debug/architecture-check"
 RELATION_REGISTRY="$EVIDENCE_DIR/contradictory-relationship.toml"
 OWNER_REGISTRY="$EVIDENCE_DIR/invalid-secondary-owner.toml"
 ORPHAN_REGISTRY="$EVIDENCE_DIR/orphan-family.toml"
@@ -38,9 +32,20 @@ OWNER_OUT="$EVIDENCE_DIR/invalid-secondary-owner.ndjson"
 ORPHAN_OUT="$EVIDENCE_DIR/orphan-family.ndjson"
 AMBIGUOUS_OUT="$EVIDENCE_DIR/ambiguous-family.ndjson"
 
-echo "==> build architecture-check"
-cargo build -p registry-check --bin architecture-check
-test -x "$BIN"
+echo "==> build architecture-check (private, provenance-controlled subject)"
+# Built from THIS tree by scripts/lib/private_subject.sh and freshness-proven,
+# so no concurrent pane's cargo can replace the binary mid-run (fresh-eyes I5).
+# shellcheck source=lib/private_subject.sh
+. "$ROOT/scripts/lib/private_subject.sh"
+if ! SUBJECT_DIR="$(subject_acquire "$ROOT")"; then
+  gate_unrun "architecture-check build from this tree failed (see $SUBJECT_DIR/build.log)"
+  exit 2
+fi
+BIN="$SUBJECT_DIR/architecture-check"
+if ! subject_is_fresh "$BIN" "$ROOT"; then
+  gate_unrun "$BIN is not this tree's artifact (stale or foreign build)"
+  exit 2
+fi
 
 echo "==> validate the frozen ADR twice"
 "$BIN" --root "$ROOT" >"$FIRST"
