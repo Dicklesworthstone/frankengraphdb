@@ -41,10 +41,13 @@
 # WHY CASES G-N EXIST. Detection alone still discarded nearly every full gate:
 # routine `br` writes rewrote the tracked JSONL every few minutes. The project
 # now disables automatic export and routes explicit export through br_sync.sh.
-# G-G3 prove the free-path attribution diagnostics; H-L prove every lease
+# G-G4 prove the free-path attribution diagnostics and missing-tracked-corpus
+# refusal; H-L prove every lease
 # direction plus a neutered deferral. M drives the
 # deployed `br` binary and proves that one declared id cannot sweep a second
-# pending record, then proves that declaring both ids exports exactly both. N
+# pending record, then proves that declaring both ids exports exactly both. M2
+# proves a repository can make its first tracked export without weakening the
+# missing-tracked-corpus refusal. N
 # neuters both attribution guards and requires the silent sweep to return. A
 # wrapper-only test would miss a config regression, while a config-only test
 # would miss either an unguarded explicit sync or an unattributed whole-file
@@ -489,6 +492,53 @@ run_export_case G3_export_missing_declared FREE 2 65 'missing declared ids:' \
   "$BR_SYNC" "$LANDING_LIB" '' fgdb-declared-but-absent \
   fgdb-declared-but-absent
 
+# G4: bootstrap permission must never mask a tracked corpus that disappeared
+# from the worktree. Move it aside rather than deleting it: the negative fixture
+# stays inspectable, and the helper must refuse before calling `br` at all.
+run_tracked_jsonl_missing_case() {
+  local d="$RUN_DIR/G4_export_tracked_jsonl_missing"
+  local log token_log out err rc calls ok=1
+
+  make_export_fixture "$d" FREE || ok=0
+  if [ "$ok" -eq 1 ]; then
+    mv "$d/project/.beads/issues.jsonl" \
+      "$d/project/.beads/issues.jsonl.preserved" || ok=0
+  fi
+  log="$d/br-calls.log"; token_log="$d/token-calls.log"
+  out="$d/out.txt"; err="$d/err.txt"
+  : >"$log"
+  : >"$token_log"
+  if [ "$ok" -eq 1 ]; then
+    (
+      cd "$d/project" || exit 1
+      BR_STUB_LOG="$log" FGDB_BR_BIN="$d/br-stub" \
+        TOKEN_STUB_LOG="$token_log" FGDB_TOKEN_SH="$d/token-stub" \
+        FGDB_TOKEN_DIR="$d/tokens" FGDB_LANDING_LIB="$LANDING_LIB" \
+        bash "$BR_SYNC" fgdb-export-fixture
+    ) >"$out" 2>"$err"
+    rc=$?
+    calls="$(wc -l <"$log")"
+    [ "$rc" -eq 65 ] || ok=0
+    [ "$calls" -eq 0 ] || ok=0
+    [ -r "$d/project/.beads/issues.jsonl.preserved" ] || ok=0
+    grep -Fq 'base commit tracks .beads/issues.jsonl' "$err" || ok=0
+  fi
+
+  if [ "$ok" -eq 1 ]; then
+    gate_pass "G4: a missing tracked JSONL is not mistaken for a first export"
+  else
+    gate_fail "G4: missing tracked JSONL did not fail before export"
+    for artifact in out.txt err.txt br-calls.log token-calls.log; do
+      if [ -f "$d/$artifact" ]; then
+        gate_diag "  --- $artifact ---"
+        while IFS= read -r line; do gate_diag "  $line"; done <"$d/$artifact"
+      fi
+    done
+  fi
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+}
+run_tracked_jsonl_missing_case
+
 # H: a live holder -> no tracked export, temporary failure for an explicit retry.
 run_export_case H_export_binding BINDING 0 75 'DEFERRED BEADS EXPORT'
 
@@ -636,6 +686,108 @@ run_project_config_case() {
 }
 run_project_config_case
 
+# M2: the deployed tool's first export. HEAD intentionally has no JSONL path;
+# the DB has exactly one dirty record under no-auto-flush configuration. A
+# pre-existing undeclared row in the untracked file must refuse byte-stably;
+# after that fixture is preserved and an empty candidate is restored, the
+# guarded helper must create the file and still prove the exact record-id set.
+run_first_export_bootstrap_case() {
+  local d="$RUN_DIR/M2_first_export_bootstrap" project br_bin id observed
+  local dirty prepare_rc foreign_before foreign_after foreign_rc flush_rc rc=0
+  project="$d/project"
+  br_bin="$(command -v br 2>/dev/null)"
+  if [ -z "$br_bin" ]; then
+    gate_unrun "case M2: the br binary is not on PATH; first-export bootstrap did not run"
+    exit 2
+  fi
+
+  mkdir -p "$project" "$d/tokens-refuse" "$d/tokens-export" || rc=1
+  write_token_stub "$d/token-stub" || rc=1
+  : >"$d/token-calls.log"
+  if [ "$rc" -eq 0 ]; then
+    (
+      cd "$project" || exit 1
+      RUST_LOG=error "$br_bin" --quiet init --prefix probe \
+        >"$d/init.out" 2>"$d/init.err" || exit 1
+      cp "$BR_CONFIG" .beads/config.yaml || exit 1
+      printf 'first-export fixture\n' >README.md || exit 1
+      git init -q || exit 1
+      git config user.email gate@example.invalid || exit 1
+      git config user.name fgdb-gate || exit 1
+      git config commit.gpgsign false || exit 1
+      git add README.md || exit 1
+      git commit -qm 'fixture: no tracked Beads export yet' || exit 1
+      if git cat-file -e 'HEAD:.beads/issues.jsonl' 2>/dev/null; then
+        exit 1
+      fi
+      RUST_LOG=error "$br_bin" --json create --title='first deferred record' \
+        --type=task --priority=2 \
+        >"$d/create.out" 2>"$d/create.err" || exit 1
+      jq -er '.id' "$d/create.out" >"$d/id.txt" || exit 1
+      RUST_LOG=error "$br_bin" sync --status --json \
+        >"$d/status.out" 2>"$d/status.err" || exit 1
+      dirty="$(jq -er '.dirty_count' "$d/status.out")" || exit 1
+      [ "$dirty" -eq 1 ] || exit 1
+    )
+    prepare_rc=$?
+    [ "$prepare_rc" -eq 0 ] || rc=1
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    id="$(cat "$d/id.txt")"
+    printf '{"id":"fgdb-bootstrap-foreign","status":"open"}\n' \
+      >>"$project/.beads/issues.jsonl" || rc=1
+    foreign_before="$(sha256sum "$project/.beads/issues.jsonl" | awk '{print $1}')"
+    (
+      cd "$project" || exit 1
+      FGDB_BR_BIN="$br_bin" FGDB_TOKEN_DIR="$d/tokens-refuse" \
+        FGDB_TOKEN_SH="$d/token-stub" TOKEN_STUB_LOG="$d/token-calls.log" \
+        RUST_LOG=error bash "$BR_SYNC" "$id"
+    ) >"$d/foreign.out" 2>"$d/foreign.err"
+    foreign_rc=$?
+    foreign_after="$(sha256sum "$project/.beads/issues.jsonl" | awk '{print $1}')"
+    [ "$foreign_rc" -eq 65 ] || rc=1
+    [ "$foreign_after" = "$foreign_before" ] || rc=1
+    grep -Fq 'fgdb-bootstrap-foreign' "$d/foreign.err" || rc=1
+    mv "$project/.beads/issues.jsonl" \
+      "$project/.beads/issues.jsonl.foreign-preserved" || rc=1
+    : >"$project/.beads/issues.jsonl"
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    (
+      cd "$project" || exit 1
+      FGDB_BR_BIN="$br_bin" FGDB_TOKEN_DIR="$d/tokens-export" \
+        FGDB_TOKEN_SH="$d/token-stub" TOKEN_STUB_LOG="$d/token-calls.log" \
+        RUST_LOG=error bash "$BR_SYNC" "$id"
+    ) >"$d/flush.out" 2>"$d/flush.err"
+    flush_rc=$?
+    observed="$(jq -r '.id' "$project/.beads/issues.jsonl" 2>/dev/null \
+      | LC_ALL=C sort -u)"
+    [ "$flush_rc" -eq 0 ] || rc=1
+    [ "$observed" = "$id" ] || rc=1
+    grep -Fq "$id" "$d/flush.out" || rc=1
+    if git -C "$project" cat-file -e 'HEAD:.beads/issues.jsonl' 2>/dev/null; then
+      rc=1
+    fi
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    gate_pass "M2: first export created JSONL under exact record-id attribution"
+  else
+    gate_fail "M2: a Git-proven absent JSONL could not bootstrap safely"
+    for artifact in init.out init.err create.out create.err status.out status.err \
+      foreign.out foreign.err flush.out flush.err token-calls.log; do
+      if [ -f "$d/$artifact" ]; then
+        gate_diag "  --- $artifact ---"
+        while IFS= read -r line; do gate_diag "  $line"; done <"$d/$artifact"
+      fi
+    done
+  fi
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+}
+run_first_export_bootstrap_case
+
 # N: MUTATION CONTROL — remove both dirty-count and post-export exact-set
 # enforcement. A one-id declaration must then silently export both dirty rows,
 # proving M is evidence about the attribution guards rather than incidental br
@@ -725,8 +877,8 @@ run_scope_case
 if [ "$CASES_RUN" -ne 6 ]; then
   gate_unrun "expected 6 cases to execute, $CASES_RUN did"
 fi
-if [ "$EXPORT_CASES_RUN" -ne 10 ]; then
-  gate_unrun "expected 10 Beads-export cases to execute, $EXPORT_CASES_RUN did"
+if [ "$EXPORT_CASES_RUN" -ne 12 ]; then
+  gate_unrun "expected 12 Beads-export cases to execute, $EXPORT_CASES_RUN did"
 fi
 if [ "$SCOPE_CASES_RUN" -ne 1 ]; then
   gate_unrun "expected 1 aggregate-scope case to execute, $SCOPE_CASES_RUN did"

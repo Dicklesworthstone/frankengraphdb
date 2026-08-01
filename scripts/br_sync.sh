@@ -23,6 +23,12 @@
 # names the complete observed set. Re-running with every id is an explicit
 # co-landing; omitting one is never permission to sweep it.
 #
+# FIRST EXPORT IS A PROVED EMPTY BASE, not an unreadable-file exception. If
+# `HEAD:.beads/issues.jsonl` does not exist, `git cat-file -e` must fail and the
+# base tree must independently enumerate no entry at that path. A readable
+# untracked JSONL is then treated as the complete delta from empty. If HEAD does
+# track the path, a missing worktree copy remains a hard refusal.
+#
 # HOLD LANDINGS, NEVER PANES. A live gate does not block issue creation,
 # updates, comments, or closure. It only defers this explicit tracked-file write
 # and returns EX_TEMPFAIL (75), so the caller can retry when the gate exits.
@@ -56,6 +62,7 @@ JSONL_REL=".beads/issues.jsonl"
 EXPECTED_IDS=""
 EXPORT_ROOT=""
 EXPORT_BASE_HEAD=""
+EXPORT_BASE_HAS_JSONL=0
 
 print_id_set() {
   [ -n "$1" ] && printf '%s\n' "$1"
@@ -103,6 +110,8 @@ prepare_expected_ids() {
 }
 
 resolve_export_tree() {
+  local base_entry
+
   command -v git >/dev/null 2>&1 || {
     printf 'BEADS EXPORT INTENT UNCHECKED — git is unavailable; no export ran.\n' >&2
     return "$EXPORT_INTENT_RC"
@@ -116,25 +125,78 @@ resolve_export_tree() {
     printf 'BEADS EXPORT INTENT UNCHECKED — not inside a Git worktree; no export ran.\n' >&2
     return "$EXPORT_INTENT_RC"
   }
-  [ -r "$EXPORT_ROOT/$JSONL_REL" ] || {
-    printf 'BEADS EXPORT INTENT UNCHECKED — cannot read %s; no export ran.\n' \
-      "$EXPORT_ROOT/$JSONL_REL" >&2
-    return "$EXPORT_INTENT_RC"
-  }
   EXPORT_BASE_HEAD="$(git -C "$EXPORT_ROOT" rev-parse HEAD 2>/dev/null)" || {
     printf 'BEADS EXPORT INTENT UNCHECKED — HEAD does not resolve; no export ran.\n' >&2
     return "$EXPORT_INTENT_RC"
   }
+
+  if git -C "$EXPORT_ROOT" cat-file -e \
+    "$EXPORT_BASE_HEAD:$JSONL_REL" 2>/dev/null; then
+    EXPORT_BASE_HAS_JSONL=1
+    if [ ! -f "$EXPORT_ROOT/$JSONL_REL" ] || [ ! -r "$EXPORT_ROOT/$JSONL_REL" ]; then
+      printf 'BEADS EXPORT INTENT UNCHECKED — base commit tracks %s, but the worktree copy is absent or unreadable; no export ran.\n' \
+        "$JSONL_REL" >&2
+      return "$EXPORT_INTENT_RC"
+    fi
+  else
+    base_entry="$(git -C "$EXPORT_ROOT" ls-tree --name-only \
+      "$EXPORT_BASE_HEAD" -- "$JSONL_REL" 2>/dev/null)" || {
+      printf 'BEADS EXPORT INTENT UNCHECKED — the base tree could not prove whether %s exists; no export ran.\n' \
+        "$JSONL_REL" >&2
+      return "$EXPORT_INTENT_RC"
+    }
+    if [ -n "$base_entry" ]; then
+      printf 'BEADS EXPORT INTENT UNCHECKED — the base tree contains %s but its object is unreadable; no export ran.\n' \
+        "$JSONL_REL" >&2
+      return "$EXPORT_INTENT_RC"
+    fi
+    EXPORT_BASE_HAS_JSONL=0
+    if [ -e "$EXPORT_ROOT/$JSONL_REL" ] || [ -L "$EXPORT_ROOT/$JSONL_REL" ]; then
+      if [ ! -f "$EXPORT_ROOT/$JSONL_REL" ] || [ ! -r "$EXPORT_ROOT/$JSONL_REL" ]; then
+        printf 'BEADS EXPORT INTENT UNCHECKED — first-export candidate %s is not a readable regular file; no export ran.\n' \
+          "$JSONL_REL" >&2
+        return "$EXPORT_INTENT_RC"
+      fi
+    fi
+  fi
   return 0
+}
+
+validated_record_ids() {
+  jq -r '
+      if type == "object"
+        and (.id | type == "string")
+        and (.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+      then .id
+      else error("changed issues.jsonl row has no valid string id")
+      end
+    ' \
+    | LC_ALL=C sort -u
 }
 
 # changed_record_ids <base-commit>
 #
-# Parse records, not line numbers or substrings. `--unified=0` leaves only
-# headers plus removed/added JSONL rows; every other payload shape is rejected
-# so a malformed line cannot disappear from the attribution set.
+# Parse records, not line numbers or substrings. For an existing tracked corpus,
+# `--unified=0` leaves only headers plus removed/added JSONL rows. For a proved
+# first export, the readable untracked file is the complete create-only delta.
+# Every other payload shape is rejected so a malformed line cannot disappear
+# from the attribution set.
 changed_record_ids() {
   local base="$1"
+
+  if [ "$EXPORT_BASE_HAS_JSONL" -eq 0 ]; then
+    if [ ! -e "$EXPORT_ROOT/$JSONL_REL" ] && [ ! -L "$EXPORT_ROOT/$JSONL_REL" ]; then
+      return 0
+    fi
+    if [ ! -f "$EXPORT_ROOT/$JSONL_REL" ] || [ ! -r "$EXPORT_ROOT/$JSONL_REL" ]; then
+      printf 'first-export candidate %s stopped being a readable regular file\n' \
+        "$JSONL_REL" >&2
+      return 1
+    fi
+    validated_record_ids <"$EXPORT_ROOT/$JSONL_REL"
+    return $?
+  fi
+
   git -C "$EXPORT_ROOT" diff --no-ext-diff --unified=0 "$base" -- "$JSONL_REL" \
     | awk '
         /^(diff --git |index |--- |\+\+\+ |@@ )/ { next }
@@ -146,15 +208,7 @@ changed_record_ids() {
         }
         END { exit bad }
       ' \
-    | jq -r '
-        if type == "object"
-          and (.id | type == "string")
-          and (.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
-        then .id
-        else error("changed issues.jsonl row has no valid string id")
-        end
-      ' \
-    | LC_ALL=C sort -u
+    | validated_record_ids
 }
 
 dirty_record_count() {
