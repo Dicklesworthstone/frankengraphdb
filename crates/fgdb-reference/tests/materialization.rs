@@ -770,6 +770,44 @@ fn a_schema_row_must_name_the_current_epoch() {
 }
 
 #[test]
+fn schema_epoch_targets_must_be_exact_successors() {
+    let row = |transition: u8, before: u64, after: u64| DeltaRow::Schema {
+        transition_oid: oid(transition),
+        before_epoch: SchemaEpoch(before),
+        after_epoch: SchemaEpoch(after),
+    };
+
+    for (name, transition, before, after) in [("no-op", 0x72, 0, 0), ("skipped", 0x73, 0, 2)] {
+        let mut graph = ReferenceGraph::new();
+        let settled = graph.clone();
+        assert_eq!(
+            graph.apply_row(&row(transition, before, after)),
+            Err(ApplyError::SchemaEpochNotSuccessor {
+                before: SchemaEpoch(before),
+                after: SchemaEpoch(after),
+            }),
+            "{name} target"
+        );
+        assert_eq!(graph, settled, "{name} refusal must be atomic");
+    }
+
+    let mut graph = ReferenceGraph::new();
+    graph
+        .apply_row(&row(0x74, 0, 1))
+        .expect("establish epoch one");
+    let settled = graph.clone();
+    assert_eq!(
+        graph.apply_row(&row(0x75, 1, 0)),
+        Err(ApplyError::SchemaEpochNotSuccessor {
+            before: SchemaEpoch(1),
+            after: SchemaEpoch(0),
+        }),
+        "rollback target"
+    );
+    assert_eq!(graph, settled, "rollback refusal must be atomic");
+}
+
+#[test]
 fn valid_time_transitions_check_their_before_image() {
     let mut graph = social_graph();
     let period = |start: i64, end: Option<i64>| ValidTimePeriod {

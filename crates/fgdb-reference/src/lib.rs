@@ -281,6 +281,13 @@ pub enum ApplyError {
         declared: SchemaEpoch,
         actual: SchemaEpoch,
     },
+    /// A schema mutation must publish the exact successor epoch. Reusing,
+    /// skipping, rolling back, or overflowing an epoch would make the value
+    /// cease to be a monotone invalidation generation (fgdb-bzp7).
+    SchemaEpochNotSuccessor {
+        before: SchemaEpoch,
+        after: SchemaEpoch,
+    },
     /// A coordinate entry was validated under a schema epoch other than the
     /// one present before this template began.
     SchemaBindingMismatch {
@@ -482,6 +489,10 @@ impl core::fmt::Display for ApplyError {
             Self::SchemaEpochMismatch { declared, actual } => write!(
                 f,
                 "schema epoch: row declares before={declared:?}, state has {actual:?}"
+            ),
+            Self::SchemaEpochNotSuccessor { before, after } => write!(
+                f,
+                "schema epoch transition {before:?} -> {after:?} is not an exact successor"
             ),
             Self::SchemaBindingMismatch {
                 graph,
@@ -1349,6 +1360,12 @@ impl ReferenceGraph {
                     return Err(ApplyError::SchemaEpochMismatch {
                         declared: *before_epoch,
                         actual: self.schema_epoch,
+                    });
+                }
+                if before_epoch.0.checked_add(1) != Some(after_epoch.0) {
+                    return Err(ApplyError::SchemaEpochNotSuccessor {
+                        before: *before_epoch,
+                        after: *after_epoch,
                     });
                 }
                 self.schema_epoch = *after_epoch;
