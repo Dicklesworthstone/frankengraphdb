@@ -156,17 +156,15 @@ fn commit_a_history(dir: &Path, cx: &CommitCx) {
     );
     commit_rows(&mut coordinator, cx, vec![edge(12, 2, 3)]);
 
-    // RE-CREATE the retired adjacency under a fresh edge identity. This is what
-    // makes the partition span more than one block: a key's second version cannot
-    // share a block with its first, so the writer is forced to seal. Without it the
-    // whole history fits in one block and the multi-block path — the one that
-    // needs the root, the merge, and the supersede rule — is never exercised.
+    // Re-create the retired TOPOLOGY under a fresh edge identity. Equal topology
+    // is deliberately not a seal boundary: EId is the parallel-edge
+    // discriminator, so this exercises the multigraph key through persistence.
     commit_rows(&mut coordinator, cx, vec![edge(13, 1, 2)]);
 }
 
 /// PHASE 2 — recover the stream, build the partition, persist it, and return ONLY
 /// the root identity. Everything else goes out of scope.
-fn build_and_persist(dir: &Path, cx: &CommitCx) -> ObjectId {
+fn build_and_persist(dir: &Path, cx: &CommitCx, seal_after: CommitSeq) -> ObjectId {
     let reopened = CommitCoordinator::open(cx, dir, keys()).expect("reopen");
     let mut writer = BlockWriter::new(GRAPH, BRANCH, 0);
     let mut frontier = CommitSeq(0);
@@ -184,6 +182,11 @@ fn build_and_persist(dir: &Path, cx: &CommitCx) -> ObjectId {
             for row in &coordinate.rows {
                 writer.apply(KEYS, commit_seq, row).expect("accepted");
             }
+        }
+        if commit_seq == seal_after {
+            writer
+                .seal(KEYS)
+                .expect("the fixture's explicit block cut seals");
         }
     }
 
@@ -210,7 +213,7 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
     let dir = scratch_dir("lifecycle");
     under_lab(51, move |cx| {
         commit_a_history(&dir, cx);
-        let root_id = build_and_persist(&dir, cx);
+        let root_id = build_and_persist(&dir, cx, CommitSeq(2));
 
         // NOTHING survives from the phases above except the path and this id —
         // exactly what a restarted process would hold.
@@ -235,7 +238,7 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
         assert_eq!(v2, vec![VId(3)]);
         assert!(
             root.blocks.len() >= 2,
-            "the re-creation must have forced a seal, or the multi-block path is \
+            "the explicit cut must exercise the multi-block path, or the root and merge are \
              never exercised: {} block(s)",
             root.blocks.len()
         );
@@ -254,7 +257,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
     let dir = scratch_dir("compacted");
     under_lab(52, move |cx| {
         commit_a_history(&dir, cx);
-        let root_id = build_and_persist(&dir, cx);
+        let root_id = build_and_persist(&dir, cx, CommitSeq(2));
         let (_, frontier) = oracle_answer(&dir, cx, 1);
 
         let compacted_root_id = {

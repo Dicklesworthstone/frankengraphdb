@@ -18,7 +18,7 @@ use fgdb_strata::store::{BLOCK_DIR, BlockStore, BlockStoreCrashPoint, StoreError
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CommitSeq, VId};
+use fgdb_types::{CommitSeq, EId, VId};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 
@@ -52,6 +52,7 @@ fn entry(src: u128, dst: u128, created: u64) -> AdjacencyEntry {
         src: VId(src),
         relation: REL,
         dst: VId(dst),
+        eid: EId(src.wrapping_mul(1_000_000).wrapping_add(dst)),
         created_at: CommitSeq(created),
         retired_at: None,
     }
@@ -455,7 +456,7 @@ use fgdb_strata::root::{
     root_id as derive_root_id,
 };
 use fgdb_strata::writer::BlockWriter;
-use fgdb_types::{BranchId, EId, GraphId};
+use fgdb_types::{BranchId, GraphId};
 
 fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
     DeltaRow::CreateEdge {

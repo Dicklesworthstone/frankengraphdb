@@ -12,18 +12,20 @@
 //! a read on the write path.
 //!
 //! **IT MUST TRACK LIVE EDGES, AND THAT IS NOT AN INDEX.** A `DeleteEdge` row
-//! names an `EId`; an adjacency entry needs `(src, relation, dst)` and the sequence
+//! names an `EId`; an adjacency entry needs `(src, relation, dst, eid)` and the sequence
 //! the version began at. Only the creation carries those, so the writer remembers
 //! them for edges it has seen live. This is bounded by the live edge count, it is
 //! rebuildable by replaying the stream, and it is exactly the state a memtable
 //! holds — not a derived structure that could become authoritative. Doctrine 5
 //! stands: recovery discards and rebuilds it.
 //!
-//! **A KEY'S SECOND VERSION FORCES A SEAL.** A block requires strictly ascending
-//! unique keys, so a writer that retires a key and re-creates it cannot hold both
-//! versions in one pending run. That constraint was discovered by the differential
-//! in slice 4 rather than declared, and this is where it is honoured: the writer
-//! seals early rather than producing a block the encoder would refuse.
+//! **EID IS PART OF THE KEY.** Parallel edges may share `(src, relation, dst)`;
+//! their stable EIds are the unconditional discriminator. A block therefore
+//! orders by the full four-field key, and a retirement replaces only the pending
+//! statement for that exact EId. The writer separately remembers every admitted
+//! EId seen in this replay lane so retirement never makes an allocation slot
+//! reusable here. Graph-wide allocator authority remains upstream of a
+//! partition-local writer.
 
 use crate::root::{BlockRef, PartitionRoot, RootError, span_of, validate_root};
 use crate::{
@@ -32,7 +34,7 @@ use crate::{
 use fgdb_delta_types::{DeltaRow, RelationId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A sealed block: its identity, its bytes, and the range it covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,14 +75,18 @@ pub enum WriteError {
     CascadeOrderViolation { previous: EId, found: EId },
     /// A `CreateEdge` named an edge this writer already holds live.
     ///
-    /// Refused rather than overwritten, and the asymmetry with a legal second
-    /// version is exact: a re-CREATE of a live edge is not a new version of it
-    /// (a retirement followed by a create is that), it is the stream failing to
-    /// be a stream. Overwriting the live map would strand the first version —
-    /// retired by nothing, answering every future snapshot (fgdb-3usp). Retire
-    /// already refuses what it cannot resolve; create refuses what it cannot
-    /// add.
+    /// Refused rather than overwritten. A re-CREATE of a live edge is the stream
+    /// failing to be a stream; overwriting the live map would strand the first
+    /// interval, retired by nothing and answering every future snapshot
+    /// (fgdb-3usp). A re-create after retirement is separately refused as
+    /// `EdgeIdentitySpent`.
     EdgeAlreadyLive { eid: EId },
+    /// A create tried to reuse an EId admitted earlier in this stream.
+    ///
+    /// Retirement removes an edge from `live`, never from the graph allocator's
+    /// spent set. Keeping this distinct from `EdgeAlreadyLive` tells the caller
+    /// whether the conflicting identity is visible or historical.
+    EdgeIdentitySpent { eid: EId },
     /// A row arrived at a sequence before the previous one.
     ///
     /// The writer is a fold over an ordered stream; out-of-order input would put
@@ -110,6 +116,9 @@ impl core::fmt::Display for WriteError {
             Self::EdgeAlreadyLive { eid } => {
                 write!(f, "{eid:?} is already live; a re-create is not a version")
             }
+            Self::EdgeIdentitySpent { eid } => {
+                write!(f, "edge identity {eid:?} is permanently spent")
+            }
             Self::SequenceNotAdvancing { previous, offered } => write!(
                 f,
                 "rows must arrive in commit order; {offered:?} follows {previous:?}"
@@ -128,10 +137,15 @@ pub struct BlockWriter {
     graph: GraphId,
     branch: BranchId,
     partition: u64,
-    /// Entries not yet sealed, keyed so a second version of one key is detectable.
-    pending: BTreeMap<(VId, RelationId, VId), AdjacencyEntry>,
+    /// Entries not yet sealed, keyed by the complete stable adjacency identity.
+    pending: BTreeMap<(VId, RelationId, VId, EId), AdjacencyEntry>,
     /// `(src, relation, dst, created_at)` for every edge currently live.
     live: BTreeMap<EId, (VId, RelationId, VId, CommitSeq)>,
+    /// Every EId admitted while replaying this partition-local writer.
+    ///
+    /// The graph-wide allocator is enforced before partition routing; this is a
+    /// defense-in-depth check over the history visible to this fold.
+    spent: BTreeSet<EId>,
     sealed: Vec<SealedBlock>,
     last_seq: Option<CommitSeq>,
 }
@@ -144,6 +158,7 @@ impl BlockWriter {
             partition,
             pending: BTreeMap::new(),
             live: BTreeMap::new(),
+            spent: BTreeSet::new(),
             sealed: Vec::new(),
             last_seq: None,
         }
@@ -190,17 +205,23 @@ impl BlockWriter {
                 if self.live.contains_key(eid) {
                     return Err(WriteError::EdgeAlreadyLive { eid: *eid });
                 }
+                if self.spent.contains(eid) {
+                    return Err(WriteError::EdgeIdentitySpent { eid: *eid });
+                }
                 self.push(
                     keys,
                     AdjacencyEntry {
                         src: *src,
                         relation: *relation,
                         dst: *dst,
+                        eid: *eid,
                         created_at: seq,
                         retired_at: None,
                     },
                 )?;
                 self.live.insert(*eid, (*src, *relation, *dst, seq));
+                let was_fresh = self.spent.insert(*eid);
+                debug_assert!(was_fresh, "spent-set admission was checked above");
             }
             DeltaRow::DeleteEdge { eid, .. } => {
                 self.retire(keys, *eid, seq)?;
@@ -282,7 +303,7 @@ impl BlockWriter {
         if created_at == seq {
             let is_same_run = self
                 .pending
-                .get(&(src, relation, dst))
+                .get(&(src, relation, dst, eid))
                 .is_some_and(|pending| pending.created_at == seq && pending.retired_at.is_none());
             if is_same_run {
                 return Ok(None);
@@ -292,6 +313,7 @@ impl BlockWriter {
             src,
             relation,
             dst,
+            eid,
             created_at,
             retired_at: Some(seq),
         };
@@ -310,7 +332,7 @@ impl BlockWriter {
             // exact durable image is no entry at all.
             let &(src, relation, dst, _) =
                 self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
-            let removed_pending = self.pending.remove(&(src, relation, dst));
+            let removed_pending = self.pending.remove(&(src, relation, dst, eid));
             debug_assert!(
                 removed_pending.is_some(),
                 "the fold requires the pending creation it was proven on"
@@ -325,19 +347,19 @@ impl BlockWriter {
         Ok(())
     }
 
-    /// Stage one entry, sealing first if its key is already pending.
+    /// Stage one entry under its full stable edge key.
     ///
     /// A pending entry for the same key that describes the SAME version is an
     /// update — the retirement of something created in this very run — and simply
     /// replaces it, because a block may carry the finished interval directly. A
-    /// DIFFERENT version cannot share the block, so it forces a seal.
+    /// DIFFERENT statement for that EId cannot share the block, so it forces a seal.
     fn push(
         &mut self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
         entry: AdjacencyEntry,
     ) -> Result<(), WriteError> {
         validate_entry(0, &entry).map_err(WriteError::Block)?;
-        let key = (entry.src, entry.relation, entry.dst);
+        let key = (entry.src, entry.relation, entry.dst, entry.eid);
         match self.pending.get(&key) {
             Some(existing) if existing.created_at == entry.created_at => {
                 self.pending.insert(key, entry);
@@ -412,7 +434,7 @@ mod tests {
     use crate::{AdjacencyEntry, BlockError};
     use fgdb_delta_types::RelationId;
     use fgdb_types::ids::DatabaseSecurityNamespaceId;
-    use fgdb_types::{BranchId, CommitSeq, GraphId, VId};
+    use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 
     const K_OID: [u8; 32] = [0x5a; 32];
 
@@ -424,11 +446,12 @@ mod tests {
     fn a_failed_seal_preserves_its_pending_entries() {
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         writer.pending.insert(
-            (VId(1), RelationId(1), VId(2)),
+            (VId(1), RelationId(1), VId(2), EId(10)),
             AdjacencyEntry {
                 src: VId(1),
                 relation: RelationId(1),
                 dst: VId(2),
+                eid: EId(10),
                 created_at: CommitSeq(0),
                 retired_at: None,
             },

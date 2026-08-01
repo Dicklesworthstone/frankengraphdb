@@ -20,16 +20,27 @@ use fgdb_strata::compact::compact;
 use fgdb_strata::root::{BlockRef, PartitionRoot, encode_root, merge_neighbours, span_of};
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CommitSeq, GraphId, VId};
+use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 
 const REL: RelationId = RelationId(1);
 const K_OID: [u8; 32] = [0x5a; 32];
 
 fn entry(src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
+    edge(
+        src.wrapping_mul(1_000_000).wrapping_add(dst),
+        src,
+        dst,
+        created,
+        retired,
+    )
+}
+
+fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     AdjacencyEntry {
         src: VId(src),
         relation: REL,
         dst: VId(dst),
+        eid: EId(eid),
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
     }
@@ -105,6 +116,34 @@ fn disjoint_blocks_collapse_into_one() {
     assert_eq!(result.dropped, 0);
     assert_blocks_are_lawful(&result.blocks);
     assert_answers_preserved(&before, &result.blocks, CommitSeq(1), 5, &[1, 2]);
+}
+
+/// Compaction supersedes statements per EId, never per topology. A tombstone for
+/// one parallel edge cannot collapse or retire another EId at the same destination.
+#[test]
+fn compaction_preserves_parallel_edge_identities() {
+    let before = vec![
+        vec![edge(10, 1, 2, 1, None)],
+        vec![edge(20, 1, 2, 2, None)],
+        vec![edge(10, 1, 2, 1, Some(4))],
+    ];
+    let result = compact(&before, CommitSeq(2));
+    assert_eq!(result.superseded, 1, "only e10's creation was restated");
+    assert_eq!(result.dropped, 0);
+    assert_eq!(result.blocks.len(), 1, "distinct EIds may share one block");
+    assert_eq!(
+        result.blocks[0]
+            .iter()
+            .map(|entry| entry.eid)
+            .collect::<Vec<_>>(),
+        vec![EId(10), EId(20)],
+        "neither stable identity was collapsed by equal topology"
+    );
+    assert_eq!(
+        merge_neighbours(&result.blocks, VId(1), REL, CommitSeq(4)).expect("merges"),
+        vec![VId(2)],
+        "e20 remains visible after e10 retires"
+    );
 }
 
 /// **A RETIRED VERSION BELOW THE FLOOR IS DROPPED, AND THAT IS WHAT LETS TWO

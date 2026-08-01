@@ -1,23 +1,16 @@
 //! Compaction: fewer blocks, same answers.
 //!
-//! A partition accumulates blocks — one per seal, and the writer is forced to seal
-//! whenever a key gets a second version. Reads merge across all of them, so the
-//! cost of a read grows with the write history. Compaction is what stops that.
+//! A partition accumulates immutable blocks, and later blocks may restate an old
+//! edge version to retire it. Reads merge across all of them, so the cost of a
+//! read grows with write history. Compaction is what stops that.
 //!
 //! **THE FORMAT MAKES THIS HARDER THAN IT LOOKS, AND THAT IS THE INTERESTING
-//! PART.** A block requires strictly ascending UNIQUE keys, so two versions of one
-//! key cannot share a block. Merging blocks that each hold a version of the same
-//! key is therefore not a packing problem — it is impossible without DROPPING one
-//! of them. Which means:
-//!
-//! > **Compaction needs a retention floor precisely because a block cannot hold two
-//! > versions of one key.** Without a floor there is nothing that licenses dropping
-//! > a version, so a compactor with no floor can only merge blocks whose key sets
-//! > are disjoint, which is the case that needed compacting least.
-//!
-//! That is not a limitation invented here; it falls out of the canonical-block rule
-//! chosen in the first slice, and it is why `compact` takes a floor rather than
-//! offering a floorless convenience that would quietly be useless.
+//! PART.** A block requires strictly ascending UNIQUE
+//! `(src, relation, dst, eid)` keys. Parallel EIds are therefore freely packable,
+//! but two cross-block statements of the SAME edge version cannot share a block
+//! until last-block-wins supersede has selected the canonical statement. That
+//! consolidation is separate from retention: only the supplied floor licenses
+//! dropping an interval entirely.
 //!
 //! **THE FLOOR IS "NO READER CAN ASK BELOW THIS".** Every version whose life ended
 //! at or before the floor is unobservable and may go. A version still live at the
@@ -32,8 +25,12 @@
 //! policy. `compact` takes the floor as an argument and refuses to guess.
 
 use crate::AdjacencyEntry;
-use fgdb_types::CommitSeq;
+use fgdb_delta_types::RelationId;
+use fgdb_types::{CommitSeq, EId, VId};
 use std::collections::BTreeMap;
+
+type EdgeKey = (VId, RelationId, VId, EId);
+type EdgeVersionKey = (EdgeKey, u64);
 
 /// The result of compacting a partition's blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,10 +62,10 @@ pub struct Compaction {
 /// Returns blocks that answer IDENTICALLY to the input for every sequence at or
 /// above `floor`, using as few blocks as the format allows.
 ///
-/// Blocks are consumed in order and later versions of a key supersede earlier ones
-/// exactly as [`crate::root::merge_neighbours`] does — compaction must not invent a
-/// second precedence rule, or a compacted partition could answer differently from
-/// the one it replaced.
+/// Blocks are consumed in order and later statements of one edge version supersede
+/// earlier ones exactly as [`crate::root::merge_neighbours`] does — compaction must
+/// not invent a second precedence rule, or a compacted partition could answer
+/// differently from the one it replaced.
 pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Compaction {
     compact_with_limit(
         blocks,
@@ -84,23 +81,16 @@ fn compact_with_limit(
 ) -> Compaction {
     // Collapse to surviving VERSIONS first, keyed the same way the merge is:
     // (key, created_at) identifies a version, and the last block wins for one.
-    let mut versions: BTreeMap<
-        (
-            (
-                fgdb_types::VId,
-                fgdb_delta_types::RelationId,
-                fgdb_types::VId,
-            ),
-            u64,
-        ),
-        AdjacencyEntry,
-    > = BTreeMap::new();
+    let mut versions: BTreeMap<EdgeVersionKey, AdjacencyEntry> = BTreeMap::new();
     let mut seen = 0usize;
     for block in blocks {
         for entry in block {
             seen += 1;
             versions.insert(
-                ((entry.src, entry.relation, entry.dst), entry.created_at.0),
+                (
+                    (entry.src, entry.relation, entry.dst, entry.eid),
+                    entry.created_at.0,
+                ),
                 *entry,
             );
         }
@@ -148,6 +138,7 @@ fn pack_retained(retained: Vec<AdjacencyEntry>, max_entries: usize) -> Vec<Vec<A
             retained[group_start].src,
             retained[group_start].relation,
             retained[group_start].dst,
+            retained[group_start].eid,
         );
         let mut group_end = group_start + 1;
         while group_end < retained.len()
@@ -155,6 +146,7 @@ fn pack_retained(retained: Vec<AdjacencyEntry>, max_entries: usize) -> Vec<Vec<A
                 retained[group_end].src,
                 retained[group_end].relation,
                 retained[group_end].dst,
+                retained[group_end].eid,
             ) == key
         {
             group_end += 1;
@@ -183,7 +175,7 @@ fn pack_retained(retained: Vec<AdjacencyEntry>, max_entries: usize) -> Vec<Vec<A
     // Each block's entries must be canonically ordered; the pack above preserves
     // key order within a block because it appends in key order.
     for block in &mut packed {
-        block.sort_by_key(|e| (e.src, e.relation, e.dst));
+        block.sort_by_key(|e| (e.src, e.relation, e.dst, e.eid));
     }
 
     // A root's list is publication order, witnessed by nondecreasing `last_seq`.
@@ -208,7 +200,7 @@ fn pack_retained(retained: Vec<AdjacencyEntry>, max_entries: usize) -> Vec<Vec<A
 mod tests {
     use super::*;
     use fgdb_delta_types::RelationId;
-    use fgdb_types::VId;
+    use fgdb_types::{EId, VId};
     use std::collections::BTreeSet;
 
     fn entry(dst: u128) -> AdjacencyEntry {
@@ -220,6 +212,7 @@ mod tests {
             src: VId(1),
             relation: RelationId(1),
             dst: VId(dst),
+            eid: EId(dst),
             created_at: CommitSeq(created),
             retired_at: retired.map(CommitSeq),
         }
@@ -235,7 +228,7 @@ mod tests {
             );
             let keys = block
                 .iter()
-                .map(|entry| (entry.src, entry.relation, entry.dst))
+                .map(|entry| (entry.src, entry.relation, entry.dst, entry.eid))
                 .collect::<BTreeSet<_>>();
             assert_eq!(
                 keys.len(),

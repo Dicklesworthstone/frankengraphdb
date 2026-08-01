@@ -21,7 +21,7 @@ use fgdb_strata::root::{
 };
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CommitSeq, GraphId};
+use fgdb_types::{BranchId, CommitSeq, EId, GraphId};
 use std::cell::Cell;
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -34,10 +34,21 @@ fn namespace() -> DatabaseSecurityNamespaceId {
 }
 
 fn entry(src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
+    edge(
+        src.wrapping_mul(1_000_000).wrapping_add(dst),
+        src,
+        dst,
+        created,
+        retired,
+    )
+}
+
+fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     AdjacencyEntry {
         src: fgdb_types::VId(src),
         relation: REL,
         dst: fgdb_types::VId(dst),
+        eid: EId(eid),
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
     }
@@ -569,7 +580,10 @@ fn a_later_block_retires_an_earlier_blocks_edge() {
 /// order, so the newest state for a key wins whatever its interval says.
 #[test]
 fn a_re_creation_after_retirement_is_visible_again() {
-    let blocks = vec![vec![entry(1, 2, 1, Some(3))], vec![entry(1, 2, 7, None)]];
+    let blocks = vec![
+        vec![edge(10, 1, 2, 1, Some(3))],
+        vec![edge(20, 1, 2, 7, None)],
+    ];
     for (as_of, expected) in [
         (1u64, vec![fgdb_types::VId(2)]),
         (3, Vec::new()),
@@ -585,18 +599,16 @@ fn a_re_creation_after_retirement_is_visible_again() {
     }
 }
 
-/// SUPERSEDE IS PER VERSION: entries for the SAME version supersede by block
-/// order, and entries for DIFFERENT versions of one key both survive.
+/// SUPERSEDE IS PER EID VERSION: entries for the SAME stable edge version
+/// supersede by block order, and distinct EIds at one topology both survive.
 ///
 /// The distinction is the whole model, and getting it wrong loses history. A
-/// merge keyed on `dst` alone passes every retirement law in this file and is
-/// wrong: once a key is retired and re-created, the newer version replaces the
-/// older outright, so a read AS OF a sequence when the older one was live returns
-/// nothing. That is MVCC time-travel silently dropped, and it is exactly what the
-/// first implementation here did until `a_re_creation_after_retirement_is_visible_again`
-/// caught it.
+/// merge keyed on `dst` alone is wrong: it collapses distinct parallel EIds and a
+/// later tombstone for one can erase the other. Keying by stable edge version
+/// preserves both the old interval and the fresh EId that later occupies the same
+/// topology.
 #[test]
-fn supersede_is_per_version_not_per_key() {
+fn supersede_is_per_eid_version_not_destination() {
     // SAME version (both created at 1): the later block's retirement wins.
     let same = vec![vec![entry(1, 2, 1, None)], vec![entry(1, 2, 1, Some(4))]];
     assert_eq!(
@@ -607,7 +619,10 @@ fn supersede_is_per_version_not_per_key() {
     );
 
     // DIFFERENT versions: both survive, and each answers for its own interval.
-    let different = vec![vec![entry(1, 2, 1, Some(3))], vec![entry(1, 2, 7, None)]];
+    let different = vec![
+        vec![edge(10, 1, 2, 1, Some(3))],
+        vec![edge(20, 1, 2, 7, None)],
+    ];
     assert_eq!(
         fgdb_strata::root::merge_neighbours(&different, fgdb_types::VId(1), REL, CommitSeq(2))
             .expect("merges"),
@@ -622,19 +637,22 @@ fn supersede_is_per_version_not_per_key() {
     );
 }
 
-/// TWO LIVE VERSIONS OF ONE KEY AT ONE SEQUENCE IS REFUSED, not deduplicated.
+/// TWO LIVE VERSIONS OF ONE EID AT ONE SEQUENCE IS REFUSED, not deduplicated.
 ///
 /// It means the stream retired a version and created its successor with
 /// overlapping intervals, so the history is not a sequence of states. Collapsing
 /// it would return a plausible answer built on an impossible one — the shape of
 /// wrong that is hardest to notice.
 #[test]
-fn two_live_versions_of_one_key_are_refused() {
-    let overlapping = vec![vec![entry(1, 2, 1, Some(9))], vec![entry(1, 2, 5, None)]];
+fn two_live_versions_of_one_eid_are_refused() {
+    let overlapping = vec![
+        vec![edge(10, 1, 2, 1, Some(9))],
+        vec![edge(10, 1, 2, 5, None)],
+    ];
     assert_eq!(
         fgdb_strata::root::merge_neighbours(&overlapping, fgdb_types::VId(1), REL, CommitSeq(6)),
         Err(fgdb_strata::root::RootError::OverlappingVersions {
-            dst: fgdb_types::VId(2),
+            eid: EId(10),
             as_of: CommitSeq(6),
         })
     );
@@ -643,6 +661,28 @@ fn two_live_versions_of_one_key_are_refused() {
     assert_eq!(
         fgdb_strata::root::merge_neighbours(&overlapping, fgdb_types::VId(1), REL, CommitSeq(2))
             .expect("merges"),
+        vec![fgdb_types::VId(2)]
+    );
+}
+
+/// Parallel EIds are not overlapping versions. Retiring one must leave the
+/// other visible even when creation and tombstone statements cross block cuts.
+#[test]
+fn parallel_edges_survive_cross_block_merge_and_individual_retirement() {
+    let blocks = vec![
+        vec![edge(10, 1, 2, 1, None)],
+        vec![edge(20, 1, 2, 2, None)],
+        vec![edge(10, 1, 2, 1, Some(4))],
+    ];
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&blocks, fgdb_types::VId(1), REL, CommitSeq(3))
+            .expect("parallel edges merge"),
+        vec![fgdb_types::VId(2)],
+        "two live EIds project to one neighbour"
+    );
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&blocks, fgdb_types::VId(1), REL, CommitSeq(4))
+            .expect("one retirement does not hide its peer"),
         vec![fgdb_types::VId(2)]
     );
 }

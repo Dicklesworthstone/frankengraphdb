@@ -9,7 +9,7 @@
 //! imply that the warmer tiers or adaptive migration controller exist yet.
 //!
 //! **WHY DURABLE BLOCKS AND NOT A MAP, WHICH IS THE INTERESTING PART.** The obvious
-//! first slice was a `BTreeMap<(VId, RelationId, VId), _>` with the tier's
+//! first slice was a `BTreeMap<(VId, RelationId, VId, EId), _>` with the tier's
 //! visibility semantics on top. It would be smaller, it would pass a differential
 //! against the reference oracle, and it would be the exact thing doctrine 7
 //! prohibits: "no `HashMap<VId, Vec<EId>>` presented as storage", and "early code
@@ -28,7 +28,7 @@
 //! without weakening the proof that every authenticated root range is truthful.
 //!
 //! **CANONICAL MEANS EXACTLY ONE BYTE STRING PER VALUE** (doctrine 4). Entries are
-//! strictly ascending by `(src, relation, dst)` and the ENCODER refuses input that
+//! strictly ascending by `(src, relation, dst, eid)` and the ENCODER refuses input that
 //! is not, rather than sorting it: a caller handing over a different order is
 //! describing a different intent, and quietly repairing it would let two callers
 //! disagree about what they stored while both succeed. The DECODER independently
@@ -44,18 +44,18 @@ pub mod writer;
 
 use fgdb_delta_types::RelationId;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CommitSeq, VId};
+use fgdb_types::{CommitSeq, EId, VId};
 
 /// `FGSB` — FrankenGraph Strata Block.
 pub const BLOCK_MAGIC: [u8; 4] = *b"FGSB";
 /// Format version. Durable formats are versioned from day one (§16.6):
 /// additive-minor, breaking-major.
-pub const BLOCK_FORMAT_V1: u16 = 1;
+pub const BLOCK_FORMAT_V2: u16 = 2;
 
 /// Header: magic + format + entry count.
 const HEADER_LEN: usize = 4 + 2 + 4;
-/// src(16) + relation(8) + dst(16) + created(8) + retired(8)
-const ENTRY_LEN: usize = 16 + 8 + 16 + 8 + 8;
+/// src(16) + relation(8) + dst(16) + eid(16) + created(8) + retired(8)
+const ENTRY_LEN: usize = 16 + 8 + 16 + 16 + 8 + 8;
 
 /// One versioned adjacency entry: an edge slot and the interval it is visible in.
 ///
@@ -68,6 +68,8 @@ pub struct AdjacencyEntry {
     pub src: VId,
     pub relation: RelationId,
     pub dst: VId,
+    /// The unconditional discriminator between parallel edges (§4.1).
+    pub eid: EId,
     pub created_at: CommitSeq,
     /// The sequence that retired this entry, or `None` while it is live.
     pub retired_at: Option<CommitSeq>,
@@ -77,8 +79,8 @@ impl AdjacencyEntry {
     /// The sort key. Ordering is by identity alone — NOT by sequence — because a
     /// block is an adjacency index first: a scan for one `(src, relation)` must be
     /// able to find its entries contiguously, whatever order they were created in.
-    fn key(&self) -> (VId, RelationId, VId) {
-        (self.src, self.relation, self.dst)
+    fn key(&self) -> (VId, RelationId, VId, EId) {
+        (self.src, self.relation, self.dst, self.eid)
     }
 
     /// Is this entry visible to a reader at `as_of`?
@@ -106,7 +108,7 @@ pub enum BlockError {
     /// trailing region is either a second block someone concatenated or damage,
     /// and both are wrong to read past.
     TrailingBytes { extra: usize },
-    /// Entries are not strictly ascending by `(src, relation, dst)`.
+    /// Entries are not strictly ascending by `(src, relation, dst, eid)`.
     ///
     /// Carries the position so a diagnostic can name the pair, since "this block
     /// is unsorted" is not actionable on a block with thousands of entries.
@@ -205,12 +207,13 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
 
     let mut out = Vec::with_capacity(HEADER_LEN + entries.len() * ENTRY_LEN);
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V1.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V2.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     for entry in entries {
         out.extend_from_slice(&entry.src.0.to_be_bytes());
         out.extend_from_slice(&entry.relation.0.to_be_bytes());
         out.extend_from_slice(&entry.dst.0.to_be_bytes());
+        out.extend_from_slice(&entry.eid.0.to_be_bytes());
         out.extend_from_slice(&entry.created_at.0.to_be_bytes());
         // Zero encodes "live". Unambiguous because sequence zero is the empty
         // stream and can never retire anything — the same fact `CreatedAtZero`
@@ -243,7 +246,7 @@ fn read_header(bytes: &[u8]) -> Result<u32, BlockError> {
         return Err(BlockError::NotABlock);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != BLOCK_FORMAT_V1 {
+    if format != BLOCK_FORMAT_V2 {
         return Err(BlockError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
@@ -277,16 +280,17 @@ fn read_entry(bytes: &[u8], index: usize) -> AdjacencyEntry {
         buf.copy_from_slice(&bytes[at + off..at + off + 8]);
         u64::from_be_bytes(buf)
     };
-    // Offsets: src 0..16, relation 16..24, dst 24..40, created 40..48,
-    // retired 48..56. Written out because the first version of this function had
+    // Offsets: src 0..16, relation 16..24, dst 24..40, eid 40..56,
+    // created 56..64, retired 64..72. Written out because the first version of this function had
     // created_at at 32 — it treated `dst` as eight bytes rather than sixteen, and
     // the round-trip law caught it on the first run.
-    let retired = u64_at(48);
+    let retired = u64_at(64);
     AdjacencyEntry {
         src: VId(u128_at(0)),
         relation: RelationId(u64_at(16)),
         dst: VId(u128_at(24)),
-        created_at: CommitSeq(u64_at(40)),
+        eid: EId(u128_at(40)),
+        created_at: CommitSeq(u64_at(56)),
         retired_at: (retired != 0).then_some(CommitSeq(retired)),
     }
 }
@@ -320,7 +324,7 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<AdjacencyEntry>, BlockError> {
 /// only the destinations it returns, rather than decoding the block and filtering
 /// — which is the whole point of having a format: a scan for one adjacency must
 /// not cost the whole block. The layout supports it because entries are sorted by
-/// `(src, relation, dst)`, so one adjacency's entries are contiguous.
+/// `(src, relation, dst, eid)`, so one adjacency's entries are contiguous.
 ///
 /// Still validates every entry it reads. A scan is a read path, and a read path
 /// that skipped the checks would be a second, weaker decoder — exactly the
@@ -333,7 +337,7 @@ pub fn scan_neighbours(
 ) -> Result<Vec<VId>, BlockError> {
     let count = read_header(bytes)? as usize;
     let mut out = Vec::new();
-    let mut previous: Option<(VId, RelationId, VId)> = None;
+    let mut previous: Option<(VId, RelationId, VId, EId)> = None;
     for index in 0..count {
         let entry = read_entry(bytes, index);
         validate_entry(index, &entry)?;
@@ -345,7 +349,11 @@ pub fn scan_neighbours(
         previous = Some(entry.key());
 
         if entry.src == src && entry.relation == relation && entry.visible_at(as_of) {
-            out.push(entry.dst);
+            // Neighbour semantics are set-valued: parallel EIds prove distinct
+            // edges without repeating their common destination in the answer.
+            if out.last() != Some(&entry.dst) {
+                out.push(entry.dst);
+            }
         }
     }
     Ok(out)

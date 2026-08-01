@@ -68,13 +68,13 @@ enum Step {
 /// **THE STRATA SIDE IS THE REAL WRITER**, not a fixture that mimics it. An
 /// earlier version of this file hand-built `AdjacencyEntry`s, which meant the
 /// differential was checking my understanding of what the writer should do rather
-/// than what it does — and it silently deduplicated a key's second version, hiding
-/// the forced-seal constraint entirely. Driving `BlockWriter` means the agreement
+/// than what it does — and it silently deduplicated a parallel edge whose topology
+/// matched another EId. Driving `BlockWriter` means the agreement
 /// is evidence about the code that will actually run.
 ///
 /// `seal_after` names the step indices where the caller cuts a block. The writer
-/// may seal MORE often than that — a key's second version forces one — and that is
-/// the point: the oracle has no notion of blocks, so no cut may be observable.
+/// may also seal at its hard entry ceiling. The oracle has no notion of blocks, so
+/// no legal cut may be observable.
 fn build(
     history: &[(u64, Step)],
     seal_after: &[usize],
@@ -220,6 +220,83 @@ fn a_split_history_agrees_with_the_oracle() {
     let (graph, blocks) = build(&history, &[3]);
     assert!(blocks.len() >= 2, "the fixture must actually split");
     assert_agrees(&graph, &blocks, &[1, 2, 3], 4);
+}
+
+/// Trigger A from fgdb-0trr: two live parallel EIds with equal topology may sit
+/// in different blocks. They are distinct edges, not overlapping versions, while
+/// the neighbour result remains the destination set.
+#[test]
+fn parallel_edges_across_blocks_agree_with_the_oracle() {
+    let history = [
+        (1u64, Step::CreateVertex(1)),
+        (1, Step::CreateVertex(2)),
+        (
+            2,
+            Step::AddEdge {
+                eid: 10,
+                src: 1,
+                dst: 2,
+            },
+        ),
+        (
+            3,
+            Step::AddEdge {
+                eid: 20,
+                src: 1,
+                dst: 2,
+            },
+        ),
+    ];
+    let (graph, blocks) = build(&history, &[2]);
+    assert!(
+        blocks.len() >= 2,
+        "the parallel EIds must cross a block cut"
+    );
+    assert_eq!(graph.neighbours(VId(1), REL), vec![VId(2)]);
+    assert_eq!(
+        merge_neighbours(&blocks, VId(1), REL, CommitSeq(3)).expect("merges"),
+        vec![VId(2)]
+    );
+    assert_agrees(&graph, &blocks, &[1, 2], 3);
+}
+
+/// Trigger B from fgdb-0trr: retiring one of two parallel EIds must not tombstone
+/// their shared topology key and erase the still-live peer. Prove both the
+/// same-block fold and the cross-block tombstone path.
+#[test]
+fn retiring_one_parallel_edge_keeps_its_peer_visible() {
+    let history = [
+        (1u64, Step::CreateVertex(1)),
+        (1, Step::CreateVertex(2)),
+        (
+            2,
+            Step::AddEdge {
+                eid: 10,
+                src: 1,
+                dst: 2,
+            },
+        ),
+        (
+            2,
+            Step::AddEdge {
+                eid: 20,
+                src: 1,
+                dst: 2,
+            },
+        ),
+        (4, Step::DeleteEdge(10)),
+    ];
+
+    for cuts in [&[][..], &[3][..]] {
+        let (graph, blocks) = build(&history, cuts);
+        assert_eq!(graph.neighbours(VId(1), REL), vec![VId(2)]);
+        assert_eq!(
+            merge_neighbours(&blocks, VId(1), REL, CommitSeq(4)).expect("merges"),
+            vec![VId(2)],
+            "cut set {cuts:?} erased the surviving EId"
+        );
+        assert_agrees(&graph, &blocks, &[1, 2], 4);
+    }
 }
 
 /// A CROSS-BLOCK RETIREMENT: the edge is created in one block and deleted in a

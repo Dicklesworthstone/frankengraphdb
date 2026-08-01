@@ -125,18 +125,18 @@ fn a_retirement_after_a_seal_publishes_an_encodable_root() {
     );
 }
 
-/// Retirement and re-creation in ONE COMMIT can force two block boundaries with
-/// equal upper frontiers. Equality is legal, and the version intervals still pick
-/// exactly one live edge at the boundary.
+/// Retirement and a fresh EId at the same destination in ONE COMMIT remain
+/// rootable. The old EId and its successor are distinct canonical block keys, so
+/// the tombstone and new edge can share one block without losing either meaning.
 #[test]
-fn retirement_and_recreation_at_one_sequence_remain_rootable() {
+fn retirement_and_a_fresh_identity_at_one_sequence_remain_rootable() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
     w.seal(keys()).expect("seals the creation");
     w.apply(keys(), CommitSeq(6), &delete(10)).expect("retires");
     w.apply(keys(), CommitSeq(6), &create(11, 1, 2))
-        .expect("re-creates at the same sequence");
+        .expect("creates a fresh identity at the same sequence");
 
     let (root, blocks) = w.publish(keys(), CommitSeq(6)).expect("publishes");
     assert_eq!(
@@ -144,11 +144,7 @@ fn retirement_and_recreation_at_one_sequence_remain_rootable() {
             .iter()
             .map(|block| (block.first_seq, block.last_seq))
             .collect::<Vec<_>>(),
-        vec![
-            (CommitSeq(1), CommitSeq(1)),
-            (CommitSeq(1), CommitSeq(6)),
-            (CommitSeq(6), CommitSeq(6)),
-        ]
+        vec![(CommitSeq(1), CommitSeq(1)), (CommitSeq(1), CommitSeq(6)),]
     );
     fgdb_strata::root::encode_root(&root).expect("equal publication frontiers are lawful");
 
@@ -169,35 +165,39 @@ fn retirement_and_recreation_at_one_sequence_remain_rootable() {
     );
 }
 
-/// A KEY'S SECOND VERSION FORCES A SEAL, without the caller asking.
+/// PARALLEL EIDS SHARE A BLOCK without collapsing one another.
 ///
-/// A block requires strictly ascending unique keys, so a re-creation cannot share
-/// the pending run. The writer seals early rather than building a block the encoder
-/// would refuse — the constraint the differential discovered in slice 4, honoured
-/// here.
+/// `(src, relation, dst)` is not an edge identity. EId is the unconditional
+/// discriminator, so two live edges at one destination are two lawful canonical
+/// keys and do not force a seal merely because their topology is equal.
 #[test]
-fn a_re_creation_forces_a_seal() {
+fn fresh_parallel_identities_share_one_pending_block() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
-    w.apply(keys(), CommitSeq(3), &delete(10)).expect("deletes");
-    assert_eq!(w.sealed().len(), 0, "nothing sealed yet");
-
-    w.apply(keys(), CommitSeq(5), &create(11, 1, 2))
-        .expect("re-creates");
+    w.apply(keys(), CommitSeq(3), &create(11, 1, 2))
+        .expect("creates a parallel edge");
     assert_eq!(
         w.sealed().len(),
-        1,
-        "the second version of (1,REL,2) must have forced a seal"
+        0,
+        "equal topology with distinct EIds must not force a seal"
     );
-    assert_eq!(w.pending_len(), 1, "and the new version is pending");
+    assert_eq!(
+        w.pending_len(),
+        2,
+        "both stable edge identities are pending"
+    );
 
     let (root, blocks) = w.publish(keys(), CommitSeq(9)).expect("publishes");
-    assert_eq!(blocks.len(), 2);
-    assert_eq!(root.blocks.len(), 2);
-    // Publication frontiers ascend; lower visibility bounds may overlap in other
-    // histories because a tombstone repeats an old creation sequence.
-    assert!(root.blocks[0].last_seq.0 <= root.blocks[1].last_seq.0);
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(root.blocks.len(), 1);
+    let decoded = decode_block(&blocks[0].bytes).expect("decodes");
+    assert_eq!(decoded.len(), 2, "neither parallel EId was collapsed");
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&[decoded], VId(1), REL, CommitSeq(9)).expect("merges"),
+        vec![VId(2)],
+        "neighbour projection remains set-valued"
+    );
 }
 
 /// A DELETE THE WRITER CANNOT RESOLVE IS REFUSED.
@@ -499,12 +499,12 @@ fn a_published_root_resolves_against_the_writers_own_blocks() {
     assert_eq!(resolved.len(), 2);
 }
 
-/// fgdb-3usp — a re-create of a LIVE edge is refused, never overwritten:
+/// fgdb-3usp / fgdb-s50d — a re-create of a LIVE edge is refused, never overwritten:
 /// overwriting the live map would strand the first version, retired by
-/// nothing, answering every future snapshot. Only a retirement re-admits
-/// the identity, and that is exactly what "a new version" means.
+/// nothing, answering every future snapshot. Retirement makes the edge absent,
+/// but its allocator slot remains permanently spent; only a fresh EId is legal.
 #[test]
-fn a_double_create_is_refused_and_only_a_retire_re_admits_the_eid() {
+fn a_double_create_is_refused_and_retirement_does_not_re_admit_the_eid() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
@@ -518,18 +518,22 @@ fn a_double_create_is_refused_and_only_a_retire_re_admits_the_eid() {
     w.apply(keys(), CommitSeq(3), &create(11, 1, 4))
         .expect("the fold continues undamaged");
 
-    // After a retirement the identity is re-admissible — THAT is a version.
+    // After a retirement the identity is absent but permanently spent.
     w.apply(keys(), CommitSeq(4), &delete(10)).expect("retires");
-    w.apply(keys(), CommitSeq(5), &create(10, 1, 3))
-        .expect("re-create after retire is a new version");
+    assert_eq!(
+        w.apply(keys(), CommitSeq(5), &create(10, 1, 3)),
+        Err(WriteError::EdgeIdentitySpent { eid: EId(10) })
+    );
+    w.apply(keys(), CommitSeq(5), &create(12, 1, 3))
+        .expect("a fresh EId remains admissible");
     let sealed = w.seal(keys()).expect("seals").expect("a block");
     let entries = decode_block(&sealed.bytes).expect("decodes");
     let live: Vec<_> = entries.iter().filter(|e| e.retired_at.is_none()).collect();
     assert_eq!(live.len(), 2);
     assert!(
         live.iter()
-            .any(|e| e.dst == VId(3) && e.created_at == CommitSeq(5)),
-        "the re-created version answers"
+            .any(|e| e.eid == EId(12) && e.dst == VId(3) && e.created_at == CommitSeq(5)),
+        "the fresh parallel identity answers"
     );
     assert!(
         !live.iter().any(|e| e.dst == VId(2)),
@@ -549,10 +553,15 @@ fn a_same_commit_create_and_delete_folds_to_no_entry() {
         .expect("the same-commit delete folds");
     assert_eq!(w.pending_len(), 0, "nothing remains of the folded edge");
 
-    // A re-create in the same commit is its own version, untouched by the fold.
-    w.apply(keys(), CommitSeq(5), &create(10, 1, 2))
-        .expect("re-create in the same commit");
-    w.apply(keys(), CommitSeq(6), &create(11, 2, 3))
+    // The allocator slot stays spent even though the zero-length interval left
+    // no block entry. A fresh identity at the same topology remains legal.
+    assert_eq!(
+        w.apply(keys(), CommitSeq(5), &create(10, 1, 2)),
+        Err(WriteError::EdgeIdentitySpent { eid: EId(10) })
+    );
+    w.apply(keys(), CommitSeq(5), &create(11, 1, 2))
+        .expect("fresh identity in the same commit");
+    w.apply(keys(), CommitSeq(6), &create(12, 2, 3))
         .expect("creates");
     let sealed = w.seal(keys()).expect("seals").expect("a block");
     let entries = decode_block(&sealed.bytes).expect("decodes");
@@ -565,7 +574,7 @@ fn a_same_commit_create_and_delete_folds_to_no_entry() {
         entries
             .iter()
             .any(|e| e.dst == VId(2) && e.created_at == CommitSeq(5)),
-        "the re-created edge survives as its own version"
+        "the fresh edge survives under its own identity"
     );
 }
 

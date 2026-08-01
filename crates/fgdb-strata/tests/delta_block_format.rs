@@ -2,7 +2,7 @@
 //!
 //! These are the laws a BYTE LAYOUT can fail and an in-memory map cannot, which is
 //! why the format is the honest first slice of Strata rather than a
-//! `BTreeMap<(VId, RelationId, VId), _>` with the right answers on top. A map has
+//! `BTreeMap<(VId, RelationId, VId, EId), _>` with the right answers on top. A map has
 //! no durable form; nothing about it can be non-canonical, truncated, or decode to
 //! something other than what was encoded. Doctrine 7 names that substitution
 //! directly — "no `HashMap<VId, Vec<EId>>` presented as storage" — and these tests
@@ -18,20 +18,31 @@
 
 use fgdb_delta_types::RelationId;
 use fgdb_strata::{
-    AdjacencyEntry, BLOCK_FORMAT_V1, BLOCK_MAGIC, BlockError, MAX_BLOCK_ENTRIES, block_id,
+    AdjacencyEntry, BLOCK_FORMAT_V2, BLOCK_MAGIC, BlockError, MAX_BLOCK_ENTRIES, block_id,
     decode_block, encode_block, read_block, scan_neighbours,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CommitSeq, VId};
+use fgdb_types::{CommitSeq, EId, VId};
 
 const REL: RelationId = RelationId(1);
 const OTHER_REL: RelationId = RelationId(2);
 
 fn entry(src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
+    edge(
+        src.wrapping_mul(1_000_000).wrapping_add(dst),
+        src,
+        dst,
+        created,
+        retired,
+    )
+}
+
+fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     AdjacencyEntry {
         src: VId(src),
         relation: REL,
         dst: VId(dst),
+        eid: EId(eid),
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
     }
@@ -92,15 +103,33 @@ fn the_encoder_refuses_unsorted_entries() {
 
 /// The encoder refuses DUPLICATE keys — strictly ascending, not merely ascending.
 ///
-/// Two entries for one `(src, relation, dst)` are two versions of one slot, and a
-/// block cannot say which is current: that is a merge, and merging belongs to the
-/// tier machinery that does not exist yet.
+/// Two entries for one `(src, relation, dst, eid)` are two statements of one
+/// stable edge slot, and a block cannot say which supersedes the other.
 #[test]
 fn the_encoder_refuses_duplicate_keys() {
     let entries = vec![entry(1, 2, 1, None), entry(1, 2, 3, None)];
     assert_eq!(
         encode_block(&entries),
         Err(BlockError::NonCanonicalOrder { at: 1 })
+    );
+}
+
+/// EId is the unconditional discriminator: parallel edges with equal topology
+/// are distinct durable entries, while neighbour projection remains set-valued.
+#[test]
+fn parallel_edge_identities_round_trip_without_repeating_the_destination() {
+    let entries = vec![edge(10, 1, 2, 1, Some(4)), edge(20, 1, 2, 2, None)];
+    let bytes = encode_block(&entries).expect("parallel EIds are canonical keys");
+    assert_eq!(decode_block(&bytes).expect("decodes"), entries);
+    assert_eq!(
+        scan_neighbours(&bytes, VId(1), REL, CommitSeq(3)).expect("scans"),
+        vec![VId(2)],
+        "two live parallel edges still yield one neighbour"
+    );
+    assert_eq!(
+        scan_neighbours(&bytes, VId(1), REL, CommitSeq(4)).expect("scans"),
+        vec![VId(2)],
+        "retiring one EId must not hide its live parallel peer"
     );
 }
 
@@ -130,12 +159,13 @@ fn the_decoder_refuses_an_out_of_order_block() {
 fn encode_forged(entries: &[AdjacencyEntry]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V1.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V2.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     for e in entries {
         out.extend_from_slice(&e.src.0.to_be_bytes());
         out.extend_from_slice(&e.relation.0.to_be_bytes());
         out.extend_from_slice(&e.dst.0.to_be_bytes());
+        out.extend_from_slice(&e.eid.0.to_be_bytes());
         out.extend_from_slice(&e.created_at.0.to_be_bytes());
         out.extend_from_slice(&e.retired_at.map_or(0, |r| r.0).to_be_bytes());
     }
@@ -163,6 +193,14 @@ fn foreign_bytes_and_future_versions_are_refused_distinctly() {
     assert_eq!(
         decode_block(&future),
         Err(BlockError::UnsupportedFormat { format: 9 })
+    );
+
+    let mut legacy = encode_block(&sample()).expect("encodes");
+    legacy[4..6].copy_from_slice(&1u16.to_be_bytes());
+    assert_eq!(
+        decode_block(&legacy),
+        Err(BlockError::UnsupportedFormat { format: 1 }),
+        "V1 omitted EId and cannot represent the V2 value"
     );
 }
 
@@ -305,6 +343,7 @@ fn a_scan_is_scoped_to_its_source_and_relation() {
             src: VId(1),
             relation: OTHER_REL,
             dst: VId(9),
+            eid: EId(9),
             created_at: CommitSeq(1),
             retired_at: None,
         },

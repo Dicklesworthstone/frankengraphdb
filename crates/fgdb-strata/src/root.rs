@@ -150,14 +150,14 @@ pub enum RootError {
         declared: (CommitSeq, CommitSeq),
         actual: (CommitSeq, CommitSeq),
     },
-    /// Two versions of one key are live at the same sequence.
+    /// Two versions of one stable EId are live at the same sequence.
     ///
     /// A merge cannot answer this: the history claims a key was in two states at
     /// once, so it is not a sequence of states at all. Refused rather than
     /// deduplicated — collapsing it would return a plausible answer built on an
     /// impossible one, which is the shape of wrong that is hardest to notice.
     OverlappingVersions {
-        dst: fgdb_types::VId,
+        eid: fgdb_types::EId,
         as_of: CommitSeq,
     },
     /// Reading one of the named blocks failed.
@@ -219,9 +219,9 @@ impl core::fmt::Display for RootError {
                 f,
                 "block {at} spans {actual:?} but the root declares {declared:?}"
             ),
-            Self::OverlappingVersions { dst, as_of } => write!(
+            Self::OverlappingVersions { eid, as_of } => write!(
                 f,
-                "two versions of {dst:?} are live at {as_of:?}; the history is not a \
+                "two versions of {eid:?} are live at {as_of:?}; the history is not a \
                  sequence of states"
             ),
             Self::Block { at, error } => write!(f, "block {at}: {error}"),
@@ -480,7 +480,7 @@ pub fn span_of(entries: &[crate::AdjacencyEntry]) -> Option<(CommitSeq, CommitSe
 /// **THE CROSS-BLOCK MODEL IS TOMBSTONE SUPERSEDE, and this is where that choice
 /// is made.** A block is immutable, so retiring an entry created in an EARLIER
 /// block cannot edit that block: the later block carries an entry for the same
-/// `(src, relation, dst)` key whose interval states the retirement, and it
+/// `(src, relation, dst, eid)` key whose interval states the retirement, and it
 /// SUPERSEDES the earlier one. The alternative — every block carrying whole
 /// version chains for the keys it touches — was rejected because it makes a write
 /// read-modify-write: the writer would have to fetch each key's prior versions
@@ -488,16 +488,14 @@ pub fn span_of(entries: &[crate::AdjacencyEntry]) -> Option<(CommitSeq, CommitSe
 /// exists to avoid. Tombstone supersede keeps writes append-only and moves the
 /// work to the read, which is what an LSM trades.
 ///
-/// **SUPERSEDE IS PER VERSION, NOT PER KEY, and getting that wrong loses history.**
-/// The first implementation keyed the merge on `dst` alone and let the last block
-/// win outright. It passes every retirement law and is WRONG: once a key is
-/// retired and re-created, the newer version replaces the older one entirely, so a
-/// read AS OF a sequence when the older version was live returns nothing. MVCC
-/// time-travel is the whole of B1, and a storage tier that cannot answer an old
-/// snapshot has silently dropped it. The merge is therefore keyed on
-/// `(dst, created_at)` — a VERSION — and selection among versions is by interval
-/// containment. Only entries describing the same version supersede, which is
-/// exactly the cross-block retirement case.
+/// **SUPERSEDE IS PER STABLE EDGE VERSION, NOT PER DESTINATION.** The first
+/// implementation keyed the merge on `dst` alone and let the last block win. That
+/// silently collapsed parallel EIds, so retiring one edge could erase its live
+/// peer. The merge is keyed on `(eid, created_at)`: distinct EIds survive whatever
+/// topology they share, while a later tombstone for the same version supersedes
+/// its earlier live statement. Keeping `created_at` explicit also makes two
+/// overlapping births of one illegally recycled EId detectable rather than
+/// converting corruption into a plausible neighbour result.
 ///
 /// Among entries for one version, the LATER BLOCK wins, because the root is an
 /// ordered publication history whose upper sequence frontier never regresses.
@@ -517,36 +515,36 @@ pub fn merge_neighbours(
     relation: fgdb_delta_types::RelationId,
     as_of: CommitSeq,
 ) -> Result<Vec<fgdb_types::VId>, RootError> {
-    // Keyed by (dst, created_at) — the VERSION, not the key. Two entries for one
-    // dst with different creations are two different versions and must BOTH
-    // survive the merge; only entries describing the same version supersede.
-    let mut versions: std::collections::BTreeMap<(fgdb_types::VId, u64), crate::AdjacencyEntry> =
+    // Keyed by (eid, created_at) — the VERSION, not merely the destination.
+    // Parallel EIds are distinct edges and must BOTH survive the merge; only
+    // entries describing the same stable edge version supersede.
+    let mut versions: std::collections::BTreeMap<(fgdb_types::EId, u64), crate::AdjacencyEntry> =
         std::collections::BTreeMap::new();
     for block in blocks {
         for entry in block {
             if entry.src != src || entry.relation != relation {
                 continue;
             }
-            versions.insert((entry.dst, entry.created_at.0), *entry);
+            versions.insert((entry.eid, entry.created_at.0), *entry);
         }
     }
 
-    let mut out: Vec<fgdb_types::VId> = Vec::new();
+    let mut destinations = std::collections::BTreeSet::<fgdb_types::VId>::new();
+    let mut previous_live_eid = None;
     for entry in versions.values().filter(|e| e.visible_at(as_of)) {
-        // TWO LIVE VERSIONS OF ONE KEY AT ONE SEQUENCE IS A CORRUPT MERGE, not a
-        // duplicate to quietly collapse. It means the stream retired a version
-        // and created its successor with overlapping intervals, so the history is
-        // not a sequence of states — and a reader that deduplicated would return a
-        // plausible answer built on an impossible one.
-        if out.last() == Some(&entry.dst) {
+        // TWO LIVE VERSIONS OF ONE EID AT ONE SEQUENCE IS A CORRUPT MERGE, not a
+        // duplicate to quietly collapse. Distinct EIds at one destination are
+        // legal parallel edges; one EId with overlapping births is not.
+        if previous_live_eid == Some(entry.eid) {
             return Err(RootError::OverlappingVersions {
-                dst: entry.dst,
+                eid: entry.eid,
                 as_of,
             });
         }
-        out.push(entry.dst);
+        previous_live_eid = Some(entry.eid);
+        destinations.insert(entry.dst);
     }
-    Ok(out)
+    Ok(destinations.into_iter().collect())
 }
 
 /// Which of a root's blocks can contribute to a read at `as_of`.
