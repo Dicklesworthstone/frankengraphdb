@@ -55,6 +55,20 @@
 //!   refinement_tag_only_payload_unaccounted  a tag-only discriminant refines
 //!                           a payload-bearing arm without accounting for the
 //!                           payload in its claim
+//!   role_projection_claim_unparseable  concrete role projection metadata is
+//!                           outside its closed machine-readable grammar
+//!   role_projection_source_unapproved  role projection names no released
+//!                           generic-source contract
+//!   role_projection_contract_mismatch  formal, role class, wire shape, or
+//!                           serialized-role policy disagrees with its source
+//!   role_projection_role_out_of_bound  concrete role is not in the source's
+//!                           exact closed role set
+//!   role_projection_role_missing / role_projection_role_duplicate  source
+//!                           role expansion is not a bijection
+//!   role_projection_branch_mismatch  concrete wire row, containing-schema
+//!                           closure, validators, or guards drifted
+//!   role_projection_refinement_syntax_forbidden  role dispatch was encoded
+//!                           through singleton/conjunction refinement prose
 //!   arm_value_claim_missing  a payload-preserving arm value carries no
 //!                           refinement claim at all
 //!   arm_value_conjunction_invalid  an arm value claims a two-location
@@ -165,6 +179,18 @@ pub const REFINEMENT_CLAIM_MARKER: &str = "admits only the ";
 /// Boolean-expression language inside registry prose.
 pub const REFINEMENT_CONJUNCTION_MARKER: &str = "admits only when both the ";
 
+/// Marker for a concrete, role-erased projection of one generic source
+/// contract (fgdb-ap4t).
+///
+/// This is deliberately separate from the singleton/conjunction refinement
+/// grammar above.  A generic source can select a DIFFERENT union and arm for
+/// each concrete role; treating those alternatives as a conjunction would
+/// require one encoded value to inhabit every role at once.  Each projection
+/// therefore declares one source role, a structured validator list, and
+/// `role_discriminator=none`.  The released contract below independently pins
+/// the complete role set and every branch.
+pub const ROLE_PROJECTION_CLAIM_MARKER: &str = "role projection [";
+
 /// Why a refinement claim that advertises itself as machine-readable could not
 /// be parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +200,256 @@ enum RefinementClaimParseError {
 }
 
 type RefinementClause<'a> = (&'a str, i64, &'a str);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoleProjectionClaim<'a> {
+    source_key: &'a str,
+    formal: &'a str,
+    formal_class: &'a str,
+    role: &'a str,
+    role_discriminator: &'a str,
+    validators: Vec<RefinementClause<'a>>,
+    guards: Vec<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoleProjectionParseError {
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoleProjectionBranchPin {
+    role: &'static str,
+    wire_type: &'static str,
+    allowed_containing_schemas: &'static [&'static str],
+    validators: &'static [RefinementClause<'static>],
+    guards: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoleProjectionFamilyPin {
+    source_key: &'static str,
+    formal: &'static str,
+    formal_class: &'static str,
+    wire_kind: &'static str,
+    max_size_bytes: i64,
+    branches: &'static [RoleProjectionBranchPin],
+}
+
+const AWAITING_SOURCE_RELEASE_LOCAL_VALIDATORS: [RefinementClause<'static>; 1] =
+    [("AwaitingSourceRelease", 0x0007, "LocalRestorePhase")];
+const AWAITING_SOURCE_RELEASE_META_VALIDATORS: [RefinementClause<'static>; 1] =
+    [("AwaitingSourceRelease", 0x0006, "MetaRestorePhase")];
+const INITIAL_RESTORE_REGISTRY_LOCAL_VALIDATORS: [RefinementClause<'static>; 3] = [
+    ("Nonterminal", 0x0001, "LocalRestoreRegistryValue"),
+    ("ActiveHidden", 0x0001, "LocalRestorePhase"),
+    (
+        "Current",
+        0x0001,
+        "RestoreLeaseState<Role:AuthorityOwningRole>",
+    ),
+];
+const INITIAL_RESTORE_REGISTRY_META_VALIDATORS: [RefinementClause<'static>; 3] = [
+    ("Nonterminal", 0x0001, "MetaRestoreRegistryValue"),
+    ("ActiveHidden", 0x0001, "MetaRestorePhase"),
+    (
+        "Current",
+        0x0001,
+        "RestoreLeaseState<Role:AuthorityOwningRole>",
+    ),
+];
+const INITIAL_RESTORE_REGISTRY_SHARD_VALIDATORS: [RefinementClause<'static>; 1] =
+    [("ActiveHidden", 0x0001, "ShardRestoreRegistryValue")];
+
+const AWAITING_SOURCE_RELEASE_BRANCHES: [RoleProjectionBranchPin; 2] = [
+    RoleProjectionBranchPin {
+        role: "Local",
+        wire_type: "AwaitingSourceReleaseLocalRestorePhase",
+        allowed_containing_schemas: &["RestoreSourceLeaseReleaseSpec<Local>"],
+        validators: &AWAITING_SOURCE_RELEASE_LOCAL_VALIDATORS,
+        guards: &["tag_only_no_arm_payload"],
+    },
+    RoleProjectionBranchPin {
+        role: "Meta",
+        wire_type: "AwaitingSourceReleaseMetaRestorePhase",
+        allowed_containing_schemas: &["RestoreSourceLeaseReleaseSpec<Meta>"],
+        validators: &AWAITING_SOURCE_RELEASE_META_VALIDATORS,
+        guards: &["tag_only_no_arm_payload"],
+    },
+];
+
+const INITIAL_RESTORE_REGISTRY_BRANCHES: [RoleProjectionBranchPin; 3] = [
+    RoleProjectionBranchPin {
+        role: "Local",
+        wire_type: "LocalInitialRestoreRegistryRef",
+        allowed_containing_schemas: &["RecoveryBridgeSpec<Local>"],
+        validators: &INITIAL_RESTORE_REGISTRY_LOCAL_VALIDATORS,
+        guards: &[
+            "complete_role_valid_common_identity",
+            "exact_initial_restore_state_ref",
+            "latest_matching_source_lease_record",
+            "no_future_applied_phase",
+        ],
+    },
+    RoleProjectionBranchPin {
+        role: "Meta",
+        wire_type: "MetaInitialRestoreRegistryRef",
+        allowed_containing_schemas: &["RecoveryBridgeSpec<Meta>"],
+        validators: &INITIAL_RESTORE_REGISTRY_META_VALIDATORS,
+        guards: &[
+            "complete_role_valid_common_identity",
+            "exact_initial_restore_state_ref",
+            "latest_matching_source_lease_record",
+            "no_future_applied_phase",
+        ],
+    },
+    RoleProjectionBranchPin {
+        role: "Shard",
+        wire_type: "ShardInitialRestoreRegistryRef",
+        allowed_containing_schemas: &["RecoveryBridgeSpec<Shard>"],
+        validators: &INITIAL_RESTORE_REGISTRY_SHARD_VALIDATORS,
+        guards: &[
+            "exact_initial_restore_state_ref",
+            "certified_source_lease_projection",
+            "exact_transform_projection",
+            "exact_meta_prefix_configuration",
+            "no_terminal_or_pin_state",
+        ],
+    },
+];
+
+const ROLE_PROJECTION_FAMILIES: [RoleProjectionFamilyPin; 2] = [
+    RoleProjectionFamilyPin {
+        source_key: "field|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>.expected_registry_basis_and_phase|expected_registry_basis_and_phase",
+        formal: "Role",
+        formal_class: "AuthorityOwningRole",
+        wire_kind: "discriminant",
+        max_size_bytes: 1,
+        branches: &AWAITING_SOURCE_RELEASE_BRANCHES,
+    },
+    RoleProjectionFamilyPin {
+        source_key: "top|InitialRestoreRegistryRef<Role>",
+        formal: "Role",
+        formal_class: "Role",
+        wire_kind: "reference_wrapper",
+        max_size_bytes: 40,
+        branches: &INITIAL_RESTORE_REGISTRY_BRANCHES,
+    },
+];
+
+fn role_projection_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+fn parse_role_projection_validator(value: &str) -> Option<RefinementClause<'_>> {
+    let (union, rest) = value.split_once("::")?;
+    let (arm, tag_hex) = rest.split_once("@0x")?;
+    if union.is_empty()
+        || union.contains(char::is_whitespace)
+        || !role_projection_token(arm)
+        || tag_hex.len() != 4
+    {
+        return None;
+    }
+    let tag = i64::from_str_radix(tag_hex, 16).ok()?;
+    Some((arm, tag, union))
+}
+
+/// Parse the closed role-projection spelling embedded in a wire row:
+///
+/// `role projection [source=...; formal=...; formal_class=...; role=...;`
+/// ` role_discriminator=none; validators=Union::Arm@0x0001,...; guards=...]`
+///
+/// The fields are ordered and total.  Unknown, repeated, empty, or malformed
+/// fields fail closed instead of becoming ignored prose.
+fn parse_role_projection_claim(
+    encoding_context: &str,
+) -> Option<Result<RoleProjectionClaim<'_>, RoleProjectionParseError>> {
+    let count = encoding_context
+        .matches(ROLE_PROJECTION_CLAIM_MARKER)
+        .count();
+    if count == 0 {
+        return None;
+    }
+    if count != 1 {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    let (_, rest) = encoding_context.split_once(ROLE_PROJECTION_CLAIM_MARKER)?;
+    let Some((body, _tail)) = rest.split_once(']') else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    let parts: Vec<&str> = body.split("; ").collect();
+    let [
+        source,
+        formal,
+        formal_class,
+        role,
+        role_discriminator,
+        validators,
+        guards,
+    ] = parts.as_slice()
+    else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    let values = (
+        source.strip_prefix("source="),
+        formal.strip_prefix("formal="),
+        formal_class.strip_prefix("formal_class="),
+        role.strip_prefix("role="),
+        role_discriminator.strip_prefix("role_discriminator="),
+        validators.strip_prefix("validators="),
+        guards.strip_prefix("guards="),
+    );
+    let (
+        Some(source_key),
+        Some(formal),
+        Some(formal_class),
+        Some(role),
+        Some(role_discriminator),
+        Some(validators),
+        Some(guards),
+    ) = values
+    else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    if source_key.is_empty()
+        || !role_projection_token(formal)
+        || !role_projection_token(formal_class)
+        || !role_projection_token(role)
+        || !role_projection_token(role_discriminator)
+    {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    let validators: Option<Vec<_>> = validators
+        .split(',')
+        .map(parse_role_projection_validator)
+        .collect();
+    let Some(validators) = validators.filter(|values| !values.is_empty()) else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    let guards: Vec<_> = guards.split(',').collect();
+    if guards.is_empty() || guards.iter().any(|guard| !role_projection_token(guard)) {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    let validator_set: BTreeSet<_> = validators.iter().copied().collect();
+    let guard_set: BTreeSet<_> = guards.iter().copied().collect();
+    if validator_set.len() != validators.len() || guard_set.len() != guards.len() {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    Some(Ok(RoleProjectionClaim {
+        source_key,
+        formal,
+        formal_class,
+        role,
+        role_discriminator,
+        validators,
+        guards,
+    }))
+}
 
 /// Parse one `<Arm> arm (arm_tag 0x<hex>) of the <Union> union` clause and
 /// return the unconsumed suffix.
@@ -456,6 +732,196 @@ fn resolve_refinement_clause<'a>(
         None
     } else {
         Some(resolved)
+    }
+}
+
+/// Enforce the two released role-projection families as exact bijections.
+///
+/// The catalog rows are the mutable description; `ROLE_PROJECTION_FAMILIES`
+/// is the independent, review-updated contract.  In particular, the generic
+/// a18 precondition expands to Local|Meta (never Shard), while the a19
+/// generated reference wrapper expands to Local|Meta|Shard.  A branch selects
+/// one concrete validator set; branches are alternatives, not a conjunction.
+fn validate_role_projection_contracts(
+    r: &IdentityRegistries,
+    ordinary_unions_by_base: &BTreeMap<&str, Vec<&OrdinaryUnion>>,
+    out: &mut Vec<Violation>,
+) {
+    let mut counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+
+    for wire in &r.wire {
+        let Some(claim) = parse_role_projection_claim(&wire.encoding_context) else {
+            continue;
+        };
+        let claim = match claim {
+            Ok(claim) => claim,
+            Err(RoleProjectionParseError::Malformed) => {
+                out.push(v(
+                    "role_projection_claim_unparseable",
+                    "wire_types",
+                    &wire.name,
+                    format!(
+                        "role projection must use the closed grammar \"{}source=...; formal=...; \
+                         formal_class=...; role=...; role_discriminator=none; \
+                         validators=Union::Arm@0x0001,...; guards=...]\"",
+                        ROLE_PROJECTION_CLAIM_MARKER
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        if wire.encoding_context.contains(REFINEMENT_CLAIM_MARKER)
+            || wire
+                .encoding_context
+                .contains(REFINEMENT_CONJUNCTION_MARKER)
+        {
+            out.push(v(
+                "role_projection_refinement_syntax_forbidden",
+                "wire_types",
+                &wire.name,
+                "a concrete role projection carries structured validators; singleton or \
+                 conjunctive refinement prose would either duplicate one branch or require \
+                 mutually exclusive roles to hold simultaneously",
+            ));
+        }
+
+        let Some(family) = ROLE_PROJECTION_FAMILIES
+            .iter()
+            .find(|family| family.source_key == claim.source_key)
+        else {
+            out.push(v(
+                "role_projection_source_unapproved",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "role projection names source {:?}, which has no released exact-role contract",
+                    claim.source_key
+                ),
+            ));
+            continue;
+        };
+
+        if claim.formal != family.formal
+            || claim.formal_class != family.formal_class
+            || claim.role_discriminator != "none"
+            || wire.kind != family.wire_kind
+            || wire.max_size_bytes != family.max_size_bytes
+            || wire.containing_union.is_some()
+            || wire.wire_tag.is_some()
+        {
+            out.push(v(
+                "role_projection_contract_mismatch",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "source {:?} requires formal {:?}, formal_class {:?}, kind {:?}, \
+                     max_size_bytes {}, no containing-union tag, and role_discriminator=none",
+                    family.source_key,
+                    family.formal,
+                    family.formal_class,
+                    family.wire_kind,
+                    family.max_size_bytes
+                ),
+            ));
+        }
+
+        let Some(branch) = family
+            .branches
+            .iter()
+            .find(|branch| branch.role == claim.role)
+        else {
+            out.push(v(
+                "role_projection_role_out_of_bound",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "role {:?} is outside source {:?}'s exact role set {:?}",
+                    claim.role,
+                    family.source_key,
+                    family
+                        .branches
+                        .iter()
+                        .map(|branch| branch.role)
+                        .collect::<Vec<_>>()
+                ),
+            ));
+            continue;
+        };
+        *counts.entry((family.source_key, branch.role)).or_default() += 1;
+
+        let containers_match = wire
+            .allowed_containing_schemas
+            .iter()
+            .map(String::as_str)
+            .eq(branch.allowed_containing_schemas.iter().copied());
+        let validators_match = claim
+            .validators
+            .iter()
+            .copied()
+            .eq(branch.validators.iter().copied());
+        let guards_match = claim
+            .guards
+            .iter()
+            .copied()
+            .eq(branch.guards.iter().copied());
+        if wire.name != branch.wire_type || !containers_match || !validators_match || !guards_match
+        {
+            out.push(v(
+                "role_projection_branch_mismatch",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "source {:?} role {:?} must use wire type {:?}, containing schemas {:?}, \
+                     validators {:?}, and guards {:?}",
+                    family.source_key,
+                    branch.role,
+                    branch.wire_type,
+                    branch.allowed_containing_schemas,
+                    branch.validators,
+                    branch.guards
+                ),
+            ));
+        }
+
+        for validator in &claim.validators {
+            validate_refinement_clause(ordinary_unions_by_base, &wire.name, *validator, out);
+        }
+    }
+
+    for family in ROLE_PROJECTION_FAMILIES {
+        for branch in family.branches {
+            match counts
+                .get(&(family.source_key, branch.role))
+                .copied()
+                .unwrap_or(0)
+            {
+                0 => out.push(v(
+                    "role_projection_role_missing",
+                    "wire_types",
+                    family.source_key,
+                    format!(
+                        "generic source has no concrete {:?} projection; exact role coverage is {:?}",
+                        branch.role,
+                        family
+                            .branches
+                            .iter()
+                            .map(|candidate| candidate.role)
+                            .collect::<Vec<_>>()
+                    ),
+                )),
+                1 => {}
+                count => out.push(v(
+                    "role_projection_role_duplicate",
+                    "wire_types",
+                    family.source_key,
+                    format!(
+                        "generic source has {count} concrete {:?} projections; exactly one is required",
+                        branch.role
+                    ),
+                )),
+            }
+        }
     }
 }
 
@@ -1787,7 +2253,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:a4c2fbd09b7b8df8";
+    const WIRE: &str = "fnv1a64:32c93daee916a420";
     const FIELDS: &str = "fnv1a64:7020ed5083f427dc";
 
     let logical = rows_pin(
@@ -1938,7 +2404,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 44,
+            expected_epoch: 45,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
@@ -2112,6 +2578,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             .or_default()
             .push(u);
     }
+    validate_role_projection_contracts(r, &ordinary_unions_by_base, &mut out);
     for w in &r.wire {
         if !matches!(
             w.kind.as_str(),
@@ -2184,7 +2651,15 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         // one alone would overstate coverage. The conjunction grammar is
         // therefore closed at exactly two distinct clauses, and this loop
         // resolves every returned clause through the same laws as a singleton.
-        let refinement_claim = parse_refinement_claim(&w.encoding_context);
+        // Role-dispatch projections own a separate structured validator list.
+        // Do not reinterpret that list through the singleton/conjunction
+        // grammar; the role-projection law above rejects either refinement
+        // marker explicitly.
+        let refinement_claim = if w.encoding_context.contains(ROLE_PROJECTION_CLAIM_MARKER) {
+            None
+        } else {
+            parse_refinement_claim(&w.encoding_context)
+        };
         match refinement_claim.as_ref() {
             None => {}
             Some(Err(RefinementClaimParseError::Single)) => out.push(v(

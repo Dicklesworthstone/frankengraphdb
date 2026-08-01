@@ -16685,6 +16685,183 @@ fn idr_refinement_conjunction_is_atomic_and_total() {
     );
 }
 
+/// Generic restore contracts whose selected arm depends on `Role` expand to
+/// concrete, role-erased projections rather than a conjunction (fgdb-ap4t).
+///
+/// The a18 source is bounded by `AuthorityOwningRole`, whose exact set is
+/// Local|Meta and whose two `AwaitingSourceRelease` arms carry DIFFERENT tags.
+/// The a19 generated reference family has Local|Meta|Shard validators with
+/// structurally different registered locations.  One concrete value can never
+/// inhabit every role at once, and serializing another role discriminator
+/// would invent bytes absent from the source schema.
+#[test]
+fn idr_role_selected_restore_projections_are_exact_and_role_erased() {
+    const ROLE_CODES: [&str; 8] = [
+        "role_projection_claim_unparseable",
+        "role_projection_source_unapproved",
+        "role_projection_contract_mismatch",
+        "role_projection_role_out_of_bound",
+        "role_projection_role_missing",
+        "role_projection_role_duplicate",
+        "role_projection_branch_mismatch",
+        "role_projection_refinement_syntax_forbidden",
+    ];
+    let role_codes = |identity: &IdentityRegistries| -> BTreeSet<String> {
+        codes_without_assignment_drift(identity)
+            .into_iter()
+            .filter(|code| ROLE_CODES.contains(&code.as_str()))
+            .collect()
+    };
+    let replace_context = |identity: &mut IdentityRegistries, name: &str, from: &str, to: &str| {
+        let row = identity
+            .wire
+            .iter_mut()
+            .find(|row| row.name == name) // ubs:ignore -- public registry-row name equality in a mutation fixture.
+            .expect("role projection fixture subject is landed");
+        assert!(row.encoding_context.contains(from), "fixture did not apply");
+        row.encoding_context = row.encoding_context.replace(from, to);
+    };
+
+    let base = real_identity();
+    assert_eq!(
+        role_codes(&base),
+        BTreeSet::new(), // ubs:ignore -- test witness intentionally panics.
+        "the released role projections must satisfy their exact bijection"
+    );
+    let projection_names: BTreeSet<&str> = base
+        .wire
+        .iter()
+        .filter(|row| {
+            row.encoding_context
+                .contains(identity::ROLE_PROJECTION_CLAIM_MARKER)
+        })
+        .map(|row| row.name.as_str())
+        .collect();
+    assert_eq!(
+        projection_names,
+        BTreeSet::from([
+            "AwaitingSourceReleaseLocalRestorePhase",
+            "AwaitingSourceReleaseMetaRestorePhase",
+            "LocalInitialRestoreRegistryRef",
+            "MetaInitialRestoreRegistryRef",
+            "ShardInitialRestoreRegistryRef",
+        ]),
+        "the concrete role-projection population moved"
+    );
+
+    // Removing one branch makes the generic-source expansion incomplete.
+    let mut missing = real_identity();
+    missing
+        .wire
+        .retain(|row| row.name != "AwaitingSourceReleaseMetaRestorePhase");
+    assert!(
+        role_codes(&missing).contains("role_projection_role_missing"),
+        "removing Meta from AuthorityOwningRole coverage must fail"
+    );
+
+    // A second concrete row for one role is not another spelling of the same
+    // projection.  The source-to-role relation is a bijection.
+    let mut duplicate = real_identity();
+    let mut duplicate_row = duplicate
+        .wire
+        .iter()
+        .find(|row| row.name == "AwaitingSourceReleaseLocalRestorePhase") // ubs:ignore -- public registry-row name equality in a mutation fixture.
+        .expect("Local projection is landed")
+        .clone();
+    duplicate_row.wire_type_id = 0x7bf0;
+    duplicate_row.name = "DuplicateAwaitingSourceReleaseLocalRestorePhase".into();
+    duplicate.wire.push(duplicate_row);
+    assert!(
+        role_codes(&duplicate).contains("role_projection_role_duplicate"),
+        "duplicating one concrete role branch must fail"
+    );
+
+    // The original cross-role defect: relabeling Meta as Local creates one
+    // duplicate and one missing branch; it cannot inherit Local's arm/tag.
+    let mut substituted = real_identity();
+    replace_context(
+        &mut substituted,
+        "AwaitingSourceReleaseMetaRestorePhase",
+        "; role=Meta;",
+        "; role=Local;",
+    );
+    let substituted_codes = role_codes(&substituted);
+    assert!(
+        substituted_codes.contains("role_projection_role_missing")
+            && substituted_codes.contains("role_projection_role_duplicate"),
+        "substituting Local for Meta must break exact expansion: {substituted_codes:?}"
+    );
+
+    // The two source arms deliberately use different tags: Local=0x0007,
+    // Meta=0x0006.  A tag mutation remains syntactically valid but disagrees
+    // with the independently pinned concrete branch.
+    let mut wrong_tag = real_identity();
+    replace_context(
+        &mut wrong_tag,
+        "AwaitingSourceReleaseLocalRestorePhase",
+        "LocalRestorePhase::AwaitingSourceRelease@0x0007",
+        "LocalRestorePhase::AwaitingSourceRelease@0x0006",
+    );
+    assert!(
+        role_codes(&wrong_tag).contains("role_projection_branch_mismatch"),
+        "mutating one role-selected arm tag must fail"
+    );
+
+    // AuthorityOwningRole is Local|Meta.  Shard consumes projections but may
+    // not become a third authority-owning branch.
+    let mut out_of_bound = real_identity();
+    let mut shard_row = out_of_bound
+        .wire
+        .iter()
+        .find(|row| row.name == "AwaitingSourceReleaseLocalRestorePhase") // ubs:ignore -- public registry-row name equality in a mutation fixture.
+        .expect("Local projection is landed")
+        .clone();
+    shard_row.wire_type_id = 0x7bf1;
+    shard_row.name = "AwaitingSourceReleaseShardRestorePhase".into();
+    shard_row.encoding_context = shard_row
+        .encoding_context
+        .replace("; role=Local;", "; role=Shard;");
+    shard_row.allowed_containing_schemas = vec!["RestoreSourceLeaseReleaseSpec<Shard>".into()];
+    out_of_bound.wire.push(shard_row);
+    assert!(
+        role_codes(&out_of_bound).contains("role_projection_role_out_of_bound"),
+        "adding Shard to AuthorityOwningRole must fail"
+    );
+
+    // The old two-location grammar means BOTH locations hold.  Appending it
+    // to a role projection must not be accepted as an alternate encoding of
+    // role dispatch.
+    let mut conjunction = real_identity();
+    let row = conjunction
+        .wire
+        .iter_mut()
+        .find(|row| row.name == "LocalInitialRestoreRegistryRef") // ubs:ignore -- public registry-row name equality in a mutation fixture.
+        .expect("Local initial-registry projection is landed");
+    row.encoding_context.push_str(
+        "; validator admits only when both the Nonterminal arm (arm_tag 0x0001) of the \
+         LocalRestoreRegistryValue union and the ActiveHidden arm (arm_tag 0x0001) of the \
+         LocalRestorePhase union",
+    );
+    assert!(
+        role_codes(&conjunction).contains("role_projection_refinement_syntax_forbidden"),
+        "conjunction syntax cannot encode role-selected alternatives"
+    );
+
+    // The metadata states the wire consequence, not merely the role census:
+    // concrete specialization adds no serialized role discriminator.
+    let mut extra_role_tag = real_identity();
+    replace_context(
+        &mut extra_role_tag,
+        "MetaInitialRestoreRegistryRef",
+        "role_discriminator=none",
+        "role_discriminator=u8",
+    );
+    assert!(
+        role_codes(&extra_role_tag).contains("role_projection_contract_mismatch"),
+        "a serialized role discriminator absent from the source must fail"
+    );
+}
+
 /// Value-position refinements are classified into tag-only preconditions and
 /// payload-bearing arm values, and each class carries its payload contract
 /// (fgdb-payload-bearing-arm-values-5u56).

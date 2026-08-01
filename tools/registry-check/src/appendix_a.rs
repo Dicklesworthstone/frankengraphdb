@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3719;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3724;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "ada9473b796d9b496a4a468451def82f9705f55049e6329adf5c37300f31b0d3";
-pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 135;
+    "103de48af7cbb8bbac16b13a142d107dbeefe9c109934850e9e5fad01c012d63";
+pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 140;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "8a0cb7da4e2d8bfd20335634d6670e18bb66349ec1a303448402489a52450235";
+    "056ddae24cca4ae7dd03110c63ac4259f9b9e38ee1bfc1504e608b71d2e633f4";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -13772,12 +13772,15 @@ pub(crate) fn registered_reference_definition_semantics(family: &str) -> Option<
         | "ClaimedReservationUseRef"
         | "ExternalCasRestoreServicePromotionManifestRef"
         | "ExternalCasRestoreServicePromotionReceiptRef"
+        | "LocalInitialRestoreRegistryRef"
         | "LocalRestoreStateRef"
+        | "MetaInitialRestoreRegistryRef"
         | "MetaRestoreStateRef"
         | "OperationalRestoreTerminalPinBasisRef"
         | "RegisteredStrongRef"
         | "RemoteConfigurationRef"
         | "ReservedReservationUseRef"
+        | "ShardInitialRestoreRegistryRef"
         | "StrongCiphertextRef"
         | "StrongCommandRef"
         | "StrongGlobalCommandRef"

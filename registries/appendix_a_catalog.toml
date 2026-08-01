@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
 
 [target_manifest]
-target_count = 3719
-projection_fallback_count = 135
-target_source_assignment_sha256 = "8a0cb7da4e2d8bfd20335634d6670e18bb66349ec1a303448402489a52450235"
+target_count = 3724
+projection_fallback_count = 140
+target_source_assignment_sha256 = "056ddae24cca4ae7dd03110c63ac4259f9b9e38ee1bfc1504e608b71d2e633f4"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 44
+registry_epoch = 45
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -113757,4 +113757,99 @@ target_row_id = "a13:field:key-envelope-root-current-write-epoch-record-ref"
 slice_id = "a13"
 source_key = "field|KeyEnvelopeRoot|KeyEnvelopeRoot.current_write_epoch_record_ref|current_write_epoch_record_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:awaiting-source-release-local-restore-phase"
+wire_type_id = 0x0564
+name = "AwaitingSourceReleaseLocalRestorePhase"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated concrete role projection [source=field|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>.expected_registry_basis_and_phase|expected_registry_basis_and_phase; formal=Role; formal_class=AuthorityOwningRole; role=Local; role_discriminator=none; validators=LocalRestorePhase::AwaitingSourceRelease@0x0007; guards=tag_only_no_arm_payload]; the precondition carries only the selected LocalRestorePhase tag and no arm payload or additional role discriminator (a18:2405)"
+allowed_containing_schemas = ["RestoreSourceLeaseReleaseSpec<Local>"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:awaiting-source-release-meta-restore-phase"
+wire_type_id = 0x0565
+name = "AwaitingSourceReleaseMetaRestorePhase"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated concrete role projection [source=field|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>.expected_registry_basis_and_phase|expected_registry_basis_and_phase; formal=Role; formal_class=AuthorityOwningRole; role=Meta; role_discriminator=none; validators=MetaRestorePhase::AwaitingSourceRelease@0x0006; guards=tag_only_no_arm_payload]; the precondition carries only the selected MetaRestorePhase tag and no arm payload or additional role discriminator (a18:2405)"
+allowed_containing_schemas = ["RestoreSourceLeaseReleaseSpec<Meta>"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a19"
+row_id = "a19:wire-type:local-initial-restore-registry-ref"
+wire_type_id = 0x0566
+name = "LocalInitialRestoreRegistryRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated concrete role projection [source=top|InitialRestoreRegistryRef<Role>; formal=Role; formal_class=Role; role=Local; role_discriminator=none; validators=LocalRestoreRegistryValue::Nonterminal@0x0001,LocalRestorePhase::ActiveHidden@0x0001,RestoreLeaseState<Role:AuthorityOwningRole>::Current@0x0001; guards=complete_role_valid_common_identity,exact_initial_restore_state_ref,latest_matching_source_lease_record,no_future_applied_phase]; strong reference to the exact Local initial registry value; the validator contract creates no standalone durable-field obligations for its nested phase, lease, or state members (a19:2557)"
+allowed_containing_schemas = ["RecoveryBridgeSpec<Local>"]
+max_size_bytes = 40
+
+[[wire_type]]
+slice_id = "a19"
+row_id = "a19:wire-type:meta-initial-restore-registry-ref"
+wire_type_id = 0x0567
+name = "MetaInitialRestoreRegistryRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated concrete role projection [source=top|InitialRestoreRegistryRef<Role>; formal=Role; formal_class=Role; role=Meta; role_discriminator=none; validators=MetaRestoreRegistryValue::Nonterminal@0x0001,MetaRestorePhase::ActiveHidden@0x0001,RestoreLeaseState<Role:AuthorityOwningRole>::Current@0x0001; guards=complete_role_valid_common_identity,exact_initial_restore_state_ref,latest_matching_source_lease_record,no_future_applied_phase]; strong reference to the exact Meta initial registry value; the validator contract creates no standalone durable-field obligations for its nested phase, lease, or state members (a19:2557)"
+allowed_containing_schemas = ["RecoveryBridgeSpec<Meta>"]
+max_size_bytes = 40
+
+[[wire_type]]
+slice_id = "a19"
+row_id = "a19:wire-type:shard-initial-restore-registry-ref"
+wire_type_id = 0x0568
+name = "ShardInitialRestoreRegistryRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated concrete role projection [source=top|InitialRestoreRegistryRef<Role>; formal=Role; formal_class=Role; role=Shard; role_discriminator=none; validators=ShardRestoreRegistryValue::ActiveHidden@0x0001; guards=exact_initial_restore_state_ref,certified_source_lease_projection,exact_transform_projection,exact_meta_prefix_configuration,no_terminal_or_pin_state]; strong reference to the exact Shard initial registry value; the validator contract creates no standalone durable-field obligations for its nested state or projection members (a19:2557)"
+allowed_containing_schemas = ["RecoveryBridgeSpec<Shard>"]
+max_size_bytes = 40
+
+[[target]]
+row_id = "a18:target:wire-type-awaiting-source-release-local-restore-phase"
+target_row_id = "a18:wire-type:awaiting-source-release-local-restore-phase"
+slice_id = "a18"
+source_key = "projection|wire_types|AwaitingSourceReleaseLocalRestorePhase"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-awaiting-source-release-meta-restore-phase"
+target_row_id = "a18:wire-type:awaiting-source-release-meta-restore-phase"
+slice_id = "a18"
+source_key = "projection|wire_types|AwaitingSourceReleaseMetaRestorePhase"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:wire-type-local-initial-restore-registry-ref"
+target_row_id = "a19:wire-type:local-initial-restore-registry-ref"
+slice_id = "a19"
+source_key = "projection|wire_types|LocalInitialRestoreRegistryRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:wire-type-meta-initial-restore-registry-ref"
+target_row_id = "a19:wire-type:meta-initial-restore-registry-ref"
+slice_id = "a19"
+source_key = "projection|wire_types|MetaInitialRestoreRegistryRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:wire-type-shard-initial-restore-registry-ref"
+target_row_id = "a19:wire-type:shard-initial-restore-registry-ref"
+slice_id = "a19"
+source_key = "projection|wire_types|ShardInitialRestoreRegistryRef"
+target_kind = "wire-type"
 definition_status = "declared"
