@@ -40,6 +40,7 @@ use fgdb_delta_types::{
     SchemaEpoch,
 };
 use fgdb_sim::{commit_capsule, prepare_capsule, replay};
+use fgdb_strata::PartitionRootVersion;
 use fgdb_strata::compact::compact;
 use fgdb_strata::root::{PartitionRoot, merge_neighbours};
 use fgdb_strata::store::BlockStore;
@@ -166,7 +167,7 @@ fn commit_a_history(dir: &Path, cx: &CommitCx) {
 
 /// PHASE 2 — recover the stream, build the partition, persist it, and return ONLY
 /// the root identity. Everything else goes out of scope.
-fn build_and_persist(dir: &Path, cx: &CommitCx, seal_after: CommitSeq) -> ObjectId {
+fn build_and_persist(dir: &Path, cx: &CommitCx, seal_after: CommitSeq) -> PartitionRootVersion {
     let reopened = CommitCoordinator::open(cx, dir, keys()).expect("reopen");
     let mut writer = BlockWriter::new(GRAPH, BRANCH, 0);
     let mut frontier = CommitSeq(0);
@@ -283,7 +284,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
                 let id = store.put(cx, &bytes).expect("stores");
                 let span = fgdb_strata::root::span_of(entries).expect("non-empty");
                 references.push(fgdb_strata::root::BlockRef {
-                    block_id: id,
+                    block_id: id.0,
                     first_seq: span.0,
                     last_seq: span.1,
                 });

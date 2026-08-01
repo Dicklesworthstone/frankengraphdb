@@ -52,6 +52,44 @@ pub const BLOCK_MAGIC: [u8; 4] = *b"FGSB";
 /// additive-minor, breaking-major.
 pub const BLOCK_FORMAT_V2: u16 = 2;
 
+/// The content identity of one immutable Tier-D block version.
+///
+/// The wrapped [`ObjectId`] is still the ordinary §5.1 logical object identity
+/// derived from the block's canonical bytes. This type adds no new identity
+/// transcript; it prevents a block identity from being passed accidentally to
+/// a partition-root operation.
+///
+/// ```compile_fail
+/// use fgdb_strata::DeltaBlockVersion;
+/// use fgdb_strata::store::BlockStore;
+/// use fgdb_types::context::CommitCx;
+///
+/// fn block_is_not_a_root(store: &BlockStore, cx: &CommitCx, block: DeltaBlockVersion) {
+///     let _ = store.get_root(cx, block);
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct DeltaBlockVersion(pub ObjectId);
+
+/// The content identity of one immutable partition-root version.
+///
+/// Like [`DeltaBlockVersion`], this is a semantic type boundary around the
+/// existing §5.1 [`ObjectId`], not a second content-addressing domain.
+///
+/// ```compile_fail
+/// use fgdb_strata::PartitionRootVersion;
+/// use fgdb_strata::store::BlockStore;
+/// use fgdb_types::context::CommitCx;
+///
+/// fn root_is_not_a_block(store: &BlockStore, cx: &CommitCx, root: PartitionRootVersion) {
+///     let _ = store.get(cx, root);
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct PartitionRootVersion(pub ObjectId);
+
 /// Header: magic + format + entry count.
 const HEADER_LEN: usize = 4 + 2 + 4;
 /// src(16) + relation(8) + dst(16) + eid(16) + created(8) + retired(8)

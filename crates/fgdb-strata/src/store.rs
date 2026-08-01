@@ -49,7 +49,7 @@
 //! question this slice has no business answering. What is here is the smallest
 //! honest thing: bytes on disk, addressed by identity, verified on read.
 
-use crate::{BlockError, block_id, decode_block};
+use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, StorageReadCx};
@@ -338,13 +338,13 @@ pub struct BlockStore {
 #[derive(Debug)]
 pub struct AdmittedPartitionRoot<'store> {
     store: &'store BlockStore,
-    root_id: ObjectId,
+    root_id: PartitionRootVersion,
     root: crate::root::PartitionRoot,
 }
 
 impl AdmittedPartitionRoot<'_> {
     /// The content identity of the admitted root.
-    pub const fn root_id(&self) -> ObjectId {
+    pub const fn root_id(&self) -> PartitionRootVersion {
         self.root_id
     }
 
@@ -491,7 +491,7 @@ impl BlockStore {
     /// name one block and store another. An existing file holding the same bytes
     /// is not rewritten, but its durability is re-established before success;
     /// one holding different bytes is a refusal.
-    pub fn put(&self, cx: &CommitCx, bytes: &[u8]) -> Result<ObjectId, StoreError> {
+    pub fn put(&self, cx: &CommitCx, bytes: &[u8]) -> Result<DeltaBlockVersion, StoreError> {
         self.put_with_crash(cx, bytes, None)
     }
 
@@ -524,7 +524,7 @@ impl BlockStore {
         cx: &CommitCx,
         bytes: &[u8],
         crash_at: Option<BlockStoreCrashPoint>,
-    ) -> Result<ObjectId, StoreError> {
+    ) -> Result<DeltaBlockVersion, StoreError> {
         self.put_with_steps(cx, bytes, crash_at, || {}, || {})
     }
 
@@ -538,7 +538,7 @@ impl BlockStore {
         crash_at: Option<BlockStoreCrashPoint>,
         before_lock: impl FnOnce(),
         after_staging_sync: impl FnOnce(),
-    ) -> Result<ObjectId, StoreError> {
+    ) -> Result<DeltaBlockVersion, StoreError> {
         self.put_object_with_steps(
             StoredObjectKind::Block,
             cx,
@@ -547,6 +547,7 @@ impl BlockStore {
             before_lock,
             after_staging_sync,
         )
+        .map(DeltaBlockVersion)
     }
 
     fn put_object_with_steps(
@@ -679,7 +680,7 @@ impl BlockStore {
     pub fn get(
         &self,
         cx: &impl StorageReadCx,
-        id: ObjectId,
+        id: DeltaBlockVersion,
     ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
         let bytes = self.get_bytes(cx, id)?;
         decode_block(&bytes).map_err(StoreError::Malformed)
@@ -699,12 +700,16 @@ impl BlockStore {
     ///
     /// For a caller that needs the bytes themselves — sealing into a capsule,
     /// copying to a replica — and must not pay to decode them.
-    pub fn get_bytes(&self, cx: &impl StorageReadCx, id: ObjectId) -> Result<Vec<u8>, StoreError> {
-        let bytes = self.read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)?;
+    pub fn get_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: DeltaBlockVersion,
+    ) -> Result<Vec<u8>, StoreError> {
+        let bytes = self.read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)?;
         let actual = block_id(&self.k_oid, self.namespace, &bytes);
-        if actual != id {
+        if actual != id.0 {
             return Err(StoreError::IdentityMismatch {
-                expected: id,
+                expected: id.0,
                 actual,
             });
         }
@@ -717,12 +722,12 @@ impl BlockStore {
         at: usize,
         reference: &crate::root::BlockRef,
     ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
-        let bytes =
-            self.get_bytes(cx, reference.block_id)
-                .map_err(|error| StoreError::RootBlockLoad {
-                    at,
-                    error: Box::new(error),
-                })?;
+        let bytes = self
+            .get_bytes(cx, DeltaBlockVersion(reference.block_id))
+            .map_err(|error| StoreError::RootBlockLoad {
+                at,
+                error: Box::new(error),
+            })?;
         crate::root::resolve_block_ref(&self.k_oid, self.namespace, at, reference, &bytes)
             .map_err(StoreError::MalformedRoot)
     }
@@ -811,10 +816,11 @@ impl BlockStore {
         &self,
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
-    ) -> Result<ObjectId, StoreError> {
+    ) -> Result<PartitionRootVersion, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
         self.inspect_root_blocks(cx, root, |_, _| false)?;
         self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
+            .map(PartitionRootVersion)
     }
 
     /// Load the partition root named by `id`, using the root format's exact byte
@@ -822,10 +828,10 @@ impl BlockStore {
     pub fn get_root(
         &self,
         cx: &impl StorageReadCx,
-        id: ObjectId,
+        id: PartitionRootVersion,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
-        let bytes = self.read_object_bytes(cx, id, crate::root::MAX_ENCODED_ROOT_BYTES as u64)?;
-        crate::root::read_root(&self.k_oid, self.namespace, &bytes, id)
+        let bytes = self.read_object_bytes(cx, id.0, crate::root::MAX_ENCODED_ROOT_BYTES as u64)?;
+        crate::root::read_root(&self.k_oid, self.namespace, &bytes, id.0)
             .map_err(StoreError::MalformedRoot)
     }
 
@@ -838,7 +844,7 @@ impl BlockStore {
     pub fn reopen(
         &self,
         cx: &impl StorageReadCx,
-        id: ObjectId,
+        id: PartitionRootVersion,
     ) -> Result<(crate::root::PartitionRoot, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
         let root = self.get_root(cx, id)?;
         let blocks = self.resolve_root_blocks(cx, &root)?;
@@ -850,7 +856,7 @@ impl BlockStore {
     pub fn admit_root(
         &self,
         cx: &impl StorageReadCx,
-        id: ObjectId,
+        id: PartitionRootVersion,
     ) -> Result<AdmittedPartitionRoot<'_>, StoreError> {
         let root = self.get_root(cx, id)?;
         self.inspect_root_blocks(cx, &root, |_, _| false)?;
@@ -871,7 +877,7 @@ impl BlockStore {
     pub fn reopen_at(
         &self,
         cx: &impl StorageReadCx,
-        id: ObjectId,
+        id: PartitionRootVersion,
         as_of: CommitSeq,
     ) -> Result<(AdmittedPartitionRoot<'_>, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
         let root = self.get_root(cx, id)?;
@@ -905,7 +911,7 @@ impl BlockStore {
     /// Found by a law about two keys sharing a directory, which failed against the
     /// stat-only version. Reading the file to answer is the cost of the answer
     /// being true, and this crate is never optimized (§15).
-    pub fn contains(&self, cx: &impl StorageReadCx, id: ObjectId) -> bool {
+    pub fn contains(&self, cx: &impl StorageReadCx, id: DeltaBlockVersion) -> bool {
         self.get_bytes(cx, id).is_ok()
     }
 }
@@ -916,6 +922,7 @@ mod durability_tests {
         BlockStore, MAX_STORED_OBJECT_BYTES, PUBLICATION_STAGING_FILE, StoreError, read_bounded,
         run_ordered_creation_barrier,
     };
+    use crate::DeltaBlockVersion;
     use asupersync::lab::run_async_under_lab;
     use fgdb_types::context::{CommitCx, PurposeContexts};
     use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -979,7 +986,7 @@ mod durability_tests {
                 .expect("extend sparse fixture");
 
             assert!(matches!(
-                store.get_bytes(cx, id),
+                store.get_bytes(cx, DeltaBlockVersion(id)),
                 Err(StoreError::ObjectTooLarge {
                     limit: MAX_STORED_OBJECT_BYTES,
                     observed
@@ -1038,7 +1045,7 @@ mod durability_tests {
     /// same identity.
     #[test]
     fn an_identical_loser_observes_only_the_complete_winner() {
-        type PutHandle = JoinHandle<Result<ObjectId, StoreError>>;
+        type PutHandle = JoinHandle<Result<DeltaBlockVersion, StoreError>>;
 
         let dir = scratch_dir("identical-loser");
         let bytes = b"one complete immutable block".to_vec();
@@ -1100,7 +1107,7 @@ mod durability_tests {
             let original = b"already canonical";
             let original_id = store.put(cx, original).expect("initial publication");
             std::fs::hard_link(
-                store.path(original_id),
+                store.path(original_id.0),
                 store.dir.join(PUBLICATION_STAGING_FILE),
             )
             .expect("construct multiply linked staging control");

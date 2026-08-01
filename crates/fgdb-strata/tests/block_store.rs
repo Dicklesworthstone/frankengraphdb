@@ -15,7 +15,9 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
 use fgdb_strata::store::{BLOCK_DIR, BlockStore, BlockStoreCrashPoint, StoreError};
-use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
+use fgdb_strata::{
+    AdjacencyEntry, DeltaBlockVersion, PartitionRootVersion, block_id, encode_block,
+};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, EId, VId};
@@ -83,7 +85,7 @@ fn a_stored_block_reads_back() {
         let id = store.put(cx, &bytes).expect("stores");
 
         assert_eq!(
-            id,
+            id.0,
             block_id(&K_OID, NAMESPACE, &bytes),
             "derived, not accepted"
         );
@@ -127,7 +129,7 @@ fn store_directory_creation_waits_for_database_directory_sync() {
 
         let lost =
             BlockStore::open(cx, &crash_image, K_OID, NAMESPACE).expect("reopen loss-arm database");
-        assert!(!lost.contains(cx, ObjectId([0x23; 32])));
+        assert!(!lost.contains(cx, DeltaBlockVersion(ObjectId([0x23; 32]))));
 
         // The other legal outcome is that the unsynced name survived. Reopen
         // re-establishes both directory barriers before any write is accepted.
@@ -149,7 +151,7 @@ fn block_creation_waits_for_store_directory_sync() {
     let crash_image = scratch_dir("block-dirent-image");
     under_lab(40, move |cx| {
         let bytes = sample();
-        let id = block_id(&K_OID, NAMESPACE, &bytes);
+        let id = DeltaBlockVersion(block_id(&K_OID, NAMESPACE, &bytes));
         let store = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE).expect("opens");
         let crashed = store.put_with_crash(
             cx,
@@ -161,7 +163,7 @@ fn block_creation_waits_for_store_directory_sync() {
             "put must not acknowledge before directory sync"
         );
         assert!(
-            store.path(id).is_file(),
+            store.path(id.0).is_file(),
             "the durable inode exists in the working view"
         );
         drop(store);
@@ -190,7 +192,7 @@ fn a_staging_crash_never_exposes_partial_canonical_bytes() {
     let dir = scratch_dir("staging-before-publication");
     under_lab(43, move |cx| {
         let bytes = sample();
-        let id = block_id(&K_OID, NAMESPACE, &bytes);
+        let id = DeltaBlockVersion(block_id(&K_OID, NAMESPACE, &bytes));
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
 
         let interrupted = store.put_with_crash(
@@ -203,7 +205,7 @@ fn a_staging_crash_never_exposes_partial_canonical_bytes() {
             "staging completion is not canonical publication"
         );
         assert!(
-            !store.path(id).exists(),
+            !store.path(id.0).exists(),
             "no partial or empty canonical path may be visible"
         );
 
@@ -231,7 +233,7 @@ fn an_equal_existing_block_reestablishes_durability_after_reopen() {
         let modified_at = std::fs::metadata(
             BlockStore::open(cx, &dir, K_OID, NAMESPACE)
                 .expect("reopens")
-                .path(id),
+                .path(id.0),
         )
         .and_then(|metadata| metadata.modified())
         .expect("mtime");
@@ -247,7 +249,7 @@ fn an_equal_existing_block_reestablishes_durability_after_reopen() {
             "equal existing bytes must not bypass the durability barrier"
         );
         assert_eq!(
-            std::fs::metadata(reopened.path(id))
+            std::fs::metadata(reopened.path(id.0))
                 .and_then(|metadata| metadata.modified())
                 .expect("mtime after re-put"),
             modified_at,
@@ -274,14 +276,14 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
         // A different, perfectly lawful block written over the path.
         let other = encode_block(&[entry(9, 9, 7)]).expect("encodes");
         assert_ne!(other, mine);
-        std::fs::write(store.path(id), &other).expect("overwrite");
+        std::fs::write(store.path(id.0), &other).expect("overwrite");
 
         let actual = block_id(&K_OID, NAMESPACE, &other);
         assert!(
             matches!(
                 store.get(cx, id),
                 Err(StoreError::IdentityMismatch { expected, actual: got })
-                    if expected == id && got == actual
+                    if expected == id.0 && got == actual
             ),
             "a store that trusts its layout returns the wrong partition silently"
         );
@@ -306,10 +308,10 @@ fn damaged_bytes_are_refused_by_identity_first() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let id = store.put(cx, &sample()).expect("stores");
 
-        let mut bytes = std::fs::read(store.path(id)).expect("read");
+        let mut bytes = std::fs::read(store.path(id.0)).expect("read");
         let at = bytes.len() / 2;
         bytes[at] ^= 0x40;
-        std::fs::write(store.path(id), &bytes).expect("write");
+        std::fs::write(store.path(id.0), &bytes).expect("write");
 
         assert!(matches!(
             store.get(cx, id),
@@ -331,14 +333,14 @@ fn storing_the_same_bytes_twice_is_a_no_op() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let bytes = sample();
         let first = store.put(cx, &bytes).expect("stores");
-        let modified_at = std::fs::metadata(store.path(first))
+        let modified_at = std::fs::metadata(store.path(first.0))
             .and_then(|m| m.modified())
             .expect("mtime");
 
         let second = store.put(cx, &bytes).expect("stores again");
         assert_eq!(first, second);
         assert_eq!(
-            std::fs::metadata(store.path(first))
+            std::fs::metadata(store.path(first.0))
                 .and_then(|m| m.modified())
                 .expect("mtime"),
             modified_at,
@@ -364,20 +366,20 @@ fn a_damaged_existing_file_is_not_misreported_as_a_collision() {
 
         // Something else has taken this identity's path with different bytes.
         let other = encode_block(&[entry(4, 5, 6)]).expect("encodes");
-        std::fs::write(store.path(id), &other).expect("plant");
+        std::fs::write(store.path(id.0), &other).expect("plant");
 
         let error = store.put(cx, &bytes).expect_err("damage must be refused");
         assert!(
             matches!(
                 error,
                 StoreError::DamagedExisting { expected, actual }
-                    if expected == id && actual == block_id(&K_OID, NAMESPACE, &other)
+                    if expected == id.0 && actual == block_id(&K_OID, NAMESPACE, &other)
             ),
             "bytes whose own identity differs from their path are damage, not a hash collision: \
              {error:?}"
         );
         assert_eq!(
-            std::fs::read(store.path(id)).expect("read"),
+            std::fs::read(store.path(id.0)).expect("read"),
             other,
             "and the refusal left the existing file untouched"
         );
@@ -426,7 +428,7 @@ fn a_missing_block_is_an_error() {
     let dir = scratch_dir("missing");
     under_lab(37, move |cx| {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        let absent = ObjectId([0xab; 32]);
+        let absent = DeltaBlockVersion(ObjectId([0xab; 32]));
         assert!(!store.contains(cx, absent));
         assert!(matches!(store.get(cx, absent), Err(StoreError::Io(_))));
     });
@@ -518,7 +520,7 @@ fn putting_a_root_refuses_a_false_block_range_before_publication() {
             partition: 0,
             published_at: CommitSeq(3),
             blocks: vec![BlockRef {
-                block_id,
+                block_id: block_id.0,
                 first_seq: CommitSeq(2),
                 last_seq: CommitSeq(2),
             }],
@@ -563,12 +565,12 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
             published_at: CommitSeq(6),
             blocks: vec![
                 BlockRef {
-                    block_id: early_id,
+                    block_id: early_id.0,
                     first_seq: CommitSeq(1),
                     last_seq: CommitSeq(3),
                 },
                 BlockRef {
-                    block_id: future_id,
+                    block_id: future_id.0,
                     first_seq: CommitSeq(5),
                     last_seq: CommitSeq(5),
                 },
@@ -599,7 +601,7 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
         // retain only the early block.
         let planted_id = store.put(cx, &root_bytes).expect("plants raw root");
         assert_identity_conflict(
-            store.reopen_at(cx, planted_id, CommitSeq(2)),
+            store.reopen_at(cx, PartitionRootVersion(planted_id.0), CommitSeq(2)),
             EId(10),
             expected,
             found,
@@ -649,11 +651,11 @@ fn a_root_read_uses_the_root_formats_exact_byte_ceiling() {
     let dir = scratch_dir("root-byte-ceiling");
     under_lab(45, move |cx| {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        let id = ObjectId([0x51; 32]);
+        let id = PartitionRootVersion(ObjectId([0x51; 32]));
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(store.path(id))
+            .open(store.path(id.0))
             .expect("creates sparse planted root");
         file.set_len(MAX_ENCODED_ROOT_BYTES as u64 + 1)
             .expect("extends sparse planted root");
@@ -704,7 +706,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
         };
         let encoded_root = fgdb_strata::root::encode_root(&root).expect("encodes root");
         assert_eq!(
-            root_id,
+            root_id.0,
             derive_root_id(&K_OID, NAMESPACE, &encoded_root),
             "root publication and root verification share one authoritative transcript"
         );
@@ -784,15 +786,18 @@ fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
             partition: 0,
             published_at: CommitSeq(9),
             blocks: vec![BlockRef {
-                block_id,
+                block_id: block_id.0,
                 first_seq: CommitSeq(7),
                 last_seq: CommitSeq(7),
             }],
         };
         let root_bytes = fgdb_strata::root::encode_root(&lying).expect("encodes root");
-        let root_id = store
-            .put(cx, &root_bytes)
-            .expect("plants an unadmitted root");
+        let root_id = PartitionRootVersion(
+            store
+                .put(cx, &root_bytes)
+                .expect("plants an unadmitted root")
+                .0,
+        );
 
         assert!(matches!(
             store.reopen_at(cx, root_id, CommitSeq(3)),
@@ -882,7 +887,8 @@ fn reopening_with_a_missing_block_is_refused() {
         // the raw path models a damaged/restored store that still reaches read.
         store.put(cx, &blocks[0].bytes).expect("stores");
         let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
-        let root_id = store.put(cx, &root_bytes).expect("plants root object");
+        let root_id =
+            PartitionRootVersion(store.put(cx, &root_bytes).expect("plants root object").0);
 
         assert!(
             matches!(
@@ -926,7 +932,7 @@ fn a_root_at_the_wrong_identity_is_refused() {
             ..root
         };
         let other_bytes = fgdb_strata::root::encode_root(&other).expect("encodes");
-        std::fs::write(store.path(root_id), &other_bytes).expect("plant");
+        std::fs::write(store.path(root_id.0), &other_bytes).expect("plant");
 
         assert!(matches!(
             store.get_root(cx, root_id),
