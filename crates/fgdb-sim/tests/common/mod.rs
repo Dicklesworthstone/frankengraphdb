@@ -175,9 +175,7 @@ pub fn assert_agrees(
     sources: &[u128],
     last: u64,
 ) {
-    if let Err(disagreement) = check_agrees(graph, blocks, sources, last) {
-        panic!("{disagreement}");
-    }
+    assert_eq!(check_agrees(graph, blocks, sources, last), Ok(()));
 }
 
 /// The fallible form of [`assert_agrees`], for the shrinker.

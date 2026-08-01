@@ -24,9 +24,15 @@
 //!
 //! Three sites, each one syscall or one slice:
 //!
-//! * [`sys::mmap_readonly`] — the `mmap(2)` syscall;
-//! * [`sys::munmap`] — the `munmap(2)` syscall, from `Drop`;
-//! * `Mapping::bytes` — forming the bounded `&[u8]` the caller actually sees.
+//! * `sys::map_range` — the `mmap(2)` syscall;
+//! * `Mapping::drop` — the `munmap(2)` syscall;
+//! * `Mapping::view_bytes` — forming the bounded `&[u8]` the caller actually
+//!   sees (named distinctly from `FileView::bytes` so the ledger's (path,
+//!   symbol) match is unambiguous).
+//!
+//! `sys` is private: `map_range` is sound only behind `plan_range`'s in-file
+//! precondition, and a public module would let a caller skip that check and
+//! hand out a view whose access faults SIGBUS.
 //!
 //! # What a site must carry
 //!

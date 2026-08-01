@@ -424,7 +424,7 @@ fn report(seed: u64, case: &Generated, error: &str) -> String {
 
 /// THE MAIN EVENT: many generated histories, every one of which must agree.
 #[test]
-fn generated_histories_agree_with_the_oracle() {
+fn generated_histories_agree_with_the_oracle() -> Result<(), String> {
     let mut coverage = Coverage::default();
 
     for seed in 0..240u64 {
@@ -445,7 +445,7 @@ fn generated_histories_agree_with_the_oracle() {
                 failure_kind(&original),
                 "seed {seed}: shrinking changed the defect ({original} -> {minimal_error})"
             );
-            panic!("{}", report(seed, &minimal, &minimal_error));
+            return Err(report(seed, &minimal, &minimal_error));
         }
     }
 
@@ -478,6 +478,7 @@ fn generated_histories_agree_with_the_oracle() {
         coverage.self_loops > 0,
         "generator never produced a self-loop: {coverage:?}"
     );
+    Ok(())
 }
 
 /// The generator must produce histories the harness ACCEPTS.
@@ -487,17 +488,18 @@ fn generated_histories_agree_with_the_oracle() {
 /// report a spurious engine disagreement — blaming Strata for a defect in this
 /// file. This law names the real culprit.
 #[test]
-fn every_generated_history_is_reachable() {
+fn every_generated_history_is_reachable() -> Result<(), String> {
     for seed in 500..560u64 {
         let case = generate(seed, 20);
         if let Err(error) = try_build(&case.history, &case.seal_after) {
-            panic!(
+            return Err(format!(
                 "seed {seed} produced an UNREACHABLE history — this is a generator defect, \
                  not an engine defect: {error}\n{:#?}",
                 case.history
-            );
+            ));
         }
     }
+    Ok(())
 }
 
 /// The generator is DETERMINISTIC: one seed, one history, forever.

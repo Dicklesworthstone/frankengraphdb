@@ -252,9 +252,13 @@ pub fn open_view(
 /// The module exists only where the ABI is known, which is what makes each
 /// site's `allow` unconditional rather than `cfg_attr`-wrapped: the code is not
 /// there at all on other targets, so an unconditional relaxation is not
-/// standing open over a site that does not exist.
+/// standing open over a site that does not exist. It is PRIVATE: `map_range`
+/// is sound only behind `plan_range`'s in-file precondition, and a public
+/// module would let a caller skip that check and hand out a view whose access
+/// faults SIGBUS (probe-proven). Keeping the boundary here makes the
+/// precondition universal by construction.
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-pub mod sys {
+mod sys {
     use super::{PAGE_BYTES, VfsError};
     use std::fs::File;
     use std::os::fd::AsRawFd;
@@ -266,8 +270,12 @@ pub mod sys {
     const SYS_MUNMAP: usize = 11;
     /// `PROT_READ`.
     const PROT_READ: usize = 0x1;
-    /// `MAP_PRIVATE`. Private so a later write by anyone else is not a
-    /// coherence question this crate has to answer.
+    /// `MAP_PRIVATE`. Private so a write through this mapping — impossible
+    /// under `PROT_READ` — could never propagate back to the file. It
+    /// privatizes only THIS process's writes: another process's writes to the
+    /// file remain observable through the view (there is no copy-on-write to
+    /// hide behind), which is why coherence is the caller's contract, not
+    /// this crate's claim.
     const MAP_PRIVATE: usize = 0x2;
     /// Linux encodes syscall errors as `-errno` in the range `[-4095, -1]`.
     const MAX_ERRNO: isize = 4095;
@@ -311,8 +319,12 @@ pub mod sys {
             //    why that check is a precondition of the mapping rather than a
             //    convenience.
             // 4. NO MUTABLE ALIAS. The mapping is read-only and this crate
-            //    never forms a `&mut` to it; `MAP_PRIVATE` means another
-            //    process's writes cannot be observed through it either.
+            //    never forms a `&mut` to it. Another process's writes to the
+            //    file ARE observable through the view — `MAP_PRIVATE`
+            //    privatizes only this process's own writes (copy-on-write,
+            //    which `PROT_READ` makes unreachable) — so the bytes are NOT a
+            //    snapshot; coherence with a live writer is the caller's
+            //    contract, and the ledger row disclaims it in both directions.
             unsafe {
                 core::slice::from_raw_parts(self.addr.as_ptr().add(self.delta), self.view_len)
             }

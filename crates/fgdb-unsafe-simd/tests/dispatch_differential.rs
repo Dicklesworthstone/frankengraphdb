@@ -53,11 +53,14 @@ fn fold_masks(digest: u64, masks: GroupMasks) -> u64 {
 fn cases() -> Vec<([u8; CONTROL_GROUP_WIDTH], u8)> {
     let mut cases = Vec::new();
 
-    // Family 1 — every control byte as a uniform group, against the tag that
-    // matches it, a tag that cannot, and both reserved controls.
+    // Family 1 — every control byte as a uniform group, against itself, the
+    // two sentinels 0x00/0x7f, and both reserved controls AS TAGS. The kernel
+    // accepts any `u8` tag and bit-identity is its defining property, so all
+    // 256 tag values are exercised; masking the tag to 7 bits would leave
+    // half the domain untested while the ledger claimed "every tag".
     for control in u8::MIN..=u8::MAX {
         let lanes = [control; CONTROL_GROUP_WIDTH];
-        for tag in [control & 0x7f, 0x00, 0x7f, EMPTY_CONTROL & 0x7f] {
+        for tag in [control, 0x00, 0x7f, EMPTY_CONTROL, DELETED_CONTROL] {
             cases.push((lanes, tag));
         }
     }
@@ -96,7 +99,7 @@ fn cases() -> Vec<([u8; CONTROL_GROUP_WIDTH], u8)> {
 
 /// Every case count is asserted, because a harness that silently ran zero
 /// cases reports exactly what a passing one reports.
-const EXPECTED_CASES: usize = 256 * 4 + CONTROL_GROUP_WIDTH * 3 + 4_096;
+const EXPECTED_CASES: usize = 256 * 5 + CONTROL_GROUP_WIDTH * 3 + 4_096;
 
 #[test]
 fn every_compiled_path_is_bit_identical_to_the_scalar_profile() {

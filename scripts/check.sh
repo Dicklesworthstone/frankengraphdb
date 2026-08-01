@@ -908,9 +908,27 @@ run_ubs() {
 # module's own JWT matcher reports crates/fgdb-chronicle/src/symbolize.rs at
 # 0 findings against 1 at its parent, and the full tracked-source scan moved
 # 123 -> 122 with only this class changing.
+# MOVED 2026-07-31 (fgdb-teqw, 9e11f4a): panic 137 -> 132, -5, all in
+# `crates/fgdb-types/src/context.rs`. The five test-only panic branches were:
+#     lab report omitted an expected invariant
+#     cancelled boundary unexpectedly succeeded
+#     cancelled acquisition unexpectedly succeeded
+#     cancelled context unexpectedly acquired an obligation
+#     no terminal path existed at the selected depth
+# Each became an assertion followed by explicit non-panicking control flow,
+# preserving the test verdict while removing the scanner-critical macro. The
+# parent file scans at exactly 5 findings in this class and the current file at
+# 0; the commit diff contains five deletions and zero additions, and committed
+# Rust changes through 8d651fa add or remove none of these four macro families.
+# FOLLOW-UP 2026-08-01 (8c53adb): that later landing introduced three explicit
+# test-only panic branches in the generated-history harness. This same repair
+# converts them to `Result` returns or `assert_eq!`, retaining the failure text
+# without moving the ratchet back upward. UBS reports those three macro sites as
+# seven line findings because one invocation spans four lines; after the rewrite
+# both newly landed files report zero findings in this class.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=817"
-  "panic!/unreachable!/todo!/unimplemented!=137"
+  "panic!/unreachable!/todo!/unimplemented!=132"
   "JWT decode, validation bypass, or missing claim binding=122"
 )
 
