@@ -1375,6 +1375,106 @@ fn concurrent_genesis_transactions_cannot_both_create_the_branch() {
     assert!(prop_of(&db, MAIN, 2).is_none());
 }
 
+/// fgdb-1xqd — A FORK IS THE OTHER WAY A COORDINATE COMES INTO EXISTENCE.
+///
+/// The law above catches two genesis transactions racing each other, because the
+/// loser can see the winner's first record in the branch's own history. A FORK
+/// leaves no such record: `fork_branch_at` appends nothing to the stream and the
+/// child "owns an empty record vector" by design — that emptiness is what makes a
+/// fork O(1) in the dimension time-travel reads.
+///
+/// So certification used to be structurally blind here. A genesis claimant would
+/// certify cleanly against a branch that had been forked into existence
+/// underneath it, and commit a template it had evaluated against the EMPTY graph
+/// into a coordinate that already carried its parent's state. The effects are
+/// disjoint, so no element-grained key sees it; before-images verify, so
+/// materialization stays self-consistent. The database ends up with two
+/// creators — its origin says `Fork`, and its first own commit claims genesis.
+#[test]
+fn a_fork_defeats_a_pending_genesis_claim_on_the_same_coordinate() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0)]);
+
+    // The claimant begins while OTHER genuinely does not exist.
+    let mut claimant = Transaction::begin_genesis(&db, GRAPH, OTHER).expect("genesis");
+    claimant.execute(&[create(2, 2)]).expect("executes");
+
+    // OTHER is forked into existence underneath it. No commit, no stream append.
+    db.fork_branch(GRAPH, MAIN, OTHER).expect("forks");
+
+    let before = db.clone();
+    let outcome = claimant
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("outcome");
+    assert_eq!(
+        outcome,
+        TxnOutcome::Conflicted {
+            conflicts: vec![ConflictKey::CoordinateExistence],
+        },
+        "a genesis claim has to lose to the fork that falsified it"
+    );
+    assert_eq!(db, before, "and it appends nothing to the forked branch");
+}
+
+/// CONTROL for the law above, and it is the one that matters.
+///
+/// Forking is not rare, so a fix that simply refused every genesis transaction on
+/// any database containing a fork would pass the law above while breaking
+/// branching outright. Here the fork touches a DIFFERENT coordinate than the one
+/// being claimed, which is the overwhelmingly common case, and the genesis
+/// transaction must still commit.
+#[test]
+fn a_fork_of_another_branch_leaves_a_genesis_claim_alone() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0)]);
+
+    let mut claimant = Transaction::begin_genesis(&db, GRAPH, NESTED).expect("genesis");
+    claimant.execute(&[create(2, 2)]).expect("executes");
+
+    // A fork of an UNRELATED branch — nothing to do with NESTED.
+    db.fork_branch(GRAPH, MAIN, OTHER).expect("forks");
+
+    let outcome = claimant
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("outcome");
+    assert!(
+        matches!(outcome, TxnOutcome::WriteCommitted { .. }),
+        "an unrelated fork must not defeat a genesis claim, got {outcome:?}"
+    );
+    assert_eq!(prop_of(&db, NESTED, 2), Some(2));
+}
+
+/// SECOND CONTROL: an ordinary transaction on a freshly forked branch commits.
+///
+/// The fix marks a forked coordinate as existence-created for everyone, not only
+/// for genesis claimants. That is deliberate and inert — the key bites only when
+/// it is in BOTH transactions' sets and only a genesis claimant carries it in its
+/// own — but "deliberate and inert" is a claim, and this is the assertion that
+/// makes it one rather than a hope. Without it the fix would strand every fresh
+/// branch, unable to accept its first ordinary write.
+#[test]
+fn a_freshly_forked_branch_accepts_its_first_ordinary_write() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0)]);
+    db.fork_branch(GRAPH, MAIN, OTHER).expect("forks");
+
+    let mut txn = Transaction::begin(&db, GRAPH, OTHER).expect("begin");
+    txn.execute(&[create(2, 2)]).expect("executes");
+    let outcome = txn
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("outcome");
+    assert!(
+        matches!(outcome, TxnOutcome::WriteCommitted { .. }),
+        "a forked branch must be writable, got {outcome:?}"
+    );
+    assert_eq!(prop_of(&db, OTHER, 2), Some(2));
+    assert_eq!(
+        prop_of(&db, OTHER, 1),
+        Some(0),
+        "and it kept its inheritance"
+    );
+}
+
 /// CONTROL for the law above: an UNCONTESTED genesis transaction still commits.
 ///
 /// Without it, the existence key could be refusing every genesis transaction and

@@ -2331,12 +2331,48 @@ impl ReferenceDatabase {
         // claiming to be the first write to a branch both used an empty basis, so
         // whichever loses computed every before-image against a state that never
         // existed. Their effects can be disjoint, so no element key catches it.
-        if self
+        let born_by_commit = self
             .history
             .get(&(graph, branch))
             .and_then(|records| records.first())
-            .is_some_and(|first| first.commit_seq.0 > since.0)
-        {
+            .is_some_and(|first| first.commit_seq.0 > since.0);
+
+        // ...AND A FORK IS THE OTHER WAY A COORDINATE COMES INTO EXISTENCE
+        // (fgdb-1xqd). `fork_branch_at` appends nothing to the stream and writes
+        // no history record — the child "owns an empty record vector" by design,
+        // which is what makes a fork O(1) in the dimension time-travel reads. So
+        // the own-history test above is structurally blind to it: a genesis
+        // claimant would certify cleanly against a branch that had been forked
+        // into existence underneath it, and commit a template evaluated on the
+        // empty graph into a coordinate that already had a parent's state.
+        //
+        // `origins` is the register that knows both ways, so ask it. Genesis is
+        // recorded there too — but only on FIRST WRITE, inside the candidate,
+        // which is strictly after this runs. So at certification time an entry
+        // here means "someone else brought this coordinate into being", which is
+        // exactly the claim a genesis transaction is asserting is false.
+        //
+        // THAT ORDERING IS LOAD-BEARING AND IT IS NOT LOCAL TO THIS FUNCTION.
+        // Move the `origins.entry(key).or_insert(BranchOrigin::Genesis)` in
+        // `apply_template` to anywhere before certification and this test starts
+        // matching a transaction's own pending genesis, refusing every genesis
+        // commit in the system. What catches that is
+        // `an_uncontested_genesis_transaction_still_commits` in
+        // tests/transaction_anomalies.rs — verified 2026-08-01 to still pass with
+        // this clause forced off, so it constrains the ordering rather than
+        // riding on this fix.
+        //
+        // A non-genesis transaction on a freshly forked branch also matches (it
+        // has no own record at or before its basis) and that is harmless: the key
+        // only bites when it is in BOTH sets, and only a genesis claimant carries
+        // CoordinateExistence in its own.
+        let born_by_fork = self.origins.contains_key(&(graph, branch))
+            && !self
+                .history
+                .get(&(graph, branch))
+                .is_some_and(|records| records.iter().any(|r| r.commit_seq.0 <= since.0));
+
+        if born_by_commit || born_by_fork {
             summary.writes.insert(ConflictKey::CoordinateExistence);
         }
 
