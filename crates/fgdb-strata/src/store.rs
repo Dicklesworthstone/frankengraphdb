@@ -21,9 +21,10 @@
 //!
 //! **AN EXISTING BLOCK IS NOT REWRITTEN.** Blocks are immutable and
 //! content-addressed, so a second write of the same identity is either the same
-//! bytes (no content rewrite) or a collision (a refusal). Truncating and rewriting
-//! would take a durable object that is currently readable and make it briefly
-//! absent, to replace it with what it already contained — the hazard
+//! bytes (no content rewrite), damage whose bytes derive a different identity, or
+//! a true identity collision (both refusals). Truncating and rewriting would take
+//! a durable object that is currently readable and make it briefly absent, to
+//! replace it with what it already contained — the hazard
 //! `fgdb-capsule-no-overwrite-pysi` names for capsules, avoided here for the same
 //! reason.
 //!
@@ -33,6 +34,12 @@
 //! then moves that complete inode to the content-addressed path and syncs the
 //! directory. An identical loser can therefore observe only absence or the
 //! winner's complete bytes — never the winner halfway through `write_all`.
+//!
+//! **READ-SIDE CAPABILITY CONTEXT IS STILL AN OPEN WORKSPACE CONTRACT.** `get`,
+//! `get_root`, and `reopen` perform synchronous filesystem reads without a `Cx`,
+//! matching Chronicle's current read-side precedent rather than claiming the
+//! doctrine-3 end state. `fgdb-j0ae` retains that gap until the workspace chooses
+//! one read-authority shape for both stores.
 //!
 //! **WHAT IS DELIBERATELY ABSENT.** Blocks are stored as their canonical bytes,
 //! NOT sealed into capsules. `strata_blocks_are_durable_objects.rs` proves a block
@@ -147,11 +154,36 @@ fn run_ordered_creation_barrier(
 /// publication authority first. Dropping the descriptor releases the lock on
 /// every return path, including an injected crash error.
 #[derive(Debug)]
-struct BlockPublicationPermit {
+struct ObjectPublicationPermit {
     _locked_file: File,
 }
 
-/// Why a block could not be stored or loaded.
+/// Selects the authoritative identity transcript for one immutable store object.
+///
+/// Block and root derivations intentionally produce the same bits today. Keeping
+/// the choice explicit on both write and read prevents that present equivalence
+/// from becoming a hidden compatibility dependency if either transcript changes.
+#[derive(Clone, Copy, Debug)]
+enum StoredObjectKind {
+    Block,
+    Root,
+}
+
+impl StoredObjectKind {
+    fn identity(
+        self,
+        k_oid: &[u8; 32],
+        namespace: DatabaseSecurityNamespaceId,
+        bytes: &[u8],
+    ) -> ObjectId {
+        match self {
+            Self::Block => block_id(k_oid, namespace, bytes),
+            Self::Root => crate::root::root_id(k_oid, namespace, bytes),
+        }
+    }
+}
+
+/// Why an immutable Strata object could not be stored or loaded.
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),
@@ -169,13 +201,24 @@ pub enum StoreError {
         expected: ObjectId,
         actual: ObjectId,
     },
-    /// A block with this identity already exists holding DIFFERENT bytes.
+    /// An existing canonical path contains bytes whose own identity names a
+    /// different object.
     ///
-    /// Under a keyed 256-bit identity this is not a hash collision anyone will
-    /// meet; it is a key/namespace mix-up or a corrupted store, and both are worse
-    /// to overwrite than to refuse.
+    /// This is damage or a nonconforming writer, not a hash collision: a true
+    /// collision requires two different byte strings that both derive the same
+    /// identity. The existing inode is preserved for diagnosis.
+    DamagedExisting {
+        expected: ObjectId,
+        actual: ObjectId,
+    },
+    /// Two different byte strings derived the same identity.
+    ///
+    /// Under a keyed 256-bit identity this is not expected to occur. Bytes at the
+    /// path that derive a *different* identity are [`StoreError::DamagedExisting`]
+    /// instead, so ordinary corruption is never mislabeled as cryptographic
+    /// evidence.
     Collision {
-        block_id: ObjectId,
+        object_id: ObjectId,
     },
     /// The stored bytes are not a lawful block.
     Malformed(BlockError),
@@ -186,6 +229,15 @@ pub enum StoreError {
     /// whether the ROOT is wrong or one of the BLOCKS is, because those are
     /// different objects to go and look at.
     MalformedRoot(crate::root::RootError),
+    /// Loading one of a root's named blocks failed at the storage boundary.
+    ///
+    /// Kept distinct from `MalformedRoot`: an absent inode, an oversized object,
+    /// and a false block identity are storage diagnoses, not evidence that the
+    /// authenticated root's own byte layout is malformed.
+    RootBlockLoad {
+        at: usize,
+        error: Box<StoreError>,
+    },
 }
 
 impl core::fmt::Display for StoreError {
@@ -200,16 +252,36 @@ impl core::fmt::Display for StoreError {
                 f,
                 "the bytes stored for {expected:?} are actually {actual:?}"
             ),
-            Self::Collision { block_id } => {
-                write!(f, "{block_id:?} already exists with different bytes")
+            Self::DamagedExisting { expected, actual } => write!(
+                f,
+                "the existing path for {expected:?} contains object {actual:?}"
+            ),
+            Self::Collision { object_id } => {
+                write!(f, "{object_id:?} already exists with different bytes")
             }
             Self::Malformed(error) => write!(f, "stored block is malformed: {error}"),
             Self::MalformedRoot(error) => write!(f, "stored root is malformed: {error}"),
+            Self::RootBlockLoad { at, error } => {
+                write!(f, "loading root block {at}: {error}")
+            }
         }
     }
 }
 
-impl core::error::Error for StoreError {}
+impl core::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Malformed(error) => Some(error),
+            Self::MalformedRoot(error) => Some(error),
+            Self::RootBlockLoad { error, .. } => Some(error.as_ref()),
+            Self::ObjectTooLarge { .. }
+            | Self::IdentityMismatch { .. }
+            | Self::DamagedExisting { .. }
+            | Self::Collision { .. } => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for StoreError {
     fn from(error: std::io::Error) -> Self {
@@ -302,7 +374,7 @@ impl BlockStore {
                 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "block publication lock path exists but is not a regular file",
+                        "object publication lock path exists but is not a regular file",
                     )
                     .into());
                 }
@@ -379,13 +451,13 @@ impl BlockStore {
     fn acquire_publication_permit(
         &self,
         cx: &CommitCx,
-    ) -> Result<BlockPublicationPermit, StoreError> {
+    ) -> Result<ObjectPublicationPermit, StoreError> {
         let locked_file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&self.publication_lock_path)?;
         cx.with_restriction(|| File::lock(&locked_file))?;
-        Ok(BlockPublicationPermit {
+        Ok(ObjectPublicationPermit {
             _locked_file: locked_file,
         })
     }
@@ -414,10 +486,29 @@ impl BlockStore {
         before_lock: impl FnOnce(),
         after_staging_sync: impl FnOnce(),
     ) -> Result<ObjectId, StoreError> {
+        self.put_object_with_steps(
+            StoredObjectKind::Block,
+            cx,
+            bytes,
+            crash_at,
+            before_lock,
+            after_staging_sync,
+        )
+    }
+
+    fn put_object_with_steps(
+        &self,
+        kind: StoredObjectKind,
+        cx: &CommitCx,
+        bytes: &[u8],
+        crash_at: Option<BlockStoreCrashPoint>,
+        before_lock: impl FnOnce(),
+        after_staging_sync: impl FnOnce(),
+    ) -> Result<ObjectId, StoreError> {
         let offered_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         ensure_size_within_limit(offered_len, MAX_STORED_OBJECT_BYTES)?;
 
-        let id = block_id(&self.k_oid, self.namespace, bytes);
+        let id = kind.identity(&self.k_oid, self.namespace, bytes);
         let path = self.path(id);
 
         before_lock();
@@ -432,17 +523,21 @@ impl BlockStore {
                 if !metadata.file_type().is_file() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "canonical block path exists but is not a regular file",
+                        "canonical object path exists but is not a regular file",
                     )
                     .into());
                 }
                 let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
-                if file.metadata()?.len() != offered_len {
-                    return Err(StoreError::Collision { block_id: id });
+                let existing = read_bounded(&mut file, MAX_STORED_OBJECT_BYTES)?;
+                let actual = kind.identity(&self.k_oid, self.namespace, &existing);
+                if actual != id {
+                    return Err(StoreError::DamagedExisting {
+                        expected: id,
+                        actual,
+                    });
                 }
-                let existing = read_bounded(&mut file, offered_len)?;
                 if existing != bytes {
-                    return Err(StoreError::Collision { block_id: id });
+                    return Err(StoreError::Collision { object_id: id });
                 }
                 sync_file_and_directory(cx, &file, &self.dir, || {
                     if crash_at
@@ -477,7 +572,7 @@ impl BlockStore {
                 if !metadata.file_type().is_file() || !staging_inode_is_exclusive(&metadata) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "block staging path is not an exclusive regular-file inode",
+                        "object staging path is not an exclusive regular-file inode",
                     )
                     .into());
                 }
@@ -528,13 +623,17 @@ impl BlockStore {
         decode_block(&bytes).map_err(StoreError::Malformed)
     }
 
+    fn read_object_bytes(&self, id: ObjectId, limit: u64) -> Result<Vec<u8>, StoreError> {
+        let mut file = File::open(self.path(id))?;
+        read_bounded(&mut file, limit)
+    }
+
     /// Load the raw bytes of a block, verifying identity but not decoding.
     ///
     /// For a caller that needs the bytes themselves — sealing into a capsule,
     /// copying to a replica — and must not pay to decode them.
     pub fn get_bytes(&self, id: ObjectId) -> Result<Vec<u8>, StoreError> {
-        let mut file = File::open(self.path(id))?;
-        let bytes = read_bounded(&mut file, MAX_STORED_OBJECT_BYTES)?;
+        let bytes = self.read_object_bytes(id, MAX_STORED_OBJECT_BYTES)?;
         let actual = block_id(&self.k_oid, self.namespace, &bytes);
         if actual != id {
             return Err(StoreError::IdentityMismatch {
@@ -543,6 +642,34 @@ impl BlockStore {
             });
         }
         Ok(bytes)
+    }
+
+    /// Load and validate every block named by an already-structural root.
+    ///
+    /// Storage failures stay outside the format-only proof, so an I/O error or
+    /// false object identity is never collapsed into `BlockError::NotABlock`.
+    /// Each encoded block is dropped before loading the next; the shared root
+    /// helper still owns block decoding and the root-to-block range proof.
+    fn resolve_root_blocks(
+        &self,
+        root: &crate::root::PartitionRoot,
+    ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
+        crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
+
+        let mut blocks = Vec::with_capacity(root.blocks.len());
+        for (at, reference) in root.blocks.iter().enumerate() {
+            let bytes =
+                self.get_bytes(reference.block_id)
+                    .map_err(|error| StoreError::RootBlockLoad {
+                        at,
+                        error: Box::new(error),
+                    })?;
+            blocks.push(
+                crate::root::resolve_block_ref(&self.k_oid, self.namespace, at, reference, &bytes)
+                    .map_err(StoreError::MalformedRoot)?,
+            );
+        }
+        Ok(blocks)
     }
 
     /// Store a partition root, returning the identity it was stored under.
@@ -555,23 +682,26 @@ impl BlockStore {
     /// is a POINTER to the current root's identity, and choosing where that pointer
     /// lives is Chronicle's question rather than this store's.
     ///
-    /// Deliberately the same `put`, so a root gets the identity derivation, the
-    /// no-overwrite rule and the collision refusal without a second implementation
-    /// that could drift from them. Only the reader differs, because only the reader
-    /// knows which decoder applies.
+    /// The root is admitted against every named block before publication. That
+    /// binds each authenticated range to the actual block bytes, so a future
+    /// range-skipping reader cannot inherit a lie minted by a privileged caller.
+    /// Publication then delegates to the same immutable-object path as blocks.
     pub fn put_root(
         &self,
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<ObjectId, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
-        self.put(cx, &bytes)
+        self.resolve_root_blocks(root)?;
+        self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
     }
 
-    /// Load the partition root named by `id`, verifying identity then lawfulness.
+    /// Load the partition root named by `id`, using the root format's exact byte
+    /// ceiling and root-specific identity verifier before structural decoding.
     pub fn get_root(&self, id: ObjectId) -> Result<crate::root::PartitionRoot, StoreError> {
-        let bytes = self.get_bytes(id)?;
-        crate::root::decode_root(&bytes).map_err(StoreError::MalformedRoot)
+        let bytes = self.read_object_bytes(id, crate::root::MAX_ENCODED_ROOT_BYTES as u64)?;
+        crate::root::read_root(&self.k_oid, self.namespace, &bytes, id)
+            .map_err(StoreError::MalformedRoot)
     }
 
     /// Reopen a whole partition: the root, and every block it names.
@@ -585,10 +715,7 @@ impl BlockStore {
         id: ObjectId,
     ) -> Result<(crate::root::PartitionRoot, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
         let root = self.get_root(id)?;
-        let blocks = crate::root::resolve_blocks(&self.k_oid, self.namespace, &root, |wanted| {
-            self.get_bytes(wanted).ok()
-        })
-        .map_err(StoreError::MalformedRoot)?;
+        let blocks = self.resolve_root_blocks(&root)?;
         Ok((root, blocks))
     }
 

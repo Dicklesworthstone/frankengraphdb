@@ -18,6 +18,7 @@ use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, VId};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -335,14 +336,14 @@ fn storing_the_same_bytes_twice_is_a_no_op() {
     });
 }
 
-/// A COLLISION IS REFUSED rather than overwritten.
+/// DAMAGE IS REFUSED without being promoted to cryptographic evidence.
 ///
-/// Under a keyed 256-bit identity this is not a hash collision anyone will meet in
-/// practice; it is a key or namespace mix-up, or a corrupted store. Both are worse
-/// to overwrite than to refuse, and the refusal names the identity so an operator
-/// can find the file.
+/// Bytes that derive a different identity from their canonical path are a key or
+/// namespace mix-up, a nonconforming writer, or corruption. A true collision is
+/// two different byte strings deriving the same keyed identity; conflating those
+/// states would make an ordinary repair incident look like a cryptographic break.
 #[test]
-fn a_collision_is_refused() {
+fn a_damaged_existing_file_is_not_misreported_as_a_collision() {
     let dir = scratch_dir("collision");
     under_lab(35, move |cx| {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
@@ -353,9 +354,15 @@ fn a_collision_is_refused() {
         let other = encode_block(&[entry(4, 5, 6)]).expect("encodes");
         std::fs::write(store.path(id), &other).expect("plant");
 
+        let error = store.put(cx, &bytes).expect_err("damage must be refused");
         assert!(
-            matches!(store.put(cx, &bytes), Err(StoreError::Collision { block_id }) if block_id == id),
-            "a differing block at this identity must not be silently replaced"
+            matches!(
+                error,
+                StoreError::DamagedExisting { expected, actual }
+                    if expected == id && actual == block_id(&K_OID, NAMESPACE, &other)
+            ),
+            "bytes whose own identity differs from their path are damage, not a hash collision: \
+             {error:?}"
         );
         assert_eq!(
             std::fs::read(store.path(id)).expect("read"),
@@ -439,7 +446,10 @@ fn stored_bytes_that_are_not_a_block_are_refused_as_malformed() {
 // ---------------------------------------------------------------------------
 
 use fgdb_delta_types::DeltaRow;
-use fgdb_strata::root::merge_neighbours;
+use fgdb_strata::root::{
+    BlockRef, MAX_ENCODED_ROOT_BYTES, PartitionRoot, RootError, merge_neighbours,
+    root_id as derive_root_id,
+};
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::{BranchId, EId, GraphId};
 
@@ -454,6 +464,106 @@ fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
         props: vec![],
         valid_time: None,
     }
+}
+
+/// A root is admitted only after every named block proves the range the root
+/// would authenticate. Otherwise a caller with commit authority could persist
+/// a keyed, content-addressed lie and a later snapshot reader could treat its
+/// understated `first_seq` as permission to skip relevant history.
+#[test]
+fn putting_a_root_refuses_a_false_block_range_before_publication() {
+    let dir = scratch_dir("root-range-admission");
+    under_lab(44, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let bytes = sample();
+        let block_id = store.put(cx, &bytes).expect("stores block");
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(3),
+            blocks: vec![BlockRef {
+                block_id,
+                first_seq: CommitSeq(2),
+                last_seq: CommitSeq(2),
+            }],
+        };
+        let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
+        let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
+
+        assert!(matches!(
+            store.put_root(cx, &root),
+            Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch {
+                at: 0,
+                declared: (CommitSeq(2), CommitSeq(2)),
+                actual: (CommitSeq(1), CommitSeq(2)),
+            }))
+        ));
+        assert!(
+            !store.path(root_id).exists(),
+            "a root that failed admission must not acquire a canonical path"
+        );
+    });
+}
+
+/// A structurally valid root is not publishable before every named block is
+/// present. Admission and canonical naming are one ordered operation.
+#[test]
+fn putting_a_root_requires_every_named_block_before_publication() {
+    let dir = scratch_dir("root-block-presence-admission");
+    under_lab(46, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(2),
+            blocks: vec![BlockRef {
+                block_id: ObjectId([0x61; 32]),
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            }],
+        };
+        let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
+        let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
+
+        assert!(matches!(
+            store.put_root(cx, &root),
+            Err(StoreError::RootBlockLoad { at: 0, error })
+                if matches!(*error, StoreError::Io(ref io)
+                    if io.kind() == std::io::ErrorKind::NotFound)
+        ));
+        assert!(
+            !store.path(root_id).exists(),
+            "an incomplete root must not acquire a canonical path"
+        );
+    });
+}
+
+/// Root decoding has a much smaller structural ceiling than a full block. The
+/// store must apply that exact ceiling before materializing bytes, not first
+/// allocate up to the block-format maximum and let the root decoder complain.
+#[test]
+fn a_root_read_uses_the_root_formats_exact_byte_ceiling() {
+    let dir = scratch_dir("root-byte-ceiling");
+    under_lab(45, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let id = ObjectId([0x51; 32]);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(store.path(id))
+            .expect("creates sparse planted root");
+        file.set_len(MAX_ENCODED_ROOT_BYTES as u64 + 1)
+            .expect("extends sparse planted root");
+
+        assert!(matches!(
+            store.get_root(id),
+            Err(StoreError::ObjectTooLarge { limit, observed })
+                if limit == MAX_ENCODED_ROOT_BYTES as u64
+                    && observed == MAX_ENCODED_ROOT_BYTES as u64 + 1
+        ));
+    });
 }
 
 /// **THE PAYOFF: a partition reopens from disk with no stream replay.**
@@ -491,6 +601,12 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
             }
             store.put_root(cx, &root).expect("stores the root")
         };
+        let encoded_root = fgdb_strata::root::encode_root(&root).expect("encodes root");
+        assert_eq!(
+            root_id,
+            derive_root_id(&K_OID, NAMESPACE, &encoded_root),
+            "root publication and root verification share one authoritative transcript"
+        );
 
         // A FRESH handle, holding nothing but the root identity.
         let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens");
@@ -530,13 +646,21 @@ fn reopening_with_a_missing_block_is_refused() {
             .expect("publishes");
 
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        // Store the root and only the FIRST block.
+        // Store the root bytes through the generic object path and only the
+        // FIRST block. `put_root` itself rejects this incomplete publication;
+        // the raw path models a damaged/restored store that still reaches read.
         store.put(cx, &blocks[0].bytes).expect("stores");
-        let root_id = store.put_root(cx, &root).expect("stores the root");
+        let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
+        let root_id = store.put(cx, &root_bytes).expect("plants root object");
 
         assert!(
-            matches!(store.reopen(root_id), Err(StoreError::MalformedRoot(_))),
-            "a root whose blocks are not all present must not reopen"
+            matches!(
+                store.reopen(root_id),
+                Err(StoreError::RootBlockLoad { at: 1, error })
+                    if matches!(*error, StoreError::Io(ref io)
+                        if io.kind() == std::io::ErrorKind::NotFound)
+            ),
+            "a missing stored block must retain both its position and I/O diagnosis"
         );
         // The root itself is still perfectly readable — the failure is about the
         // partition, not about the root object, and the two are worth telling apart.
@@ -555,11 +679,14 @@ fn a_root_at_the_wrong_identity_is_refused() {
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates");
-        let (root, _) = writer
+        let (root, blocks) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        for block in blocks {
+            store.put(cx, &block.bytes).expect("stores block");
+        }
         let root_id = store.put_root(cx, &root).expect("stores");
 
         // A different lawful root written over the path.
@@ -572,7 +699,9 @@ fn a_root_at_the_wrong_identity_is_refused() {
 
         assert!(matches!(
             store.get_root(root_id),
-            Err(StoreError::IdentityMismatch { .. })
+            Err(StoreError::MalformedRoot(
+                RootError::IdentityMismatch { .. }
+            ))
         ));
     });
 }

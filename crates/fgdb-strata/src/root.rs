@@ -47,6 +47,12 @@ const REF_LEN: usize = 32 + 8 + 8;
 
 /// The largest number of blocks this build will read from one root.
 pub const MAX_ROOT_BLOCKS: u32 = 1 << 20;
+/// The largest canonical root byte string this format version can encode.
+///
+/// Storage applies this before materializing a root. Keeping the byte ceiling
+/// derived beside the layout prevents the block store from drifting to a much
+/// larger, block-shaped allocation bound when the durable root format changes.
+pub const MAX_ENCODED_ROOT_BYTES: usize = HEADER_LEN + (MAX_ROOT_BLOCKS as usize) * REF_LEN;
 
 /// One block a root names, and the sequence range it covers.
 ///
@@ -374,6 +380,41 @@ pub fn read_root(
     decode_root(bytes)
 }
 
+/// Prove one loaded block against the identity and range named by a root.
+///
+/// Kept crate-visible so the filesystem store can retain its own I/O error while
+/// sharing the exact same format proof as the source-agnostic resolver below.
+/// The encoded bytes are dropped before the next block is loaded, avoiding an
+/// eager second copy of the whole partition.
+pub(crate) fn resolve_block_ref(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    at: usize,
+    reference: &BlockRef,
+    bytes: &[u8],
+) -> Result<Vec<crate::AdjacencyEntry>, RootError> {
+    let entries = crate::read_block(k_oid, namespace, bytes, reference.block_id)
+        .map_err(|error| RootError::Block { at, error })?;
+
+    // An empty block spans nothing, so it cannot honour any declared range —
+    // and a root naming one is describing a block that carries no information.
+    let Some(actual) = span_of(&entries) else {
+        return Err(RootError::BlockRangeMismatch {
+            at,
+            declared: (reference.first_seq, reference.last_seq),
+            actual: (CommitSeq(0), CommitSeq(0)),
+        });
+    };
+    if actual != (reference.first_seq, reference.last_seq) {
+        return Err(RootError::BlockRangeMismatch {
+            at,
+            declared: (reference.first_seq, reference.last_seq),
+            actual,
+        });
+    }
+    Ok(entries)
+}
+
 /// Load every block a root names, proving each is the block the root meant AND
 /// that it spans the range the root claimed.
 ///
@@ -405,26 +446,9 @@ pub fn resolve_blocks(
             at: index,
             error: BlockError::NotABlock,
         })?;
-        let entries = crate::read_block(k_oid, namespace, &bytes, reference.block_id)
-            .map_err(|error| RootError::Block { at: index, error })?;
-
-        // An empty block spans nothing, so it cannot honour any declared range —
-        // and a root naming one is describing a block that carries no information.
-        let Some(actual) = span_of(&entries) else {
-            return Err(RootError::BlockRangeMismatch {
-                at: index,
-                declared: (reference.first_seq, reference.last_seq),
-                actual: (CommitSeq(0), CommitSeq(0)),
-            });
-        };
-        if actual != (reference.first_seq, reference.last_seq) {
-            return Err(RootError::BlockRangeMismatch {
-                at: index,
-                declared: (reference.first_seq, reference.last_seq),
-                actual,
-            });
-        }
-        out.push(entries);
+        out.push(resolve_block_ref(
+            k_oid, namespace, index, reference, &bytes,
+        )?);
     }
     Ok(out)
 }

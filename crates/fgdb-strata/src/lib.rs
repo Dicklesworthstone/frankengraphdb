@@ -1,13 +1,15 @@
-//! `fgdb-strata` — B2's graph-structured LSM. **This activation lands tier one's
-//! durable artifact and nothing else.**
+//! `fgdb-strata` — B2's graph-structured LSM, currently implementing the Tier-D
+//! delta-block posture.
 //!
 //! §2 of the plan puts adjacency in three temperature tiers: versioned delta
-//! blocks, sealed compressed CSR runs, archived anchors. What is here is the
-//! first tier's *format*: a sorted, versioned adjacency run with an exact byte
-//! layout, a fail-closed decoder, and scans that read from the encoded bytes.
+//! blocks, sealed compressed CSR runs, archived anchors. This crate now owns the
+//! first tier's exact block format, ordered writer, partition roots, immutable
+//! block store, cross-block snapshot merge, and compaction. Those pieces make a
+//! durable partition reopenable without replaying the commit stream; they do not
+//! imply that the warmer tiers or adaptive migration controller exist yet.
 //!
-//! **WHY A FORMAT AND NOT A MAP, WHICH IS THE INTERESTING PART.** The obvious
-//! first slice is a `BTreeMap<(VId, RelationId, VId), _>` with the tier's
+//! **WHY DURABLE BLOCKS AND NOT A MAP, WHICH IS THE INTERESTING PART.** The obvious
+//! first slice was a `BTreeMap<(VId, RelationId, VId), _>` with the tier's
 //! visibility semantics on top. It would be smaller, it would pass a differential
 //! against the reference oracle, and it would be the exact thing doctrine 7
 //! prohibits: "no `HashMap<VId, Vec<EId>>` presented as storage", and "early code
@@ -15,16 +17,15 @@
 //! in-memory map with the right answers is a substitute for storage; it has no
 //! durable form, so nothing about it can be wrong in the way storage is wrong.
 //!
-//! A byte layout can be wrong in exactly those ways, which is why it is the honest
-//! slice: it can be non-canonical, it can be truncated, it can decode to something
-//! other than what was encoded, and it can lie about ordering. Every one of those
-//! is a law below.
+//! Durable blocks and roots can be wrong in exactly those ways, which is why this
+//! is the honest slice: they can be non-canonical, truncated, falsely addressed,
+//! published out of order, or disagree about visibility ranges. Every one of
+//! those boundaries has a typed refusal and a law below.
 //!
 //! **WHAT IS DELIBERATELY ABSENT**, so the gap is legible rather than implied:
-//! sealing a block, compressed CSR runs, archived anchors, the stable-ID
-//! directory, tier migration and its decision cards, compaction, and any
-//! in-memory index over blocks. A block is written once and read back; nothing
-//! here manages a set of them.
+//! sealed compressed CSR runs, archived anchors, the stable-ID directory, tier
+//! migration and its decision cards, and a read path that skips unopened blocks
+//! without weakening the proof that every authenticated root range is truthful.
 //!
 //! **CANONICAL MEANS EXACTLY ONE BYTE STRING PER VALUE** (doctrine 4). Entries are
 //! strictly ascending by `(src, relation, dst)` and the ENCODER refuses input that
