@@ -319,38 +319,36 @@ fn a_duplicate_cascade_edge_is_refused_atomically() {
         .expect("the duplicate refusal must leave the edge live");
 }
 
-/// Every retirement in a cascade is validated before the first one lands. A row
-/// cannot return a late interval error after already consuming an earlier edge.
+/// Every retirement in a cascade is validated before the first one lands, and
+/// a member created in the cascade's own commit FOLDS to nothing (fgdb-zeay):
+/// a vertex created and deleted with its incident edge in one commit is
+/// visible on no snapshot, so the durable image retires the older edges and
+/// carries no entry for the same-commit one.
 #[test]
-fn a_cascade_is_preflighted_before_any_retirement() {
+fn a_cascade_folds_its_same_commit_members_and_retires_the_rest() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates the earlier edge");
     w.apply(keys(), CommitSeq(4), &create(11, 3, 1))
         .expect("creates the same-commit edge");
 
-    assert_eq!(
-        w.apply(
-            keys(),
-            CommitSeq(4),
-            &DeltaRow::DeleteVertex {
-                vid: VId(1),
-                before_version: ObjectId([0u8; 32]),
-                sorted_retired_incident_edges: vec![EId(10), EId(11)],
-            },
-        ),
-        Err(WriteError::Block(
-            fgdb_strata::BlockError::RetiredBeforeCreated {
-                at: 0,
-                created_at: CommitSeq(4),
-                retired_at: CommitSeq(4),
-            }
-        ))
-    );
-    w.apply(keys(), CommitSeq(4), &delete(10))
-        .expect("the late refusal must leave the earlier edge live");
-    w.apply(keys(), CommitSeq(5), &delete(11))
-        .expect("the late refusal must also leave its own invalid edge live");
+    w.apply(
+        keys(),
+        CommitSeq(4),
+        &DeltaRow::DeleteVertex {
+            vid: VId(1),
+            before_version: ObjectId([0u8; 32]),
+            sorted_retired_incident_edges: vec![EId(10), EId(11)],
+        },
+    )
+    .expect("the same-commit member folds instead of poisoning the cascade");
+
+    let sealed = w.seal(keys()).expect("seals").expect("a block");
+    let entries = decode_block(&sealed.bytes).expect("decodes");
+    assert_eq!(entries.len(), 1, "only the older edge stages a tombstone");
+    assert_eq!(entries[0].dst, VId(2));
+    assert_eq!(entries[0].created_at, CommitSeq(1));
+    assert_eq!(entries[0].retired_at, Some(CommitSeq(4)));
 }
 
 /// A row that can never become a canonical block is refused before it changes the
@@ -499,4 +497,132 @@ fn a_published_root_resolves_against_the_writers_own_blocks() {
     })
     .expect("every named block resolves and matches its declared range");
     assert_eq!(resolved.len(), 2);
+}
+
+/// fgdb-3usp — a re-create of a LIVE edge is refused, never overwritten:
+/// overwriting the live map would strand the first version, retired by
+/// nothing, answering every future snapshot. Only a retirement re-admits
+/// the identity, and that is exactly what "a new version" means.
+#[test]
+fn a_double_create_is_refused_and_only_a_retire_re_admits_the_eid() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("creates");
+
+    assert_eq!(
+        w.apply(keys(), CommitSeq(2), &create(10, 1, 3)),
+        Err(WriteError::EdgeAlreadyLive { eid: EId(10) }),
+        "a second create for a live edge is not a version, it is the stream lying"
+    );
+    // State-atomic: the refusal moved nothing, so the fold continues undamaged.
+    w.apply(keys(), CommitSeq(3), &create(11, 1, 4))
+        .expect("the fold continues undamaged");
+
+    // After a retirement the identity is re-admissible — THAT is a version.
+    w.apply(keys(), CommitSeq(4), &delete(10)).expect("retires");
+    w.apply(keys(), CommitSeq(5), &create(10, 1, 3))
+        .expect("re-create after retire is a new version");
+    let sealed = w.seal(keys()).expect("seals").expect("a block");
+    let entries = decode_block(&sealed.bytes).expect("decodes");
+    let live: Vec<_> = entries.iter().filter(|e| e.retired_at.is_none()).collect();
+    assert_eq!(live.len(), 2);
+    assert!(
+        live.iter()
+            .any(|e| e.dst == VId(3) && e.created_at == CommitSeq(5)),
+        "the re-created version answers"
+    );
+    assert!(
+        !live.iter().any(|e| e.dst == VId(2)),
+        "the retired first version answers nothing — the stranded-v1 defect"
+    );
+}
+
+/// fgdb-zeay — created and deleted in ONE commit, an edge is visible on no
+/// snapshot, so its durable image is no entry at all: the pending creation
+/// folds away instead of poisoning the seal with an empty interval.
+#[test]
+fn a_same_commit_create_and_delete_folds_to_no_entry() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(5), &create(10, 1, 2))
+        .expect("creates");
+    w.apply(keys(), CommitSeq(5), &delete(10))
+        .expect("the same-commit delete folds");
+    assert_eq!(w.pending_len(), 0, "nothing remains of the folded edge");
+
+    // A re-create in the same commit is its own version, untouched by the fold.
+    w.apply(keys(), CommitSeq(5), &create(10, 1, 2))
+        .expect("re-create in the same commit");
+    w.apply(keys(), CommitSeq(6), &create(11, 2, 3))
+        .expect("creates");
+    let sealed = w.seal(keys()).expect("seals").expect("a block");
+    let entries = decode_block(&sealed.bytes).expect("decodes");
+    assert_eq!(entries.len(), 2, "the folded pair left nothing behind");
+    assert!(
+        entries.iter().all(|e| e.retired_at.is_none()),
+        "no tombstones: the fold means there was never anything to retire"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.dst == VId(2) && e.created_at == CommitSeq(5)),
+        "the re-created edge survives as its own version"
+    );
+}
+
+/// The cascade contract is strict ascending-unique, and the preflight enforces
+/// ALL of it: a non-adjacent duplicate or an unsorted list fails BEFORE any
+/// member retires — never mid-loop, half-applied.
+#[test]
+fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
+    // Non-adjacent duplicate: [10, 20, 10] is an order violation at the
+    // second 10 (20 > 10), caught at preflight.
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("creates");
+    w.apply(keys(), CommitSeq(2), &create(20, 1, 3))
+        .expect("creates");
+    assert_eq!(
+        w.apply(
+            keys(),
+            CommitSeq(4),
+            &DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(10), EId(20), EId(10)],
+            },
+        ),
+        Err(WriteError::CascadeOrderViolation {
+            previous: EId(20),
+            found: EId(10),
+        })
+    );
+    // Atomic: both edges are still live and retirable afterward.
+    w.apply(keys(), CommitSeq(4), &delete(10))
+        .expect("the refusal left the edge live");
+    w.apply(keys(), CommitSeq(4), &delete(20))
+        .expect("the refusal left the other edge live");
+
+    // Unsorted (no duplicate): [20, 10] is the same contract breach.
+    let mut w2 = writer();
+    w2.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("creates");
+    w2.apply(keys(), CommitSeq(2), &create(20, 1, 3))
+        .expect("creates");
+    assert_eq!(
+        w2.apply(
+            keys(),
+            CommitSeq(4),
+            &DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(20), EId(10)],
+            },
+        ),
+        Err(WriteError::CascadeOrderViolation {
+            previous: EId(20),
+            found: EId(10),
+        })
+    );
+    w2.apply(keys(), CommitSeq(4), &delete(20))
+        .expect("the refusal left the writer usable");
 }

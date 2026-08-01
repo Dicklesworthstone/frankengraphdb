@@ -65,6 +65,22 @@ pub enum WriteError {
     /// or is missing a row. Skipping would silently produce a partition whose
     /// adjacency disagrees with the history that built it.
     UnknownEdge { eid: EId },
+    /// A cascade's incident-edge list violated its strict ascending contract.
+    ///
+    /// The durable row carries the list in canonical order; anything else is
+    /// not a cascade the stream produced. Refused at preflight, before any
+    /// member retires — a mid-loop failure would leave the writer half-applied.
+    CascadeOrderViolation { previous: EId, found: EId },
+    /// A `CreateEdge` named an edge this writer already holds live.
+    ///
+    /// Refused rather than overwritten, and the asymmetry with a legal second
+    /// version is exact: a re-CREATE of a live edge is not a new version of it
+    /// (a retirement followed by a create is that), it is the stream failing to
+    /// be a stream. Overwriting the live map would strand the first version —
+    /// retired by nothing, answering every future snapshot (fgdb-3usp). Retire
+    /// already refuses what it cannot resolve; create refuses what it cannot
+    /// add.
+    EdgeAlreadyLive { eid: EId },
     /// A row arrived at a sequence before the previous one.
     ///
     /// The writer is a fold over an ordered stream; out-of-order input would put
@@ -84,6 +100,15 @@ impl core::fmt::Display for WriteError {
         match self {
             Self::UnknownEdge { eid } => {
                 write!(f, "no live version of {eid:?} to retire")
+            }
+            Self::CascadeOrderViolation { previous, found } => {
+                write!(
+                    f,
+                    "cascade edges must be strictly ascending: {found:?} follows {previous:?}"
+                )
+            }
+            Self::EdgeAlreadyLive { eid } => {
+                write!(f, "{eid:?} is already live; a re-create is not a version")
             }
             Self::SequenceNotAdvancing { previous, offered } => write!(
                 f,
@@ -162,6 +187,9 @@ impl BlockWriter {
                 dst,
                 ..
             } => {
+                if self.live.contains_key(eid) {
+                    return Err(WriteError::EdgeAlreadyLive { eid: *eid });
+                }
                 self.push(
                     keys,
                     AdjacencyEntry {
@@ -204,16 +232,28 @@ impl BlockWriter {
 
     /// Prove every cascade member can retire before changing the first one.
     ///
-    /// The commit stream carries this list in strict canonical order, so a
-    /// repeated adjacent identity would become unknown after its first
-    /// retirement and is refused during the same preflight. `push` admits only
-    /// validated entries and seals at the hard format ceiling, so after this pass
-    /// the retirement loop has no reachable typed refusal left halfway through.
+    /// The commit stream carries this list in strict ascending-unique order
+    /// (canonical decode enforces it), and this preflight enforces the WHOLE
+    /// contract, not only adjacent equality: a non-adjacent duplicate
+    /// (`[10, 20, 10]`) or an unsorted list must fail HERE, not mid-loop
+    /// after earlier members have already retired — exactly the half-applied
+    /// state the preflight exists to prevent (atomicity, 8e299ea). `push`
+    /// admits only validated entries and seals at the hard format ceiling, so
+    /// after this pass the retirement loop has no reachable typed refusal
+    /// left halfway through.
     fn preflight_retirements(&self, eids: &[EId], seq: CommitSeq) -> Result<(), WriteError> {
         let mut previous = None;
         for &eid in eids {
-            if previous == Some(eid) {
-                return Err(WriteError::UnknownEdge { eid });
+            if let Some(p) = previous {
+                if p == eid {
+                    return Err(WriteError::UnknownEdge { eid });
+                }
+                if p > eid {
+                    return Err(WriteError::CascadeOrderViolation {
+                        previous: p,
+                        found: eid,
+                    });
+                }
             }
             self.retirement_entry(eid, seq)?;
             previous = Some(eid);
@@ -221,9 +261,33 @@ impl BlockWriter {
         Ok(())
     }
 
-    fn retirement_entry(&self, eid: EId, seq: CommitSeq) -> Result<AdjacencyEntry, WriteError> {
+    /// What retiring one edge stages: a tombstone, or nothing at all.
+    ///
+    /// The NOTHING case is exact: an edge created and deleted in the SAME
+    /// commit has an empty visibility interval, which the durable format
+    /// rightly refuses (`RetiredBeforeCreated`). Its fold is no entry — the
+    /// edge is visible on no snapshot, so the pending creation and the live
+    /// record both simply go away (fgdb-zeay). The fold applies only while
+    /// the creation is still pending: once it has sealed, the interval can no
+    /// longer be folded away, and the format's refusal stands as the honest
+    /// answer to a pathological stream (16M+ rows between create and delete
+    /// in one commit — a typed refusal, never wrong bytes).
+    fn retirement_entry(
+        &self,
+        eid: EId,
+        seq: CommitSeq,
+    ) -> Result<Option<AdjacencyEntry>, WriteError> {
         let &(src, relation, dst, created_at) =
             self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
+        if created_at == seq {
+            let is_same_run = self
+                .pending
+                .get(&(src, relation, dst))
+                .is_some_and(|pending| pending.created_at == seq && pending.retired_at.is_none());
+            if is_same_run {
+                return Ok(None);
+            }
+        }
         let entry = AdjacencyEntry {
             src,
             relation,
@@ -232,7 +296,7 @@ impl BlockWriter {
             retired_at: Some(seq),
         };
         validate_entry(0, &entry).map_err(WriteError::Block)?;
-        Ok(entry)
+        Ok(Some(entry))
     }
 
     fn retire(
@@ -241,7 +305,20 @@ impl BlockWriter {
         eid: EId,
         seq: CommitSeq,
     ) -> Result<(), WriteError> {
-        let entry = self.retirement_entry(eid, seq)?;
+        let Some(entry) = self.retirement_entry(eid, seq)? else {
+            // The same-commit fold: created and deleted in one commit, so the
+            // exact durable image is no entry at all.
+            let &(src, relation, dst, _) =
+                self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
+            let removed_pending = self.pending.remove(&(src, relation, dst));
+            debug_assert!(
+                removed_pending.is_some(),
+                "the fold requires the pending creation it was proven on"
+            );
+            let removed_live = self.live.remove(&eid);
+            debug_assert!(removed_live.is_some(), "preflighted live edge disappeared");
+            return Ok(());
+        };
         self.push(keys, entry)?;
         let removed = self.live.remove(&eid);
         debug_assert!(removed.is_some(), "preflighted live edge disappeared");
