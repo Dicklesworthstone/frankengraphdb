@@ -20,18 +20,26 @@
 # unreadable lease costs a warning and the tripwire still catches the bad
 # outcome. What cannot be tolerated is SILENCE, not permissiveness.
 #
-# The silent-allow paths are exactly two, and neither is a failure: no lease is
-# held, or this commit is not a landing. Everything else announces itself.
+# Within an invocation of THIS HOOK, the silent-allow paths are exactly two, and
+# neither is a failure: no lease is held, or this commit is not a landing.
+# Everything else announces itself.
+#
+# This is not universal reference-movement enforcement. Git does not invoke
+# `pre-commit` when `git rebase` (including `git pull --rebase`) updates a branch
+# tip. Such a move bypasses prevention here, but the tree-stability tripwire
+# still detects it and reports UNRUN carrying both shas. If prevention must ever
+# cover every tip move, it belongs in a `reference-transaction` hook rather than
+# in a stronger claim about this hook.
 #
 # -----------------------------------------------------------------------------
 # WHAT IT BINDS, AND WHAT IT DELIBERATELY DOES NOT
 # -----------------------------------------------------------------------------
-# It binds a commit on branch `main` — a LANDING, the thing that moves the tree
-# other panes' gates are running against. It does NOT bind a commit on a
-# detached HEAD, which is every scratch/staging worktree here (28 of 29 at the
-# time of writing), and it touches nothing else at all: `git add`, builds,
-# tests, gates and read-only checks are all unaffected. Hold landings, never
-# panes — holding panes is what cost pane4 forty minutes.
+# When Git invokes it, this hook binds a commit on branch `main` — a LANDING,
+# the thing that moves the tree other panes' gates are running against. It does
+# NOT bind a commit on a detached HEAD, which is every scratch/staging worktree
+# here (28 of 29 at the time of writing), and it touches nothing else at all:
+# `git add`, builds, tests, gates and read-only checks are all unaffected. Hold
+# landings, never panes — holding panes is what cost pane4 forty minutes.
 #
 # ESCAPE HATCH: `git commit --no-verify`, native, always available. It voids the
 # in-flight run, so say so in the commit message.

@@ -9,13 +9,22 @@
 # time via include_str!, tests/identity.rs reads the corpus at RUN time — so a
 # commit landing between those moments desynchronises them and four identity
 # pins go red on a tree where every pin is correct. 38cca3f made that loss
-# LEGIBLE (the gate reports UNRUN carrying both shas). This file is the half that
-# makes it not happen.
+# LEGIBLE (the gate reports UNRUN carrying both shas). This file is the
+# prevention half for ordinary `git commit` landings on `main`; the tripwire
+# remains the authority for detecting every tree movement.
 #
 # WHY THE BUILD TOKENS CANNOT DO THIS. build-1/build-2 serialise BUILDS. The
-# event that voids a run is a `git commit` from a pane holding no build slot at
-# all. Excluding it needs a token a GATE RUN can take and a COMMIT must respect —
-# which is why the enforcement point is a git hook, not a convention.
+# common event that voids a run is a `git commit` from a pane holding no build
+# slot at all. Excluding it needs a token a GATE RUN can take and a COMMIT must
+# respect — which is why the enforcement point is a git hook, not a convention.
+#
+# SCOPE LIMIT. `pre-commit` is a commit-command hook, not a universal branch-tip
+# guard. Git can update `main` through `git rebase` or `git pull --rebase`
+# without invoking it. Those paths bypass this prevention layer by design; the
+# tree-stability tripwire still detects the moved subject and reports UNRUN with
+# both shas. If policy ever requires prevention on every tip move, implement it
+# with a `reference-transaction` hook. Do not ascribe that coverage to the
+# current hook.
 #
 # WHY A MECHANISM AND NOT A RULE, stated because the rule was tried. Doing this
 # by hand cost, in one evening: a ~40-minute landing hold placed on pane4 on the
@@ -55,11 +64,12 @@
 #   it; this does.
 #
 # FOUR — HOLD LANDINGS, NEVER PANES. A leased-out pane must still derive, stage
-# and run read-only checks. Only `git commit` on branch `main` is bound; nothing
-# here touches `git add`, a build, a test, a gate, or a commit in a scratch
-# worktree. Measured: this repo has 29 linked worktrees and 28 are detached
-# HEAD, so every staging worktree is unaffected by construction. Holding panes
-# rather than landings is what cost pane4 forty minutes.
+# and run read-only checks. Within the hook's scope, only `git commit` on branch
+# `main` is bound; nothing here touches `git add`, a build, a test, a gate, or a
+# commit in a scratch worktree. Rebase-driven ref moves are outside that scope,
+# as stated above. Measured: this repo has 29 linked worktrees and 28 are
+# detached HEAD, so every staging worktree is unaffected by construction.
+# Holding panes rather than landings is what cost pane4 forty minutes.
 #
 # =============================================================================
 # STATES
