@@ -58,12 +58,21 @@ marker_pattern = "FG-[A-Z]{2,5}-[0-9]{2}"
 # The three generated/checked documents under docs/ are scanned too: their
 # markers are emitted from the registries, so an unresolvable one there is a
 # generator defect, and scanning them costs nothing.
+#
+# REALITY_CHECK_AND_BRIDGE_PLAN.md is SCANNED rather than excluded even though it
+# is hand-written narrative and carries zero markers today. An exclusion is a
+# standing claim that nothing checks the file; scanning is free, and this document
+# is exactly the kind of prose that acquires an `FG-INV-19`-shaped citation later,
+# at which point the marker must resolve like any other. Verified 2026-07-31:
+# `grep -c 'FG-[A-Z]\{2,5\}-[0-9][0-9]'` returns 0, so admitting it to `scan`
+# changed no verdict at the time it was admitted.
 scan = [
   "README.md",
   "AGENTS.md",
   "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md",
   "docs/ARCHITECTURE_DECISION_RECORD.md",
   "docs/NEGATIVE_EVIDENCE.md",
+  "docs/REALITY_CHECK_AND_BRIDGE_PLAN.md",
   "docs/THREAT_AND_TRUST_MODEL.md",
   "docs/WORKSPACE_TOPOLOGY.md",
 ]

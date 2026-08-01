@@ -275,6 +275,23 @@ coverage_of() {
     docs/THREAT_AND_TRUST_MODEL.md)      echo "threat-check (generated document)" ;;
     docs/WORKSPACE_TOPOLOGY.md)          echo "topology-check (generated document)" ;;
     docs/NEGATIVE_EVIDENCE.md)           echo "g0_negative_evidence_e2e (parses every entry; each doctrine id, bead and repair commit must resolve)" ;;
+    # Hand-written narrative, unlike the three generated documents above -- so the
+    # coverage is genuinely weaker and this row says so rather than implying a
+    # content gate that does not exist. What IS enforced: membership in the prose
+    # closure, and that every claim marker written into it resolves.
+    #
+    # MUTATION-PROVEN 2026-07-31 on a quiet root, both directions, same binary:
+    #   * removed from `lint.scan` -> `registry-check all` exits 1 with
+    #     `unclaimed_prose` naming this exact path (this is not hypothetical --
+    #     the document landed in 21f8cc7 unregistered and the gate was red
+    #     repo-wide until this row and its `scan` entry landed);
+    #   * appended `FG-ZZZ-99` -> exits 1 with `unregistered_marker` at the
+    #     injected line. The append control matters here: a truncation probe
+    #     would only have re-proven the path law the first bullet already covers.
+    #   * registered and unmutated -> exits 0, `files_scanned` 7->8 with
+    #     `markers_seen` unchanged at 162, so admitting it flipped exactly one
+    #     verdict and blessed nothing else.
+    docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT the narrative content)" ;;
     # EXACT, not `formal/lean/*.lean`. The gate runs the artifacts of CHECKED
     # lanes only, so a glob would claim coverage for a future DECLARED lane's
     # artifact that nothing runs — the same fail-open as the `registries/*.toml`
