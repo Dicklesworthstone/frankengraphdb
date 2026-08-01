@@ -87,8 +87,10 @@ fn under_lab<T: Send + 'static>(
         test(&contexts.commit())
     });
     assert!(
-        report.invariant_violations.is_empty(),
-        "lab invariant violation: {report:?}"
+        // lab_test_passed() covers ALL THREE channels — quiescence, the full
+        // 24-oracle suite, and the mirrored invariant list (fresh-eyes I3).
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
     );
     output
 }
