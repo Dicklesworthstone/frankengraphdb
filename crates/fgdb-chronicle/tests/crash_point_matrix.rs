@@ -245,18 +245,20 @@ fn fully_populated_marker() -> CommitMarker {
 #[test]
 fn a_marker_round_trips_through_its_canonical_bytes() {
     let marker = fully_populated_marker();
-    let bytes = marker.canonical_bytes();
+    let bytes = marker.canonical_bytes().expect("marker encodes");
     let decoded = fgdb_chronicle::marker::decode_canonical(&bytes).expect("decodes");
     assert_eq!(decoded, marker, "every field must survive the round trip");
 
     // And the decoded marker re-encodes identically — so the encoding is a
     // bijection on this input, not merely a function the decoder can undo.
-    assert_eq!(decoded.canonical_bytes(), bytes);
+    assert_eq!(decoded.canonical_bytes().expect("marker re-encodes"), bytes);
 }
 
 #[test]
 fn a_truncated_marker_body_decodes_to_nothing_at_every_length() {
-    let bytes = fully_populated_marker().canonical_bytes();
+    let bytes = fully_populated_marker()
+        .canonical_bytes()
+        .expect("marker encodes");
     for length in 0..bytes.len() {
         assert!(
             fgdb_chronicle::marker::decode_canonical(&bytes[..length]).is_none(),
@@ -268,7 +270,9 @@ fn a_truncated_marker_body_decodes_to_nothing_at_every_length() {
 
 #[test]
 fn trailing_bytes_after_a_marker_are_refused() {
-    let mut bytes = fully_populated_marker().canonical_bytes();
+    let mut bytes = fully_populated_marker()
+        .canonical_bytes()
+        .expect("marker encodes");
     bytes.push(0x00);
     assert!(
         fgdb_chronicle::marker::decode_canonical(&bytes).is_none(),
@@ -395,9 +399,11 @@ fn a_conflicting_existing_capsule_path_is_never_overwritten() {
 /// Deterministic sealing makes legitimate deduplication ordinary: two commits
 /// may name the same capsule bytes. No-replace publication must therefore
 /// distinguish an identical existing object from a conflicting one rather than
-/// turning every `AlreadyExists` into an error.
+/// turning every `AlreadyExists` into an error. Verification needs only read
+/// authority over immutable capsule bytes; requiring write access would make a
+/// legitimate dedup commit fail on scrub-hardened or read-only object media.
 #[test]
-fn identical_payloads_reuse_one_capsule_and_both_markers_survive_restart() {
+fn identical_payloads_reuse_a_read_only_capsule_and_both_markers_survive_restart() {
     let dir = scratch_dir("capsule-dedup");
     under_lab(36, move |cx| {
         let plaintext = capsule_bytes(1);
@@ -414,12 +420,28 @@ fn identical_payloads_reuse_one_capsule_and_both_markers_survive_restart() {
                 })
                 .expect("deduplicated commit");
             assert_eq!(marker_ref.commit_seq, CommitSeq(expected_seq));
+            if expected_seq == 1 {
+                let path = only_capsule_path(&dir);
+                let mut permissions = std::fs::metadata(&path)
+                    .expect("capsule metadata")
+                    .permissions();
+                permissions.set_readonly(true);
+                std::fs::set_permissions(&path, permissions)
+                    .expect("make immutable capsule read-only");
+            }
         }
 
         assert_eq!(
             capsule_file_count(&dir),
             1,
             "identical deterministic containers share one immutable object"
+        );
+        assert!(
+            std::fs::metadata(only_capsule_path(&dir))
+                .expect("capsule metadata")
+                .permissions()
+                .readonly(),
+            "deduplication must neither replace nor make the immutable capsule writable"
         );
         assert_eq!(
             coordinator

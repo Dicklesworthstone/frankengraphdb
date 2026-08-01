@@ -168,7 +168,9 @@ fn tampering_with_any_marker_field_breaks_the_chain_at_that_sequence() {
         // the recomputation must disagree with the recorded value.
         let mut tampered = entries[2].marker.clone();
         mutate(&mut tampered);
-        let recomputed = tampered.chain_hash(entries[1].chain_hash);
+        let recomputed = tampered
+            .chain_hash(entries[1].chain_hash)
+            .expect("tampered marker remains encodable");
         assert_ne!(
             recomputed, entries[2].chain_hash,
             "mutating {field} must change the chain value at its sequence"
@@ -176,7 +178,10 @@ fn tampering_with_any_marker_field_breaks_the_chain_at_that_sequence() {
 
         // And every later chain value depended on that one, so the divergence
         // propagates: history after the tamper is invalidated too.
-        let later = entries[3].marker.chain_hash(recomputed);
+        let later = entries[3]
+            .marker
+            .chain_hash(recomputed)
+            .expect("later marker remains encodable");
         assert_ne!(
             later, entries[3].chain_hash,
             "mutating {field} must invalidate every later marker"
@@ -199,7 +204,7 @@ fn verification_names_the_sequence_where_history_diverges() {
     let mut diverged_at = None;
     for (index, entry) in entries.iter().enumerate() {
         let marker = if index == 3 { &tampered } else { &entry.marker };
-        let recomputed = marker.chain_hash(value);
+        let recomputed = marker.chain_hash(value).expect("marker remains encodable");
         if recomputed != entry.chain_hash && diverged_at.is_none() {
             diverged_at = Some(entry.marker.commit_seq);
         }
@@ -355,7 +360,7 @@ fn head_coordinates_preserve_high_bits_without_low_64_aliases() {
             head(high_graph, low_branch, None),
         ],
     );
-    let encoded = high_marker.canonical_bytes();
+    let encoded = high_marker.canonical_bytes().expect("marker encodes");
     let decoded = decode_canonical(&encoded).expect("high-bit marker decodes");
     assert_eq!(decoded, high_marker, "all 128 coordinate bits round-trip");
     chain.append(decoded).expect("high coordinates append");
@@ -493,7 +498,10 @@ fn a_stream_prefix_verifies_without_its_suffix() {
     for prefix_len in 1..=entries.len() {
         let mut value = CHAIN_ORIGIN;
         for entry in entries.iter().take(prefix_len) {
-            let recomputed = entry.marker.chain_hash(value);
+            let recomputed = entry
+                .marker
+                .chain_hash(value)
+                .expect("marker remains encodable");
             assert_eq!(
                 recomputed, entry.chain_hash,
                 "prefix of {prefix_len} must verify at commit_seq {}",
@@ -528,7 +536,9 @@ fn forged(markers: Vec<CommitMarker>) -> Vec<ChainedMarker> {
     let mut chain_value = CHAIN_ORIGIN;
     let mut entries = Vec::new();
     for marker in markers {
-        let chain_hash = marker.chain_hash(chain_value);
+        let chain_hash = marker
+            .chain_hash(chain_value)
+            .expect("forged marker remains encodable");
         entries.push(ChainedMarker {
             marker,
             marker_oid: ObjectId(chain_hash.0),

@@ -127,7 +127,10 @@ impl CommitMarker {
     /// exactly the transcript the chain hash is computed over. There is no
     /// second, shorter encoding: this function is the only definition of what
     /// a marker's bytes are.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
+    ///
+    /// Returns [`ChainError::HeadUpdateCountOverflow`] when the in-memory
+    /// update count cannot be represented by the format's `u32` count field.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ChainError> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.logical_command_seq.to_be_bytes());
         out.extend_from_slice(&self.commit_seq.to_be_bytes());
@@ -140,7 +143,7 @@ impl CommitMarker {
                 out.extend_from_slice(&previous.commit_seq.0.to_be_bytes());
             }
         }
-        out.extend_from_slice(&(self.head_updates.len() as u32).to_be_bytes());
+        out.extend_from_slice(&encoded_head_update_count(self.head_updates.len())?);
         for update in &self.head_updates {
             update.write_into(&mut out);
         }
@@ -168,17 +171,18 @@ impl CommitMarker {
             }
         }
         out.extend_from_slice(&self.flags.to_be_bytes());
-        out
+        Ok(out)
     }
 
     /// `chain_hash` hashes the prior chain value plus marker bytes excluding
-    /// `chain_hash` (plan a10:1938).
-    pub fn chain_hash(&self, prior_chain: Digest) -> Digest {
+    /// `chain_hash` (plan a10:1938). It returns the same encoding error as
+    /// [`Self::canonical_bytes`] rather than hashing a truncated transcript.
+    pub fn chain_hash(&self, prior_chain: Digest) -> Result<Digest, ChainError> {
         let mut hasher = fgdb_crypto::Hasher::new();
         hasher.update(MARKER_CHAIN_DOMAIN);
         hasher.update(&prior_chain.0);
-        hasher.update(&self.canonical_bytes());
-        hasher.finalize()
+        hasher.update(&self.canonical_bytes()?);
+        Ok(hasher.finalize())
     }
 
     /// Whether the head updates are canonically sorted and free of duplicate
@@ -189,6 +193,14 @@ impl CommitMarker {
             .windows(2)
             .all(|pair| (pair[0].graph, pair[0].branch) < (pair[1].graph, pair[1].branch))
     }
+}
+
+fn encoded_head_update_count(count: usize) -> Result<[u8; 4], ChainError> {
+    let encoded = u32::try_from(count).map_err(|_| ChainError::HeadUpdateCountOverflow {
+        count,
+        max: u32::MAX as usize,
+    })?;
+    Ok(encoded.to_be_bytes())
 }
 
 /// Typed evidence for a failed branch-head compare-and-swap.
@@ -222,6 +234,10 @@ pub enum ChainError {
     /// `logical_command_seq` did not advance. Two commits cannot share one
     /// logical command position.
     NonMonotonicCommandSeq { previous: u64, found: u64 },
+    /// The canonical marker format carries the head-update count as a `u32`.
+    /// Refuse an in-memory marker outside that domain rather than truncating
+    /// its count and hashing an ambiguous transcript.
+    HeadUpdateCountOverflow { count: usize, max: usize },
     /// Head updates are unsorted or contain a duplicate `(graph, branch)`.
     NonCanonicalHeadUpdates,
     /// A branch head compare-and-swap failed: the branch's head is not what
@@ -245,6 +261,10 @@ impl core::fmt::Display for ChainError {
             Self::NonMonotonicCommandSeq { previous, found } => {
                 write!(f, "logical_command_seq {found} does not exceed {previous}")
             }
+            Self::HeadUpdateCountOverflow { count, max } => write!(
+                f,
+                "head-update count {count} exceeds the canonical-format maximum {max}"
+            ),
             Self::NonCanonicalHeadUpdates => {
                 f.write_str("head updates are unsorted or contain a duplicate coordinate")
             }
@@ -489,7 +509,7 @@ impl MarkerChain {
             }
         }
 
-        let chain_hash = marker.chain_hash(self.chain_value());
+        let chain_hash = marker.chain_hash(self.chain_value())?;
         // The marker's identity is its own canonical bytes under the chain
         // value, so two markers with identical content at different points in
         // history are distinct objects — which is what makes a MarkerRef a
@@ -783,5 +803,26 @@ mod commit_seq_exhaustion_tests {
                 "an exhausted refusal changes no state"
             );
         }
+    }
+
+    #[test]
+    fn head_update_count_encoding_is_exact_at_the_u32_boundary() {
+        assert_eq!(
+            encoded_head_update_count(u32::MAX as usize),
+            Ok(u32::MAX.to_be_bytes())
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn head_update_count_encoding_refuses_the_u32_boundary_plus_one() {
+        let count = u32::MAX as usize + 1;
+        assert_eq!(
+            encoded_head_update_count(count),
+            Err(ChainError::HeadUpdateCountOverflow {
+                count,
+                max: u32::MAX as usize,
+            })
+        );
     }
 }

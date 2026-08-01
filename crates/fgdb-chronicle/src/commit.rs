@@ -591,12 +591,8 @@ impl CommitCoordinator {
                 if !metadata.file_type().is_file() {
                     return Err(CommitError::CapsulePathConflict { capsule_oid });
                 }
-                let mut file = cx.with_restriction(|| {
-                    OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(&capsule_path)
-                })?;
+                let mut file =
+                    cx.with_restriction(|| OpenOptions::new().read(true).open(&capsule_path))?;
                 if !Self::existing_capsule_matches(cx, &mut file, &encoded_capsule)? {
                     return Err(CommitError::CapsulePathConflict { capsule_oid });
                 }
@@ -687,7 +683,7 @@ impl CommitCoordinator {
     /// leading length. The chain hash is stored rather than recomputed on the
     /// fly so recovery can detect content tampering as well as framing damage.
     fn encode_entry(marker: &CommitMarker, chain_hash: Digest) -> Result<Vec<u8>, CommitError> {
-        let body = marker.canonical_bytes();
+        let body = marker.canonical_bytes()?;
         if body.len() > MAX_ENTRY_BODY {
             return Err(CommitError::MarkerTooLarge {
                 body_len: body.len(),
@@ -758,7 +754,11 @@ impl CommitCoordinator {
                         });
                     }
                 };
-                let expected = marker.chain_hash(chain.chain_value());
+                let expected = marker.chain_hash(chain.chain_value()).map_err(|_| {
+                    CommitError::CorruptLogEntry {
+                        commit_seq: marker.commit_seq,
+                    }
+                })?;
                 if expected != stored_chain_hash {
                     return Err(CommitError::ChainDiverged {
                         commit_seq: marker.commit_seq,
