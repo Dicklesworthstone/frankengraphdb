@@ -86,6 +86,10 @@ subject_is_fresh() {
 }
 
 # subject_build <root> <outdir> -> 0 on success; writes <outdir>/registry-check
+# plus the three gate-consumed checker binaries (fresh-eyes I5: the topology,
+# threat, and architecture gates ran cargo's shared-target-dir artifact with
+# only test -x — a binary another pane's build can replace mid-run; they now
+# consume this provenance-controlled subject like their sibling gates).
 #
 # The build log lands in <outdir>/build.log. Running from <root> makes rustup
 # honour rust-toolchain.toml — building from elsewhere silently selects the
@@ -99,7 +103,12 @@ subject_build() {
          tools/registry-check/src/lib.rs -o "$outdir/libregistry_check.rlib" \
     && rustc --edition 2024 -C strip=symbols tools/registry-check/src/main.rs \
          --extern "registry_check=$outdir/libregistry_check.rlib" \
-         -o "$outdir/registry-check") >"$outdir/build.log" 2>&1
+         -o "$outdir/registry-check" \
+    && for gate_bin in topology-check threat-check architecture-check; do
+         rustc --edition 2024 -C strip=symbols "tools/registry-check/src/bin/$gate_bin.rs" \
+           --extern "registry_check=$outdir/libregistry_check.rlib" \
+           -o "$outdir/$gate_bin" || exit 1
+       done) >"$outdir/build.log" 2>&1
 }
 
 # subject_cache_dir -> the directory shared subjects live in
