@@ -656,6 +656,12 @@ impl DistinctSketch {
     }
 
     /// Returns a deterministic Q32 estimate and its selected estimator branch.
+    ///
+    /// The conventional small-range correction switches from linear counting
+    /// to the raw harmonic estimator. The combined estimate is not globally
+    /// monotone across that boundary: increasing the final zero register can
+    /// select the raw branch and lower the reported estimate. Callers comparing
+    /// estimates over time must therefore account for [`DistinctEstimate::method`].
     #[must_use]
     pub fn estimate_fixed(&self) -> DistinctEstimate {
         let register_count = self.registers.len() as u64;
@@ -683,6 +689,11 @@ impl DistinctSketch {
     }
 
     /// Returns the fixed-point estimate rounded to the nearest integer.
+    ///
+    /// This convenience projection discards the selected estimator branch and
+    /// inherits its documented switch discontinuity. Use [`Self::estimate_fixed`]
+    /// when a comparison must distinguish branch changes from within-branch
+    /// estimate movement.
     #[must_use]
     pub fn estimate(&self) -> u64 {
         self.estimate_fixed().rounded()
@@ -1538,19 +1549,26 @@ mod tests {
     }
 
     #[test]
-    fn accumulation_is_monotone_and_splitting_the_stream_is_exact() -> Result<(), DistinctError> {
-        // Monotonicity: registers only ever rise, so a distinct-count estimate
-        // may not fall as more keys arrive. This is the algebraic counterpart
-        // of the modeled accuracy contract -- a falling estimate would make the
-        // error bound meaningless regardless of what the contract declares.
+    fn linear_counting_accumulation_is_monotone_and_split_merge_is_exact()
+    -> Result<(), DistinctError> {
+        // This sampled run stays wholly within LinearCounting, where fewer zero
+        // registers cannot lower the estimate. The combined estimator is not
+        // monotone across its branch boundary; that discontinuity is pinned by
+        // estimator_switch_discontinuity_is_explicit_and_frozen below.
         let mut running = sketch()?;
-        let mut previous = running.estimate();
+        let mut previous = running.estimate_fixed();
+        assert_eq!(previous.method, DistinctEstimateMethod::LinearCounting);
         for key in 0..64_u64 {
             running.observe(&key.to_le_bytes());
-            let now = running.estimate();
+            let now = running.estimate_fixed();
+            assert_eq!(
+                now.method,
+                DistinctEstimateMethod::LinearCounting,
+                "the branch-scoped monotonicity fixture crossed estimators after key {key}"
+            );
             assert!(
-                now >= previous,
-                "distinct estimate fell from {previous} to {now} after key {key}"
+                now.scaled >= previous.scaled,
+                "linear-counting estimate fell after key {key}"
             );
             previous = now;
         }
@@ -1598,6 +1616,41 @@ mod tests {
             "overlapping shards must not inflate the merged state"
         );
         Ok(())
+    }
+
+    #[test]
+    fn estimator_switch_discontinuity_is_explicit_and_frozen() {
+        let small_profile = DistinctProfile {
+            precision: MIN_PRECISION,
+            hash_algorithm: DistinctHashAlgorithm::SeededHasherV1,
+            seed: 0x5357_4954_4348_4252,
+            max_registers: 1 << MIN_PRECISION,
+        };
+        let mut before = DistinctSketch::try_new(small_profile).expect("small valid profile");
+        before.registers[..15].fill(1);
+        let linear = before.estimate_fixed();
+        assert_eq!(linear.method, DistinctEstimateMethod::LinearCounting);
+        assert_eq!(linear.zero_registers, 1);
+        assert_eq!(linear.rounded(), 44);
+
+        let mut after = before.clone();
+        after.registers[15] = 1;
+        assert!(
+            before
+                .registers
+                .iter()
+                .zip(&after.registers)
+                .all(|(&left, &right)| left <= right),
+            "the transition fixture must only increase register state"
+        );
+        let raw = after.estimate_fixed();
+        assert_eq!(raw.method, DistinctEstimateMethod::RawHarmonic);
+        assert_eq!(raw.zero_registers, 0);
+        assert_eq!(raw.rounded(), 22);
+        assert!(
+            raw.scaled < linear.scaled,
+            "the frozen branch transition must retain its documented discontinuity"
+        );
     }
 
     #[test]
