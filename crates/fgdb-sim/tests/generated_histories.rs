@@ -31,13 +31,17 @@
 //! A fork changes the history topology, so treating it as another row-shaped
 //! `Step` would hide the parent boundary and make branch-aware shrinking
 //! impossible. The branch differential independently folds a forest, then checks
-//! current state, historical snapshots, origins, frontiers, and inherited
-//! conflict windows against `ReferenceDatabase` after every action.
+//! current state, historical snapshots, properties, the enacted single-period
+//! valid-time subset and its selector boundaries, origins, frontiers, and
+//! inherited conflict windows against `ReferenceDatabase` after every action.
 
 mod common;
 
 use common::{GRAPH, LABEL, PROP, REL, Step, check_agrees, try_build};
-use fgdb_delta_types::{CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, SchemaEpoch};
+use fgdb_delta_types::{
+    CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, PropertyKeyId, SchemaEpoch,
+    ValidTimePeriod,
+};
 use fgdb_reference::{BranchOrigin, ConflictKey, ReferenceDatabase, ReferenceGraph};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, LogicalCommandSeq, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -597,12 +601,28 @@ fn shrinking_preserves_the_failure_and_reduces_the_history() {
 /// Branching changes the shape of the generated object, not merely the set of
 /// row operations. Keeping it in a separate language prevents a fork from being
 /// mistaken for one more [`Step`] that a single-coordinate harness can apply.
+/// `SetValidTime` deliberately models the current `Option<ValidTimePeriod>` row
+/// contract; it is evidence for that enacted subset, not the plan's eventual
+/// normalized multi-slice representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchStep {
+    Graph(Step),
+    SetProperty {
+        elem: ElementId,
+        after: Option<i64>,
+    },
+    SetValidTime {
+        elem: ElementId,
+        after: Option<ValidTimePeriod>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BranchAction {
     Write {
         logical_seq: u64,
         branch: u128,
-        step: Step,
+        step: BranchStep,
     },
     Fork {
         parent: u128,
@@ -630,6 +650,19 @@ struct BranchCoverage {
     inherited_mutations: usize,
     divergent_siblings: usize,
     inherited_conflict_windows: usize,
+    property_sets: usize,
+    property_removals: usize,
+    vertex_property_mutations: usize,
+    edge_property_mutations: usize,
+    inherited_property_mutations: usize,
+    valid_time_sets: usize,
+    valid_time_clears: usize,
+    bounded_valid_times: usize,
+    open_valid_times: usize,
+    zero_length_valid_times: usize,
+    vertex_valid_time_mutations: usize,
+    edge_valid_time_mutations: usize,
+    inherited_valid_time_mutations: usize,
 }
 
 impl BranchCoverage {
@@ -642,65 +675,197 @@ impl BranchCoverage {
         self.inherited_mutations += other.inherited_mutations;
         self.divergent_siblings += other.divergent_siblings;
         self.inherited_conflict_windows += other.inherited_conflict_windows;
+        self.property_sets += other.property_sets;
+        self.property_removals += other.property_removals;
+        self.vertex_property_mutations += other.vertex_property_mutations;
+        self.edge_property_mutations += other.edge_property_mutations;
+        self.inherited_property_mutations += other.inherited_property_mutations;
+        self.valid_time_sets += other.valid_time_sets;
+        self.valid_time_clears += other.valid_time_clears;
+        self.bounded_valid_times += other.bounded_valid_times;
+        self.open_valid_times += other.open_valid_times;
+        self.zero_length_valid_times += other.zero_length_valid_times;
+        self.vertex_valid_time_mutations += other.vertex_valid_time_mutations;
+        self.edge_valid_time_mutations += other.edge_valid_time_mutations;
+        self.inherited_valid_time_mutations += other.inherited_valid_time_mutations;
     }
 }
 
 /// A deliberately plain graph used only by the branch oracle below.
 ///
-/// It knows identities and endpoints, but no MVCC representation, version
-/// digest, branch metadata, or `ReferenceGraph` implementation detail. That is
-/// enough to answer what each branch should contain after recursively applying
-/// its ancestor prefix and own commits.
+/// It knows logical payloads, but no MVCC representation, version digest,
+/// branch metadata, or `ReferenceGraph` implementation detail. That is enough
+/// to answer what each branch should contain after recursively applying its
+/// ancestor prefix and own commits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NaiveVertex {
+    birth_ordinal: u64,
+    props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    valid_time: Option<ValidTimePeriod>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NaiveEdge {
+    birth_ordinal: u64,
+    src: u128,
+    dst: u128,
+    props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    valid_time: Option<ValidTimePeriod>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct NaiveGraph {
-    vertices: BTreeSet<u128>,
-    edges: BTreeMap<u128, (u128, u128)>,
+    vertices: BTreeMap<u128, NaiveVertex>,
+    edges: BTreeMap<u128, NaiveEdge>,
 }
 
 impl NaiveGraph {
-    fn apply(&mut self, step: Step) -> Result<BTreeSet<ConflictKey>, String> {
+    fn apply(&mut self, step: BranchStep) -> Result<BTreeSet<ConflictKey>, String> {
         let mut conflicts = BTreeSet::new();
         match step {
-            Step::CreateVertex(vid) => {
-                if !self.vertices.insert(vid) {
+            BranchStep::Graph(Step::CreateVertex(vid)) => {
+                let birth_ordinal = u64::try_from(vid)
+                    .map_err(|_| format!("vertex identity {vid} exceeds the birth domain"))?;
+                let value = i64::try_from(vid)
+                    .map_err(|_| format!("vertex identity {vid} exceeds the scalar domain"))?;
+                if self
+                    .vertices
+                    .insert(
+                        vid,
+                        NaiveVertex {
+                            birth_ordinal,
+                            props: BTreeMap::from([(PROP, CanonicalScalar::Int(value))]),
+                            valid_time: None,
+                        },
+                    )
+                    .is_some()
+                {
                     return Err(format!("CreateVertex({vid}) reuses a live identity"));
                 }
                 conflicts.insert(ConflictKey::Element(ElementId::Vertex(VId(vid))));
             }
-            Step::AddEdge { eid, src, dst } => {
-                if !self.vertices.contains(&src) || !self.vertices.contains(&dst) {
+            BranchStep::Graph(Step::AddEdge { eid, src, dst }) => {
+                if !self.vertices.contains_key(&src) || !self.vertices.contains_key(&dst) {
                     return Err(format!(
                         "AddEdge({eid}) names a dead endpoint ({src}, {dst})"
                     ));
                 }
-                if self.edges.insert(eid, (src, dst)).is_some() {
+                let birth_ordinal = u64::try_from(eid)
+                    .map_err(|_| format!("edge identity {eid} exceeds the birth domain"))?;
+                if self
+                    .edges
+                    .insert(
+                        eid,
+                        NaiveEdge {
+                            birth_ordinal,
+                            src,
+                            dst,
+                            props: BTreeMap::new(),
+                            valid_time: None,
+                        },
+                    )
+                    .is_some()
+                {
                     return Err(format!("AddEdge({eid}) reuses a live identity"));
                 }
                 conflicts.insert(ConflictKey::Element(ElementId::Edge(EId(eid))));
             }
-            Step::DeleteEdge(eid) => {
+            BranchStep::Graph(Step::DeleteEdge(eid)) => {
                 if self.edges.remove(&eid).is_none() {
                     return Err(format!("DeleteEdge({eid}) names a dead edge"));
                 }
                 conflicts.insert(ConflictKey::Element(ElementId::Edge(EId(eid))));
             }
-            Step::DeleteVertex(vid) => {
-                if !self.vertices.remove(&vid) {
+            BranchStep::Graph(Step::DeleteVertex(vid)) => {
+                if self.vertices.remove(&vid).is_none() {
                     return Err(format!("DeleteVertex({vid}) names a dead vertex"));
                 }
                 conflicts.insert(ConflictKey::Element(ElementId::Vertex(VId(vid))));
                 let retired = self
                     .edges
                     .iter()
-                    .filter_map(|(eid, (src, dst))| (*src == vid || *dst == vid).then_some(*eid))
+                    .filter_map(|(eid, edge)| (edge.src == vid || edge.dst == vid).then_some(*eid))
                     .collect::<Vec<_>>();
                 for eid in retired {
                     self.edges.remove(&eid);
                     conflicts.insert(ConflictKey::Element(ElementId::Edge(EId(eid))));
                 }
             }
+            BranchStep::SetProperty { elem, after } => {
+                let props = match elem {
+                    ElementId::Vertex(vid) => {
+                        &mut self
+                            .vertices
+                            .get_mut(&vid.0)
+                            .ok_or_else(|| format!("SetProperty names dead vertex {}", vid.0))?
+                            .props
+                    }
+                    ElementId::Edge(eid) => {
+                        &mut self
+                            .edges
+                            .get_mut(&eid.0)
+                            .ok_or_else(|| format!("SetProperty names dead edge {}", eid.0))?
+                            .props
+                    }
+                };
+                if let Some(value) = after {
+                    props.insert(PROP, CanonicalScalar::Int(value));
+                } else {
+                    props.remove(&PROP);
+                }
+                conflicts.insert(ConflictKey::Element(elem));
+            }
+            BranchStep::SetValidTime { elem, after } => {
+                if let Some(period) = after
+                    && period
+                        .end_micros
+                        .is_some_and(|end| period.start_micros > end)
+                {
+                    return Err(format!("SetValidTime names an inverted period {period:?}"));
+                }
+                let valid_time = match elem {
+                    ElementId::Vertex(vid) => {
+                        &mut self
+                            .vertices
+                            .get_mut(&vid.0)
+                            .ok_or_else(|| format!("SetValidTime names dead vertex {}", vid.0))?
+                            .valid_time
+                    }
+                    ElementId::Edge(eid) => {
+                        &mut self
+                            .edges
+                            .get_mut(&eid.0)
+                            .ok_or_else(|| format!("SetValidTime names dead edge {}", eid.0))?
+                            .valid_time
+                    }
+                };
+                *valid_time = after;
+                conflicts.insert(ConflictKey::Element(elem));
+            }
         }
         Ok(conflicts)
+    }
+
+    fn live_elements(&self) -> Vec<ElementId> {
+        self.vertices
+            .keys()
+            .map(|vid| ElementId::Vertex(VId(*vid)))
+            .chain(self.edges.keys().map(|eid| ElementId::Edge(EId(*eid))))
+            .collect()
+    }
+
+    fn property(&self, elem: ElementId) -> Option<&CanonicalScalar> {
+        match elem {
+            ElementId::Vertex(vid) => self.vertices.get(&vid.0)?.props.get(&PROP),
+            ElementId::Edge(eid) => self.edges.get(&eid.0)?.props.get(&PROP),
+        }
+    }
+
+    fn valid_time(&self, elem: ElementId) -> Option<ValidTimePeriod> {
+        match elem {
+            ElementId::Vertex(vid) => self.vertices.get(&vid.0)?.valid_time,
+            ElementId::Edge(eid) => self.edges.get(&eid.0)?.valid_time,
+        }
     }
 }
 
@@ -714,7 +879,7 @@ enum NaiveOrigin {
 struct NaiveCommit {
     commit_seq: u64,
     logical_seq: u64,
-    step: Step,
+    step: BranchStep,
     conflicts: BTreeSet<ConflictKey>,
 }
 
@@ -825,7 +990,12 @@ impl NaiveBranchDatabase {
         Ok(())
     }
 
-    fn apply_write(&mut self, branch: u128, logical_seq: u64, step: Step) -> Result<u64, String> {
+    fn apply_write(
+        &mut self,
+        branch: u128,
+        logical_seq: u64,
+        step: BranchStep,
+    ) -> Result<u64, String> {
         if logical_seq <= self.logical_frontier() {
             return Err(format!(
                 "logical sequence {logical_seq} does not advance {}",
@@ -912,7 +1082,7 @@ impl NaiveBranchDatabase {
             .values()
             .flat_map(|branch| branch.commits.iter())
             .filter_map(|commit| match commit.step {
-                Step::CreateVertex(vid) => Some(vid),
+                BranchStep::Graph(Step::CreateVertex(vid)) => Some(vid),
                 _ => None,
             })
             .collect()
@@ -923,7 +1093,7 @@ impl NaiveBranchDatabase {
             .values()
             .flat_map(|branch| branch.commits.iter())
             .filter_map(|commit| match commit.step {
-                Step::AddEdge { eid, .. } => Some(eid),
+                BranchStep::Graph(Step::AddEdge { eid, .. }) => Some(eid),
                 _ => None,
             })
             .collect()
@@ -934,16 +1104,23 @@ impl NaiveBranchDatabase {
             record
                 .commits
                 .iter()
-                .any(|commit| commit.step == Step::CreateVertex(vid))
+                .any(|commit| commit.step == BranchStep::Graph(Step::CreateVertex(vid)))
         })
     }
 
     fn branch_owns_edge(&self, branch: u128, eid: u128) -> bool {
         self.branches.get(&branch).is_some_and(|record| {
             record.commits.iter().any(
-                |commit| matches!(commit.step, Step::AddEdge { eid: found, .. } if found == eid),
+                |commit| matches!(commit.step, BranchStep::Graph(Step::AddEdge { eid: found, .. }) if found == eid),
             )
         })
+    }
+
+    fn branch_owns_element(&self, branch: u128, elem: ElementId) -> bool {
+        match elem {
+            ElementId::Vertex(vid) => self.branch_owns_vertex(branch, vid.0),
+            ElementId::Edge(eid) => self.branch_owns_edge(branch, eid.0),
+        }
     }
 
     fn expected_conflicts_since(
@@ -1034,6 +1211,7 @@ fn generate_branch_forest(seed: u64, action_budget: usize) -> BranchGenerated {
     let mut next_branch = 2u128;
     let mut next_vid = 1u128;
     let mut next_eid = 1_000u128;
+    let mut next_property_value = 10_000i64;
     let mut logical_seq = 0u64;
 
     for _ in 0..action_budget {
@@ -1094,23 +1272,23 @@ fn generate_branch_forest(seed: u64, action_budget: usize) -> BranchGenerated {
         };
         let step = loop {
             match rng.below(100) {
-                0..=29 => {
+                0..=21 => {
                     let vid = next_vid;
                     next_vid += 1;
-                    break Step::CreateVertex(vid);
+                    break BranchStep::Graph(Step::CreateVertex(vid));
                 }
-                30..=69 => {
+                22..=44 => {
                     if state.vertices.is_empty() {
                         continue;
                     }
-                    let vertices = state.vertices.iter().copied().collect::<Vec<_>>();
+                    let vertices = state.vertices.keys().copied().collect::<Vec<_>>();
                     let src = vertices[rng.below(vertices.len())];
                     let dst = vertices[rng.below(vertices.len())];
                     let eid = next_eid;
                     next_eid += 1;
-                    break Step::AddEdge { eid, src, dst };
+                    break BranchStep::Graph(Step::AddEdge { eid, src, dst });
                 }
-                70..=84 => {
+                45..=54 => {
                     if state.edges.is_empty() {
                         continue;
                     }
@@ -1120,20 +1298,104 @@ fn generate_branch_forest(seed: u64, action_budget: usize) -> BranchGenerated {
                     {
                         coverage.inherited_mutations += 1;
                     }
-                    break Step::DeleteEdge(eid);
+                    break BranchStep::Graph(Step::DeleteEdge(eid));
                 }
-                _ => {
+                55..=64 => {
                     if state.vertices.is_empty() {
                         continue;
                     }
-                    let vertices = state.vertices.iter().copied().collect::<Vec<_>>();
+                    let vertices = state.vertices.keys().copied().collect::<Vec<_>>();
                     let vid = vertices[rng.below(vertices.len())];
                     if model.branches.contains_key(&branch)
                         && !model.branch_owns_vertex(branch, vid)
                     {
                         coverage.inherited_mutations += 1;
                     }
-                    break Step::DeleteVertex(vid);
+                    break BranchStep::Graph(Step::DeleteVertex(vid));
+                }
+                65..=81 => {
+                    let elements = state.live_elements();
+                    if elements.is_empty() {
+                        continue;
+                    }
+                    let elem = elements[rng.below(elements.len())];
+                    let inherited = model.branches.contains_key(&branch)
+                        && !model.branch_owns_element(branch, elem);
+                    let after = if state.property(elem).is_some() && rng.chance(35) {
+                        coverage.property_removals += 1;
+                        None
+                    } else {
+                        let value = next_property_value;
+                        next_property_value = next_property_value
+                            .checked_add(1)
+                            .expect("small generated property domain");
+                        coverage.property_sets += 1;
+                        Some(value)
+                    };
+                    match elem {
+                        ElementId::Vertex(_) => coverage.vertex_property_mutations += 1,
+                        ElementId::Edge(_) => coverage.edge_property_mutations += 1,
+                    }
+                    if inherited {
+                        coverage.inherited_mutations += 1;
+                        coverage.inherited_property_mutations += 1;
+                    }
+                    break BranchStep::SetProperty { elem, after };
+                }
+                _ => {
+                    let elements = state.live_elements();
+                    if elements.is_empty() {
+                        continue;
+                    }
+                    let elem = elements[rng.below(elements.len())];
+                    let inherited = model.branches.contains_key(&branch)
+                        && !model.branch_owns_element(branch, elem);
+                    let current = state.valid_time(elem);
+                    let after = if current.is_some() && rng.chance(30) {
+                        coverage.valid_time_clears += 1;
+                        None
+                    } else {
+                        let period = loop {
+                            let start = i64::try_from(rng.below(65))
+                                .expect("small generated time domain")
+                                - 32;
+                            let end_micros = if rng.chance(70) {
+                                Some(
+                                    start
+                                        + i64::try_from(rng.below(9))
+                                            .expect("small generated duration domain"),
+                                )
+                            } else {
+                                None
+                            };
+                            let candidate = ValidTimePeriod {
+                                start_micros: start,
+                                end_micros,
+                            };
+                            if Some(candidate) != current {
+                                break candidate;
+                            }
+                        };
+                        coverage.valid_time_sets += 1;
+                        if let Some(end) = period.end_micros {
+                            coverage.bounded_valid_times += 1;
+                            if end == period.start_micros {
+                                coverage.zero_length_valid_times += 1;
+                            }
+                        } else {
+                            coverage.open_valid_times += 1;
+                        }
+                        Some(period)
+                    };
+                    match elem {
+                        ElementId::Vertex(_) => coverage.vertex_valid_time_mutations += 1,
+                        ElementId::Edge(_) => coverage.edge_valid_time_mutations += 1,
+                    }
+                    if inherited {
+                        coverage.inherited_mutations += 1;
+                        coverage.inherited_valid_time_mutations += 1;
+                    }
+                    break BranchStep::SetValidTime { elem, after };
                 }
             }
         };
@@ -1177,10 +1439,10 @@ fn generate_branch_forest(seed: u64, action_budget: usize) -> BranchGenerated {
 fn delta_row_for_branch(
     db: &ReferenceDatabase,
     branch: BranchId,
-    step: Step,
+    step: BranchStep,
 ) -> Result<DeltaRow, String> {
     match step {
-        Step::CreateVertex(vid) => {
+        BranchStep::Graph(Step::CreateVertex(vid)) => {
             let birth_ordinal = u64::try_from(vid)
                 .map_err(|_| format!("vertex identity {vid} exceeds the birth-ordinal domain"))?;
             let value = i64::try_from(vid)
@@ -1193,7 +1455,7 @@ fn delta_row_for_branch(
                 valid_time: None,
             })
         }
-        Step::AddEdge { eid, src, dst } => Ok(DeltaRow::CreateEdge {
+        BranchStep::Graph(Step::AddEdge { eid, src, dst }) => Ok(DeltaRow::CreateEdge {
             eid: EId(eid),
             birth_ordinal: u64::try_from(eid)
                 .map_err(|_| format!("edge identity {eid} exceeds the birth-ordinal domain"))?,
@@ -1204,7 +1466,7 @@ fn delta_row_for_branch(
             props: vec![],
             valid_time: None,
         }),
-        Step::DeleteEdge(eid) => {
+        BranchStep::Graph(Step::DeleteEdge(eid)) => {
             let graph = db
                 .graph(GRAPH, branch)
                 .ok_or_else(|| format!("DeleteEdge({eid}) names an absent branch"))?;
@@ -1216,7 +1478,7 @@ fn delta_row_for_branch(
                 before_version,
             })
         }
-        Step::DeleteVertex(vid) => {
+        BranchStep::Graph(Step::DeleteVertex(vid)) => {
             let graph = db
                 .graph(GRAPH, branch)
                 .ok_or_else(|| format!("DeleteVertex({vid}) names an absent branch"))?;
@@ -1227,6 +1489,56 @@ fn delta_row_for_branch(
                 vid: VId(vid),
                 before_version,
                 sorted_retired_incident_edges: graph.incident_edges(VId(vid)),
+            })
+        }
+        BranchStep::SetProperty { elem, after } => {
+            let graph = db
+                .graph(GRAPH, branch)
+                .ok_or_else(|| format!("SetProperty({elem:?}) names an absent branch"))?;
+            let before = match elem {
+                ElementId::Vertex(vid) => graph
+                    .vertex(vid)
+                    .ok_or_else(|| format!("SetProperty names dead vertex {}", vid.0))?
+                    .props
+                    .get(&PROP)
+                    .cloned(),
+                ElementId::Edge(eid) => graph
+                    .edge(eid)
+                    .ok_or_else(|| format!("SetProperty names dead edge {}", eid.0))?
+                    .props
+                    .get(&PROP)
+                    .cloned(),
+            };
+            Ok(DeltaRow::Property {
+                elem,
+                property: PROP,
+                before,
+                after: after.map(CanonicalScalar::Int),
+            })
+        }
+        BranchStep::SetValidTime { elem, after } => {
+            let graph = db
+                .graph(GRAPH, branch)
+                .ok_or_else(|| format!("SetValidTime({elem:?}) names an absent branch"))?;
+            let before = match elem {
+                ElementId::Vertex(vid) => {
+                    graph
+                        .vertex(vid)
+                        .ok_or_else(|| format!("SetValidTime names dead vertex {}", vid.0))?
+                        .valid_time
+                }
+                ElementId::Edge(eid) => {
+                    graph
+                        .edge(eid)
+                        .ok_or_else(|| format!("SetValidTime names dead edge {}", eid.0))?
+                        .valid_time
+                }
+            };
+            Ok(DeltaRow::ValidTime {
+                elem,
+                contract_id: ObjectId([0x56; 32]),
+                before,
+                after,
             })
         }
     }
@@ -1424,32 +1736,40 @@ fn compare_branch_graph(
         ));
     }
     for vid in all_vertices {
-        let expected_live = expected.vertices.contains(vid);
+        let expected_vertex = expected.vertices.get(vid);
         let found = actual.vertex(VId(*vid));
-        if found.is_some() != expected_live {
+        if found.is_some() != expected_vertex.is_some() {
             return Err(format!(
-                "{context}: vertex {vid} liveness differs: reference {} vs model {expected_live}",
-                found.is_some()
+                "{context}: vertex {vid} liveness differs: reference {} vs model {}",
+                found.is_some(),
+                expected_vertex.is_some()
             ));
         }
-        if let Some(vertex) = found {
-            let birth = u64::try_from(*vid)
-                .map_err(|_| format!("{context}: vertex {vid} exceeds birth domain"))?;
-            let scalar = i64::try_from(*vid)
-                .map_err(|_| format!("{context}: vertex {vid} exceeds scalar domain"))?;
-            if vertex.birth_ordinal != birth
+        if let (Some(vertex), Some(expected_vertex)) = (found, expected_vertex) {
+            if vertex.birth_ordinal != expected_vertex.birth_ordinal
                 || vertex.labels != BTreeSet::from([LABEL])
-                || vertex.props != BTreeMap::from([(PROP, CanonicalScalar::Int(scalar))])
             {
                 return Err(format!(
-                    "{context}: vertex {vid} payload differs: {vertex:?}"
+                    "{context}: vertex {vid} structural payload differs: {vertex:?}"
+                ));
+            }
+            if vertex.props != expected_vertex.props {
+                return Err(format!(
+                    "{context}: vertex {vid} properties differ: reference {:?} vs model {:?}",
+                    vertex.props, expected_vertex.props
+                ));
+            }
+            if vertex.valid_time != expected_vertex.valid_time {
+                return Err(format!(
+                    "{context}: vertex {vid} valid time differs: reference {:?} vs model {:?}",
+                    vertex.valid_time, expected_vertex.valid_time
                 ));
             }
         }
         let expected_out = expected
             .edges
             .iter()
-            .filter_map(|(eid, (src, _))| (*src == *vid).then_some(EId(*eid)))
+            .filter_map(|(eid, edge)| (edge.src == *vid).then_some(EId(*eid)))
             .collect::<Vec<_>>();
         if actual.out_edges(VId(*vid)) != expected_out {
             return Err(format!(
@@ -1468,17 +1788,121 @@ fn compare_branch_graph(
                 expected_edge.is_some()
             ));
         }
-        if let (Some(edge), Some((src, dst))) = (found, expected_edge) {
-            let birth = u64::try_from(*eid)
-                .map_err(|_| format!("{context}: edge {eid} exceeds birth domain"))?;
-            if edge.birth_ordinal != birth
-                || edge.src != VId(*src)
-                || edge.dst != VId(*dst)
+        if let (Some(edge), Some(expected_edge)) = (found, expected_edge) {
+            if edge.birth_ordinal != expected_edge.birth_ordinal
+                || edge.src != VId(expected_edge.src)
+                || edge.dst != VId(expected_edge.dst)
                 || edge.relation != REL
                 || edge.canonical_key.is_some()
-                || !edge.props.is_empty()
             {
-                return Err(format!("{context}: edge {eid} payload differs: {edge:?}"));
+                return Err(format!(
+                    "{context}: edge {eid} structural payload differs: {edge:?}"
+                ));
+            }
+            if edge.props != expected_edge.props {
+                return Err(format!(
+                    "{context}: edge {eid} properties differ: reference {:?} vs model {:?}",
+                    edge.props, expected_edge.props
+                ));
+            }
+            if edge.valid_time != expected_edge.valid_time {
+                return Err(format!(
+                    "{context}: edge {eid} valid time differs: reference {:?} vs model {:?}",
+                    edge.valid_time, expected_edge.valid_time
+                ));
+            }
+        }
+    }
+    compare_branch_temporal_projection(actual, expected, context)
+}
+
+fn period_contains(period: Option<ValidTimePeriod>, micros: i64) -> bool {
+    period.is_none_or(|period| {
+        period.start_micros <= micros && period.end_micros.is_none_or(|end| micros < end)
+    })
+}
+
+fn naive_vertex_live_at(graph: &NaiveGraph, vid: u128, micros: i64) -> bool {
+    graph
+        .vertices
+        .get(&vid)
+        .is_some_and(|vertex| period_contains(vertex.valid_time, micros))
+}
+
+fn temporal_probe_instants(graph: &NaiveGraph) -> BTreeSet<i64> {
+    let mut instants = BTreeSet::from([i64::MIN, -1, 0, 1, i64::MAX]);
+    for period in graph
+        .vertices
+        .values()
+        .filter_map(|vertex| vertex.valid_time)
+        .chain(graph.edges.values().filter_map(|edge| edge.valid_time))
+    {
+        instants.insert(period.start_micros.saturating_sub(1));
+        instants.insert(period.start_micros);
+        instants.insert(period.start_micros.saturating_add(1));
+        if let Some(end) = period.end_micros {
+            instants.insert(end.saturating_sub(1));
+            instants.insert(end);
+            instants.insert(end.saturating_add(1));
+        }
+    }
+    instants
+}
+
+fn compare_branch_temporal_projection(
+    actual: &ReferenceGraph,
+    expected: &NaiveGraph,
+    context: &str,
+) -> Result<(), String> {
+    for micros in temporal_probe_instants(expected) {
+        let expected_vertices = expected
+            .vertices
+            .iter()
+            .filter_map(|(vid, vertex)| {
+                period_contains(vertex.valid_time, micros).then_some(VId(*vid))
+            })
+            .collect::<Vec<_>>();
+        let expected_edges = expected
+            .edges
+            .iter()
+            .filter_map(|(eid, edge)| {
+                (period_contains(edge.valid_time, micros)
+                    && naive_vertex_live_at(expected, edge.src, micros)
+                    && naive_vertex_live_at(expected, edge.dst, micros))
+                .then_some(EId(*eid))
+            })
+            .collect::<Vec<_>>();
+        if actual.vertices_as_of(micros) != expected_vertices {
+            return Err(format!(
+                "{context}: vertices at valid time {micros} differ: reference {:?} vs model {expected_vertices:?}",
+                actual.vertices_as_of(micros)
+            ));
+        }
+        if actual.edges_as_of(micros) != expected_edges {
+            return Err(format!(
+                "{context}: edges at valid time {micros} differ: reference {:?} vs model {expected_edges:?}",
+                actual.edges_as_of(micros)
+            ));
+        }
+        for vid in expected.vertices.keys() {
+            let expected_neighbours = expected
+                .edges
+                .values()
+                .filter_map(|edge| {
+                    (edge.src == *vid
+                        && period_contains(edge.valid_time, micros)
+                        && naive_vertex_live_at(expected, edge.src, micros)
+                        && naive_vertex_live_at(expected, edge.dst, micros))
+                    .then_some(VId(edge.dst))
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let actual_neighbours = actual.neighbours_as_of(VId(*vid), REL, micros);
+            if actual_neighbours != expected_neighbours {
+                return Err(format!(
+                    "{context}: neighbours of {vid} at valid time {micros} differ: reference {actual_neighbours:?} vs model {expected_neighbours:?}"
+                ));
             }
         }
     }
@@ -1631,14 +2055,46 @@ fn report_branch_failure(seed: u64, case: &BranchGenerated, error: &str) -> Stri
     out
 }
 
-fn render_branch_step(step: Step) -> String {
+fn render_branch_step(step: BranchStep) -> String {
     match step {
-        Step::CreateVertex(vid) => format!("Step::CreateVertex({vid})"),
-        Step::AddEdge { eid, src, dst } => {
-            format!("Step::AddEdge {{ eid: {eid}, src: {src}, dst: {dst} }}")
+        BranchStep::Graph(Step::CreateVertex(vid)) => {
+            format!("BranchStep::Graph(Step::CreateVertex({vid}))")
         }
-        Step::DeleteEdge(eid) => format!("Step::DeleteEdge({eid})"),
-        Step::DeleteVertex(vid) => format!("Step::DeleteVertex({vid})"),
+        BranchStep::Graph(Step::AddEdge { eid, src, dst }) => {
+            format!("BranchStep::Graph(Step::AddEdge {{ eid: {eid}, src: {src}, dst: {dst} }})")
+        }
+        BranchStep::Graph(Step::DeleteEdge(eid)) => {
+            format!("BranchStep::Graph(Step::DeleteEdge({eid}))")
+        }
+        BranchStep::Graph(Step::DeleteVertex(vid)) => {
+            format!("BranchStep::Graph(Step::DeleteVertex({vid}))")
+        }
+        BranchStep::SetProperty { elem, after } => format!(
+            "BranchStep::SetProperty {{ elem: {}, after: {after:?} }}",
+            render_branch_element(elem)
+        ),
+        BranchStep::SetValidTime { elem, after } => {
+            let rendered_after = after.map_or_else(
+                || "None".to_string(),
+                |period| {
+                    format!(
+                        "Some(ValidTimePeriod {{ start_micros: {}, end_micros: {:?} }})",
+                        period.start_micros, period.end_micros
+                    )
+                },
+            );
+            format!(
+                "BranchStep::SetValidTime {{ elem: {}, after: {rendered_after} }}",
+                render_branch_element(elem)
+            )
+        }
+    }
+}
+
+fn render_branch_element(elem: ElementId) -> String {
+    match elem {
+        ElementId::Vertex(vid) => format!("ElementId::Vertex(VId({}))", vid.0),
+        ElementId::Edge(eid) => format!("ElementId::Edge(EId({}))", eid.0),
     }
 }
 
@@ -1650,7 +2106,7 @@ fn branch_differential_detects_current_state_substituted_for_a_historical_fork()
     let mut subject = ReferenceDatabase::new();
     let mut model = NaiveBranchDatabase::default();
     for (logical_seq, vid) in [(1u64, 1u128), (2, 2)] {
-        let step = Step::CreateVertex(vid);
+        let step = BranchStep::Graph(Step::CreateVertex(vid));
         let commit_seq = model
             .apply_write(1, logical_seq, step)
             .expect("model accepts reachable write");
@@ -1685,6 +2141,68 @@ fn branch_differential_detects_current_state_substituted_for_a_historical_fork()
     assert!(
         error.contains("cardinality differs") || error.contains("vertex 2 liveness differs"),
         "the planted state divergence should be named, got {error}"
+    );
+}
+
+/// Controls for the two new payload families. The valid-time arm calls the
+/// selector oracle directly so exact payload comparison cannot mask a broken
+/// half-open or endpoint-liveness projection.
+#[test]
+fn branch_differential_detects_dropped_property_and_valid_time_rows() {
+    let create = BranchStep::Graph(Step::CreateVertex(1));
+    let mut actual = ReferenceGraph::new();
+    actual
+        .apply_row(&DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![LABEL],
+            props: vec![(PROP, CanonicalScalar::Int(1))],
+            valid_time: None,
+        })
+        .expect("control vertex applies");
+
+    let mut base = NaiveGraph::default();
+    base.apply(create).expect("control model vertex applies");
+
+    let mut property_expected = base.clone();
+    property_expected
+        .apply(BranchStep::SetProperty {
+            elem: ElementId::Vertex(VId(1)),
+            after: Some(42),
+        })
+        .expect("control property applies");
+    let property_error = compare_branch_graph(
+        &actual,
+        &property_expected,
+        &BTreeSet::from([1]),
+        &BTreeSet::new(),
+        "planted dropped-property mutant",
+    )
+    .expect_err("the differential must detect a dropped property row");
+    assert!(
+        property_error.contains("properties differ"),
+        "the property divergence should be named, got {property_error}"
+    );
+
+    let mut temporal_expected = base;
+    temporal_expected
+        .apply(BranchStep::SetValidTime {
+            elem: ElementId::Vertex(VId(1)),
+            after: Some(ValidTimePeriod {
+                start_micros: 10,
+                end_micros: Some(20),
+            }),
+        })
+        .expect("control valid time applies");
+    let temporal_error = compare_branch_temporal_projection(
+        &actual,
+        &temporal_expected,
+        "planted dropped-valid-time mutant",
+    )
+    .expect_err("the selector differential must detect a dropped valid-time row");
+    assert!(
+        temporal_error.contains("vertices at valid time"),
+        "the selector divergence should be named, got {temporal_error}"
     );
 }
 
@@ -1734,6 +2252,55 @@ fn generated_branch_forests_match_the_naive_lineage_model() -> Result<(), String
         coverage.inherited_conflict_windows > 0,
         "no inherited conflict window: {coverage:?}"
     );
+    assert!(coverage.property_sets > 0, "no property set: {coverage:?}");
+    assert!(
+        coverage.property_removals > 0,
+        "no property removal: {coverage:?}"
+    );
+    assert!(
+        coverage.vertex_property_mutations > 0,
+        "no vertex property mutation: {coverage:?}"
+    );
+    assert!(
+        coverage.edge_property_mutations > 0,
+        "no edge property mutation: {coverage:?}"
+    );
+    assert!(
+        coverage.inherited_property_mutations > 0,
+        "no inherited property mutation: {coverage:?}"
+    );
+    assert!(
+        coverage.valid_time_sets > 0,
+        "no valid-time set: {coverage:?}"
+    );
+    assert!(
+        coverage.valid_time_clears > 0,
+        "no valid-time clear: {coverage:?}"
+    );
+    assert!(
+        coverage.bounded_valid_times > 0,
+        "no bounded valid-time assignment: {coverage:?}"
+    );
+    assert!(
+        coverage.open_valid_times > 0,
+        "no open valid-time assignment: {coverage:?}"
+    );
+    assert!(
+        coverage.zero_length_valid_times > 0,
+        "no zero-length valid-time assignment: {coverage:?}"
+    );
+    assert!(
+        coverage.vertex_valid_time_mutations > 0,
+        "no vertex valid-time mutation: {coverage:?}"
+    );
+    assert!(
+        coverage.edge_valid_time_mutations > 0,
+        "no edge valid-time mutation: {coverage:?}"
+    );
+    assert!(
+        coverage.inherited_valid_time_mutations > 0,
+        "no inherited valid-time mutation: {coverage:?}"
+    );
     Ok(())
 }
 
@@ -1780,7 +2347,7 @@ fn branch_shrink_moves_drop_subtrees_and_lower_fork_depth() {
         BranchAction::Write {
             logical_seq: 1,
             branch: 1,
-            step: Step::CreateVertex(1),
+            step: BranchStep::Graph(Step::CreateVertex(1)),
         },
         BranchAction::Fork {
             parent: 1,
@@ -1795,7 +2362,7 @@ fn branch_shrink_moves_drop_subtrees_and_lower_fork_depth() {
         BranchAction::Write {
             logical_seq: 2,
             branch: 3,
-            step: Step::CreateVertex(2),
+            step: BranchStep::Graph(Step::CreateVertex(2)),
         },
         BranchAction::Fork {
             parent: 1,
@@ -1838,7 +2405,7 @@ fn branch_shrinker_preserves_the_failure_and_reduces_the_forest() {
             BranchAction::Write {
                 logical_seq: 1,
                 branch: 1,
-                step: Step::CreateVertex(1),
+                step: BranchStep::Graph(Step::CreateVertex(1)),
             },
             BranchAction::Fork {
                 parent: 1,
@@ -1853,7 +2420,7 @@ fn branch_shrinker_preserves_the_failure_and_reduces_the_forest() {
             BranchAction::Write {
                 logical_seq: 2,
                 branch: 3,
-                step: Step::DeleteEdge(9_999),
+                step: BranchStep::Graph(Step::DeleteEdge(9_999)),
             },
             BranchAction::Fork {
                 parent: 1,
@@ -1881,7 +2448,7 @@ fn branch_shrinker_preserves_the_failure_and_reduces_the_forest() {
         minimal.actions.iter().any(|action| matches!(
             action,
             BranchAction::Write {
-                step: Step::DeleteEdge(9_999),
+                step: BranchStep::Graph(Step::DeleteEdge(9_999)),
                 ..
             }
         )),
