@@ -30,6 +30,13 @@
 //! let them silently corrupt the wrong region. Each symbol is found by searching
 //! the file for its own bytes, which `decode_container` hands us — ciphertext plus
 //! a MAC, so a false match is not a practical concern.
+//!
+//! **SCRATCH STATE IS NEVER REUSED.** The repository's no-deletion rule means this
+//! campaign deliberately retains its on-disk evidence. One exclusively created
+//! suite root contains all per-test directories, and a stale root left by a prior
+//! process is skipped rather than reopened. Actual reclamation requires a separate,
+//! explicitly authorized lifecycle policy (`fgdb-g0f1.1`); correctness never
+//! depends on it.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile, decode_container};
@@ -38,7 +45,9 @@ use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate, MarkerChain
 use fgdb_crypto::Digest;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::{BranchId, GraphId, ObjectId};
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 fn digest(seed: u8) -> Digest {
     Digest([seed; 32])
@@ -83,10 +92,60 @@ fn marker_for(seq: u64, capsule: ObjectId, chain: &MarkerChain) -> CommitMarker 
     }
 }
 
+fn fresh_suite_root(parent: &Path, pid: u32) -> io::Result<PathBuf> {
+    let mut attempt = 0_u64;
+    loop {
+        let candidate = parent.join(format!("fgdb-bitrot-{pid}-{attempt}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                attempt = attempt
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("scratch root attempt space exhausted"))?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fgdb-bitrot-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+    let root = ROOT.get_or_init(|| {
+        fresh_suite_root(&std::env::temp_dir(), std::process::id())
+            .expect("create fresh bit-rot suite root")
+    });
+    let dir = root.join(name);
+    std::fs::create_dir(&dir).expect("fresh per-test scratch dir");
     dir
+}
+
+/// A prior process with the same PID must never donate its populated database
+/// directory to this run. The exclusive create is the contract: a collision is
+/// skipped without modifying the stale evidence, and the selected root is empty.
+#[test]
+fn scratch_allocation_skips_a_stale_nonempty_process_root() {
+    let parent = scratch_dir("scratch-allocation-control");
+    let simulated_reused_pid = 424_242;
+    let stale = parent.join(format!("fgdb-bitrot-{simulated_reused_pid}-0"));
+    std::fs::create_dir(&stale).expect("stale root fixture");
+    let witness = stale.join("prior-run-witness");
+    std::fs::write(&witness, b"must remain untouched").expect("stale witness");
+
+    let fresh = fresh_suite_root(&parent, simulated_reused_pid).expect("allocate after stale root");
+    assert_ne!(fresh, stale, "a stale process root must never be reused");
+    assert_eq!(
+        std::fs::read(&witness).expect("stale witness remains readable"),
+        b"must remain untouched",
+        "allocating a new root must not mutate prior-run evidence"
+    );
+    assert!(
+        std::fs::read_dir(&fresh)
+            .expect("fresh root")
+            .next()
+            .is_none(),
+        "the selected root must be newly created and empty"
+    );
 }
 
 fn under_lab<T: Send + 'static>(
