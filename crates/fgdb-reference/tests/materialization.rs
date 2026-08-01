@@ -1307,3 +1307,58 @@ fn an_inverted_valid_time_period_is_refused() {
         .apply_row(&row(Some(period(200, None)), Some(period(200, Some(200)))))
         .expect("a zero-length period is not inverted");
 }
+
+/// fgdb-lqem — creation and update rows admit the same valid-time value, so
+/// creation cannot bypass the inverted-period check enforced by `ValidTime`.
+#[test]
+fn creation_rows_cannot_bypass_inverted_valid_time_validation() {
+    let mut graph = social_graph();
+    let period = |start: i64, end: Option<i64>| ValidTimePeriod {
+        start_micros: start,
+        end_micros: end,
+    };
+    let vertex = |vid, birth_ordinal, valid_time| DeltaRow::CreateVertex {
+        vid: VId(vid),
+        birth_ordinal,
+        labels: Vec::new(),
+        props: Vec::new(),
+        valid_time,
+    };
+    let edge = |eid, birth_ordinal, valid_time| DeltaRow::CreateEdge {
+        eid: EId(eid),
+        birth_ordinal,
+        src: VId(1),
+        relation: REL_KNOWS,
+        dst: VId(2),
+        canonical_key: None,
+        props: Vec::new(),
+        valid_time,
+    };
+    let inverted = Some(period(200, Some(100)));
+
+    let before = graph.clone();
+    assert!(matches!(
+        graph.apply_row(&vertex(99, 99, inverted)),
+        Err(ApplyError::InvertedValidTimePeriod {
+            elem: ElementId::Vertex(VId(99)),
+            ..
+        })
+    ));
+    assert_eq!(graph, before, "a refused vertex creation is atomic");
+
+    assert!(matches!(
+        graph.apply_row(&edge(99, 99, inverted)),
+        Err(ApplyError::InvertedValidTimePeriod {
+            elem: ElementId::Edge(EId(99)),
+            ..
+        })
+    ));
+    assert_eq!(graph, before, "a refused edge creation is atomic");
+
+    graph
+        .apply_row(&vertex(100, 100, Some(period(200, None))))
+        .expect("an open creation period is not inverted");
+    graph
+        .apply_row(&edge(100, 100, Some(period(200, Some(200)))))
+        .expect("a zero-length creation period is not inverted");
+}

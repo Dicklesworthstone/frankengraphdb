@@ -970,6 +970,7 @@ impl ReferenceGraph {
                 props,
                 valid_time,
             } => {
+                Self::require_valid_time_period(ElementId::Vertex(*vid), *valid_time)?;
                 if self.vertices.contains_key(vid) {
                     return Err(ApplyError::VertexAlreadyExists { vid: *vid });
                 }
@@ -1000,6 +1001,7 @@ impl ReferenceGraph {
                 props,
                 valid_time,
             } => {
+                Self::require_valid_time_period(ElementId::Edge(*eid), *valid_time)?;
                 if self.edges.contains_key(eid) {
                     return Err(ApplyError::EdgeAlreadyExists { eid: *eid });
                 }
@@ -1202,19 +1204,7 @@ impl ReferenceGraph {
                 after,
                 ..
             } => {
-                // The after-period must BE a period before anything agrees
-                // to transition into it: start past end is inverted, and an
-                // inverted interval is dead state from the moment it lands
-                // (fgdb-nrub). Open periods (end = None) are always valid.
-                if let Some(period) = after
-                    && let Some(end) = period.end_micros
-                    && period.start_micros > end
-                {
-                    return Err(ApplyError::InvertedValidTimePeriod {
-                        elem: *elem,
-                        declared: *period,
-                    });
-                }
+                Self::require_valid_time_period(*elem, *after)?;
                 match elem {
                     ElementId::Vertex(vid) => {
                         let vertex = self
@@ -1427,6 +1417,26 @@ impl ReferenceGraph {
                 delta,
                 declared_after: after,
             })
+        }
+    }
+
+    /// Refuses a malformed retained period before any creation or update arm
+    /// can mutate state. Open and zero-length periods remain admitted by the
+    /// reference model's existing enacted law; only start-after-end is invalid.
+    fn require_valid_time_period(
+        elem: ElementId,
+        period: Option<ValidTimePeriod>,
+    ) -> Result<(), ApplyError> {
+        if let Some(period) = period
+            && let Some(end) = period.end_micros
+            && period.start_micros > end
+        {
+            Err(ApplyError::InvertedValidTimePeriod {
+                elem,
+                declared: period,
+            })
+        } else {
+            Ok(())
         }
     }
 
