@@ -118,6 +118,19 @@ else
   die "control: the subject runner leaks a directory per run"
 fi
 
+# ONE hermetic control for the shared cache's provenance contract. Running this
+# once in the spine gate is sufficient because all six registry gates source
+# the same implementation above; repeating its compiler-identity and
+# incomplete-cache mutations in every consumer would add time without another
+# independent reader. The control proves identical reuse and separately moves
+# recipe bytes, pinned and resolved toolchain identity, relative paths, framed
+# file boundaries, and the published artifact manifest.
+if subject_provenance_control "$WORK"; then
+  ok "control: the subject key and manifest bind every compiler-input axis"
+else
+  die "control: the subject key or manifest accepted a provenance mutation"
+fi
+
 # --- Phase 1: materialized spine passes validate + hash + closure ------------
 log "phase 1: materialized spine (validate + hash + closure baseline)"
 if "$BIN" all --root "$ROOT" >"$WORK/spine-baseline.jsonl" 2>"$WORK/spine-baseline.err"; then
