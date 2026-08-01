@@ -999,6 +999,13 @@ impl OpeLedger {
         if self.is_complete() {
             return Err(OpeError::WindowAlreadyComplete);
         }
+        if decision.sequence > self.identity.window.last_sequence {
+            return Err(OpeError::SequenceOutsideWindow {
+                first: self.identity.window.first_sequence,
+                last: self.identity.window.last_sequence,
+                actual: decision.sequence,
+            });
+        }
         let observation_count =
             u64::try_from(self.observations.len()).map_err(|_| OpeError::ArithmeticOverflow)?;
         let expected_sequence = self
@@ -1013,14 +1020,6 @@ impl OpeLedger {
                 actual: decision.sequence,
             });
         }
-        if decision.sequence > self.identity.window.last_sequence {
-            return Err(OpeError::SequenceOutsideWindow {
-                first: self.identity.window.first_sequence,
-                last: self.identity.window.last_sequence,
-                actual: decision.sequence,
-            });
-        }
-
         let action_count = decision.actions.len();
         if action_count > self.profile.maximum_actions_per_observation {
             return Err(OpeError::TooManyActions {
@@ -2891,6 +2890,36 @@ mod tests {
             })
         ));
         assert_eq!(ledger.evidence()?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn sequence_above_window_is_named_by_ope() -> TestResult {
+        let mut ledger = OpeLedger::try_new(
+            identity(OpeEstimator::ImportanceWeighted, 5, 6)?,
+            profile(1, 2, 2, 4)?,
+        )?;
+        let before = ledger.evidence()?;
+
+        let error = ledger.record(binary_decision(
+            7,
+            true,
+            HALF,
+            HALF,
+            HALF,
+            outcome(OUTCOME_SCALE)?,
+            outcome(0)?,
+        )?);
+        assert!(matches!(
+            error,
+            Err(OpeError::SequenceOutsideWindow {
+                first: 5,
+                last: 6,
+                actual: 7,
+            })
+        ));
+        assert_eq!(ledger.evidence()?, before);
+        assert!(ledger.observations().is_empty());
         Ok(())
     }
 

@@ -1102,6 +1102,13 @@ impl AnnRecallLedger {
         if self.is_complete() {
             return Err(AnnRecallError::WindowAlreadyComplete);
         }
+        if observation.sequence > self.identity.window.last_sequence {
+            return Err(AnnRecallError::SequenceOutsideWindow {
+                first: self.identity.window.first_sequence,
+                last: self.identity.window.last_sequence,
+                actual: observation.sequence,
+            });
+        }
 
         let accepted = u64::try_from(self.observations.len())
             .map_err(|_| AnnRecallError::ArithmeticOverflow)?;
@@ -1117,14 +1124,6 @@ impl AnnRecallLedger {
                 actual: observation.sequence,
             });
         }
-        if observation.sequence > self.identity.window.last_sequence {
-            return Err(AnnRecallError::SequenceOutsideWindow {
-                first: self.identity.window.first_sequence,
-                last: self.identity.window.last_sequence,
-                actual: observation.sequence,
-            });
-        }
-
         validate_binding(self.identity, observation.binding)?;
 
         if self.sample_members.contains(&observation.sample_member_oid) {
@@ -2921,16 +2920,16 @@ mod tests {
     #[test]
     fn identity_and_sequence_failures_are_atomic() -> Result<(), AnnRecallError> {
         let mut ledger =
-            AnnRecallLedger::try_new(identity(2)?, profile(2, 2, 0, 0, supported_assumptions())?)?;
+            AnnRecallLedger::try_new(identity(3)?, profile(3, 2, 0, 0, supported_assumptions())?)?;
         ledger.record(observation(100, 20, &[1, 2], &[1, 2])?)?;
         let before = ledger.evidence()?;
 
-        let bad_sequence = observation(103, 21, &[3, 4], &[3, 4])?;
+        let bad_sequence = observation(102, 21, &[3, 4], &[3, 4])?;
         assert!(matches!(
             ledger.record(bad_sequence),
             Err(AnnRecallError::UnexpectedSequence {
                 expected: 101,
-                actual: 103
+                actual: 102
             })
         ));
         assert_eq!(ledger.evidence()?, before);
@@ -2965,6 +2964,25 @@ mod tests {
         ));
         assert_eq!(ledger.evidence()?, before);
         assert_eq!(ledger.observations().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn sequence_above_window_is_named_by_ann_recall() -> Result<(), AnnRecallError> {
+        let mut ledger =
+            AnnRecallLedger::try_new(identity(2)?, profile(2, 2, 0, 0, supported_assumptions())?)?;
+        let before = ledger.evidence()?;
+
+        assert_eq!(
+            ledger.record(observation(102, 20, &[1, 2], &[1, 2])?),
+            Err(AnnRecallError::SequenceOutsideWindow {
+                first: 100,
+                last: 101,
+                actual: 102,
+            })
+        );
+        assert_eq!(ledger.evidence()?, before);
+        assert!(ledger.observations().is_empty());
         Ok(())
     }
 
