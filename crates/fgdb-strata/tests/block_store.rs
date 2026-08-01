@@ -7,9 +7,10 @@
 //! is the exact failure content-addressing exists to prevent and the one that is
 //! silent.
 //!
-//! The store is the first thing in `fgdb-strata` that touches a disk, so it is also
-//! the first place `&CommitCx` appears — doctrine 3, and the boundary a lab runtime
-//! swaps to inject fsync lies and torn writes.
+//! The store is the first thing in `fgdb-strata` that touches a disk. Writes use
+//! `&CommitCx`, while every synchronous read accepts the shared sealed
+//! `StorageReadCx` contract and runs under the caller's role restriction — the
+//! doctrine-3 boundary a lab runtime swaps to inject filesystem faults.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
@@ -75,12 +76,12 @@ fn a_stored_block_reads_back() {
             block_id(&K_OID, NAMESPACE, &bytes),
             "derived, not accepted"
         );
-        assert!(store.contains(id));
+        assert!(store.contains(cx, id));
         assert_eq!(
-            store.get(id).expect("loads"),
+            store.get(cx, id).expect("loads"),
             fgdb_strata::decode_block(&bytes).expect("decodes")
         );
-        assert_eq!(store.get_bytes(id).expect("loads bytes"), bytes);
+        assert_eq!(store.get_bytes(cx, id).expect("loads bytes"), bytes);
     });
 }
 
@@ -115,7 +116,7 @@ fn store_directory_creation_waits_for_database_directory_sync() {
 
         let lost =
             BlockStore::open(cx, &crash_image, K_OID, NAMESPACE).expect("reopen loss-arm database");
-        assert!(!lost.contains(ObjectId([0x23; 32])));
+        assert!(!lost.contains(cx, ObjectId([0x23; 32])));
 
         // The other legal outcome is that the unsynced name survived. Reopen
         // re-establishes both directory barriers before any write is accepted.
@@ -123,7 +124,7 @@ fn store_directory_creation_waits_for_database_directory_sync() {
             .expect("reopen survival-arm database");
         let bytes = sample();
         let id = survived.put(cx, &bytes).expect("store after reopen");
-        assert_eq!(survived.get_bytes(id).expect("read"), bytes);
+        assert_eq!(survived.get_bytes(cx, id).expect("read"), bytes);
     });
 }
 
@@ -157,14 +158,14 @@ fn block_creation_waits_for_store_directory_sync() {
         let lost =
             BlockStore::open(cx, &crash_image, K_OID, NAMESPACE).expect("reopen loss-arm database");
         assert!(
-            !lost.contains(id),
+            !lost.contains(cx, id),
             "the legal loss arm cannot resolve an unsynced block name"
         );
 
         let survived = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE)
             .expect("reopen survival-arm database");
         assert_eq!(
-            survived.get_bytes(id).expect("surviving dirent reads"),
+            survived.get_bytes(cx, id).expect("surviving dirent reads"),
             bytes
         );
     });
@@ -200,7 +201,7 @@ fn a_staging_crash_never_exposes_partial_canonical_bytes() {
             id,
             "the next permit owner reuses the noncanonical staging slot"
         );
-        assert_eq!(store.get_bytes(id).expect("published bytes"), bytes);
+        assert_eq!(store.get_bytes(cx, id).expect("published bytes"), bytes);
     });
 }
 
@@ -241,7 +242,7 @@ fn an_equal_existing_block_reestablishes_durability_after_reopen() {
             modified_at,
             "re-establishing durability must not rewrite immutable bytes"
         );
-        assert_eq!(reopened.get_bytes(id).expect("read"), bytes);
+        assert_eq!(reopened.get_bytes(cx, id).expect("read"), bytes);
     });
 }
 
@@ -267,7 +268,7 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
         let actual = block_id(&K_OID, NAMESPACE, &other);
         assert!(
             matches!(
-                store.get(id),
+                store.get(cx, id),
                 Err(StoreError::IdentityMismatch { expected, actual: got })
                     if expected == id && got == actual
             ),
@@ -276,7 +277,7 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
         // And the raw-bytes path enforces it too — a caller that skips decoding
         // must not thereby skip the identity check.
         assert!(matches!(
-            store.get_bytes(id),
+            store.get_bytes(cx, id),
             Err(StoreError::IdentityMismatch { .. })
         ));
     });
@@ -300,7 +301,7 @@ fn damaged_bytes_are_refused_by_identity_first() {
         std::fs::write(store.path(id), &bytes).expect("write");
 
         assert!(matches!(
-            store.get(id),
+            store.get(cx, id),
             Err(StoreError::IdentityMismatch { .. })
         ));
     });
@@ -332,7 +333,7 @@ fn storing_the_same_bytes_twice_is_a_no_op() {
             modified_at,
             "the file must not have been rewritten"
         );
-        assert_eq!(store.get_bytes(first).expect("loads"), bytes);
+        assert_eq!(store.get_bytes(cx, first).expect("loads"), bytes);
     });
 }
 
@@ -390,16 +391,19 @@ fn two_stores_with_different_keys_do_not_share_blocks() {
         let their_id = theirs.put(cx, &bytes).expect("stores");
         assert_ne!(my_id, their_id, "different keys, different objects");
         assert!(
-            !mine.contains(their_id),
+            !mine.contains(cx, their_id),
             "one key's store must not claim to hold another key's block, even \
              though the file is right there in the shared directory"
         );
-        assert!(theirs.contains(their_id), "while its own store does");
+        assert!(theirs.contains(cx, their_id), "while its own store does");
 
         // Each store resolves its OWN identity and refuses the other's.
-        assert_eq!(mine.get_bytes(my_id).expect("loads"), bytes);
+        assert_eq!(mine.get_bytes(cx, my_id).expect("loads"), bytes);
         assert!(
-            matches!(mine.get(their_id), Err(StoreError::IdentityMismatch { .. })),
+            matches!(
+                mine.get(cx, their_id),
+                Err(StoreError::IdentityMismatch { .. })
+            ),
             "the same bytes under another key are not this store's object"
         );
     });
@@ -412,8 +416,8 @@ fn a_missing_block_is_an_error() {
     under_lab(37, move |cx| {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let absent = ObjectId([0xab; 32]);
-        assert!(!store.contains(absent));
-        assert!(matches!(store.get(absent), Err(StoreError::Io(_))));
+        assert!(!store.contains(cx, absent));
+        assert!(matches!(store.get(cx, absent), Err(StoreError::Io(_))));
     });
 }
 
@@ -433,9 +437,9 @@ fn stored_bytes_that_are_not_a_block_are_refused_as_malformed() {
         let id = store
             .put(cx, b"this is not a strata block")
             .expect("stores");
-        assert!(matches!(store.get(id), Err(StoreError::Malformed(_))));
+        assert!(matches!(store.get(cx, id), Err(StoreError::Malformed(_))));
         assert!(
-            store.get_bytes(id).is_ok(),
+            store.get_bytes(cx, id).is_ok(),
             "and the raw path still returns them, since identity is all it claims"
         );
     });
@@ -558,7 +562,7 @@ fn a_root_read_uses_the_root_formats_exact_byte_ceiling() {
             .expect("extends sparse planted root");
 
         assert!(matches!(
-            store.get_root(id),
+            store.get_root(cx, id),
             Err(StoreError::ObjectTooLarge { limit, observed })
                 if limit == MAX_ENCODED_ROOT_BYTES as u64
                     && observed == MAX_ENCODED_ROOT_BYTES as u64 + 1
@@ -610,7 +614,8 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
 
         // A FRESH handle, holding nothing but the root identity.
         let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens");
-        let (loaded_root, loaded_blocks) = reopened.reopen(root_id).expect("reopens the partition");
+        let (loaded_root, loaded_blocks) =
+            reopened.reopen(cx, root_id).expect("reopens the partition");
 
         assert_eq!(loaded_root, root, "the root came back exactly");
         assert_eq!(loaded_blocks.len(), blocks.len());
@@ -654,7 +659,7 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
         let root_id = store.put_root(cx, &root).expect("stores root");
 
         let (admitted, visible) = store
-            .reopen_at(root_id, CommitSeq(3))
+            .reopen_at(cx, root_id, CommitSeq(3))
             .expect("selectively reopens");
         assert_eq!(admitted.root_id(), root_id);
         assert_eq!(admitted.root(), &root);
@@ -693,7 +698,7 @@ fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
             .expect("plants an unadmitted root");
 
         assert!(matches!(
-            store.reopen_at(root_id, CommitSeq(3)),
+            store.reopen_at(cx, root_id, CommitSeq(3)),
             Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch {
                 at: 0,
                 declared: (CommitSeq(7), CommitSeq(7)),
@@ -729,7 +734,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
             store.put(cx, &block.bytes).expect("stores block");
         }
         let root_id = store.put_root(cx, &root).expect("stores root");
-        let admitted = store.admit_root(root_id).expect("admits every range");
+        let admitted = store.admit_root(cx, root_id).expect("admits every range");
         let future_block_id = root
             .blocks
             .get(1)
@@ -740,7 +745,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
             .expect("plants later damage");
 
         let early = admitted
-            .resolve_blocks_at(CommitSeq(3))
+            .resolve_blocks_at(cx, CommitSeq(3))
             .expect("future-only damage is skipped");
         assert_eq!(early.len(), 1);
         assert_eq!(
@@ -748,7 +753,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
             vec![VId(2)]
         );
         assert!(matches!(
-            admitted.resolve_blocks_at(CommitSeq(7)),
+            admitted.resolve_blocks_at(cx, CommitSeq(7)),
             Err(StoreError::RootBlockLoad { at: 1, error })
                 if matches!(*error, StoreError::IdentityMismatch { .. })
         ));
@@ -784,7 +789,7 @@ fn reopening_with_a_missing_block_is_refused() {
 
         assert!(
             matches!(
-                store.reopen(root_id),
+                store.reopen(cx, root_id),
                 Err(StoreError::RootBlockLoad { at: 1, error })
                     if matches!(*error, StoreError::Io(ref io)
                         if io.kind() == std::io::ErrorKind::NotFound)
@@ -793,7 +798,7 @@ fn reopening_with_a_missing_block_is_refused() {
         );
         // The root itself is still perfectly readable — the failure is about the
         // partition, not about the root object, and the two are worth telling apart.
-        assert_eq!(store.get_root(root_id).expect("the root is fine"), root);
+        assert_eq!(store.get_root(cx, root_id).expect("the root is fine"), root);
     });
 }
 
@@ -827,7 +832,7 @@ fn a_root_at_the_wrong_identity_is_refused() {
         std::fs::write(store.path(root_id), &other_bytes).expect("plant");
 
         assert!(matches!(
-            store.get_root(root_id),
+            store.get_root(cx, root_id),
             Err(StoreError::MalformedRoot(
                 RootError::IdentityMismatch { .. }
             ))

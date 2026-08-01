@@ -309,19 +309,21 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
             // whole and decodable, and it must still contribute nothing.
             let capsule_durable = point != CrashPoint::BeforeCapsule;
             assert_eq!(
-                reopened.capsule_exists(third.object_id),
+                reopened.capsule_exists(cx, third.object_id),
                 capsule_durable,
                 "{point:?}: capsule presence"
             );
             if capsule_durable {
-                let orphan_bytes = reopened.read_capsule(third.object_id).expect("readable");
+                let orphan_bytes = reopened
+                    .read_capsule(cx, third.object_id)
+                    .expect("readable");
                 assert!(
                     LogicalDeltaTemplate::decode_canonical(&orphan_bytes).is_ok(),
                     "{point:?}: the orphan decodes cleanly — being unusable is not \
                      what keeps it out of the graph; being unnamed by any marker is"
                 );
                 assert_eq!(
-                    reopened.orphan_capsules().expect("scan"),
+                    reopened.orphan_capsules(cx).expect("scan"),
                     vec![third.object_id]
                 );
             }
@@ -417,7 +419,7 @@ fn a_rewritten_capsule_is_refused_rather_than_materialized() {
 
         // Nothing partial was applied on the way to failing.
         assert!(
-            reopened.read_capsule(capsules[0].object_id).is_err(),
+            reopened.read_capsule(cx, capsules[0].object_id).is_err(),
             "the substituted container must not recover under the committed identity"
         );
     });
@@ -569,7 +571,7 @@ fn a_prepared_capsule_agrees_with_the_stores_derived_identity() {
             })
             .expect("commit");
         assert_eq!(observed, Some(expected));
-        assert!(coordinator.capsule_exists(expected));
+        assert!(coordinator.capsule_exists(cx, expected));
     });
 }
 
@@ -586,7 +588,7 @@ fn a_committed_capsule_recovers_its_exact_plaintext_through_the_codec() {
 
         let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         let recovered = reopened
-            .read_capsule(capsule.object_id)
+            .read_capsule(cx, capsule.object_id)
             .expect("recovers through the codec");
         assert_eq!(recovered, capsule.bytes);
 

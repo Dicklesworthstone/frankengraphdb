@@ -309,7 +309,7 @@ fn committed_markers_survive_a_restart() {
         for (index, entry) in reopened.chain().entries().iter().enumerate() {
             assert_eq!(entry.marker.commit_seq, index as u64 + 1);
             assert!(
-                reopened.capsule_exists(capsule_oid(entry.marker.commit_seq)),
+                reopened.capsule_exists(cx, capsule_oid(entry.marker.commit_seq)),
                 "a committed marker names a capsule that must be durable"
             );
         }
@@ -325,7 +325,7 @@ fn a_committed_capsule_is_never_an_orphan() {
             commit_ok(&mut coordinator, cx, seq);
         }
         assert_eq!(
-            coordinator.orphan_capsules().expect("scan"),
+            coordinator.orphan_capsules(cx).expect("scan"),
             Vec::new(),
             "every capsule here is named by a committed marker"
         );
@@ -421,7 +421,7 @@ fn identical_payloads_reuse_one_capsule_and_both_markers_survive_restart() {
         );
         assert_eq!(
             coordinator
-                .read_capsule(expected_oid)
+                .read_capsule(cx, expected_oid)
                 .expect("read shared capsule"),
             plaintext
         );
@@ -433,7 +433,7 @@ fn identical_payloads_reuse_one_capsule_and_both_markers_survive_restart() {
         assert_eq!(capsule_file_count(&dir), 1);
         assert_eq!(
             reopened
-                .read_capsule(expected_oid)
+                .read_capsule(cx, expected_oid)
                 .expect("recover shared capsule"),
             plaintext
         );
@@ -500,11 +500,11 @@ fn a_crash_at_any_instant_recovers_the_committed_prefix() {
             // a test that nothing happened.
             let capsule_written = point != CrashPoint::BeforeCapsule;
             assert_eq!(
-                reopened.capsule_exists(capsule_oid(3)),
+                reopened.capsule_exists(cx, capsule_oid(3)),
                 capsule_written,
                 "{point:?}: capsule presence"
             );
-            let orphans = reopened.orphan_capsules().expect("scan");
+            let orphans = reopened.orphan_capsules(cx).expect("scan");
             if capsule_written {
                 assert_eq!(
                     orphans,
@@ -543,7 +543,7 @@ fn capsule_namespace_loss_before_d1_recovers_as_no_commit() {
             );
             assert!(crashed.is_err(), "{point:?} must interrupt D1");
             assert!(
-                coordinator.capsule_exists(capsule_oid(1)),
+                coordinator.capsule_exists(cx, capsule_oid(1)),
                 "the inode exists in the working view before the simulated namespace loss"
             );
             drop(coordinator);
@@ -554,8 +554,8 @@ fn capsule_namespace_loss_before_d1_recovers_as_no_commit() {
             let recovered =
                 CommitCoordinator::open(cx, &crash_image, keys()).expect("open crash image");
             assert!(recovered.chain().is_empty());
-            assert!(!recovered.capsule_exists(capsule_oid(1)));
-            assert!(recovered.orphan_capsules().expect("scan").is_empty());
+            assert!(!recovered.capsule_exists(cx, capsule_oid(1)));
+            assert!(recovered.orphan_capsules(cx).expect("scan").is_empty());
         });
     }
 }
@@ -599,14 +599,14 @@ fn first_marker_dirent_loss_never_creates_a_dangling_commit() {
         assert!(lost_log.chain().is_empty());
         assert_eq!(lost_log.next_commit_seq(), Ok(CommitSeq(1)));
         assert_eq!(
-            lost_log.orphan_capsules().expect("scan loss arm"),
+            lost_log.orphan_capsules(cx).expect("scan loss arm"),
             vec![capsule_oid(1)]
         );
 
         let survived_log =
             CommitCoordinator::open(cx, &working_dir, keys()).expect("recover survival arm");
         assert_eq!(survived_log.chain().len(), 1);
-        assert!(survived_log.orphan_capsules().expect("scan").is_empty());
+        assert!(survived_log.orphan_capsules(cx).expect("scan").is_empty());
     });
 }
 
@@ -676,7 +676,7 @@ fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
             "recovery reports what it dropped rather than swallowing it"
         );
         assert_eq!(
-            reopened.orphan_capsules().expect("scan"),
+            reopened.orphan_capsules(cx).expect("scan"),
             vec![capsule_oid(3)],
             "the capsule survives as an orphan"
         );
@@ -762,7 +762,7 @@ fn an_intact_unsynced_entry_recovers_as_committed() {
         assert_eq!(reopened.chain().verify(), Ok(()));
         assert_eq!(reopened.discarded_tail_bytes(), 0);
         assert!(
-            reopened.orphan_capsules().expect("scan").is_empty(),
+            reopened.orphan_capsules(cx).expect("scan").is_empty(),
             "the capsule is named by a recovered marker, so it is not an orphan"
         );
     });
@@ -935,7 +935,7 @@ fn repeated_crashes_leave_a_verifiable_chain() {
         assert_eq!(final_state.chain().len(), 10);
         assert_eq!(final_state.chain().verify(), Ok(()));
         assert_eq!(
-            final_state.orphan_capsules().expect("scan").len(),
+            final_state.orphan_capsules(cx).expect("scan").len(),
             expected_orphans,
             "every crash past the capsule write leaves exactly one orphan, and \
              none of them is ever mistaken for a commit"

@@ -31,6 +31,7 @@ use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_contain
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
 use crate::store::{sync_created_entry, sync_directory, sync_file};
 use fgdb_crypto::Digest;
+use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
 use fgdb_types::{CommitSeq, MarkerRef};
@@ -267,23 +268,26 @@ impl CommitCoordinator {
         let dir = database_dir.as_ref().to_path_buf();
         let writer_lease = Self::acquire_writer_lease(cx, &dir)?;
         let capsule_dir = dir.join(CAPSULE_DIR);
-        match std::fs::create_dir(&capsule_dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !std::fs::symlink_metadata(&capsule_dir)?
-                    .file_type()
-                    .is_dir()
-                {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "capsule path exists but is not a directory",
-                    )
-                    .into());
+        cx.with_restriction(|| -> Result<(), CommitError> {
+            match std::fs::create_dir(&capsule_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !std::fs::symlink_metadata(&capsule_dir)?
+                        .file_type()
+                        .is_dir()
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "capsule path exists but is not a directory",
+                        )
+                        .into());
+                    }
                 }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
-        }
-        let (chain, discarded_tail_bytes) = Self::recover_chain(&dir)?;
+            Ok(())
+        })?;
+        let (chain, discarded_tail_bytes) = Self::recover_chain(cx, &dir)?;
         Ok(Self {
             dir,
             _writer_lease: writer_lease,
@@ -304,31 +308,33 @@ impl CommitCoordinator {
     /// duplicated handles can share lock ownership on some platforms, whereas
     /// independent opens contend both within one process and across processes.
     fn acquire_writer_lease(cx: &CommitCx, dir: &Path) -> Result<File, CommitError> {
-        let path = dir.join(COORDINATOR_LOCK_NAME);
-        let lease = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "commit coordinator lock path exists but is not a regular file",
-                    )
-                    .into());
+        cx.with_restriction(|| {
+            let path = dir.join(COORDINATOR_LOCK_NAME);
+            let lease = match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "commit coordinator lock path exists but is not a regular file",
+                        )
+                        .into());
+                    }
+                    OpenOptions::new().read(true).write(true).open(&path)?
                 }
-                OpenOptions::new().read(true).write(true).open(&path)?
+                Err(error) => return Err(error.into()),
+            };
+            match lease.try_lock() {
+                Ok(()) => Ok(lease),
+                Err(TryLockError::WouldBlock) => Err(CommitError::WriterAlreadyOpen),
+                Err(TryLockError::Error(error)) => Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
-        };
-        match cx.with_restriction(|| lease.try_lock()) {
-            Ok(()) => Ok(lease),
-            Err(TryLockError::WouldBlock) => Err(CommitError::WriterAlreadyOpen),
-            Err(TryLockError::Error(error)) => Err(error.into()),
-        }
+        })
     }
 
     pub fn chain(&self) -> &MarkerChain {
@@ -384,38 +390,44 @@ impl CommitCoordinator {
     /// for publication, and deduplication must not require another
     /// capsule-sized allocation. A length or byte mismatch is a conflict;
     /// genuine read failures remain I/O errors.
-    fn existing_capsule_matches(file: &mut File, expected: &[u8]) -> Result<bool, CommitError> {
-        let expected_len = u64::try_from(expected.len()).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "capsule container length does not fit u64",
-            )
-        })?;
-        if file.metadata()?.len() != expected_len {
-            return Ok(false);
-        }
-
-        let mut actual = [0u8; CAPSULE_COMPARE_BUFFER_BYTES];
-        for expected_chunk in expected.chunks(actual.len()) {
-            match file.read_exact(&mut actual[..expected_chunk.len()]) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Ok(false);
-                }
-                Err(error) => return Err(error.into()),
-            }
-            // ubs:ignore -- durable encrypted container bytes, not secret material.
-            if actual[..expected_chunk.len()] != expected_chunk[..] {
+    fn existing_capsule_matches(
+        cx: &impl StorageReadCx,
+        file: &mut File,
+        expected: &[u8],
+    ) -> Result<bool, CommitError> {
+        cx.with_restriction(|| {
+            let expected_len = u64::try_from(expected.len()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "capsule container length does not fit u64",
+                )
+            })?;
+            if file.metadata()?.len() != expected_len {
                 return Ok(false);
             }
-        }
 
-        // Defend the exact comparison against a file that grew after the
-        // metadata read. Same-directory writer exclusion is a separate
-        // protocol concern, but accepting bytes we did not compare would still
-        // be wrong here.
-        let mut trailing = [0u8; 1];
-        Ok(file.read(&mut trailing)? == 0)
+            let mut actual = [0u8; CAPSULE_COMPARE_BUFFER_BYTES];
+            for expected_chunk in expected.chunks(actual.len()) {
+                match file.read_exact(&mut actual[..expected_chunk.len()]) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                // ubs:ignore -- durable encrypted container bytes, not secret material.
+                if actual[..expected_chunk.len()] != expected_chunk[..] {
+                    return Ok(false);
+                }
+            }
+
+            // Defend the exact comparison against a file that grew after the
+            // metadata read. Same-directory writer exclusion is a separate
+            // protocol concern, but accepting bytes we did not compare would still
+            // be wrong here.
+            let mut trailing = [0u8; 1];
+            Ok(file.read(&mut trailing)? == 0)
+        })
     }
 
     /// Read a durable capsule's bytes back.
@@ -429,11 +441,17 @@ impl CommitCoordinator {
     /// content addressed and durable; what the bytes *mean* belongs to whoever
     /// wrote them, and the marker already carries the digests that let a reader
     /// prove it got the object it asked for.
-    pub fn read_capsule(&self, capsule_oid: ObjectId) -> Result<Vec<u8>, CommitError> {
-        let mut container = Vec::new();
-        File::open(Self::capsule_path(&self.dir, capsule_oid))?.read_to_end(&mut container)?;
-        let (descriptor, symbols) = decode_container(&container)?;
-        Ok(self.keys.recover(&descriptor, &symbols, capsule_oid)?)
+    pub fn read_capsule(
+        &self,
+        cx: &impl StorageReadCx,
+        capsule_oid: ObjectId,
+    ) -> Result<Vec<u8>, CommitError> {
+        cx.with_restriction(|| {
+            let mut container = Vec::new();
+            File::open(Self::capsule_path(&self.dir, capsule_oid))?.read_to_end(&mut container)?;
+            let (descriptor, symbols) = decode_container(&container)?;
+            Ok(self.keys.recover(&descriptor, &symbols, capsule_oid)?)
+        })
     }
 
     /// The identity `plaintext` will have as a capsule under this database's
@@ -448,8 +466,8 @@ impl CommitCoordinator {
 
     /// Is this capsule durable? Used by recovery to identify orphans — bytes
     /// written by a commit that never reached D2.
-    pub fn capsule_exists(&self, capsule_oid: ObjectId) -> bool {
-        Self::capsule_path(&self.dir, capsule_oid).exists()
+    pub fn capsule_exists(&self, cx: &impl StorageReadCx, capsule_oid: ObjectId) -> bool {
+        cx.with_restriction(|| Self::capsule_path(&self.dir, capsule_oid).exists())
     }
 
     /// The file component of a durability barrier, named for the same reason
@@ -569,15 +587,17 @@ impl CommitCoordinator {
                 file
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = std::fs::symlink_metadata(&capsule_path)?;
+                let metadata = cx.with_restriction(|| std::fs::symlink_metadata(&capsule_path))?;
                 if !metadata.file_type().is_file() {
                     return Err(CommitError::CapsulePathConflict { capsule_oid });
                 }
-                let mut file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&capsule_path)?;
-                if !Self::existing_capsule_matches(&mut file, &encoded_capsule)? {
+                let mut file = cx.with_restriction(|| {
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&capsule_path)
+                })?;
+                if !Self::existing_capsule_matches(cx, &mut file, &encoded_capsule)? {
                     return Err(CommitError::CapsulePathConflict { capsule_oid });
                 }
                 file
@@ -706,87 +726,89 @@ impl CommitCoordinator {
     /// as a tail would let one bad entry silently delete every commit after it
     /// while recovery reported success, which is the worst outcome available to
     /// a commit log: durable data lost with a green light.
-    fn recover_chain(dir: &Path) -> Result<(MarkerChain, usize), CommitError> {
-        let path = dir.join(COMMIT_LOG_NAME);
-        let mut file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((MarkerChain::new(), 0));
-            }
-            Err(error) => return Err(error.into()),
-        };
+    fn recover_chain(cx: &CommitCx, dir: &Path) -> Result<(MarkerChain, usize), CommitError> {
+        cx.with_restriction(|| {
+            let path = dir.join(COMMIT_LOG_NAME);
+            let mut file = match File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok((MarkerChain::new(), 0));
+                }
+                Err(error) => return Err(error.into()),
+            };
 
-        let mut chain = MarkerChain::new();
-        let mut cursor = 0usize;
-        // One bounded entry buffer replaces whole-log materialization. A valid
-        // writer entry is at most MAX_ENTRY_BODY plus its fixed framing, so a
-        // hostile sparse or multi-gigabyte log can never demand a matching
-        // allocation merely because it exists on disk.
-        let mut entry = Vec::with_capacity(
-            ENTRY_HEADER_BYTES + MAX_ENTRY_BODY + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES,
-        );
-        while let Some(decoded) = Self::read_next_entry(&mut file, &mut entry)? {
-            let (marker, stored_chain_hash, consumed) = match decoded {
-                Ok(decoded) => decoded,
-                // Reachable only when the remaining bytes run out, which by
-                // construction means end of file.
-                Err(EntryDefect::Truncated) => break,
-                Err(EntryDefect::Corrupt) => {
-                    return Err(CommitError::CorruptLogEntry {
-                        commit_seq: chain.next_commit_seq()?.0,
+            let mut chain = MarkerChain::new();
+            let mut cursor = 0usize;
+            // One bounded entry buffer replaces whole-log materialization. A valid
+            // writer entry is at most MAX_ENTRY_BODY plus its fixed framing, so a
+            // hostile sparse or multi-gigabyte log can never demand a matching
+            // allocation merely because it exists on disk.
+            let mut entry = Vec::with_capacity(
+                ENTRY_HEADER_BYTES + MAX_ENTRY_BODY + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES,
+            );
+            while let Some(decoded) = Self::read_next_entry(&mut file, &mut entry)? {
+                let (marker, stored_chain_hash, consumed) = match decoded {
+                    Ok(decoded) => decoded,
+                    // Reachable only when the remaining bytes run out, which by
+                    // construction means end of file.
+                    Err(EntryDefect::Truncated) => break,
+                    Err(EntryDefect::Corrupt) => {
+                        return Err(CommitError::CorruptLogEntry {
+                            commit_seq: chain.next_commit_seq()?.0,
+                        });
+                    }
+                };
+                let expected = marker.chain_hash(chain.chain_value());
+                if expected != stored_chain_hash {
+                    return Err(CommitError::ChainDiverged {
+                        commit_seq: marker.commit_seq,
                     });
                 }
-            };
-            let expected = marker.chain_hash(chain.chain_value());
-            if expected != stored_chain_hash {
-                return Err(CommitError::ChainDiverged {
-                    commit_seq: marker.commit_seq,
-                });
+                let seq = marker.commit_seq;
+                chain
+                    .append(marker)
+                    .map_err(|_| CommitError::CorruptLogEntry { commit_seq: seq })?;
+                cursor = cursor.checked_add(consumed).ok_or_else(|| {
+                    CommitError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "commit log length exceeds this platform's address space",
+                    ))
+                })?;
             }
-            let seq = marker.commit_seq;
-            chain
-                .append(marker)
-                .map_err(|_| CommitError::CorruptLogEntry { commit_seq: seq })?;
-            cursor = cursor.checked_add(consumed).ok_or_else(|| {
+            let valid_len = u64::try_from(cursor).map_err(|_| {
                 CommitError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "commit log length exceeds this platform's address space",
+                    "commit log length does not fit u64",
                 ))
             })?;
-        }
-        let valid_len = u64::try_from(cursor).map_err(|_| {
-            CommitError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "commit log length does not fit u64",
-            ))
-        })?;
-        let file_len = file.metadata()?.len();
-        let discarded_tail_bytes =
-            usize::try_from(file_len.checked_sub(valid_len).ok_or_else(|| {
-                CommitError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "commit log shrank during recovery",
-                ))
-            })?)
-            .map_err(|_| {
-                CommitError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "discarded commit-log tail does not fit usize",
-                ))
-            })?;
-        if discarded_tail_bytes != 0 {
-            // O_APPEND uses the file's physical end, not the recovered
-            // chain's logical end. Leaving the torn bytes in place would put
-            // the next acknowledged entry after an undecodable prefix; the
-            // following restart would stop at that old prefix and silently
-            // lose the acknowledged commit. The next successful D2 sync makes
-            // this truncation durable together with the appended entry.
-            OpenOptions::new()
-                .write(true)
-                .open(&path)?
-                .set_len(valid_len)?;
-        }
-        Ok((chain, discarded_tail_bytes))
+            let file_len = file.metadata()?.len();
+            let discarded_tail_bytes =
+                usize::try_from(file_len.checked_sub(valid_len).ok_or_else(|| {
+                    CommitError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "commit log shrank during recovery",
+                    ))
+                })?)
+                .map_err(|_| {
+                    CommitError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "discarded commit-log tail does not fit usize",
+                    ))
+                })?;
+            if discarded_tail_bytes != 0 {
+                // O_APPEND uses the file's physical end, not the recovered
+                // chain's logical end. Leaving the torn bytes in place would put
+                // the next acknowledged entry after an undecodable prefix; the
+                // following restart would stop at that old prefix and silently
+                // lose the acknowledged commit. The next successful D2 sync makes
+                // this truncation durable together with the appended entry.
+                OpenOptions::new()
+                    .write(true)
+                    .open(&path)?
+                    .set_len(valid_len)?;
+            }
+            Ok((chain, discarded_tail_bytes))
+        })
     }
 
     /// Read and decode exactly one bounded entry.
@@ -905,7 +927,7 @@ impl CommitCoordinator {
     /// These are the residue of commits that crashed between D1 and D2. They
     /// are NOT partial commits — they are bytes nobody referenced — and
     /// reclaiming them is ordinary maintenance rather than recovery.
-    pub fn orphan_capsules(&self) -> Result<Vec<ObjectId>, CommitError> {
+    pub fn orphan_capsules(&self, cx: &impl StorageReadCx) -> Result<Vec<ObjectId>, CommitError> {
         let referenced: Vec<ObjectId> = self
             .chain
             .entries()
@@ -919,27 +941,29 @@ impl CommitCoordinator {
             })
             .collect();
 
-        let mut orphans = Vec::new();
-        let capsule_dir = self.dir.join(CAPSULE_DIR);
-        for entry in std::fs::read_dir(&capsule_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let Some(stem) = name
-                .to_string_lossy()
-                .strip_suffix(".capsule")
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let Some(oid) = decode_hex_oid(&stem) else {
-                continue;
-            };
-            if !referenced.contains(&oid) {
-                orphans.push(oid);
+        cx.with_restriction(|| {
+            let mut orphans = Vec::new();
+            let capsule_dir = self.dir.join(CAPSULE_DIR);
+            for entry in std::fs::read_dir(&capsule_dir)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(stem) = name
+                    .to_string_lossy()
+                    .strip_suffix(".capsule")
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let Some(oid) = decode_hex_oid(&stem) else {
+                    continue;
+                };
+                if !referenced.contains(&oid) {
+                    orphans.push(oid);
+                }
             }
-        }
-        orphans.sort_by_key(|oid| oid.0);
-        Ok(orphans)
+            orphans.sort_by_key(|oid| oid.0);
+            Ok(orphans)
+        })
     }
 }
 

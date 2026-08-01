@@ -490,11 +490,11 @@ fn a_crash_mid_fixture_append_leaves_the_committed_prefix_replayable() {
             "the crashed transaction contributed nothing"
         );
         assert!(
-            reopened.capsule_exists(capsule.object_id),
+            reopened.capsule_exists(cx, capsule.object_id),
             "though its capsule is durable — the orphan is real"
         );
         assert_eq!(
-            reopened.orphan_capsules().expect("scan"),
+            reopened.orphan_capsules(cx).expect("scan"),
             vec![capsule.object_id]
         );
 

@@ -285,15 +285,15 @@ fn a_refused_transaction_seals_no_capsule() {
         // transaction would have written is absent from the store.
         let would_have = lost.capsule_oid.expect("its capsule identity is known");
         assert!(
-            !coordinator.capsule_exists(would_have),
+            !coordinator.capsule_exists(cx, would_have),
             "the refused transaction's bytes reached the disk"
         );
         assert!(
-            coordinator.capsule_exists(won.capsule_oid.expect("prepared")),
+            coordinator.capsule_exists(cx, won.capsule_oid.expect("prepared")),
             "while the winner's did — otherwise the check above is vacuous"
         );
         assert_eq!(
-            coordinator.orphan_capsules().expect("scan"),
+            coordinator.orphan_capsules(cx).expect("scan"),
             vec![],
             "a refused transaction leaves no orphan"
         );
@@ -349,7 +349,7 @@ fn durability_decides_membership_in_the_ssi_history() {
         assert_eq!(prop_of(&graph, 1), Some(0), "t1 landed");
         assert_eq!(prop_of(&graph, 2), Some(1), "t2 did not");
         assert!(
-            reopened.capsule_exists(b.capsule_oid.expect("prepared")),
+            reopened.capsule_exists(cx, b.capsule_oid.expect("prepared")),
             "its capsule is durable — the orphan is real, and still not a commit"
         );
 

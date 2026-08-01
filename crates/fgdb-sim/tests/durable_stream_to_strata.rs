@@ -142,13 +142,13 @@ fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<Del
 /// carries. This is how a real partition is rebuilt after a restart — there is no
 /// other source of truth (doctrine 5: derived structures are never more
 /// authoritative than the commit stream, and recovery discards and rebuilds them).
-fn rebuild_from_stream(coordinator: &CommitCoordinator) -> Vec<Vec<AdjacencyEntry>> {
+fn rebuild_from_stream(cx: &CommitCx, coordinator: &CommitCoordinator) -> Vec<Vec<AdjacencyEntry>> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, 0);
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
         let EffectSource::Local { capsule_ref, .. } = &entry.marker.effect_source;
         let bytes = coordinator
-            .read_capsule(*capsule_ref)
+            .read_capsule(cx, *capsule_ref)
             .expect("a committed capsule is readable");
         let template =
             LogicalDeltaTemplate::decode_canonical(&bytes).expect("a committed template decodes");
@@ -192,7 +192,7 @@ fn a_partition_rebuilt_from_the_recovered_stream_agrees_with_the_oracle() {
             .expect("the coordinate materialized");
         let frontier = database.applied_through(GRAPH, BRANCH).expect("a frontier");
 
-        let blocks = rebuild_from_stream(&reopened);
+        let blocks = rebuild_from_stream(cx, &reopened);
         assert!(!blocks.is_empty(), "the stream produced blocks");
 
         for source in [1u128, 2, 3] {
@@ -249,7 +249,7 @@ fn a_deletion_in_a_later_commit_agrees_with_the_oracle() {
         let graph = database.graph(GRAPH, BRANCH).expect("materialized");
         let frontier = database.applied_through(GRAPH, BRANCH).expect("frontier");
 
-        let blocks = rebuild_from_stream(&reopened);
+        let blocks = rebuild_from_stream(cx, &reopened);
         assert_eq!(
             graph.neighbours(VId(1), REL),
             vec![VId(3)],
@@ -290,11 +290,11 @@ fn rebuilding_twice_produces_identical_blocks() {
         }
         let first = {
             let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-            rebuild_from_stream(&reopened)
+            rebuild_from_stream(cx, &reopened)
         };
         let second = {
             let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-            rebuild_from_stream(&reopened)
+            rebuild_from_stream(cx, &reopened)
         };
         assert_eq!(
             first, second,

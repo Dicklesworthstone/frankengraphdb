@@ -277,13 +277,13 @@ pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed
             logical_delta_template_digest,
         } = &entry.marker.effect_source;
 
-        if !coordinator.capsule_exists(*capsule_ref) {
+        if !coordinator.capsule_exists(cx, *capsule_ref) {
             return Err(ReplayError::MissingCapsule {
                 commit_seq,
                 capsule_oid: *capsule_ref,
             });
         }
-        let bytes = coordinator.read_capsule(*capsule_ref)?;
+        let bytes = coordinator.read_capsule(cx, *capsule_ref)?;
 
         let recomputed = template_digest(&bytes);
         // ubs:ignore — canonical logical-effect integrity is public, not authentication material.

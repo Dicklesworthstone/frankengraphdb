@@ -11,10 +11,10 @@
 //! write destroys a slot nobody was depending on. The previous generation
 //! remains complete, authenticated, and selectable throughout.
 //!
-//! `&CommitCx` is required by doctrine 3 — every function that performs I/O
-//! takes a capability context. It is what makes the lab runtime able to run
-//! this path under injected latency, torn writes, and fsync lies without the
-//! code knowing the difference.
+//! Doctrine 3 requires an explicit capability context for every I/O path.
+//! Persisted reads accept the sealed `StorageReadCx` capability, while root
+//! creation and publication stay on `CommitCx`. That split lets read-only roles
+//! inspect durable state without gaining any way to publish it.
 //!
 //! NOT HERE, deliberately: the filesystem profile (sector size, atomicity
 //! class) that decides how large a write may be before it can tear, which is
@@ -25,6 +25,7 @@
 use crate::root::{
     ROOT_FILE_LEN, RootSelection, RootSlot, SLOT_A_OFFSET, SLOT_B_OFFSET, SLOT_LEN, select_root,
 };
+use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -58,8 +59,10 @@ pub(crate) fn sync_file(cx: &CommitCx, file: &File) -> std::io::Result<()> {
 
 /// Make the directory entries in `directory` durable.
 pub(crate) fn sync_directory(cx: &CommitCx, directory: &Path) -> std::io::Result<()> {
-    let directory = File::open(directory)?;
-    cx.with_restriction(|| directory.sync_all())
+    cx.with_restriction(|| {
+        let directory = File::open(directory)?;
+        directory.sync_all()
+    })
 }
 
 fn run_created_entry_barrier(
@@ -209,14 +212,14 @@ impl RootStore {
     }
 
     /// Read the file and apply the recovery rule.
-    pub fn recover(&self) -> Result<RootSelection, StoreError> {
-        let bytes = self.read_file()?;
+    pub fn recover(&self, cx: &impl StorageReadCx) -> Result<RootSelection, StoreError> {
+        let bytes = self.read_file(cx)?;
         Ok(select_root(&bytes))
     }
 
     /// The currently published root, or an error naming why there is none.
-    pub fn current(&self) -> Result<RootSlot, StoreError> {
-        match self.recover()? {
+    pub fn current(&self, cx: &impl StorageReadCx) -> Result<RootSlot, StoreError> {
+        match self.recover(cx)? {
             RootSelection::Selected { slot, .. } | RootSelection::IdenticalPair { slot } => {
                 Ok(*slot)
             }
@@ -242,7 +245,7 @@ impl RootStore {
     /// atomically from any reader's perspective, because selection is by
     /// generation and the new slot is either fully durable or not credible.
     pub fn publish(&self, cx: &CommitCx, next: &RootSlot) -> Result<(), StoreError> {
-        let file_bytes = self.read_file()?;
+        let file_bytes = self.read_file(cx)?;
         let (current_generation, occupied_index) = match select_root(&file_bytes) {
             RootSelection::Selected { slot, index, .. } => (slot.slot_generation, index),
             // An identical pair occupies both slots equally; writing either is
@@ -291,28 +294,30 @@ impl RootStore {
         Ok(())
     }
 
-    fn read_file(&self) -> Result<Vec<u8>, StoreError> {
-        let mut file = File::open(&self.path)?;
-        let len = file.metadata()?.len();
-        if len != ROOT_FILE_LEN as u64 {
-            return Err(StoreError::MalformedFile { len });
-        }
-        let mut bytes = Vec::with_capacity(ROOT_FILE_LEN);
-        file.read_to_end(&mut bytes)?;
-        if bytes.len() != ROOT_FILE_LEN {
-            return Err(StoreError::MalformedFile {
-                len: bytes.len() as u64,
-            });
-        }
-        Ok(bytes)
+    fn read_file(&self, cx: &impl StorageReadCx) -> Result<Vec<u8>, StoreError> {
+        cx.with_restriction(|| {
+            let mut file = File::open(&self.path)?;
+            let len = file.metadata()?.len();
+            if len != ROOT_FILE_LEN as u64 {
+                return Err(StoreError::MalformedFile { len });
+            }
+            let mut bytes = Vec::with_capacity(ROOT_FILE_LEN);
+            file.read_to_end(&mut bytes)?;
+            if bytes.len() != ROOT_FILE_LEN {
+                return Err(StoreError::MalformedFile {
+                    len: bytes.len() as u64,
+                });
+            }
+            Ok(bytes)
+        })
     }
 
     /// Which physical slot currently holds the selected root: 0 = A, 1 = B.
     /// Exposed so a test — or an operator — can observe that publishing
     /// actually alternates rather than rewriting one slot forever, which is
     /// the failure mode that silently removes all crash safety.
-    pub fn selected_slot_index(&self) -> Result<u8, StoreError> {
-        match self.recover()? {
+    pub fn selected_slot_index(&self, cx: &impl StorageReadCx) -> Result<u8, StoreError> {
+        match self.recover(cx)? {
             RootSelection::Selected { index, .. } => Ok(index),
             RootSelection::IdenticalPair { .. } => Ok(0),
             RootSelection::MalformedFile { len } => {

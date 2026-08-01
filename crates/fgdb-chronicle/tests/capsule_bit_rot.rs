@@ -174,7 +174,10 @@ fn an_undamaged_capsule_reads_back_exactly() {
     under_lab(1, move |cx| {
         let (path, oid) = committed(&dir, cx);
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        assert_eq!(coordinator.read_capsule(oid).expect("reads"), plaintext());
+        assert_eq!(
+            coordinator.read_capsule(cx, oid).expect("reads"),
+            plaintext()
+        );
 
         let (_, symbols) = decode_container(&std::fs::read(&path).expect("read")).expect("decodes");
         assert!(
@@ -200,7 +203,7 @@ fn a_single_rotted_symbol_heals_invisibly() {
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(oid).expect("heals"),
+            coordinator.read_capsule(cx, oid).expect("heals"),
             plaintext(),
             "one rotted symbol must be invisible, not merely survivable"
         );
@@ -219,7 +222,9 @@ fn rot_within_the_repair_budget_heals() {
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(oid).expect("heals at the budget"),
+            coordinator
+                .read_capsule(cx, oid)
+                .expect("heals at the budget"),
             plaintext(),
             "the budget is a promise about the last symbol as much as the first"
         );
@@ -240,7 +245,7 @@ fn rot_beyond_the_repair_budget_fails_closed() {
         rot_symbols(&path, over);
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let result = coordinator.read_capsule(oid);
+        let result = coordinator.read_capsule(cx, oid);
         assert!(
             result.is_err(),
             "beyond the budget the read must FAIL, not return {} bytes",
@@ -264,7 +269,7 @@ fn the_repair_budget_is_the_exact_boundary() {
             rot_symbols(&path, budget);
             CommitCoordinator::open(cx, &dir, keys())
                 .expect("reopen")
-                .read_capsule(oid)
+                .read_capsule(cx, oid)
                 .is_ok()
         })
     };
@@ -275,7 +280,7 @@ fn the_repair_budget_is_the_exact_boundary() {
             rot_symbols(&path, budget + 1);
             CommitCoordinator::open(cx, &dir, keys())
                 .expect("reopen")
-                .read_capsule(oid)
+                .read_capsule(cx, oid)
                 .is_ok()
         })
     };
@@ -306,7 +311,7 @@ fn rot_in_the_container_header_is_refused() {
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         assert!(
-            coordinator.read_capsule(oid).is_err(),
+            coordinator.read_capsule(cx, oid).is_err(),
             "header damage is not recoverable and must not read as success"
         );
     });
@@ -325,7 +330,7 @@ fn a_destroyed_magic_is_refused() {
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         assert!(matches!(
-            coordinator.read_capsule(oid),
+            coordinator.read_capsule(cx, oid),
             Err(CommitError::Capsule(_))
         ));
     });
@@ -345,7 +350,7 @@ fn healed_bytes_still_recompute_their_identity() {
         rot_symbols(&path, keys().profile.erasure_budget());
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let healed = coordinator.read_capsule(oid).expect("heals");
+        let healed = coordinator.read_capsule(cx, oid).expect("heals");
         assert_eq!(
             coordinator.capsule_id(&healed),
             oid,
@@ -369,9 +374,12 @@ fn healing_a_read_does_not_repair_the_file() {
         let after_damage = std::fs::read(&path).expect("read container");
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        assert_eq!(coordinator.read_capsule(oid).expect("heals"), plaintext());
         assert_eq!(
-            coordinator.read_capsule(oid).expect("heals again"),
+            coordinator.read_capsule(cx, oid).expect("heals"),
+            plaintext()
+        );
+        assert_eq!(
+            coordinator.read_capsule(cx, oid).expect("heals again"),
             plaintext()
         );
         assert_eq!(
@@ -429,7 +437,7 @@ fn rot_in_the_declared_repair_count_is_refused() {
         let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
         assert!(
             matches!(
-                coordinator.read_capsule(oid),
+                coordinator.read_capsule(cx, oid),
                 Err(CommitError::Capsule(
                     fgdb_chronicle::capsule::CapsuleError::RepairBudgetMismatch { .. }
                 ))

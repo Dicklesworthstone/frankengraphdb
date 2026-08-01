@@ -275,6 +275,30 @@ impl PurposeContexts {
     }
 }
 
+mod storage_read_seal {
+    pub trait Sealed {}
+}
+
+/// Purpose-typed authority for synchronous storage reads.
+///
+/// Implementations install their existing role restriction while the read is
+/// executed. The trait is sealed to the storage-capable database roles; in
+/// particular, deterministic merge evaluation cannot satisfy this boundary.
+///
+/// ```compile_fail
+/// use fgdb_types::{MergeEvalCx, StorageReadCx};
+///
+/// fn requires_storage_read(_cx: &impl StorageReadCx) {}
+///
+/// fn merge_replay_cannot_read(cx: &MergeEvalCx) {
+///     requires_storage_read(cx);
+/// }
+/// ```
+pub trait StorageReadCx: storage_read_seal::Sealed {
+    /// Runs a storage read with this role's synchronous restriction installed.
+    fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T;
+}
+
 /// Query-only effects.
 ///
 /// ```compile_fail
@@ -334,6 +358,14 @@ impl QueryCx {
             DatabaseObligationKind::PinSnapshot,
             1,
         )
+    }
+}
+
+impl storage_read_seal::Sealed for QueryCx {}
+
+impl StorageReadCx for QueryCx {
+    fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
+        QueryCx::with_restriction(self, run)
     }
 }
 
@@ -406,6 +438,14 @@ impl TxnCx {
             DatabaseObligationKind::ReservePreparedBytes,
             bytes.get(),
         )
+    }
+}
+
+impl storage_read_seal::Sealed for TxnCx {}
+
+impl StorageReadCx for TxnCx {
+    fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
+        TxnCx::with_restriction(self, run)
     }
 }
 
@@ -495,6 +535,14 @@ impl CommitCx {
     }
 }
 
+impl storage_read_seal::Sealed for CommitCx {}
+
+impl StorageReadCx for CommitCx {
+    fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
+        CommitCx::with_restriction(self, run)
+    }
+}
+
 /// Maintenance effects.
 ///
 /// ```compile_fail
@@ -549,6 +597,14 @@ impl MaintCx {
             DatabaseObligationKind::PublishSegment,
             1,
         )
+    }
+}
+
+impl storage_read_seal::Sealed for MaintCx {}
+
+impl StorageReadCx for MaintCx {
+    fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
+        MaintCx::with_restriction(self, run)
     }
 }
 
@@ -620,6 +676,14 @@ impl ReplCx {
             DatabaseObligationKind::PublishSegment,
             1,
         )
+    }
+}
+
+impl storage_read_seal::Sealed for ReplCx {}
+
+impl StorageReadCx for ReplCx {
+    fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
+        ReplCx::with_restriction(self, run)
     }
 }
 
@@ -1605,6 +1669,17 @@ mod tests {
             });
             assert!(!Cx::is_restricted());
         });
+    }
+
+    #[test]
+    fn storage_read_roles_implement_the_shared_contract() {
+        fn assert_storage_read_role<T: StorageReadCx>() {}
+
+        assert_storage_read_role::<QueryCx>();
+        assert_storage_read_role::<TxnCx>();
+        assert_storage_read_role::<CommitCx>();
+        assert_storage_read_role::<MaintCx>();
+        assert_storage_read_role::<ReplCx>();
     }
 
     // ---------------------------------------------------------------------

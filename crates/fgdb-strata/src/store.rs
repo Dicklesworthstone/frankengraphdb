@@ -35,11 +35,11 @@
 //! directory. An identical loser can therefore observe only absence or the
 //! winner's complete bytes — never the winner halfway through `write_all`.
 //!
-//! **READ-SIDE CAPABILITY CONTEXT IS STILL AN OPEN WORKSPACE CONTRACT.** `get`,
-//! `get_root`, `admit_root`, and the reopen paths perform synchronous filesystem
-//! reads without a `Cx`, matching Chronicle's current read-side precedent rather
-//! than claiming the doctrine-3 end state. `fgdb-j0ae` retains that gap until the
-//! workspace chooses one read-authority shape for both stores.
+//! **READS USE THE SHARED STORAGE AUTHORITY CONTRACT.** Every synchronous read
+//! accepts `&impl StorageReadCx` and performs its filesystem work under that
+//! role's restriction. The sealed workspace contract admits query, transaction,
+//! commit, maintenance, and replication contexts while leaving deterministic
+//! merge evaluation unable to express storage I/O (doctrine 3).
 //!
 //! **WHAT IS DELIBERATELY ABSENT.** Blocks are stored as their canonical bytes,
 //! NOT sealed into capsules. `strata_blocks_are_durable_objects.rs` proves a block
@@ -50,9 +50,9 @@
 //! honest thing: bytes on disk, addressed by identity, verified on read.
 
 use crate::{BlockError, block_id, decode_block};
-use fgdb_types::CommitSeq;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
+use fgdb_types::{CommitSeq, StorageReadCx};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -95,7 +95,7 @@ pub enum BlockStoreCrashPoint {
 
 /// Make every directory entry currently visible in `directory` durable.
 fn sync_directory(cx: &CommitCx, directory: &Path) -> std::io::Result<()> {
-    let directory = File::open(directory)?;
+    let directory = cx.with_restriction(|| File::open(directory))?;
     cx.with_restriction(|| directory.sync_all())
 }
 
@@ -297,20 +297,26 @@ fn ensure_size_within_limit(observed: u64, limit: u64) -> Result<(), StoreError>
     Ok(())
 }
 
-fn read_bounded(file: &mut File, limit: u64) -> Result<Vec<u8>, StoreError> {
-    ensure_size_within_limit(file.metadata()?.len(), limit)?;
+fn read_bounded(
+    cx: &impl StorageReadCx,
+    file: &mut File,
+    limit: u64,
+) -> Result<Vec<u8>, StoreError> {
+    cx.with_restriction(|| {
+        ensure_size_within_limit(file.metadata()?.len(), limit)?;
 
-    let mut bytes = Vec::new();
-    {
-        // Metadata is only an early refusal, not authority: the inode could grow
-        // after it was read. One extra byte distinguishes the exact ceiling from
-        // an over-limit stream without ever materializing the unbounded tail.
-        let mut bounded = file.take(limit.saturating_add(1));
-        bounded.read_to_end(&mut bytes)?;
-    }
-    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    ensure_size_within_limit(observed, limit)?;
-    Ok(bytes)
+        let mut bytes = Vec::new();
+        {
+            // Metadata is only an early refusal, not authority: the inode could grow
+            // after it was read. One extra byte distinguishes the exact ceiling from
+            // an over-limit stream without ever materializing the unbounded tail.
+            let mut bounded = file.take(limit.saturating_add(1));
+            bounded.read_to_end(&mut bytes)?;
+        }
+        let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        ensure_size_within_limit(observed, limit)?;
+        Ok(bytes)
+    })
 }
 
 /// A directory of content-addressed Strata blocks.
@@ -350,10 +356,11 @@ impl AdmittedPartitionRoot<'_> {
     /// Load the blocks that can contribute to `as_of`.
     pub fn resolve_blocks_at(
         &self,
+        cx: &impl StorageReadCx,
         as_of: CommitSeq,
     ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
         self.store
-            .resolve_admitted_root_blocks_at(&self.root, as_of)
+            .resolve_admitted_root_blocks_at(cx, &self.root, as_of)
     }
 }
 
@@ -384,7 +391,11 @@ impl BlockStore {
         match std::fs::create_dir(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !std::fs::symlink_metadata(&dir)?.file_type().is_dir() {
+                if !cx
+                    .with_restriction(|| std::fs::symlink_metadata(&dir))?
+                    .file_type()
+                    .is_dir()
+                {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "strata block path exists but is not a directory",
@@ -396,15 +407,17 @@ impl BlockStore {
         }
 
         let publication_lock_path = dir.join(PUBLICATION_LOCK_FILE);
-        let publication_lock = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&publication_lock_path)
-        {
+        let publication_lock = match cx.with_restriction(|| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&publication_lock_path)
+        }) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !std::fs::symlink_metadata(&publication_lock_path)?
+                if !cx
+                    .with_restriction(|| std::fs::symlink_metadata(&publication_lock_path))?
                     .file_type()
                     .is_file()
                 {
@@ -414,10 +427,12 @@ impl BlockStore {
                     )
                     .into());
                 }
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&publication_lock_path)?
+                cx.with_restriction(|| {
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&publication_lock_path)
+                })?
             }
             Err(error) => return Err(error.into()),
         };
@@ -488,10 +503,12 @@ impl BlockStore {
         &self,
         cx: &CommitCx,
     ) -> Result<ObjectPublicationPermit, StoreError> {
-        let locked_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.publication_lock_path)?;
+        let locked_file = cx.with_restriction(|| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.publication_lock_path)
+        })?;
         cx.with_restriction(|| File::lock(&locked_file))?;
         Ok(ObjectPublicationPermit {
             _locked_file: locked_file,
@@ -554,7 +571,7 @@ impl BlockStore {
         // held, so a conforming writer can see either no winner or one complete
         // winner. Equal bytes are never rewritten, but they are re-synced after
         // reopen because visibility alone is not a durability receipt.
-        match std::fs::symlink_metadata(&path) {
+        match cx.with_restriction(|| std::fs::symlink_metadata(&path)) {
             Ok(metadata) => {
                 if !metadata.file_type().is_file() {
                     return Err(std::io::Error::new(
@@ -563,8 +580,9 @@ impl BlockStore {
                     )
                     .into());
                 }
-                let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
-                let existing = read_bounded(&mut file, MAX_STORED_OBJECT_BYTES)?;
+                let mut file =
+                    cx.with_restriction(|| OpenOptions::new().read(true).write(true).open(&path))?;
+                let existing = read_bounded(cx, &mut file, MAX_STORED_OBJECT_BYTES)?;
                 let actual = kind.identity(&self.k_oid, self.namespace, &existing);
                 if actual != id {
                     return Err(StoreError::DamagedExisting {
@@ -596,15 +614,16 @@ impl BlockStore {
         // here and the next owner may safely rewrite them. The canonical name
         // remains absent until this inode is complete and synced.
         let staging_path = self.dir.join(PUBLICATION_STAGING_FILE);
-        let mut staging = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&staging_path)
-        {
+        let mut staging = match cx.with_restriction(|| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&staging_path)
+        }) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = std::fs::symlink_metadata(&staging_path)?;
+                let metadata = cx.with_restriction(|| std::fs::symlink_metadata(&staging_path))?;
                 if !metadata.file_type().is_file() || !staging_inode_is_exclusive(&metadata) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -612,11 +631,13 @@ impl BlockStore {
                     )
                     .into());
                 }
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&staging_path)?
+                cx.with_restriction(|| {
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .truncate(true)
+                        .open(&staging_path)
+                })?
             }
             Err(error) => return Err(error.into()),
         };
@@ -636,7 +657,8 @@ impl BlockStore {
         drop(staging);
         std::fs::rename(&staging_path, &path)?;
 
-        let published = OpenOptions::new().read(true).write(true).open(&path)?;
+        let published =
+            cx.with_restriction(|| OpenOptions::new().read(true).write(true).open(&path))?;
         sync_file_and_directory(cx, &published, &self.dir, || {
             if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
                 return Err(std::io::Error::other(
@@ -654,22 +676,31 @@ impl BlockStore {
     /// store that trusted its own layout would return whatever happened to sit at
     /// the expected path — the exact failure content-addressing exists to prevent,
     /// and the one that is silent.
-    pub fn get(&self, id: ObjectId) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
-        let bytes = self.get_bytes(id)?;
+    pub fn get(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
+        let bytes = self.get_bytes(cx, id)?;
         decode_block(&bytes).map_err(StoreError::Malformed)
     }
 
-    fn read_object_bytes(&self, id: ObjectId, limit: u64) -> Result<Vec<u8>, StoreError> {
-        let mut file = File::open(self.path(id))?;
-        read_bounded(&mut file, limit)
+    fn read_object_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        limit: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let mut file = cx.with_restriction(|| File::open(self.path(id)))?;
+        read_bounded(cx, &mut file, limit)
     }
 
     /// Load the raw bytes of a block, verifying identity but not decoding.
     ///
     /// For a caller that needs the bytes themselves — sealing into a capsule,
     /// copying to a replica — and must not pay to decode them.
-    pub fn get_bytes(&self, id: ObjectId) -> Result<Vec<u8>, StoreError> {
-        let bytes = self.read_object_bytes(id, MAX_STORED_OBJECT_BYTES)?;
+    pub fn get_bytes(&self, cx: &impl StorageReadCx, id: ObjectId) -> Result<Vec<u8>, StoreError> {
+        let bytes = self.read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)?;
         let actual = block_id(&self.k_oid, self.namespace, &bytes);
         if actual != id {
             return Err(StoreError::IdentityMismatch {
@@ -682,11 +713,12 @@ impl BlockStore {
 
     fn resolve_root_block(
         &self,
+        cx: &impl StorageReadCx,
         at: usize,
         reference: &crate::root::BlockRef,
     ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
         let bytes =
-            self.get_bytes(reference.block_id)
+            self.get_bytes(cx, reference.block_id)
                 .map_err(|error| StoreError::RootBlockLoad {
                     at,
                     error: Box::new(error),
@@ -703,6 +735,7 @@ impl BlockStore {
     /// because an unproved lower bound is not permission to skip that block.
     fn inspect_root_blocks(
         &self,
+        cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
         mut retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
     ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
@@ -710,7 +743,7 @@ impl BlockStore {
 
         let mut blocks = Vec::new();
         for (at, reference) in root.blocks.iter().enumerate() {
-            let entries = self.resolve_root_block(at, reference)?;
+            let entries = self.resolve_root_block(cx, at, reference)?;
             if retain(at, reference) {
                 blocks.push(entries);
             }
@@ -721,9 +754,10 @@ impl BlockStore {
     /// Load and validate every block named by an already-structural root.
     fn resolve_root_blocks(
         &self,
+        cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
-        self.inspect_root_blocks(root, |_, _| true)
+        self.inspect_root_blocks(cx, root, |_, _| true)
     }
 
     /// Resolve only blocks selected by an already-minted admission token.
@@ -733,6 +767,7 @@ impl BlockStore {
     /// opened: their range summaries were proved when the token was minted.
     fn resolve_admitted_root_blocks_at(
         &self,
+        cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
         as_of: CommitSeq,
     ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
@@ -745,7 +780,7 @@ impl BlockStore {
                 continue;
             }
             selected.next();
-            blocks.push(self.resolve_root_block(at, reference)?);
+            blocks.push(self.resolve_root_block(cx, at, reference)?);
         }
         debug_assert!(selected.next().is_none());
         Ok(blocks)
@@ -771,14 +806,18 @@ impl BlockStore {
         root: &crate::root::PartitionRoot,
     ) -> Result<ObjectId, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
-        self.inspect_root_blocks(root, |_, _| false)?;
+        self.inspect_root_blocks(cx, root, |_, _| false)?;
         self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
     }
 
     /// Load the partition root named by `id`, using the root format's exact byte
     /// ceiling and root-specific identity verifier before structural decoding.
-    pub fn get_root(&self, id: ObjectId) -> Result<crate::root::PartitionRoot, StoreError> {
-        let bytes = self.read_object_bytes(id, crate::root::MAX_ENCODED_ROOT_BYTES as u64)?;
+    pub fn get_root(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<crate::root::PartitionRoot, StoreError> {
+        let bytes = self.read_object_bytes(cx, id, crate::root::MAX_ENCODED_ROOT_BYTES as u64)?;
         crate::root::read_root(&self.k_oid, self.namespace, &bytes, id)
             .map_err(StoreError::MalformedRoot)
     }
@@ -791,18 +830,23 @@ impl BlockStore {
     /// each block spans what the root claimed about it.
     pub fn reopen(
         &self,
+        cx: &impl StorageReadCx,
         id: ObjectId,
     ) -> Result<(crate::root::PartitionRoot, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
-        let root = self.get_root(id)?;
-        let blocks = self.resolve_root_blocks(&root)?;
+        let root = self.get_root(cx, id)?;
+        let blocks = self.resolve_root_blocks(cx, &root)?;
         Ok((root, blocks))
     }
 
     /// Admit a stored root against every named block without retaining the
     /// decoded partition.
-    pub fn admit_root(&self, id: ObjectId) -> Result<AdmittedPartitionRoot<'_>, StoreError> {
-        let root = self.get_root(id)?;
-        self.inspect_root_blocks(&root, |_, _| false)?;
+    pub fn admit_root(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<AdmittedPartitionRoot<'_>, StoreError> {
+        let root = self.get_root(cx, id)?;
+        self.inspect_root_blocks(cx, &root, |_, _| false)?;
         Ok(AdmittedPartitionRoot {
             store: self,
             root_id: id,
@@ -819,13 +863,14 @@ impl BlockStore {
     /// [`AdmittedPartitionRoot::resolve_blocks_at`] genuinely selective.
     pub fn reopen_at(
         &self,
+        cx: &impl StorageReadCx,
         id: ObjectId,
         as_of: CommitSeq,
     ) -> Result<(AdmittedPartitionRoot<'_>, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
-        let root = self.get_root(id)?;
+        let root = self.get_root(cx, id)?;
         let visible = crate::root::blocks_visible_at(&root, as_of);
         let mut visible = visible.into_iter().peekable();
-        let blocks = self.inspect_root_blocks(&root, |at, _| {
+        let blocks = self.inspect_root_blocks(cx, &root, |at, _| {
             if visible.peek() != Some(&at) {
                 return false;
             }
@@ -853,8 +898,8 @@ impl BlockStore {
     /// Found by a law about two keys sharing a directory, which failed against the
     /// stat-only version. Reading the file to answer is the cost of the answer
     /// being true, and this crate is never optimized (§15).
-    pub fn contains(&self, id: ObjectId) -> bool {
-        self.get_bytes(id).is_ok()
+    pub fn contains(&self, cx: &impl StorageReadCx, id: ObjectId) -> bool {
+        self.get_bytes(cx, id).is_ok()
     }
 }
 
@@ -908,7 +953,7 @@ mod durability_tests {
         let mut file = File::open(path).expect("open fixture");
 
         assert!(matches!(
-            read_bounded(&mut file, 2),
+            under_lab(49, move |cx| read_bounded(cx, &mut file, 2)),
             Err(StoreError::ObjectTooLarge {
                 limit: 2,
                 observed: 3
@@ -927,7 +972,7 @@ mod durability_tests {
                 .expect("extend sparse fixture");
 
             assert!(matches!(
-                store.get_bytes(id),
+                store.get_bytes(cx, id),
                 Err(StoreError::ObjectTooLarge {
                     limit: MAX_STORED_OBJECT_BYTES,
                     observed
@@ -1059,7 +1104,7 @@ mod durability_tests {
                     if error.kind() == std::io::ErrorKind::InvalidData
             ));
             assert_eq!(
-                store.get_bytes(original_id).expect("original survives"),
+                store.get_bytes(cx, original_id).expect("original survives"),
                 original
             );
         });

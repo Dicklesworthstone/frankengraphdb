@@ -11,8 +11,9 @@
 //!   * a crash mid-publish leaves the previous generation whole;
 //!   * recovery never moves backwards, even when the newest slot is damaged.
 //!
-//! Every I/O path takes `&CommitCx`, so these run under asupersync's lab
-//! runtime (plan §15: simulation-first, and the lab exists before the first
+//! Writer paths take `&CommitCx`, while persisted reads take the sealed storage-
+//! read capability implemented by `CommitCx`, so these run under asupersync's
+//! lab runtime (plan §15: simulation-first, and the lab exists before the first
 //! fsync).
 
 use asupersync::lab::run_async_under_lab;
@@ -122,7 +123,7 @@ fn a_published_root_survives_a_restart() {
 
         // A completely fresh binding, as a restarted process would make.
         let reopened = RootStore::new(&dir);
-        let recovered = reopened.current().expect("the root must survive");
+        let recovered = reopened.current(cx).expect("the root must survive");
         assert_eq!(recovered.slot_generation, 1);
         assert_eq!(
             recovered,
@@ -152,14 +153,16 @@ fn genesis_is_not_acknowledged_between_inode_and_directory_sync() {
             "the creation barrier must not return green"
         );
         assert_eq!(
-            store.current().expect("inode survives in the working view"),
+            store
+                .current(cx)
+                .expect("inode survives in the working view"),
             slot(1)
         );
 
         let lost_dirent = RootStore::new(&crash_image);
         assert!(
             matches!(
-                lost_dirent.current(),
+                lost_dirent.current(cx),
                 Err(StoreError::Io(error))
                     if error.kind() == std::io::ErrorKind::NotFound
             ),
@@ -181,9 +184,9 @@ fn publishing_alternates_slots() {
         let mut seen = Vec::new();
         for generation in 2..=6u64 {
             store.publish(cx, &slot(generation)).expect("publish");
-            let current = store.current().expect("current");
+            let current = store.current(cx).expect("current");
             assert_eq!(current.slot_generation, generation);
-            seen.push(store.selected_slot_index().expect("index"));
+            seen.push(store.selected_slot_index(cx).expect("index"));
         }
         // Consecutive publishes must land in different physical slots.
         for pair in seen.windows(2) {
@@ -206,7 +209,7 @@ fn a_crash_mid_publish_preserves_the_previous_generation() {
         store.create(cx, &slot(1)).expect("genesis");
         store.publish(cx, &slot(2)).expect("second generation");
 
-        let live_index = store.selected_slot_index().expect("index");
+        let live_index = store.selected_slot_index(cx).expect("index");
         let target = 1 - live_index; // the slot the NEXT publish would write
 
         // Crash partway through writing generation 3: the target slot is left
@@ -215,7 +218,7 @@ fn a_crash_mid_publish_preserves_the_previous_generation() {
             .damage_slot_for_test(target, 1234)
             .expect("simulate a torn write");
 
-        let recovered = store.current().expect("the previous generation survives");
+        let recovered = store.current(cx).expect("the previous generation survives");
         assert_eq!(
             recovered.slot_generation, 2,
             "a crash on the inactive slot must not disturb the live root"
@@ -225,7 +228,7 @@ fn a_crash_mid_publish_preserves_the_previous_generation() {
         // And the store is still writable: the next publish simply reuses the
         // damaged slot, which is exactly what it was for.
         store.publish(cx, &slot(3)).expect("publish after a crash");
-        assert_eq!(store.current().expect("current").slot_generation, 3);
+        assert_eq!(store.current(cx).expect("current").slot_generation, 3);
     });
 }
 
@@ -241,10 +244,10 @@ fn damaging_the_live_slot_falls_back_to_the_credible_one() {
         store.create(cx, &slot(1)).expect("genesis");
         store.publish(cx, &slot(2)).expect("second");
 
-        let live = store.selected_slot_index().expect("index");
+        let live = store.selected_slot_index(cx).expect("index");
         store.damage_slot_for_test(live, 77).expect("damage live");
 
-        let recovered = store.current().expect("the older credible slot recovers");
+        let recovered = store.current(cx).expect("the older credible slot recovers");
         assert_eq!(recovered.slot_generation, 1);
     });
 }
@@ -273,7 +276,7 @@ fn a_non_monotonic_publish_is_refused() {
             );
         }
         // The refusals changed nothing.
-        assert_eq!(store.current().expect("current").slot_generation, 5);
+        assert_eq!(store.current(cx).expect("current").slot_generation, 5);
     });
 }
 
@@ -287,7 +290,7 @@ fn genesis_publishes_an_identical_pair() {
         store.create(cx, &slot(1)).expect("genesis");
         assert!(
             matches!(
-                store.recover().expect("recover"),
+                store.recover(cx).expect("recover"),
                 fgdb_chronicle::root::RootSelection::IdenticalPair { .. }
             ),
             "genesis must leave an identical pair"
@@ -314,7 +317,7 @@ fn a_truncated_root_file_is_refused_not_treated_as_fresh() {
 
         assert!(
             matches!(
-                store.current(),
+                store.current(cx),
                 Err(StoreError::MalformedFile { len: 4096 })
             ),
             "a short root file must be refused, never read as fresh"
@@ -333,7 +336,7 @@ fn repeated_publishes_stay_monotone_and_readable() {
         store.create(cx, &slot(1)).expect("genesis");
         for generation in 2..=40u64 {
             store.publish(cx, &slot(generation)).expect("publish");
-            let current = store.current().expect("current");
+            let current = store.current(cx).expect("current");
             assert_eq!(current.slot_generation, generation);
             assert_eq!(
                 current,
