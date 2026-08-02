@@ -37,11 +37,14 @@
 
 mod common;
 
-use common::{GRAPH, LABEL, PROP, REL, Step, check_agrees, try_build};
+use common::{BRANCH, GRAPH, LABEL, PROP, REL, Step, check_agrees, try_build};
 use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, PropertyKeyId, SchemaEpoch,
     ValidTimePeriod,
 };
+use fgdb_reference::intents::{Intent, MismatchPolicy, Statement};
+use fgdb_reference::ssi::{DangerousStructure, dangerous_structures};
+use fgdb_reference::txn::Transaction;
 use fgdb_reference::{BranchOrigin, ConflictKey, ReferenceDatabase, ReferenceGraph};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, LogicalCommandSeq, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2454,5 +2457,80 @@ fn branch_shrinker_preserves_the_failure_and_reduces_the_forest() {
         )),
         "branch shrinker removed the failing operation: {:?}",
         minimal.actions
+    );
+}
+
+/// A successful conditional write whose replacement equals the current value is
+/// still a semantic read. The reducer quite correctly emits no row for that
+/// no-op, so the transaction layer must capture the observation separately from
+/// its durable effects. Otherwise two guarded, disjoint writes lose both
+/// dependency edges and the independent history checker sees a serial history.
+#[test]
+fn compare_and_set_noop_guards_are_present_in_transaction_traces() {
+    const SEMANTICS: ObjectId = ObjectId([0x11; 32]);
+
+    let create = |vid| {
+        Statement::new(vec![Intent::CreateVertex {
+            vid: VId(vid),
+            labels: vec![LABEL],
+            props: vec![(PROP, CanonicalScalar::Int(1))],
+        }])
+    };
+    let set = |vid, value| {
+        Statement::new(vec![Intent::SetProp {
+            elem: ElementId::Vertex(VId(vid)),
+            name: PROP,
+            value: CanonicalScalar::Int(value),
+        }])
+    };
+    let guard = |vid| {
+        Statement::new(vec![Intent::CompareAndSet {
+            elem: ElementId::Vertex(VId(vid)),
+            name: PROP,
+            expected: Some(CanonicalScalar::Int(1)),
+            value: CanonicalScalar::Int(1),
+            mismatch: MismatchPolicy::StatementError,
+        }])
+    };
+
+    let mut db = ReferenceDatabase::new();
+    let mut seed = Transaction::begin_genesis(&db, GRAPH, BRANCH).expect("genesis begins");
+    seed.execute(&[create(1), create(2)])
+        .expect("seed executes");
+    assert!(
+        seed.commit(&mut db, REL, SEMANTICS, CommitSeq(1), LogicalCommandSeq(10),)
+            .expect("seed commit is evaluated")
+            .is_committed()
+    );
+
+    let mut left = Transaction::begin(&db, GRAPH, BRANCH).expect("left begins");
+    let mut right = Transaction::begin(&db, GRAPH, BRANCH).expect("right begins");
+    left.execute(&[guard(2), set(1, 0)]).expect("left executes");
+    right
+        .execute(&[guard(1), set(2, 0)])
+        .expect("right executes");
+
+    let left_trace = left.trace(1).committed_at(CommitSeq(2));
+    let right_trace = right.trace(2).committed_at(CommitSeq(3));
+    assert!(
+        left.commit(&mut db, REL, SEMANTICS, CommitSeq(2), LogicalCommandSeq(20),)
+            .expect("left commit is evaluated")
+            .is_committed()
+    );
+    assert!(
+        right
+            .commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30),)
+            .expect("right commit is evaluated")
+            .is_committed()
+    );
+
+    assert_eq!(
+        dangerous_structures(&[left_trace, right_trace]),
+        vec![DangerousStructure {
+            pivot: 2,
+            incoming_from: 1,
+            outgoing_to: 1,
+        }],
+        "conditional no-op guards must remain visible as transaction reads"
     );
 }
