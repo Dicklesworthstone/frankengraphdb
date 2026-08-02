@@ -742,7 +742,7 @@ reason = "vuq8: all 16 pinned grep assertions MEASURED present at 0ada651, trans
 [[script_disposition]]
 path = "scripts/disk_hygiene.sh"
 role = "advisory"
-reason = "fgdb-c4ou: an operator inventory of the swarm scratch root, not a gate. Its own header states 'Inventory only: this command never deletes or mutates artifacts' — it classifies /data/tmp/fgdb_swarm paths by owning pane and bead and reports reclaimable KB so a human can decide what to reclaim. It asserts nothing about this repository and would red on no defect, so registering it as a [[checker]] would make check.sh execute an inventory of a directory outside the repo and then have no verdict to consume. Declared advisory rather than candidate on purpose: candidate means measured-and-promotable, and there is nothing here to promote"
+reason = "fgdb-c4ou + fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra phase 1: an operator inventory, not a gate. Its default/report mode never deletes or mutates artifacts; it classifies /data/tmp/fgdb_swarm paths and separately reports only the two owner-authorized gate pools using strict producer REAPABLE-AFTER records, exclusive liveness locks, inode-aware hard-link accounting, retention, and byte-stability checks. It asserts nothing about this repository and would red on no defect, so registering it as a [[checker]] would make check.sh inspect directories outside the repo and then have no verdict to consume. Declared advisory rather than candidate on purpose: candidate means measured-and-promotable, and there is nothing here to promote"
 
 [[script_disposition]]
 path = "scripts/git_hooks/install.sh"
@@ -767,4 +767,4 @@ reason = "fgdb-eesn: source-only landing-lease policy and state machine used by 
 [[script_disposition]]
 path = "scripts/lib/private_subject.sh"
 role = "library"
-reason = "fgdb-g0-spine-e2e-red-measures-harness-not-spine-iy7e: source-only content-keyed subject builder used by the registered claims, identity, and spine gates. Each caller owns and executes its freshness and residue controls; the library itself reports no verdict"
+reason = "fgdb-g0-spine-e2e-red-measures-harness-not-spine-iy7e + fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra phase 1: source-only content-keyed subject builder used by six registered G0 gates. Each caller owns and executes its freshness and residue controls, retains the shared subject liveness lock for its full process lifetime, and publishes the strict inode-aware REAPABLE-AFTER record; the library itself reports no verdict"
