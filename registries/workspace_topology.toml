@@ -129,7 +129,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:622285a436c644d0"
+semantic_contract_hash = "fnv1a64:eccc01e5f817b073"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -591,7 +591,7 @@ id = "asupersync"
 title = "asupersync"
 linkage = "linked"
 git_url = "https://github.com/Dicklesworthstone/asupersync"
-pinned_rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb"
+pinned_rev = "8ccae2fa8d15d780a9ab774aaf255a4ec7731a71"
 package_prefixes = ["asupersync"]
 known_members = [
   "asupersync",
