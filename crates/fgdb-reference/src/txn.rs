@@ -437,7 +437,8 @@ impl Transaction {
         &self.workspace
     }
 
-    /// Every conflict key this transaction has READ through a tracked read.
+    /// Every conflict key this transaction has READ through a tracked read or a
+    /// captured intent observation.
     ///
     /// Reads are tracked because rw-antidependencies are what separates
     /// serializable from snapshot isolation: write-write conflicts alone cannot
@@ -615,12 +616,13 @@ impl Transaction {
                 predecessor: opened_at,
                 mutation_potential,
             });
-            let (outcome, last_intent_ordinal) = evaluate_from_intent_ordinal(
+            let (outcome, last_intent_ordinal, captured_reads) = evaluate_from_intent_ordinal(
                 &self.workspace,
                 core::slice::from_ref(statement),
                 self.last_intent_ordinal,
             );
             self.last_intent_ordinal = last_intent_ordinal;
+            self.read_set.extend(captured_reads);
             match outcome {
                 Outcome::Aborted { failure, .. } => {
                     self.statement_events

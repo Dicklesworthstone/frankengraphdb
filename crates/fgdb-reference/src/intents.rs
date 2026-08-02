@@ -40,9 +40,10 @@
 //! guessing at them here would be worse than their absence. What is here is a
 //! subset of the final vocabulary, not a substitute for it.
 
-use crate::{ApplyError, ReferenceGraph};
+use crate::{ApplyError, ConflictKey, ReferenceGraph};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
+use std::collections::BTreeSet;
 
 /// What a failed `CompareAndSet` precondition means (Appendix B, verbatim
 /// vocabulary: `mismatch: NoOp|StatementError|TxnAbort`).
@@ -379,14 +380,18 @@ pub fn evaluate(basis: &ReferenceGraph, statements: &[Statement]) -> Outcome {
 /// and statement failures. [`evaluate`] starts a standalone evaluation at zero;
 /// [`crate::txn::Transaction`] carries the returned cursor across its repeatable
 /// `execute` calls so splitting one statement stream cannot reset birth order.
+/// The final component is the logical read set observed while reducing visited
+/// intents. It is separate from durable effects because a successful conditional
+/// no-op still read the value that made it a no-op.
 pub(crate) fn evaluate_from_intent_ordinal(
     basis: &ReferenceGraph,
     statements: &[Statement],
     mut intent_ordinal: u64,
-) -> (Outcome, u64) {
+) -> (Outcome, u64, BTreeSet<ConflictKey>) {
     let mut scratch = basis.clone();
     let mut effects: Vec<DeltaRow> = Vec::new();
     let mut statement_failures: Vec<(usize, StatementFailure)> = Vec::new();
+    let mut captured_reads = BTreeSet::new();
     // THE CANONICAL INTENT ORDINAL, and it is deliberately not a graph
     // cardinality (fgdb-intent-birth-ordinal-cardinality-spa1).
     //
@@ -430,9 +435,13 @@ pub(crate) fn evaluate_from_intent_ordinal(
                         },
                     },
                     intent_ordinal,
+                    captured_reads,
                 );
             };
             intent_ordinal = next_intent_ordinal;
+            if let Intent::CompareAndSet { elem, .. } = intent {
+                captured_reads.insert(ConflictKey::Element(*elem));
+            }
             match reduce(&statement_scratch, intent, intent_ordinal) {
                 Reduction::Effects(rows) => {
                     for row in rows {
@@ -458,6 +467,7 @@ pub(crate) fn evaluate_from_intent_ordinal(
                             failure: f,
                         },
                         intent_ordinal,
+                        captured_reads,
                     );
                 }
             }
@@ -480,6 +490,7 @@ pub(crate) fn evaluate_from_intent_ordinal(
             statement_failures,
         },
         intent_ordinal,
+        captured_reads,
     )
 }
 
@@ -742,10 +753,11 @@ mod overflow_internal_tests {
             props: vec![],
         }]);
 
-        let (outcome, cursor) =
+        let (outcome, cursor, captured_reads) =
             evaluate_from_intent_ordinal(&ReferenceGraph::default(), &[statement], u64::MAX);
 
         assert_eq!(cursor, u64::MAX);
+        assert!(captured_reads.is_empty());
         assert!(outcome.effects().is_empty());
         assert_eq!(
             outcome,
