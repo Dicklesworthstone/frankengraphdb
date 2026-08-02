@@ -43,8 +43,8 @@ use fgdb_delta_types::{
     ValidTimePeriod,
 };
 use fgdb_reference::intents::{Intent, MismatchPolicy, Statement};
-use fgdb_reference::ssi::{DangerousStructure, dangerous_structures};
-use fgdb_reference::txn::Transaction;
+use fgdb_reference::ssi::{DangerousStructure, TxnTrace, dangerous_structures};
+use fgdb_reference::txn::{Transaction, TxnOutcome};
 use fgdb_reference::{BranchOrigin, ConflictKey, ReferenceDatabase, ReferenceGraph};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, LogicalCommandSeq, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2532,5 +2532,1136 @@ fn compare_and_set_noop_guards_are_present_in_transaction_traces() {
             outgoing_to: 1,
         }],
         "conditional no-op guards must remain visible as transaction reads"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Transaction histories: a separate language and an independent SI model.
+// ---------------------------------------------------------------------------
+
+// SUBSET NOTE: this axis holds topology fixed and varies one integer property.
+// It covers snapshot workspaces, explicit and CompareAndSet reads, FCW, abort,
+// read-close and the enacted SSI trace law. It does not stand in for the future
+// generated observation families for adjacency, range gaps or constraints.
+
+const TXN_VERTICES: [u128; 3] = [1, 2, 3];
+const TXN_SEMANTICS: ObjectId = ObjectId([0x31; 32]);
+const ABORT_GUARD_VALUE: i64 = i64::MIN;
+
+/// Transaction topology cannot be represented honestly as another graph
+/// `Step`: begin captures a snapshot, actions address a private workspace, and
+/// commit or abort ends that workspace. Keeping this language separate is what
+/// lets the shrinker remove a whole transaction rather than leave orphaned
+/// transaction-shaped `Step` arms behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TxnAction {
+    Begin { tx: u8 },
+    Read { tx: u8, vid: u128 },
+    Guard { tx: u8, vid: u128, expected: i64 },
+    Write { tx: u8, vid: u128, value: i64 },
+    Abort { tx: u8, guard_vid: u128 },
+    Commit { tx: u8 },
+}
+
+impl TxnAction {
+    const fn transaction(self) -> u8 {
+        match self {
+            Self::Begin { tx }
+            | Self::Read { tx, .. }
+            | Self::Guard { tx, .. }
+            | Self::Write { tx, .. }
+            | Self::Abort { tx, .. }
+            | Self::Commit { tx } => tx,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TxnCoverage {
+    begins: usize,
+    concurrent_begins: usize,
+    reads: usize,
+    read_own_writes: usize,
+    guards: usize,
+    writes: usize,
+    disjoint_commits: usize,
+    conflicts: usize,
+    aborts_after_writes: usize,
+    read_closes: usize,
+    histories_with_structures: usize,
+}
+
+impl TxnCoverage {
+    fn merge(&mut self, next: &Self) {
+        self.begins += next.begins;
+        self.concurrent_begins += next.concurrent_begins;
+        self.reads += next.reads;
+        self.read_own_writes += next.read_own_writes;
+        self.guards += next.guards;
+        self.writes += next.writes;
+        self.disjoint_commits += next.disjoint_commits;
+        self.conflicts += next.conflicts;
+        self.aborts_after_writes += next.aborts_after_writes;
+        self.read_closes += next.read_closes;
+        self.histories_with_structures += next.histories_with_structures;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TxnGenerated {
+    actions: Vec<TxnAction>,
+    coverage: TxnCoverage,
+}
+
+#[derive(Clone, Debug)]
+struct NaiveTransaction {
+    snapshot_high: u64,
+    workspace: BTreeMap<u128, i64>,
+    reads: BTreeSet<ConflictKey>,
+    write_vertices: BTreeSet<u128>,
+    effect_count: usize,
+    statement_failures: usize,
+    next_statement: usize,
+    mutation_capable: bool,
+    aborted_at: Option<usize>,
+}
+
+impl NaiveTransaction {
+    fn register_statement(&mut self) -> Result<usize, String> {
+        let statement = self.next_statement;
+        self.next_statement = statement
+            .checked_add(1)
+            .ok_or_else(|| "statement index exhausted".to_string())?;
+        Ok(statement)
+    }
+
+    fn ensure_open(&self) -> Result<(), String> {
+        if let Some(statement) = self.aborted_at {
+            Err(format!(
+                "transaction already aborted at statement {statement}"
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The model deliberately does not reuse `TxnTrace`: matching field names are
+/// not an independent oracle if both sides are assembled by the same helper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NaiveTxnTrace {
+    id: usize,
+    snapshot_high: u64,
+    commit_seq: Option<u64>,
+    reads: BTreeSet<ConflictKey>,
+    writes: BTreeSet<ConflictKey>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TxnModelEvent {
+    Began,
+    Read(Option<i64>),
+    Executed,
+    Terminal(TxnOutcome),
+}
+
+#[derive(Clone, Debug)]
+struct NaiveTxnDatabase {
+    committed: BTreeMap<u128, i64>,
+    frontier: u64,
+    active: BTreeMap<u8, NaiveTransaction>,
+    started: BTreeSet<u8>,
+    committed_writes: Vec<(u64, BTreeSet<u128>)>,
+    history: Vec<NaiveTxnTrace>,
+}
+
+impl NaiveTxnDatabase {
+    fn seeded() -> Self {
+        Self {
+            committed: TXN_VERTICES.into_iter().map(|vid| (vid, 1)).collect(),
+            frontier: 1,
+            active: BTreeMap::new(),
+            started: BTreeSet::new(),
+            committed_writes: Vec::new(),
+            history: Vec::new(),
+        }
+    }
+
+    fn apply(&mut self, action: TxnAction) -> Result<TxnModelEvent, String> {
+        match action {
+            TxnAction::Begin { tx } => {
+                if self.started.contains(&tx) {
+                    return Err(format!("transaction {tx} began more than once"));
+                }
+                self.started.insert(tx);
+                self.active.insert(
+                    tx,
+                    NaiveTransaction {
+                        snapshot_high: self.frontier,
+                        workspace: self.committed.clone(),
+                        reads: BTreeSet::new(),
+                        write_vertices: BTreeSet::new(),
+                        effect_count: 0,
+                        statement_failures: 0,
+                        next_statement: 0,
+                        mutation_capable: false,
+                        aborted_at: None,
+                    },
+                );
+                Ok(TxnModelEvent::Began)
+            }
+            TxnAction::Read { tx, vid } => {
+                let transaction = self
+                    .active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("read names inactive transaction {tx}"))?;
+                transaction.ensure_open()?;
+                transaction
+                    .reads
+                    .insert(ConflictKey::Element(ElementId::Vertex(VId(vid))));
+                Ok(TxnModelEvent::Read(
+                    transaction.workspace.get(&vid).copied(),
+                ))
+            }
+            TxnAction::Guard { tx, vid, expected } => {
+                let transaction = self
+                    .active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("guard names inactive transaction {tx}"))?;
+                transaction.ensure_open()?;
+                transaction.register_statement()?;
+                transaction
+                    .reads
+                    .insert(ConflictKey::Element(ElementId::Vertex(VId(vid))));
+                if transaction.workspace.get(&vid).copied() == Some(expected) {
+                    transaction.mutation_capable = true;
+                } else {
+                    transaction.statement_failures += 1;
+                }
+                Ok(TxnModelEvent::Executed)
+            }
+            TxnAction::Write { tx, vid, value } => {
+                let transaction = self
+                    .active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("write names inactive transaction {tx}"))?;
+                transaction.ensure_open()?;
+                transaction.register_statement()?;
+                let before = transaction
+                    .workspace
+                    .get(&vid)
+                    .copied()
+                    .ok_or_else(|| format!("write names absent vertex {vid}"))?;
+                transaction.mutation_capable = true;
+                if before != value {
+                    transaction.workspace.insert(vid, value);
+                    transaction.write_vertices.insert(vid);
+                    transaction.effect_count += 1;
+                }
+                Ok(TxnModelEvent::Executed)
+            }
+            TxnAction::Abort { tx, guard_vid } => {
+                let transaction = self
+                    .active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("abort names inactive transaction {tx}"))?;
+                transaction.ensure_open()?;
+                let statement = transaction.register_statement()?;
+                transaction
+                    .reads
+                    .insert(ConflictKey::Element(ElementId::Vertex(VId(guard_vid))));
+                if transaction.workspace.get(&guard_vid).copied() == Some(ABORT_GUARD_VALUE) {
+                    return Err("abort guard unexpectedly matched the generated value".to_string());
+                }
+                transaction.aborted_at = Some(statement);
+                Ok(TxnModelEvent::Executed)
+            }
+            TxnAction::Commit { tx } => self.commit(tx),
+        }
+    }
+
+    fn commit(&mut self, tx: u8) -> Result<TxnModelEvent, String> {
+        let transaction = self
+            .active
+            .remove(&tx)
+            .ok_or_else(|| format!("commit names inactive transaction {tx}"))?;
+
+        let mut writes = BTreeSet::new();
+        for vid in &transaction.write_vertices {
+            writes.insert(ConflictKey::Element(ElementId::Vertex(VId(*vid))));
+        }
+        let mut trace = NaiveTxnTrace {
+            id: usize::from(tx),
+            snapshot_high: transaction.snapshot_high,
+            commit_seq: None,
+            reads: transaction.reads.clone(),
+            writes,
+        };
+
+        let outcome = if let Some(statement) = transaction.aborted_at {
+            TxnOutcome::Aborted { statement }
+        } else if !transaction.mutation_capable {
+            TxnOutcome::ReadClosed {
+                statement_failures: transaction.statement_failures,
+            }
+        } else {
+            let mut conflicts = BTreeSet::new();
+            for (seq, committed_writes) in &self.committed_writes {
+                if *seq <= transaction.snapshot_high {
+                    continue;
+                }
+                for vid in transaction.write_vertices.intersection(committed_writes) {
+                    conflicts.insert(ConflictKey::Element(ElementId::Vertex(VId(*vid))));
+                }
+            }
+
+            if conflicts.is_empty() {
+                let commit_seq = self
+                    .frontier
+                    .checked_add(1)
+                    .ok_or_else(|| "commit frontier exhausted".to_string())?;
+                for vid in &transaction.write_vertices {
+                    let value = transaction
+                        .workspace
+                        .get(vid)
+                        .copied()
+                        .ok_or_else(|| format!("workspace lost vertex {vid}"))?;
+                    self.committed.insert(*vid, value);
+                }
+                self.frontier = commit_seq;
+                self.committed_writes
+                    .push((commit_seq, transaction.write_vertices.clone()));
+                trace.commit_seq = Some(commit_seq);
+                TxnOutcome::WriteCommitted {
+                    commit_seq: CommitSeq(commit_seq),
+                    effects: transaction.effect_count,
+                    statement_failures: transaction.statement_failures,
+                }
+            } else {
+                TxnOutcome::Conflicted {
+                    conflicts: conflicts.into_iter().collect(),
+                }
+            }
+        };
+
+        self.history.push(trace);
+        Ok(TxnModelEvent::Terminal(outcome))
+    }
+}
+
+fn naive_antidependency(reader: &NaiveTxnTrace, writer: &NaiveTxnTrace) -> bool {
+    if reader.id == writer.id {
+        return false;
+    }
+    let (Some(reader_commit), Some(writer_commit)) = (reader.commit_seq, writer.commit_seq) else {
+        return false;
+    };
+    if writer_commit <= reader.snapshot_high || reader_commit <= writer.snapshot_high {
+        return false;
+    }
+    reader.reads.intersection(&writer.writes).next().is_some()
+}
+
+/// Brute-force statement of the history law. This intentionally does not call
+/// the subject checker or share its private edge helper.
+fn naive_dangerous_structures(history: &[NaiveTxnTrace]) -> Vec<DangerousStructure> {
+    let mut found = BTreeSet::new();
+    for pivot in history {
+        let Some(pivot_commit) = pivot.commit_seq else {
+            continue;
+        };
+        for incoming in history {
+            if !naive_antidependency(incoming, pivot) {
+                continue;
+            }
+            for outgoing in history {
+                if !naive_antidependency(pivot, outgoing) {
+                    continue;
+                }
+                let Some(outgoing_commit) = outgoing.commit_seq else {
+                    continue;
+                };
+                if outgoing_commit >= pivot_commit {
+                    continue;
+                }
+                found.insert(DangerousStructure {
+                    pivot: pivot.id,
+                    incoming_from: incoming.id,
+                    outgoing_to: outgoing.id,
+                });
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+fn txn_create_statement(vid: u128) -> Statement {
+    Statement::new(vec![Intent::CreateVertex {
+        vid: VId(vid),
+        labels: vec![LABEL],
+        props: vec![(PROP, CanonicalScalar::Int(1))],
+    }])
+}
+
+fn txn_write_statement(vid: u128, value: i64) -> Statement {
+    Statement::new(vec![Intent::SetProp {
+        elem: ElementId::Vertex(VId(vid)),
+        name: PROP,
+        value: CanonicalScalar::Int(value),
+    }])
+}
+
+fn txn_guard_statement(vid: u128, expected: i64, mismatch: MismatchPolicy) -> Statement {
+    Statement::new(vec![Intent::CompareAndSet {
+        elem: ElementId::Vertex(VId(vid)),
+        name: PROP,
+        expected: Some(CanonicalScalar::Int(expected)),
+        value: CanonicalScalar::Int(expected),
+        mismatch,
+    }])
+}
+
+fn seeded_transaction_subject() -> Result<ReferenceDatabase, String> {
+    let mut db = ReferenceDatabase::new();
+    let mut seed = Transaction::begin_genesis(&db, GRAPH, BRANCH)
+        .map_err(|error| format!("seed begin: {error}"))?;
+    let statements: Vec<_> = TXN_VERTICES.into_iter().map(txn_create_statement).collect();
+    seed.execute(&statements)
+        .map_err(|error| format!("seed execute: {error}"))?;
+    let outcome = seed
+        .commit(
+            &mut db,
+            REL,
+            TXN_SEMANTICS,
+            CommitSeq(1),
+            LogicalCommandSeq(1),
+        )
+        .map_err(|error| format!("seed commit: {error}"))?;
+    if outcome
+        != (TxnOutcome::WriteCommitted {
+            commit_seq: CommitSeq(1),
+            effects: TXN_VERTICES.len(),
+            statement_failures: 0,
+        })
+    {
+        return Err(format!("seed outcome differs: {outcome:?}"));
+    }
+    Ok(db)
+}
+
+fn scalar_int(value: Option<CanonicalScalar>) -> Result<Option<i64>, String> {
+    match value {
+        None => Ok(None),
+        Some(CanonicalScalar::Int(value)) => Ok(Some(value)),
+        Some(other) => Err(format!("expected integer property, got {other:?}")),
+    }
+}
+
+fn graph_property(graph: &ReferenceGraph, vid: u128) -> Result<Option<i64>, String> {
+    scalar_int(
+        graph
+            .vertex(VId(vid))
+            .and_then(|vertex| vertex.props.get(&PROP).cloned()),
+    )
+}
+
+fn compare_transaction_state(
+    subject_db: &ReferenceDatabase,
+    subject_active: &BTreeMap<u8, Transaction>,
+    subject_history: &[TxnTrace],
+    model: &NaiveTxnDatabase,
+    context: &str,
+) -> Result<(), String> {
+    let subject_ids: Vec<_> = subject_active.keys().copied().collect();
+    let model_ids: Vec<_> = model.active.keys().copied().collect();
+    if subject_ids != model_ids {
+        return Err(format!(
+            "state|{context}: active transactions differ: {subject_ids:?} != {model_ids:?}"
+        ));
+    }
+
+    for (tx, subject) in subject_active {
+        let modeled = model
+            .active
+            .get(tx)
+            .ok_or_else(|| format!("state|{context}: model lost transaction {tx}"))?;
+        if subject.snapshot().high().0 != modeled.snapshot_high {
+            return Err(format!(
+                "state|{context}: transaction {tx} snapshot differs: {} != {}",
+                subject.snapshot().high().0,
+                modeled.snapshot_high
+            ));
+        }
+        if subject.read_set() != &modeled.reads {
+            return Err(format!(
+                "state|{context}: transaction {tx} reads differ: {:?} != {:?}",
+                subject.read_set(),
+                modeled.reads
+            ));
+        }
+        if subject.is_aborted() != modeled.aborted_at.is_some() {
+            return Err(format!(
+                "state|{context}: transaction {tx} abort state differs"
+            ));
+        }
+        if subject.effects().len() != modeled.effect_count {
+            return Err(format!(
+                "state|{context}: transaction {tx} effect count differs: {} != {}",
+                subject.effects().len(),
+                modeled.effect_count
+            ));
+        }
+        if subject.statement_failures() != modeled.statement_failures {
+            return Err(format!(
+                "state|{context}: transaction {tx} statement failures differ: {} != {}",
+                subject.statement_failures(),
+                modeled.statement_failures
+            ));
+        }
+        for vid in TXN_VERTICES {
+            let actual = graph_property(subject.workspace(), vid)?;
+            let expected = modeled.workspace.get(&vid).copied();
+            if actual != expected {
+                return Err(format!(
+                    "state|{context}: transaction {tx} workspace vertex {vid} differs: {actual:?} != {expected:?}"
+                ));
+            }
+        }
+    }
+
+    let subject_snapshot = subject_db
+        .snapshot(GRAPH, BRANCH)
+        .map_err(|error| format!("state|{context}: snapshot: {error}"))?;
+    if subject_snapshot.high().0 != model.frontier {
+        return Err(format!(
+            "state|{context}: frontier differs: {} != {}",
+            subject_snapshot.high().0,
+            model.frontier
+        ));
+    }
+    let subject_graph = subject_db
+        .graph(GRAPH, BRANCH)
+        .ok_or_else(|| format!("state|{context}: subject coordinate disappeared"))?;
+    for vid in TXN_VERTICES {
+        let actual = graph_property(subject_graph, vid)?;
+        let expected = model.committed.get(&vid).copied();
+        if actual != expected {
+            return Err(format!(
+                "state|{context}: committed vertex {vid} differs: {actual:?} != {expected:?}"
+            ));
+        }
+    }
+
+    if subject_history.len() != model.history.len() {
+        return Err(format!(
+            "trace|{context}: history length differs: {} != {}",
+            subject_history.len(),
+            model.history.len()
+        ));
+    }
+    for (actual, expected) in subject_history.iter().zip(&model.history) {
+        if actual.id != expected.id
+            || actual.snapshot_high.0 != expected.snapshot_high
+            || actual.commit_seq.map(|seq| seq.0) != expected.commit_seq
+            || actual.reads != expected.reads
+            || actual.writes != expected.writes
+        {
+            return Err(format!(
+                "trace|{context}: trace differs: {actual:?} != {expected:?}"
+            ));
+        }
+    }
+
+    let actual_structures = dangerous_structures(subject_history);
+    let expected_structures = naive_dangerous_structures(&model.history);
+    if actual_structures != expected_structures {
+        return Err(format!(
+            "structure|{context}: history analysis differs: {actual_structures:?} != {expected_structures:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn run_transaction_history(case: &TxnGenerated) -> Result<(), String> {
+    let mut subject_db = seeded_transaction_subject()?;
+    let mut subject_active: BTreeMap<u8, Transaction> = BTreeMap::new();
+    let mut subject_history = Vec::new();
+    let mut model = NaiveTxnDatabase::seeded();
+
+    for (index, action) in case.actions.iter().copied().enumerate() {
+        let context = format!("action {index} {action:?}");
+        match action {
+            TxnAction::Begin { tx } => {
+                model
+                    .apply(action)
+                    .map_err(|error| format!("reachability|{context}: {error}"))?;
+                let transaction = Transaction::begin(&subject_db, GRAPH, BRANCH)
+                    .map_err(|error| format!("subject|{context}: {error}"))?;
+                if subject_active.insert(tx, transaction).is_some() {
+                    return Err(format!(
+                        "subject|{context}: transaction {tx} was already active"
+                    ));
+                }
+            }
+            TxnAction::Read { tx, vid } => {
+                let expected = match model
+                    .apply(action)
+                    .map_err(|error| format!("reachability|{context}: {error}"))?
+                {
+                    TxnModelEvent::Read(value) => value,
+                    other => {
+                        return Err(format!(
+                            "model|{context}: read produced unexpected event {other:?}"
+                        ));
+                    }
+                };
+                let subject = subject_active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("subject|{context}: inactive transaction {tx}"))?;
+                let actual = scalar_int(subject.read_property(ElementId::Vertex(VId(vid)), PROP))?;
+                if actual != expected {
+                    return Err(format!(
+                        "read|{context}: value differs: {actual:?} != {expected:?}"
+                    ));
+                }
+            }
+            TxnAction::Guard { tx, vid, expected } => {
+                model
+                    .apply(action)
+                    .map_err(|error| format!("reachability|{context}: {error}"))?;
+                subject_active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("subject|{context}: inactive transaction {tx}"))?
+                    .execute(&[txn_guard_statement(
+                        vid,
+                        expected,
+                        MismatchPolicy::StatementError,
+                    )])
+                    .map_err(|error| format!("subject|{context}: {error}"))?;
+            }
+            TxnAction::Write { tx, vid, value } => {
+                model
+                    .apply(action)
+                    .map_err(|error| format!("reachability|{context}: {error}"))?;
+                subject_active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("subject|{context}: inactive transaction {tx}"))?
+                    .execute(&[txn_write_statement(vid, value)])
+                    .map_err(|error| format!("subject|{context}: {error}"))?;
+            }
+            TxnAction::Abort { tx, guard_vid } => {
+                model
+                    .apply(action)
+                    .map_err(|error| format!("reachability|{context}: {error}"))?;
+                subject_active
+                    .get_mut(&tx)
+                    .ok_or_else(|| format!("subject|{context}: inactive transaction {tx}"))?
+                    .execute(&[txn_guard_statement(
+                        guard_vid,
+                        ABORT_GUARD_VALUE,
+                        MismatchPolicy::TxnAbort,
+                    )])
+                    .map_err(|error| format!("subject|{context}: {error}"))?;
+            }
+            TxnAction::Commit { tx } => {
+                let proposed_seq = model
+                    .frontier
+                    .checked_add(1)
+                    .ok_or_else(|| format!("model|{context}: frontier exhausted"))?;
+                let expected = match model
+                    .apply(action)
+                    .map_err(|error| format!("reachability|{context}: {error}"))?
+                {
+                    TxnModelEvent::Terminal(outcome) => outcome,
+                    other => {
+                        return Err(format!(
+                            "model|{context}: commit produced unexpected event {other:?}"
+                        ));
+                    }
+                };
+                let subject = subject_active
+                    .remove(&tx)
+                    .ok_or_else(|| format!("subject|{context}: inactive transaction {tx}"))?;
+                let trace = subject.trace(usize::from(tx));
+                let logical_seq = u64::try_from(index)
+                    .ok()
+                    .and_then(|value| value.checked_add(2))
+                    .ok_or_else(|| format!("subject|{context}: logical sequence exhausted"))?;
+                let actual = subject
+                    .commit(
+                        &mut subject_db,
+                        REL,
+                        TXN_SEMANTICS,
+                        CommitSeq(proposed_seq),
+                        LogicalCommandSeq(logical_seq),
+                    )
+                    .map_err(|error| format!("subject|{context}: {error}"))?;
+                let trace = match actual {
+                    TxnOutcome::WriteCommitted { commit_seq, .. } => trace.committed_at(commit_seq),
+                    _ => trace,
+                };
+                subject_history.push(trace);
+                if actual != expected {
+                    return Err(format!(
+                        "outcome|{context}: terminal differs: {actual:?} != {expected:?}"
+                    ));
+                }
+            }
+        }
+
+        compare_transaction_state(
+            &subject_db,
+            &subject_active,
+            &subject_history,
+            &model,
+            &context,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_transaction_action(
+    actions: &mut Vec<TxnAction>,
+    model: &mut NaiveTxnDatabase,
+    action: TxnAction,
+) -> Result<(), String> {
+    model
+        .apply(action)
+        .map_err(|error| format!("generator rejected {action:?}: {error}"))?;
+    actions.push(action);
+    Ok(())
+}
+
+fn transaction_coverage(actions: &[TxnAction]) -> Result<TxnCoverage, String> {
+    let mut model = NaiveTxnDatabase::seeded();
+    let mut coverage = TxnCoverage::default();
+    for action in actions.iter().copied() {
+        let active_before = model.active.len();
+        let transaction_before = model.active.get(&action.transaction()).cloned();
+        let frontier_before = model.frontier;
+        let event = model.apply(action)?;
+        match action {
+            TxnAction::Begin { .. } => {
+                coverage.begins += 1;
+                coverage.concurrent_begins += usize::from(active_before > 0);
+            }
+            TxnAction::Read { vid, .. } => {
+                coverage.reads += 1;
+                coverage.read_own_writes += usize::from(
+                    transaction_before
+                        .as_ref()
+                        .is_some_and(|transaction| transaction.write_vertices.contains(&vid)),
+                );
+            }
+            TxnAction::Guard { .. } => coverage.guards += 1,
+            TxnAction::Write { .. } => coverage.writes += 1,
+            TxnAction::Abort { .. } => {
+                coverage.aborts_after_writes += usize::from(
+                    transaction_before
+                        .as_ref()
+                        .is_some_and(|transaction| !transaction.write_vertices.is_empty()),
+                );
+            }
+            TxnAction::Commit { .. } => match event {
+                TxnModelEvent::Terminal(TxnOutcome::WriteCommitted { .. }) => {
+                    coverage.disjoint_commits +=
+                        usize::from(transaction_before.as_ref().is_some_and(|transaction| {
+                            !transaction.write_vertices.is_empty()
+                                && transaction.snapshot_high < frontier_before
+                        }));
+                }
+                TxnModelEvent::Terminal(TxnOutcome::Conflicted { .. }) => {
+                    coverage.conflicts += 1;
+                }
+                TxnModelEvent::Terminal(TxnOutcome::ReadClosed { .. }) => {
+                    coverage.read_closes += 1;
+                }
+                TxnModelEvent::Terminal(TxnOutcome::Aborted { .. })
+                | TxnModelEvent::Began
+                | TxnModelEvent::Read(_)
+                | TxnModelEvent::Executed => {}
+            },
+        }
+    }
+    coverage.histories_with_structures =
+        usize::from(!naive_dangerous_structures(&model.history).is_empty());
+    Ok(coverage)
+}
+
+fn generate_transaction_history(seed: u64, budget: usize) -> Result<TxnGenerated, String> {
+    let mut rng = SplitMix64(seed ^ 0x7478_6e5f_6869_7374);
+    let mut model = NaiveTxnDatabase::seeded();
+    let mut actions = Vec::new();
+
+    let prefix = match seed % 4 {
+        0 => vec![
+            TxnAction::Begin { tx: 1 },
+            TxnAction::Begin { tx: 2 },
+            TxnAction::Guard {
+                tx: 1,
+                vid: 2,
+                expected: 1,
+            },
+            TxnAction::Guard {
+                tx: 2,
+                vid: 1,
+                expected: 1,
+            },
+            TxnAction::Write {
+                tx: 1,
+                vid: 1,
+                value: 0,
+            },
+            TxnAction::Write {
+                tx: 2,
+                vid: 2,
+                value: 0,
+            },
+            TxnAction::Commit { tx: 1 },
+            TxnAction::Commit { tx: 2 },
+        ],
+        1 => vec![
+            TxnAction::Begin { tx: 1 },
+            TxnAction::Begin { tx: 2 },
+            TxnAction::Write {
+                tx: 1,
+                vid: 1,
+                value: 2,
+            },
+            TxnAction::Write {
+                tx: 2,
+                vid: 1,
+                value: 3,
+            },
+            TxnAction::Commit { tx: 1 },
+            TxnAction::Commit { tx: 2 },
+        ],
+        2 => vec![
+            TxnAction::Begin { tx: 1 },
+            TxnAction::Write {
+                tx: 1,
+                vid: 1,
+                value: 2,
+            },
+            TxnAction::Abort {
+                tx: 1,
+                guard_vid: 2,
+            },
+            TxnAction::Commit { tx: 1 },
+            TxnAction::Begin { tx: 2 },
+            TxnAction::Read { tx: 2, vid: 1 },
+            TxnAction::Commit { tx: 2 },
+        ],
+        _ => vec![
+            TxnAction::Begin { tx: 1 },
+            TxnAction::Begin { tx: 2 },
+            TxnAction::Write {
+                tx: 1,
+                vid: 1,
+                value: 2,
+            },
+            TxnAction::Read { tx: 1, vid: 1 },
+            TxnAction::Write {
+                tx: 2,
+                vid: 2,
+                value: 3,
+            },
+            TxnAction::Commit { tx: 1 },
+            TxnAction::Commit { tx: 2 },
+        ],
+    };
+    for action in prefix {
+        append_transaction_action(&mut actions, &mut model, action)?;
+    }
+
+    let mut next_tx = 3u8;
+    while actions.len() < budget {
+        if next_tx <= 9 && (model.active.is_empty() || (model.active.len() < 3 && rng.chance(28))) {
+            append_transaction_action(&mut actions, &mut model, TxnAction::Begin { tx: next_tx })?;
+            next_tx += 1;
+            continue;
+        }
+        if model.active.is_empty() {
+            break;
+        }
+
+        let active_ids: Vec<_> = model.active.keys().copied().collect();
+        let tx = active_ids[rng.below(active_ids.len())];
+        let transaction = model
+            .active
+            .get(&tx)
+            .ok_or_else(|| format!("generator lost active transaction {tx}"))?;
+        let action = if transaction.aborted_at.is_some() {
+            TxnAction::Commit { tx }
+        } else {
+            let vid = TXN_VERTICES[rng.below(TXN_VERTICES.len())];
+            match rng.below(100) {
+                0..=21 => TxnAction::Read { tx, vid },
+                22..=37 => {
+                    let current = transaction
+                        .workspace
+                        .get(&vid)
+                        .copied()
+                        .ok_or_else(|| format!("generator workspace lost vertex {vid}"))?;
+                    let expected = if rng.chance(75) {
+                        current
+                    } else {
+                        current.saturating_add(41)
+                    };
+                    TxnAction::Guard { tx, vid, expected }
+                }
+                38..=67 => {
+                    let current = transaction
+                        .workspace
+                        .get(&vid)
+                        .copied()
+                        .ok_or_else(|| format!("generator workspace lost vertex {vid}"))?;
+                    let increment = i64::try_from(rng.next() % 3)
+                        .map_err(|_| "generator increment does not fit i64".to_string())?;
+                    TxnAction::Write {
+                        tx,
+                        vid,
+                        value: current.saturating_add(1 + increment),
+                    }
+                }
+                68..=77 if !transaction.write_vertices.is_empty() => {
+                    TxnAction::Abort { tx, guard_vid: vid }
+                }
+                _ => TxnAction::Commit { tx },
+            }
+        };
+        append_transaction_action(&mut actions, &mut model, action)?;
+    }
+
+    let remaining: Vec<_> = model.active.keys().copied().collect();
+    for tx in remaining {
+        append_transaction_action(&mut actions, &mut model, TxnAction::Commit { tx })?;
+    }
+    let coverage = transaction_coverage(&actions)?;
+    Ok(TxnGenerated { actions, coverage })
+}
+
+fn transaction_failure_kind(error: &str) -> &str {
+    error.split_once('|').map_or(error, |(kind, _)| kind)
+}
+
+fn drop_transaction(actions: &[TxnAction], tx: u8) -> Vec<TxnAction> {
+    actions
+        .iter()
+        .copied()
+        .filter(|action| action.transaction() != tx)
+        .collect()
+}
+
+fn shrink_transaction_history(case: &TxnGenerated) -> TxnGenerated {
+    let Some(original_error) = run_transaction_history(case).err() else {
+        return case.clone();
+    };
+    let failure_kind = transaction_failure_kind(&original_error);
+    let mut actions = case.actions.clone();
+
+    loop {
+        let mut changed = false;
+        let transactions: BTreeSet<_> = actions
+            .iter()
+            .copied()
+            .map(TxnAction::transaction)
+            .collect();
+        for tx in transactions {
+            let candidate = drop_transaction(&actions, tx);
+            let candidate_case = TxnGenerated {
+                actions: candidate.clone(),
+                coverage: TxnCoverage::default(),
+            };
+            if run_transaction_history(&candidate_case)
+                .err()
+                .is_some_and(|error| transaction_failure_kind(&error) == failure_kind)
+            {
+                actions = candidate;
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            continue;
+        }
+
+        for index in 0..actions.len() {
+            let mut candidate = actions.clone();
+            candidate.remove(index);
+            let candidate_case = TxnGenerated {
+                actions: candidate.clone(),
+                coverage: TxnCoverage::default(),
+            };
+            if run_transaction_history(&candidate_case)
+                .err()
+                .is_some_and(|error| transaction_failure_kind(&error) == failure_kind)
+            {
+                actions = candidate;
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    TxnGenerated {
+        actions,
+        coverage: TxnCoverage::default(),
+    }
+}
+
+fn report_transaction_failure(seed: u64, case: &TxnGenerated, error: &str) -> String {
+    format!(
+        "transaction seed {seed}: {error}\n\nPasteable reproduction:\n\n#[test]\nfn transaction_seed_{seed}_reproduction() {{\n    let case = TxnGenerated {{\n        actions: vec!{:#?},\n        coverage: TxnCoverage::default(),\n    }};\n    let error = run_transaction_history(&case).expect_err(\"reproduces\");\n    assert_eq!(transaction_failure_kind(&error), {:?});\n}}",
+        case.actions,
+        transaction_failure_kind(error)
+    )
+}
+
+#[test]
+fn generated_transaction_histories_match_the_independent_model() -> Result<(), String> {
+    let mut coverage = TxnCoverage::default();
+    for seed in 0..96u64 {
+        let case = generate_transaction_history(seed, 30)?;
+        coverage.merge(&case.coverage);
+        if let Err(original) = run_transaction_history(&case) {
+            let minimal = shrink_transaction_history(&case);
+            let minimal_error = run_transaction_history(&minimal)
+                .err()
+                .unwrap_or_else(|| "shrunk transaction case no longer fails".to_string());
+            if transaction_failure_kind(&minimal_error) != transaction_failure_kind(&original) {
+                return Err(format!(
+                    "transaction shrink changed failure kind: {original} -> {minimal_error}"
+                ));
+            }
+            return Err(report_transaction_failure(seed, &minimal, &minimal_error));
+        }
+    }
+
+    assert!(coverage.begins > 0, "no transaction begins: {coverage:?}");
+    assert!(
+        coverage.concurrent_begins > 0,
+        "no concurrent transaction snapshots: {coverage:?}"
+    );
+    assert!(coverage.reads > 0, "no tracked reads: {coverage:?}");
+    assert!(
+        coverage.read_own_writes > 0,
+        "no read-own-write observations: {coverage:?}"
+    );
+    assert!(coverage.guards > 0, "no conditional guards: {coverage:?}");
+    assert!(coverage.writes > 0, "no transaction writes: {coverage:?}");
+    assert!(
+        coverage.disjoint_commits > 0,
+        "no stale-snapshot disjoint commits: {coverage:?}"
+    );
+    assert!(coverage.conflicts > 0, "no write conflicts: {coverage:?}");
+    assert!(
+        coverage.aborts_after_writes > 0,
+        "no transaction aborts after writing: {coverage:?}"
+    );
+    assert!(
+        coverage.read_closes > 0,
+        "no read-only closes: {coverage:?}"
+    );
+    assert!(
+        coverage.histories_with_structures > 0,
+        "no dependency structures: {coverage:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_generated_transaction_history_is_reachable() -> Result<(), String> {
+    for seed in 600..660u64 {
+        let case = generate_transaction_history(seed, 26)?;
+        let mut model = NaiveTxnDatabase::seeded();
+        for (index, action) in case.actions.iter().copied().enumerate() {
+            model.apply(action).map_err(|error| {
+                format!("seed {seed} action {index} is unreachable: {action:?}: {error}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_seed_reproduces_its_transaction_history_exactly() -> Result<(), String> {
+    for seed in [7u64, 211, 44_001] {
+        assert_eq!(
+            generate_transaction_history(seed, 34)?.actions,
+            generate_transaction_history(seed, 34)?.actions,
+            "transaction seed {seed} drifted"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn transaction_shrink_move_drops_the_whole_lifecycle() {
+    let actions = vec![
+        TxnAction::Begin { tx: 1 },
+        TxnAction::Begin { tx: 2 },
+        TxnAction::Write {
+            tx: 1,
+            vid: 1,
+            value: 2,
+        },
+        TxnAction::Read { tx: 2, vid: 1 },
+        TxnAction::Commit { tx: 1 },
+        TxnAction::Commit { tx: 2 },
+    ];
+    let dropped = drop_transaction(&actions, 1);
+    assert!(
+        dropped.iter().all(|action| action.transaction() != 1),
+        "every action owned by transaction 1 must be removed: {dropped:?}"
+    );
+    assert!(
+        dropped.iter().any(|action| action.transaction() == 2),
+        "the unrelated transaction must survive: {dropped:?}"
+    );
+}
+
+#[test]
+fn transaction_shrinker_preserves_failure_kind_and_removes_unrelated_work() {
+    let case = TxnGenerated {
+        actions: vec![
+            TxnAction::Begin { tx: 1 },
+            TxnAction::Write {
+                tx: 1,
+                vid: 1,
+                value: 2,
+            },
+            TxnAction::Commit { tx: 1 },
+            TxnAction::Begin { tx: 2 },
+            TxnAction::Read { tx: 2, vid: 1 },
+            TxnAction::Commit { tx: 2 },
+            TxnAction::Commit { tx: 9 },
+        ],
+        coverage: TxnCoverage::default(),
+    };
+    let original = run_transaction_history(&case).expect_err("inactive commit must fail");
+    let minimal = shrink_transaction_history(&case);
+    let shrunk = run_transaction_history(&minimal).expect_err("shrunk case must still fail");
+    assert_eq!(
+        transaction_failure_kind(&shrunk),
+        transaction_failure_kind(&original)
+    );
+    assert!(
+        minimal.actions.len() < case.actions.len(),
+        "shrinker retained unrelated work: {:?}",
+        minimal.actions
+    );
+    assert!(
+        minimal.actions.contains(&TxnAction::Commit { tx: 9 }),
+        "shrinker removed the failing action: {:?}",
+        minimal.actions
+    );
+    let report = report_transaction_failure(9, &minimal, &shrunk);
+    assert!(
+        report.contains("actions: vec!["),
+        "the reproduction must construct the Vec it prints: {report}"
     );
 }
