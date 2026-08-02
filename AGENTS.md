@@ -83,7 +83,7 @@ Implementation follows the plan, not ad-hoc invention. Read in this order:
 
 ## The FrankenGraphDB Engineering Doctrine (READ THIS BEFORE WRITING CODE)
 
-These are the constitutional, non-negotiable rules from §1 of the plan. Violating any of them is a revert, memorialized in `docs/NEGATIVE_EVIDENCE.md`.
+These are the constitutional, non-negotiable rules from §1 of the plan. Violating any of them is memorialized in `docs/NEGATIVE_EVIDENCE.md` — whether the repair is a revert or, as the Backwards Compatibility rule requires, a fix in place.
 
 1. **The dependency universe is closed.** Allowed: `core`/`alloc`/`std`, the pinned Rust nightly, and the three foundations (`asupersync`, the `fnx-*` crates, design-level reuse of `frankensqlite`). Everything else — compression codecs, sketches, ANN indexes, inverted indexes, radix trees, wire protocols, columnar readers — is built in-house (§18 is the complete inventory). **No serde, no tokio, no rocksdb, no arrow, no tantivy, no hnswlib. Ever.** This constraint is the moat, not an albatross: the entire dependency surface is auditable, deterministic under lab, and owned.
 
