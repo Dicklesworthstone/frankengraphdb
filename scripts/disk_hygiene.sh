@@ -50,10 +50,10 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --root)
-      [ "$#" -ge 2 ] && [ "$root_set" -eq 0 ] || {
+      if [ "$#" -lt 2 ] || [ "$root_set" -ne 0 ]; then
         printf 'error: --root requires one path and may appear only once\n' >&2
         exit 64
-      }
+      fi
       root="$2"
       root_set=1
       shift 2
@@ -109,15 +109,21 @@ classify() {
 authorized_reaper_candidates() {
   local path base
   for path in /data/tmp/tmp.*; do
-    [ -d "$path" ] && [ ! -L "$path" ] || continue
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+      continue
+    fi
     base="${path##*/}"
     [[ "$base" =~ ^tmp\.[A-Za-z0-9._-]+$ ]] || continue
-    [ -d "$path/neg-appendix-bead" ] \
-      && [ ! -L "$path/neg-appendix-bead" ] || continue
+    if [ ! -d "$path/neg-appendix-bead" ] \
+      || [ -L "$path/neg-appendix-bead" ]; then
+      continue
+    fi
     printf 'g0-identity-work\t%s\n' "$path"
   done
   for path in /data/tmp/fgdb-subject/subject-*; do
-    [ -d "$path" ] && [ ! -L "$path" ] || continue
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+      continue
+    fi
     base="${path##*/}"
     [[ "$base" =~ ^subject-[0-9a-f]{64}$ ]] || continue
     printf 'registry-check-subject\t%s\n' "$path"
@@ -136,7 +142,9 @@ candidate_is_authorized() {
   case "$pool" in
     g0-identity-work)
       [[ "$path" =~ ^/data/tmp/tmp\.[A-Za-z0-9._-]+$ ]] || return 1
-      [ -d "$path" ] && [ ! -L "$path" ] || return 1
+      if [ ! -d "$path" ] || [ -L "$path" ]; then
+        return 1
+      fi
       [ -d "$path/neg-appendix-bead" ] \
         && [ ! -L "$path/neg-appendix-bead" ]
       ;;
@@ -222,10 +230,10 @@ acquire_reaper_parent_locks() {
   mkdir -p /data/tmp/fgdb-subject || return 75
   for spec in "${specs[@]}"; do
     IFS='|' read -r parent_dir lock_path label <<<"$spec"
-    [ -d "$parent_dir" ] && [ ! -L "$parent_dir" ] || {
+    if [ ! -d "$parent_dir" ] || [ -L "$parent_dir" ]; then
       release_reaper_parent_locks
       return 75
-    }
+    fi
     canonical_parent="$(realpath -e -- "$parent_dir")" || {
       release_reaper_parent_locks
       return 75
@@ -588,8 +596,12 @@ revalidate_reapable_candidate() {
   reapable_lock_fd_is_open "$parent_lock_fd" || return 1
   flock -n -x "$parent_lock_fd" || return 1
   flock -n -x "$lock_fd" || return 1
-  [ -f "$stamp" ] && [ ! -L "$stamp" ] || return 1
-  [ -f "$lock_path" ] && [ ! -L "$lock_path" ] || return 1
+  if [ ! -f "$stamp" ] || [ -L "$stamp" ]; then
+    return 1
+  fi
+  if [ ! -f "$lock_path" ] || [ -L "$lock_path" ]; then
+    return 1
+  fi
   dir_identity="$(stat -Lc '%d:%i' "$pinned_dir")" || return 1
   path_identity="$(stat -Lc '%d:%i' "$pinned_candidate")" || return 1
   parent_identity="$(stat -Lc '%d:%i' "/proc/${BASHPID:-$$}/fd/$parent_fd")" \

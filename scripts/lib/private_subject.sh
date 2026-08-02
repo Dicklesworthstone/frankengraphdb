@@ -383,26 +383,12 @@ reapable_parent_lock_shared() {
   printf -v "$out_fd_name" '%s' "$opened_fd"
 }
 
-# reapable_dir_stamp <dir> <pool> <shared-lock-fd>
-#
-# The stamp is written while the producer holds the shared liveness lock. It is
-# intentionally a strict key=value record rather than an mtime convention: the
-# reaper can reject malformed, cross-pool, or byte-drifted state. The writer
-# converges the record against a settled allocation measurement so the stamp,
-# lock, and delayed-allocation block for the record itself are all included.
-reapable_dir_stamp() {
-  local dir="$1" pool="$2" lock_fd="$3"
-  local retention_seconds now_epoch after_epoch measurement observed
+# _reapable_dir_stamp_locked <dir> <pool> <retention-seconds>
+_reapable_dir_stamp_locked() {
+  local dir="$1" pool="$2" retention_seconds="$3"
+  local now_epoch after_epoch measurement observed
   local allocated_bytes reclaimable_bytes shared_bytes
   local attempt
-  [ -d "$dir" ] || return 1
-  reapable_lock_fd_is_open "$lock_fd" || return 1
-  case "$pool" in
-    g0-identity-work | registry-check-subject) ;;
-    *) return 1 ;;
-  esac
-  retention_seconds="${FGDB_REAPABLE_AFTER_SECONDS:-86400}"
-  [[ "$retention_seconds" =~ ^[0-9]+$ ]] || return 1
   now_epoch="$(date -u +%s)" || return 1
   after_epoch=$((now_epoch + retention_seconds))
   measurement=$'0\t0\t0'
@@ -432,7 +418,51 @@ reapable_dir_stamp() {
     fi
     measurement="$observed"
   done
+  {
+    printf 'format=fgdb-reapable-invalid\n'
+    printf 'pool=%s\n' "$pool"
+    printf 'reason=allocation-did-not-converge\n'
+  } >"$dir/REAPABLE-AFTER"
+  sync -f "$dir/REAPABLE-AFTER" || true
   return 1
+}
+
+# reapable_dir_stamp <dir> <pool> <shared-lock-fd>
+#
+# The stamp is written while the producer holds the shared liveness lock. It is
+# intentionally a strict key=value record rather than an mtime convention: the
+# reaper can reject malformed, cross-pool, or byte-drifted state. A separate
+# exclusive writer lock serializes concurrent shared-lock consumers; it exists
+# before measurement, and `now_epoch` is sampled only after acquiring it, so a
+# later consumer cannot accidentally publish an earlier retention boundary.
+# The writer converges the record against a settled allocation measurement so
+# the stamp, both lock files, and delayed-allocation block are all included.
+reapable_dir_stamp() {
+  local dir="$1" pool="$2" lock_fd="$3"
+  local retention_seconds stamp_lock_fd rc
+  [ -d "$dir" ] || return 1
+  reapable_lock_fd_is_open "$lock_fd" || return 1
+  case "$pool" in
+    g0-identity-work | registry-check-subject) ;;
+    *) return 1 ;;
+  esac
+  retention_seconds="${FGDB_REAPABLE_AFTER_SECONDS:-86400}"
+  [[ "$retention_seconds" =~ ^[0-9]+$ ]] || return 1
+  : >>"$dir/.fgdb-stamp-writer.lock" || return 1
+  if ! { exec {stamp_lock_fd}<>"$dir/.fgdb-stamp-writer.lock"; }; then
+    return 1
+  fi
+  if ! flock -x "$stamp_lock_fd"; then
+    exec {stamp_lock_fd}>&-
+    return 1
+  fi
+  if _reapable_dir_stamp_locked "$dir" "$pool" "$retention_seconds"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  exec {stamp_lock_fd}>&-
+  return "$rc"
 }
 
 # subject_cache_dir -> the directory shared subjects live in
