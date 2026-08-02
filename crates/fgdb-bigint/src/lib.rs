@@ -1072,7 +1072,170 @@ impl BigInt {
             Self::from_sign_magnitude(self.negative, remainder),
         ))
     }
+
+    /// Canonical byte encoding: exactly one byte string per value.
+    ///
+    /// Zero is the single octet `0x00`. A nonzero value is its sign octet
+    /// (`0x01` positive, `0x02` negative), a little-endian `u64` limb count,
+    /// then that many little-endian `u64` magnitude limbs whose last limb is
+    /// nonzero. Uniqueness holds because the in-memory representation is
+    /// already canonical and the layout adds no degrees of freedom.
+    pub fn encode_canonical_bytes(&self) -> Vec<u8> {
+        if self.is_zero() {
+            return vec![encoding_tag::ZERO];
+        }
+        let mut out = Vec::with_capacity(1 + 8 + self.limbs.len() * 8);
+        out.push(if self.negative {
+            encoding_tag::NEGATIVE
+        } else {
+            encoding_tag::POSITIVE
+        });
+        out.extend_from_slice(&(self.limbs.len() as u64).to_le_bytes());
+        for limb in &self.limbs {
+            out.extend_from_slice(&limb.to_le_bytes());
+        }
+        out
+    }
+
+    /// Decode a canonical byte encoding, failing closed on every
+    /// malformation.
+    ///
+    /// The declared limb count is bounded by `limit` and by the actual byte
+    /// length BEFORE any allocation, so a hostile header cannot make this
+    /// reserve memory it was never sent; the length comparison runs in `u128`
+    /// so no `limit` choice can make it wrap. Canonicality itself is then
+    /// enforced by [`BigInt::from_canonical_limbs`] — one validator, not two.
+    pub fn decode_canonical_bytes(bytes: &[u8], limit: LimbLimit) -> Result<Self, DecodeError> {
+        let (&tag, rest) = bytes.split_first().ok_or(DecodeError::Empty)?;
+        let sign = match tag {
+            encoding_tag::ZERO => {
+                if !rest.is_empty() {
+                    return Err(DecodeError::TrailingBytes {
+                        expected_len: 1,
+                        actual_len: bytes.len(),
+                    });
+                }
+                return Ok(Self::zero());
+            }
+            encoding_tag::POSITIVE => Sign::Positive,
+            encoding_tag::NEGATIVE => Sign::Negative,
+            tag => return Err(DecodeError::UnknownSignTag { tag }),
+        };
+        if rest.len() < 8 {
+            return Err(DecodeError::TruncatedLimbCount {
+                available_bytes: rest.len(),
+            });
+        }
+        let (count_bytes, magnitude) = rest.split_at(8);
+        let mut count_le = [0u8; 8];
+        count_le.copy_from_slice(count_bytes);
+        let declared = u64::from_le_bytes(count_le);
+        if declared > limit.max_limbs() as u64 {
+            return Err(DecodeError::DeclaredLimbsExceedLimit {
+                declared_limbs: declared,
+                limit: limit.max_limbs(),
+            });
+        }
+        if (magnitude.len() as u128) != (declared as u128) * 8 {
+            return Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: declared,
+                actual_bytes: magnitude.len(),
+            });
+        }
+        let requested_limbs = declared as usize;
+        let mut limbs = Vec::new();
+        limbs
+            .try_reserve_exact(requested_limbs)
+            .map_err(|_| DecodeError::AllocationFailed { requested_limbs })?;
+        for chunk in magnitude.chunks_exact(8) {
+            let mut limb_le = [0u8; 8];
+            limb_le.copy_from_slice(chunk);
+            limbs.push(u64::from_le_bytes(limb_le));
+        }
+        Self::from_canonical_limbs(sign, limbs.into_boxed_slice(), limit)
+            .map_err(DecodeError::NotCanonical)
+    }
 }
+
+/// Sign octets of the canonical byte encoding. Durable values: assigned once,
+/// never renumbered.
+mod encoding_tag {
+    pub const ZERO: u8 = 0x00;
+    pub const POSITIVE: u8 = 0x01;
+    pub const NEGATIVE: u8 = 0x02;
+}
+
+/// Why a canonical byte decoding was rejected.
+///
+/// Every variant names the exact malformation so a fuzz counterexample is
+/// reproducible from the error alone; `NotCanonical` carries the construction
+/// error because decode routes through [`BigInt::from_canonical_limbs`] rather
+/// than re-stating its laws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeError {
+    Empty,
+    UnknownSignTag {
+        tag: u8,
+    },
+    TruncatedLimbCount {
+        available_bytes: usize,
+    },
+    DeclaredLimbsExceedLimit {
+        declared_limbs: u64,
+        limit: usize,
+    },
+    MagnitudeLengthMismatch {
+        declared_limbs: u64,
+        actual_bytes: usize,
+    },
+    TrailingBytes {
+        expected_len: usize,
+        actual_len: usize,
+    },
+    AllocationFailed {
+        requested_limbs: usize,
+    },
+    NotCanonical(ConstructionError),
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Empty => write!(f, "empty input has no sign octet"),
+            Self::UnknownSignTag { tag } => write!(f, "unknown sign octet 0x{tag:02x}"),
+            Self::TruncatedLimbCount { available_bytes } => {
+                write!(
+                    f,
+                    "limb count needs 8 bytes, only {available_bytes} present"
+                )
+            }
+            Self::DeclaredLimbsExceedLimit {
+                declared_limbs,
+                limit,
+            } => write!(f, "declared {declared_limbs} limbs, limit is {limit}"),
+            Self::MagnitudeLengthMismatch {
+                declared_limbs,
+                actual_bytes,
+            } => write!(
+                f,
+                "declared {declared_limbs} limbs but {actual_bytes} magnitude bytes follow"
+            ),
+            Self::TrailingBytes {
+                expected_len,
+                actual_len,
+            } => write!(
+                f,
+                "encoding is {expected_len} bytes, input carries {actual_len}"
+            ),
+            Self::AllocationFailed { requested_limbs } => {
+                write!(f, "allocation of {requested_limbs} limbs failed")
+            }
+            Self::NotCanonical(ref error) => write!(f, "decoded limbs are not canonical: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
 
 impl PartialOrd for BigInt {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -2191,5 +2354,150 @@ mod tests {
                 "clone of width {width} must not fit width-1"
             );
         }
+    }
+
+    // =====================================================================
+    // The canonical byte codec (tjk residue: byte-level encode/decode
+    // coherence). Round-trip, injectivity, and one exact-variant rejection
+    // per malformation — a rejection asserted only as is_err() could pass on
+    // a DIFFERENT failure kind than the one the mutation constructs.
+    // =====================================================================
+
+    #[test]
+    fn codec_round_trip_randomized_and_adversarial() {
+        let seed = 0x5eed_b16e_c0de_0001u64;
+        let mut rng = SplitMix64(seed);
+        let mut values: Vec<BigInt> = (0..500).map(|_| rng.bigint(8)).collect();
+        values.extend([
+            BigInt::zero(),
+            BigInt::from_i64(-1),
+            BigInt::from_u64(1),
+            BigInt::from_u64(u64::MAX),
+            BigInt::from_u128(u64::MAX as u128 + 1),
+            BigInt::from_u128(u128::MAX),
+            BigInt::from_i128(i128::MIN),
+            BigInt::from_i128(i128::MAX),
+        ]);
+        for value in &values {
+            let bytes = value.encode_canonical_bytes();
+            let decoded = BigInt::decode_canonical_bytes(&bytes, TEST_LIMIT)
+                .unwrap_or_else(|error| panic!("seed {seed:#x}: round trip failed: {error}"));
+            assert_eq!(&decoded, value, "seed {seed:#x}: bytes {bytes:02x?}");
+            assert_eq!(
+                bytes,
+                value.encode_canonical_bytes(),
+                "encoding must be deterministic"
+            );
+        }
+        // Injectivity over the sample: distinct values, distinct encodings —
+        // and order survives the round trip.
+        values.sort();
+        values.dedup();
+        let mut encodings: Vec<Vec<u8>> =
+            values.iter().map(BigInt::encode_canonical_bytes).collect();
+        let before = encodings.len();
+        encodings.sort();
+        encodings.dedup();
+        assert_eq!(before, encodings.len(), "two values shared an encoding");
+        for pair in values.windows(2) {
+            let a = BigInt::decode_canonical_bytes(&pair[0].encode_canonical_bytes(), TEST_LIMIT)
+                .expect("sorted sample re-decodes");
+            let b = BigInt::decode_canonical_bytes(&pair[1].encode_canonical_bytes(), TEST_LIMIT)
+                .expect("sorted sample re-decodes");
+            assert!(a < b, "order must survive the round trip");
+        }
+    }
+
+    #[test]
+    fn zero_encodes_as_the_single_zero_octet() {
+        assert_eq!(BigInt::zero().encode_canonical_bytes(), vec![0x00]);
+    }
+
+    #[test]
+    fn decode_rejects_each_malformation_with_its_exact_variant() {
+        let two_limbs = BigInt::from_u128(u64::MAX as u128 + 7);
+        let good = two_limbs.encode_canonical_bytes();
+
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[], TEST_LIMIT),
+            Err(DecodeError::Empty)
+        );
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[0x03], TEST_LIMIT),
+            Err(DecodeError::UnknownSignTag { tag: 0x03 })
+        );
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[0x01, 0x01, 0x00], TEST_LIMIT),
+            Err(DecodeError::TruncatedLimbCount { available_bytes: 2 })
+        );
+        // Append control on zero: the single octet plus anything is invalid.
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[0x00, 0x00], TEST_LIMIT),
+            Err(DecodeError::TrailingBytes {
+                expected_len: 1,
+                actual_len: 2
+            })
+        );
+        // Truncate control: drop the final magnitude byte.
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&good[..good.len() - 1], TEST_LIMIT),
+            Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: 2,
+                actual_bytes: 15
+            })
+        );
+        // Append control: one byte past the declared magnitude.
+        let mut appended = good.clone();
+        appended.push(0x00);
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&appended, TEST_LIMIT),
+            Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: 2,
+                actual_bytes: 17
+            })
+        );
+        // Length-before-allocation: a hostile count with a short buffer must
+        // fail on the LIMIT check, proving the bound runs before any reserve.
+        let mut hostile = vec![0x01];
+        hostile.extend_from_slice(&u64::MAX.to_le_bytes());
+        hostile.extend_from_slice(&[0u8; 8]);
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&hostile, TEST_LIMIT),
+            Err(DecodeError::DeclaredLimbsExceedLimit {
+                declared_limbs: u64::MAX,
+                limit: TEST_LIMIT.max_limbs()
+            })
+        );
+        // The limit binds real decodes too: two limbs against a one-limb cap.
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&good, LimbLimit::new(1)),
+            Err(DecodeError::DeclaredLimbsExceedLimit {
+                declared_limbs: 2,
+                limit: 1
+            })
+        );
+        // High-zero-limb forgery: widen the count and append a zero limb — the
+        // canonicality validator, not the codec, must name it.
+        let mut forged = good.clone();
+        forged[1] = 3;
+        forged.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&forged, TEST_LIMIT),
+            Err(DecodeError::NotCanonical(ConstructionError::HighZeroLimb {
+                sign: Sign::Positive,
+                limb_count: 3
+            }))
+        );
+        // Negative-zero forgery: a sign octet with a zero limb count.
+        let mut negative_zero = vec![0x02];
+        negative_zero.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&negative_zero, TEST_LIMIT),
+            Err(DecodeError::NotCanonical(
+                ConstructionError::NonzeroSignWithoutMagnitude {
+                    sign: Sign::Negative
+                }
+            ))
+        );
     }
 }
