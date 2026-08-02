@@ -1147,9 +1147,9 @@ impl BigInt {
         limbs
             .try_reserve_exact(requested_limbs)
             .map_err(|_| DecodeError::AllocationFailed { requested_limbs })?;
-        for chunk in magnitude.chunks_exact(8) {
-            let mut limb_le = [0u8; 8];
-            limb_le.copy_from_slice(chunk);
+        let (chunks, remainder) = magnitude.as_chunks::<8>();
+        debug_assert!(remainder.is_empty(), "length was validated above");
+        for &limb_le in chunks {
             limbs.push(u64::from_le_bytes(limb_le));
         }
         Self::from_canonical_limbs(sign, limbs.into_boxed_slice(), limit)
@@ -2364,7 +2364,7 @@ mod tests {
     // =====================================================================
 
     #[test]
-    fn codec_round_trip_randomized_and_adversarial() {
+    fn codec_round_trip_randomized_and_adversarial() -> Result<(), String> {
         let seed = 0x5eed_b16e_c0de_0001u64;
         let mut rng = SplitMix64(seed);
         let mut values: Vec<BigInt> = (0..500).map(|_| rng.bigint(8)).collect();
@@ -2380,8 +2380,9 @@ mod tests {
         ]);
         for value in &values {
             let bytes = value.encode_canonical_bytes();
-            let decoded = BigInt::decode_canonical_bytes(&bytes, TEST_LIMIT)
-                .unwrap_or_else(|error| panic!("seed {seed:#x}: round trip failed: {error}"));
+            let decoded = BigInt::decode_canonical_bytes(&bytes, TEST_LIMIT).map_err(|error| {
+                format!("seed {seed:#x}: bytes {bytes:02x?}: round trip failed: {error}")
+            })?;
             assert_eq!(&decoded, value, "seed {seed:#x}: bytes {bytes:02x?}");
             assert_eq!(
                 bytes,
@@ -2406,6 +2407,7 @@ mod tests {
                 .expect("sorted sample re-decodes");
             assert!(a < b, "order must survive the round trip");
         }
+        Ok(())
     }
 
     #[test]
