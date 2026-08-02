@@ -48,8 +48,12 @@ pub const KNOWN_LAW_KEYS: [&str; 8] = [
 /// 2026-08-01/02): the name licenses nothing, its citations were repaired away
 /// in the same landing, and the row remains as the permanent record that the
 /// phrase claims no authority.
-pub const LAW_STATUSES: [&str; 4] =
-    ["registered", "unadjudicated", "fabrication-candidate", "struck"];
+pub const LAW_STATUSES: [&str; 4] = [
+    "registered",
+    "unadjudicated",
+    "fabrication-candidate",
+    "struck",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Law {

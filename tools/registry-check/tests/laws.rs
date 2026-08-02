@@ -224,7 +224,11 @@ fn registered_law_without_anchor_is_rejected() {
 
 #[test]
 fn a_real_anchor_is_accepted() {
-    for good in ["a01:1412", "plan:392", "enforcement:field_unresolved_schema"] {
+    for good in [
+        "a01:1412",
+        "plan:392",
+        "enforcement:field_unresolved_schema",
+    ] {
         let r = mutate(|law| {
             law.status = "registered".into();
             law.source_location = good.into();
@@ -606,14 +610,11 @@ fn exceeding_the_open_adjudication_ceiling_fails() {
         "rationale = \"a01:1412 one more citation under the {} law\"\n",
         struck.name
     ));
-    let codes: Vec<String> = validate_citations_with_ceiling(
-        &registry,
-        &extract_citations(&text),
-        &[("FG-LAW-07", 0)],
-    )
-    .into_iter()
-    .map(|violation| violation.code)
-    .collect();
+    let codes: Vec<String> =
+        validate_citations_with_ceiling(&registry, &extract_citations(&text), &[("FG-LAW-07", 0)])
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect();
     assert!(
         codes.contains(&"law_citation_not_licensed".to_string()),
         "exceeding the ceiling must fail: {codes:?}"
