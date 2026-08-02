@@ -33,9 +33,9 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_026_112;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_027_538;
 pub const APPENDIX_SHA256: &str =
-    "34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab";
+    "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3724;
@@ -73,7 +73,7 @@ pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_454;
 pub const EXPECTED_REFERENCE_OCCURRENCE_SHA256: &str =
-    "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3";
+    "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f";
 pub const EXPECTED_G0_PROJECTION_ROW_COUNT: usize = 35;
 pub const EXPECTED_G0_PROJECTION_ROW_IDS_SHA256: &str =
     "ff344794c0f061e83016f9f4844591a75d07bff597d439258d2b2632fc810d61";
@@ -5295,8 +5295,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1464,
         end_line: 1543,
         line_count: 80,
-        byte_count: 69_107,
-        sha256: "b2219214103512f64e26081eb311d884838be4e6232ef51605ab13d4aa87e92e",
+        byte_count: 69_113,
+        sha256: "e58540b8902dfc72dc349958429b77c9d4992e420cade64aec35cfcf81fbd401",
     },
     SlicePin {
         ordinal: 4,
@@ -5350,8 +5350,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1791,
         end_line: 1889,
         line_count: 99,
-        byte_count: 92_153,
-        sha256: "12c687981de6c7b05f675e8c47368744b95cb556731a9a4b509d20a8540d45db",
+        byte_count: 92_146,
+        sha256: "482e554a3156a0071c2d017373ddb21b646df2edf2b1e2641bd0a343213cb598",
     },
     SlicePin {
         ordinal: 9,
@@ -5361,8 +5361,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1890,
         end_line: 1909,
         line_count: 20,
-        byte_count: 12_328,
-        sha256: "eea5d9f7257bfefee5cae1077bbe3f17d4948267736dcd79e24d530f2a1873df",
+        byte_count: 13_365,
+        sha256: "814c02a4c07405b3df4e3e6f3833af3cdf8daa9393470cc2bbe16a4bfb3cde50",
     },
     SlicePin {
         ordinal: 10,
@@ -5372,8 +5372,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1910,
         end_line: 1931,
         line_count: 22,
-        byte_count: 16_993,
-        sha256: "e9d0ae8d2638e7af2889ffe9f6bf52b54e4dfb42453543175a4d29b82d0136c9",
+        byte_count: 16_997,
+        sha256: "a3b96ccac365a96e8a04918508f8b3cd70b8313ebeb78ecc5b301b5126605644",
     },
     SlicePin {
         ordinal: 11,
@@ -5416,8 +5416,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2035,
         end_line: 2056,
         line_count: 22,
-        byte_count: 17_540,
-        sha256: "de90db8cd87f7b9c4b168ed9357580ffb8e9c64f60ef643ba48f872daf566e93",
+        byte_count: 17_746,
+        sha256: "4097ff42d79c2cbf2e2171ce64f495a10b0c7c67e3e8b00e5f4de8468fab1354",
     },
     SlicePin {
         ordinal: 15,
@@ -5427,8 +5427,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2057,
         end_line: 2156,
         line_count: 100,
-        byte_count: 80_982,
-        sha256: "98978263199392f940c0c64afc073aca367a309ce2d52910019c6be3ba6e3e14",
+        byte_count: 81_074,
+        sha256: "70b318ed9ab711bfc910f0e6dcd083af6cc296cd071249625456507bfafba999",
     },
     SlicePin {
         ordinal: 16,
@@ -5460,8 +5460,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2349,
         end_line: 2458,
         line_count: 110,
-        byte_count: 97_542,
-        sha256: "13426a61fb328d31b0fac83459032d7b9d82a7aef34b05452640bf2c45a55fe3",
+        byte_count: 97_630,
+        sha256: "8793cbfbcd974a66322010e53d7043c40ed31d1ec1ed268fe1f9da13ef0fac9f",
     },
     SlicePin {
         ordinal: 19,

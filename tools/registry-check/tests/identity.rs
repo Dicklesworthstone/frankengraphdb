@@ -2129,7 +2129,15 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // receipt binds `{...}`" (a14:2035) — as top|PayloadReceipt, the sole
     // consumer of RemotePreparedIdentity, and minted the record wire type
     // 0x0563 it contains by value.
-    assert_eq!(baseline.top_level_candidates.len(), 1_254);
+    // 1_254 -> 1_258: fgdb-x2ar's owner-confirmed source amendments spell four
+    // previously unnamed/openfamily symbols as definitional sentences —
+    // AllocationReservationTransitionSpec<Local> (a09:1900),
+    // FinalizationAllocationDispositionSpec<Local> (a09:1904),
+    // LocalGcAuthorizeSpec (a14:2045), and KeyDestroyAuthorizeSpec (a15:2059) —
+    // each now a census candidate with a catalog row. The a03 rename
+    // ResultSemanticOwnerRef -> ResultSemanticOwnerRecordRef (a03:1510) re-keys
+    // an existing candidate and is count-neutral.
+    assert_eq!(baseline.top_level_candidates.len(), 1_258);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -17955,9 +17963,14 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
     // intentionally absent from this set.
     // 217 -> 216: fgdb-mtxm source-spells MetaRestorePhase's structural union,
     // so that candidate is no longer a definition without a structural body.
+    // 216 -> 220: fgdb-x2ar's four new definitional symbols (allocation wrapper,
+    // finalization disposition, LocalGcAuthorizeSpec, KeyDestroyAuthorizeSpec)
+    // are declared by prose sentences without structural bodies — deliberately,
+    // per the owner's arm-set rulings the bodies live in the already-spelled
+    // member specs — so each enters this control exactly once.
     assert_eq!(
         global_bodyless.len(),
-        216,
+        220,
         "the Appendix-wide definition-without-body control moved"
     );
     let a12_bodyless: BTreeSet<_> = a12

@@ -1,6 +1,6 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab.
+# Appendix A lines 1388-2728; sha256=c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 

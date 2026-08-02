@@ -27,8 +27,8 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1026112
-sha256 = "34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab"
+byte_count = 1027538
+sha256 = "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
@@ -36,7 +36,7 @@ next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 target_count = 813
 target_ids_sha256 = "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
 occurrence_count = 2454
-occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
+occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
 target_count = 3724
@@ -156,14 +156,14 @@ title = "Appendix A exact catalog: Local logical state and durable transaction f
 start_line = 1464
 end_line = 1543
 line_count = 80
-byte_count = 69107
-sha256 = "b2219214103512f64e26081eb311d884838be4e6232ef51605ab13d4aa87e92e"
+byte_count = 69113
+sha256 = "e58540b8902dfc72dc349958429b77c9d4992e420cade64aec35cfcf81fbd401"
 predecessor = "a02"
 successor = "a04"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
 top_level_candidate_count = 92
-top_level_candidate_ids_sha256 = "f95ce38004b8210d78a8b666f0c4df2b4f125f8650adfa3d0d29b4a2c1647c28"
+top_level_candidate_ids_sha256 = "319d479e19feec3d0667e5166fc004cd5326a79a21b8cc1bc0928692afa4b71d"
 field_candidate_count = 746
 field_candidate_ids_sha256 = "eb134d74fd49109b3cc347d8c014887a716bdd0c6843612cae7522a418bac7ca"
 union_candidate_count = 50
@@ -171,7 +171,7 @@ union_candidate_ids_sha256 = "ec76ad225e6cc2de283f1f6f3571438ea45375af46143a96bd
 arm_candidate_count = 132
 arm_candidate_ids_sha256 = "8e189a7503f20ff2aed51990204ae587e2fc1a4b8a31cc7ca67df5db6747c95e"
 ambiguity_count = 496
-ambiguity_ids_sha256 = "ecb55da2065c6db1e1bc08040b97d93f6f765f78423d97f311e2d21d6dd4d382"
+ambiguity_ids_sha256 = "25fe794ec90fc3e10902dac7cccbdf35e5494596fcc8129628b7c54d714a6d57"
 
 [[slice]]
 ordinal = 4
@@ -281,8 +281,8 @@ title = "Appendix A exact catalog: W12 retention, compaction, reconfiguration, G
 start_line = 1791
 end_line = 1889
 line_count = 99
-byte_count = 92153
-sha256 = "12c687981de6c7b05f675e8c47368744b95cb556731a9a4b509d20a8540d45db"
+byte_count = 92146
+sha256 = "482e554a3156a0071c2d017373ddb21b646df2edf2b1e2641bd0a343213cb598"
 predecessor = "a07"
 successor = "a09"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -290,13 +290,13 @@ definition_status = "declared"
 top_level_candidate_count = 112
 top_level_candidate_ids_sha256 = "8891ad276c2be5ac38d4dbfc7d3786acfb7c76539c689bb8070a60b5655e7433"
 field_candidate_count = 1101
-field_candidate_ids_sha256 = "fe5ef12f7a9273484f9bbd72a77b6c67cde0ef2acf0fed9d6575ea7a7ab6ca24"
+field_candidate_ids_sha256 = "fb474c3990a48614b1a4c097fbf3e88a1a348e909412558b0d96285ec8c23d5b"
 union_candidate_count = 42
 union_candidate_ids_sha256 = "867a6dc2f093d342e80d0dc5e1a4fd6597a97b94ec6353a08ac250ae04da2fd8"
 arm_candidate_count = 142
 arm_candidate_ids_sha256 = "dbaca4cd29c32a02c0aec03ab339767c83e9e485eeaaae7719e646971e9fb5c1"
 ambiguity_count = 710
-ambiguity_ids_sha256 = "a4e3e6bcccd179f52ac2d9ad710bde106f0f8079fa04f83dc5191d97f18f54c7"
+ambiguity_ids_sha256 = "9d20c8df7290c4daa6c7ecce4750efbd1318e5afb5c407072e3248e4b8763930"
 
 [[slice]]
 ordinal = 9
@@ -306,22 +306,22 @@ title = "Appendix A exact catalog: Strata run, identity continuity, allocator, a
 start_line = 1890
 end_line = 1909
 line_count = 20
-byte_count = 12328
-sha256 = "eea5d9f7257bfefee5cae1077bbe3f17d4948267736dcd79e24d530f2a1873df"
+byte_count = 13365
+sha256 = "814c02a4c07405b3df4e3e6f3833af3cdf8daa9393470cc2bbe16a4bfb3cde50"
 predecessor = "a08"
 successor = "a10"
 expected_projection_classes = ["logical_object_kinds", "physical_record_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 20
-top_level_candidate_ids_sha256 = "d137f1f4de0d9b151ae1f715eb729a712d0df898627a7e23312fbd04dfd23645"
+top_level_candidate_count = 22
+top_level_candidate_ids_sha256 = "b1b2e60a6cda4aa6bf132af407872d2cbd990e3bec18d91ec3a7c776badcf9e5"
 field_candidate_count = 162
 field_candidate_ids_sha256 = "bbbe9e2c55064332f4f365e0b7dc589bb2ef580b7245bde95de790dd10022bb3"
 union_candidate_count = 4
 union_candidate_ids_sha256 = "2231db4c82ac7d8e980b3d9b192136d69b39bda8184d95431688595b0873ba9c"
 arm_candidate_count = 12
 arm_candidate_ids_sha256 = "78421c2968d2b5baa12ab3ac00269ce7c5d10cdb1160e84dabad680f9f7c3fb2"
-ambiguity_count = 148
-ambiguity_ids_sha256 = "f7800d599243f9e88d34f2f03420d779283e077c8fb425861f07766d50ac294b"
+ambiguity_count = 150
+ambiguity_ids_sha256 = "380e719215d1608d66e8727b24c661a6dab6fe40ff63013262f6b4d9fd9e1dca"
 
 [[slice]]
 ordinal = 10
@@ -331,8 +331,8 @@ title = "Appendix A exact catalog: Committed effects, commands, and logical delt
 start_line = 1910
 end_line = 1931
 line_count = 22
-byte_count = 16993
-sha256 = "e9d0ae8d2638e7af2889ffe9f6bf52b54e4dfb42453543175a4d29b82d0136c9"
+byte_count = 16997
+sha256 = "a3b96ccac365a96e8a04918508f8b3cd70b8313ebeb78ecc5b301b5126605644"
 predecessor = "a09"
 successor = "a11"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -345,8 +345,8 @@ union_candidate_count = 5
 union_candidate_ids_sha256 = "ad9a6e5137cb020d17d5deb1296356146580661a0500823df541203875e56170"
 arm_candidate_count = 17
 arm_candidate_ids_sha256 = "7fcfd50dfd4f06f8be8676acbdc70683db596e0dd9f56020e0950b9c25aab16e"
-ambiguity_count = 110
-ambiguity_ids_sha256 = "0e0d54b8ad8683ebb76934cdccac5409c74f9c917bd71ecaedc368935ce4f68a"
+ambiguity_count = 109
+ambiguity_ids_sha256 = "43b7d06b7e1fdb1fec02cd5994de1d15548dd25b77743ee31a7e2df02b5db3cb"
 
 [[slice]]
 ordinal = 11
@@ -431,22 +431,22 @@ title = "Appendix A exact catalog: Payload availability, configuration floors, a
 start_line = 2035
 end_line = 2056
 line_count = 22
-byte_count = 17540
-sha256 = "de90db8cd87f7b9c4b168ed9357580ffb8e9c64f60ef643ba48f872daf566e93"
+byte_count = 17746
+sha256 = "4097ff42d79c2cbf2e2171ce64f495a10b0c7c67e3e8b00e5f4de8468fab1354"
 predecessor = "a13"
 successor = "a15"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 19
-top_level_candidate_ids_sha256 = "73c39c678ed24ef427f8db7aa41449616ed7f79e72e24a4216b2facaa248b018"
+top_level_candidate_count = 20
+top_level_candidate_ids_sha256 = "fd0bb9b12c5d943cf6fa095f22e971e4eee8819f17471d683712a0b917fa8011"
 field_candidate_count = 141
 field_candidate_ids_sha256 = "613a6860db585b897f217566aea407ed58521fe31f1f2879be36e244f5a94fa8"
 union_candidate_count = 5
 union_candidate_ids_sha256 = "15e303a3e58a1840bb506926c05b7cb208a699ec1a1bb3deab7e0b013acc8fab"
 arm_candidate_count = 14
 arm_candidate_ids_sha256 = "c7df914eb8691036d5d60156878e4b216c4cc223434d4dd70e37b61a999f8a8e"
-ambiguity_count = 94
-ambiguity_ids_sha256 = "8b5c0d6090c04fbbd7bbaca88171b9254caccf65c89ac8c867651c52527b7a66"
+ambiguity_count = 95
+ambiguity_ids_sha256 = "19917d3d51b84b35881020eaa0dc56f5e24e7f9876d72de284bc7e8e35b0c5c6"
 
 [[slice]]
 ordinal = 15
@@ -456,22 +456,22 @@ title = "Appendix A exact catalog: Key destruction, backup, publication, and rel
 start_line = 2057
 end_line = 2156
 line_count = 100
-byte_count = 80982
-sha256 = "98978263199392f940c0c64afc073aca367a309ce2d52910019c6be3ba6e3e14"
+byte_count = 81074
+sha256 = "70b318ed9ab711bfc910f0e6dcd083af6cc296cd071249625456507bfafba999"
 predecessor = "a14"
 successor = "a16"
 expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 99
-top_level_candidate_ids_sha256 = "fa41629df7e0f3230f88a0ae3b1cbeec1d1c2f5f003f4c44b141fd6c7d1b5e92"
+top_level_candidate_count = 100
+top_level_candidate_ids_sha256 = "276a18dca0bda82c1fcd689e8a742d92bcbf78bf354fd8a974aebbeb038fa1d8"
 field_candidate_count = 1035
 field_candidate_ids_sha256 = "c780027d7b605547074ca25631992f2016f9d9d765a3dea7b2bc32a3242db6d6"
 union_candidate_count = 51
 union_candidate_ids_sha256 = "7ae8c34a227cf7241c420848692817ab58f1052869af7470c1f788a1c1805a98"
 arm_candidate_count = 162
 arm_candidate_ids_sha256 = "51becf54c432a95fac5e4cb79fc7245f373904d7f97f629645619b10729ad798"
-ambiguity_count = 805
-ambiguity_ids_sha256 = "d9787d07e4193700cff2b046034a01306a7692040c3a201743e1ce1408bba3ff"
+ambiguity_count = 806
+ambiguity_ids_sha256 = "0fca1932998086257bc39dfab84611cfe991b2e97e4425261b5b75749955a1dc"
 
 [[slice]]
 ordinal = 16
@@ -531,8 +531,8 @@ title = "Appendix A exact catalog: Restore registry, cleanup, terminal history, 
 start_line = 2349
 end_line = 2458
 line_count = 110
-byte_count = 97542
-sha256 = "13426a61fb328d31b0fac83459032d7b9d82a7aef34b05452640bf2c45a55fe3"
+byte_count = 97630
+sha256 = "8793cbfbcd974a66322010e53d7043c40ed31d1ec1ed268fe1f9da13ef0fac9f"
 predecessor = "a17"
 successor = "a19"
 expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_kinds", "wire_types", "durable_fields"]
@@ -58404,14 +58404,54 @@ identity_class = "logical"
 source_locations = ["a07:1728"]
 
 [[top_level_candidate]]
-row_id = "a03:top-level-candidate:result-semantic-owner-ref-2179ba0c8bdcf77e"
+row_id = "a03:top-level-candidate:result-semantic-owner-record-ref-03468b938522f3d4"
 slice_id = "a03"
-symbol = "ResultSemanticOwnerRef"
+symbol = "ResultSemanticOwnerRecordRef"
 generic_signature = ""
-source_key = "top|ResultSemanticOwnerRef"
+source_key = "top|ResultSemanticOwnerRecordRef"
 source_kind = "name-only"
 identity_class = "unclassified"
 source_locations = ["a03:1510"]
+
+[[top_level_candidate]]
+row_id = "a09:top-level-candidate:allocation-reservation-transition-spec-local-2229de3f98cd7f52"
+slice_id = "a09"
+symbol = "AllocationReservationTransitionSpec"
+generic_signature = "<Local>"
+source_key = "top|AllocationReservationTransitionSpec<Local>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a09:1900"]
+
+[[top_level_candidate]]
+row_id = "a09:top-level-candidate:finalization-allocation-disposition-spec-local-a4aff5b1f7bf6adb"
+slice_id = "a09"
+symbol = "FinalizationAllocationDispositionSpec"
+generic_signature = "<Local>"
+source_key = "top|FinalizationAllocationDispositionSpec<Local>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a09:1904"]
+
+[[top_level_candidate]]
+row_id = "a14:top-level-candidate:local-gc-authorize-spec-bcfe3cbc57d27524"
+slice_id = "a14"
+symbol = "LocalGcAuthorizeSpec"
+generic_signature = ""
+source_key = "top|LocalGcAuthorizeSpec"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a14:2045"]
+
+[[top_level_candidate]]
+row_id = "a15:top-level-candidate:key-destroy-authorize-spec-2f8792f1e2e02a4b"
+slice_id = "a15"
+symbol = "KeyDestroyAuthorizeSpec"
+generic_signature = ""
+source_key = "top|KeyDestroyAuthorizeSpec"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a15:2059"]
 
 [[top_level_candidate]]
 row_id = "a03:top-level-candidate:result-terminal-common-role-authority-owning-role-cf2559902c105761"

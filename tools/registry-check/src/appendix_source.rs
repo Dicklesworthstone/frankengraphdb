@@ -7071,7 +7071,7 @@ mod tests {
             + "\n";
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "13426a61fb328d31b0fac83459032d7b9d82a7aef34b05452640bf2c45a55fe3",
+            "8793cbfbcd974a66322010e53d7043c40ed31d1ec1ed268fe1f9da13ef0fac9f",
             "the MetaRestorePhase ruling was measured on a different a18 source"
         );
         assert!(
@@ -7256,7 +7256,7 @@ mod tests {
         // is a re-measurement rather than a re-pin.
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "34c4ced469f5f251d509ebe8fefcc8a1288195268b1dba52ff46b7236c3033ab",
+            "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16",
             "the two-union population was measured on a different Appendix A source"
         );
 
