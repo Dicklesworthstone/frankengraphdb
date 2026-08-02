@@ -59,21 +59,28 @@
 # for one tree state therefore reuses one directory rather than compiling a
 # private copy; a cache hit deliberately re-hashes the promised artifacts.
 #
-# STILL NOTHING HERE DELETES A FILE, and that is deliberate (RULE 1). The publish
-# step is `mv -T` onto a path that does not exist; a pane losing that race keeps
-# its own copy rather than removing anyone's, which degrades exactly to the old
-# behaviour. What the cache changes is the LIFETIME: one directory per distinct
-# TREE STATE instead of one per RUN.
+# STILL NOTHING HERE DELETES A FILE. The owner-authorized reaper remains in
+# scripts/disk_hygiene.sh and is restricted to the two paths named by the
+# fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra ruling. This library owns
+# only the producer half of that protocol: a consumer holds a shared flock for
+# its whole lifetime and refreshes a fail-closed REAPABLE-AFTER record containing
+# the retention boundary plus inode-aware byte accounting. The reaper must take
+# the same lock exclusively, so age can never be its only answer.
+#
+# The publish step is `mv -T` onto a path that does not exist; a pane losing that
+# race keeps its own copy rather than removing anyone's, which degrades exactly
+# to the old behaviour. What the cache changes is the LIFETIME: one directory
+# per distinct TREE STATE instead of one per RUN.
 #
 # THAT IS A 3x CUT, NOT A BOUND, and the honest number matters. MEASURED: 111
 # commits touched tools/registry-check/src over the window in which 113 of those
 # directories appeared -- 1.02 directories per commit. The tree state moves about
 # as often as a gate runs, so sharing ACROSS runs recovers almost nothing; what is
 # guaranteed is sharing WITHIN one check.sh, whose three gates run a minute or two
-# apart. Bounding the cache means deleting old keys, and reuse and self-cleanup
-# are mutually exclusive here -- if the first gate cleaned up on exit the other two
-# could not reuse -- so a retention policy needs an owner with delete authority and
-# is fgdb-1j16 option 2, not this library's business.
+# apart. Reuse and self-cleanup remain mutually exclusive here -- if the first
+# gate cleaned up on exit the other two could not reuse. The owner has now ruled
+# that a separate, scoped reaper may act only after this library's retention
+# stamp and live shared-lock discipline both say it is safe.
 # =============================================================================
 
 # subject_inputs_exist <root> -> all mandatory input roots/files exist
@@ -280,6 +287,128 @@ subject_build() {
     >"$outdir/build.log" 2>&1
 }
 
+# reapable_measure_allocated_bytes <dir>
+#
+# Prints three tab-separated byte counts:
+#
+#   allocated-total  reclaimable-if-tree-is-removed  shared-outside-tree
+#
+# The hard-link distinction is load-bearing. Summing file sizes per path
+# invents bytes for multiply-linked inputs, while `du` alone cannot say whether
+# another link lives outside this tree. Group regular files by (device,inode),
+# count how many links are inside the tree, and call their blocks reclaimable
+# only when every link is inside. Non-regular inodes are private workdir
+# structure and are counted once. This is the corrected instrument recorded by
+# fgdb-hardlink-measurement-hazard-af3k.
+reapable_measure_allocated_bytes() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  find "$dir" -xdev -printf '%y\t%D\t%i\t%n\t%b\n' \
+    | awk -F '\t' '
+        $1 == "f" {
+          key = $2 ":" $3
+          if (!(key in blocks)) {
+            blocks[key] = $5
+            links[key] = $4
+          }
+          seen[key]++
+          next
+        }
+        {
+          other_blocks += $5
+        }
+        END {
+          total_blocks = other_blocks
+          reclaimable_blocks = other_blocks
+          shared_blocks = 0
+          for (key in blocks) {
+            total_blocks += blocks[key]
+            if (seen[key] == links[key]) {
+              reclaimable_blocks += blocks[key]
+            } else {
+              shared_blocks += blocks[key]
+            }
+          }
+          printf "%.0f\t%.0f\t%.0f\n", \
+            total_blocks * 512, reclaimable_blocks * 512, shared_blocks * 512
+        }
+      '
+}
+
+# reapable_dir_lock_shared <dir> <fd-variable>
+#
+# Opens the one liveness lock and stores its numeric descriptor in the caller's
+# named variable. The descriptor deliberately remains open until the gate exits;
+# child processes inherit it, so a still-running descendant also keeps the
+# directory non-reapable. A SIGKILL may prevent the stamp, but kernel FD cleanup
+# still releases the lock and an unstamped directory remains fail-closed.
+reapable_dir_lock_shared() {
+  local dir="$1" out_fd_name="$2" opened_fd
+  [ -d "$dir" ] || return 1
+  : >>"$dir/.fgdb-reaper.lock"
+  exec {opened_fd}<>"$dir/.fgdb-reaper.lock"
+  if ! flock -s "$opened_fd"; then
+    exec {opened_fd}>&-
+    return 1
+  fi
+  printf -v "$out_fd_name" '%s' "$opened_fd"
+}
+
+reapable_lock_fd_is_open() {
+  local lock_fd="$1"
+  [[ "$lock_fd" =~ ^[0-9]+$ ]] || return 1
+  [ -e "/proc/${BASHPID:-$$}/fd/$lock_fd" ]
+}
+
+# reapable_dir_stamp <dir> <pool> <shared-lock-fd>
+#
+# The stamp is written while the producer holds the shared liveness lock. It is
+# intentionally a strict key=value record rather than an mtime convention: the
+# reaper can reject malformed, cross-pool, or byte-drifted state. A placeholder
+# is written before measurement so the stamp and lock allocations themselves
+# are included in the recorded block count.
+reapable_dir_stamp() {
+  local dir="$1" pool="$2" lock_fd="$3"
+  local retention_seconds now_epoch after_epoch measurement
+  local allocated_bytes reclaimable_bytes shared_bytes
+  [ -d "$dir" ] || return 1
+  reapable_lock_fd_is_open "$lock_fd" || return 1
+  case "$pool" in
+    g0-identity-work | registry-check-subject) ;;
+    *) return 1 ;;
+  esac
+  retention_seconds="${FGDB_REAPABLE_AFTER_SECONDS:-86400}"
+  [[ "$retention_seconds" =~ ^[0-9]+$ ]] || return 1
+  now_epoch="$(date -u +%s)" || return 1
+  after_epoch=$((now_epoch + retention_seconds))
+  {
+    printf 'format=fgdb-reapable-v1\n'
+    printf 'pool=%s\n' "$pool"
+    printf 'reapable_after_epoch=%s\n' "$after_epoch"
+    printf 'measured_at_epoch=%s\n' "$now_epoch"
+    printf 'producer_pid=%s\n' "$$"
+    printf 'allocated_bytes=0\n'
+    printf 'reclaimable_bytes=0\n'
+    printf 'shared_bytes=0\n'
+  } >"$dir/REAPABLE-AFTER"
+  measurement="$(reapable_measure_allocated_bytes "$dir")" || return 1
+  IFS=$'\t' read -r allocated_bytes reclaimable_bytes shared_bytes \
+    <<<"$measurement"
+  [[ "$allocated_bytes" =~ ^[0-9]+$ ]] || return 1
+  [[ "$reclaimable_bytes" =~ ^[0-9]+$ ]] || return 1
+  [[ "$shared_bytes" =~ ^[0-9]+$ ]] || return 1
+  {
+    printf 'format=fgdb-reapable-v1\n'
+    printf 'pool=%s\n' "$pool"
+    printf 'reapable_after_epoch=%s\n' "$after_epoch"
+    printf 'measured_at_epoch=%s\n' "$now_epoch"
+    printf 'producer_pid=%s\n' "$$"
+    printf 'allocated_bytes=%s\n' "$allocated_bytes"
+    printf 'reclaimable_bytes=%s\n' "$reclaimable_bytes"
+    printf 'shared_bytes=%s\n' "$shared_bytes"
+  } >"$dir/REAPABLE-AFTER"
+}
+
 # subject_cache_dir -> the directory shared subjects live in
 subject_cache_dir() {
   printf '%s' "${FGDB_SUBJECT_CACHE:-${TMPDIR:-/tmp}/fgdb-subject}"
@@ -347,6 +476,49 @@ subject_acquire() {
     printf '%s' "$stage"
   fi
   return 0
+}
+
+# subject_acquire_leased <root> <dir-variable> <fd-variable>
+#
+# Production gates use this wrapper rather than command substitution around
+# subject_acquire: the wrapper executes in the gate shell, so its shared lock FD
+# survives for the gate's full lifetime. The old printing API remains for the
+# hermetic provenance/residue controls whose caches are outside the authorized
+# /data/tmp/fgdb-subject pool.
+subject_acquire_leased() {
+  local root="$1" out_dir_name="$2" out_fd_name="$3"
+  local dir="" key lock_fd
+  if ! dir="$(subject_acquire "$root")"; then
+    printf -v "$out_dir_name" '%s' "$dir"
+    return 1
+  fi
+  if ! reapable_dir_lock_shared "$dir" lock_fd; then
+    printf -v "$out_dir_name" '%s' "$dir"
+    return 1
+  fi
+  key="$(subject_key "$root")" || {
+    exec {lock_fd}>&-
+    printf -v "$out_dir_name" '%s' "$dir"
+    return 1
+  }
+  if ! subject_cache_entry_is_valid "$dir" "$root" "$key"; then
+    exec {lock_fd}>&-
+    printf -v "$out_dir_name" '%s' "$dir"
+    return 1
+  fi
+  # Only canonical cache entries are in the owner's deletion carve-out.
+  # A publish-race loser may still be used safely for this run, but its
+  # `.partial.<pid>` directory remains unstamped and therefore unreapable.
+  if [ "${dir%/*}" = "$(subject_cache_dir)" ] \
+    && [[ "${dir##*/}" =~ ^subject-[0-9a-f]{64}$ ]]; then
+    if ! reapable_dir_stamp "$dir" registry-check-subject "$lock_fd"; then
+      exec {lock_fd}>&-
+      printf -v "$out_dir_name" '%s' "$dir"
+      return 1
+    fi
+  fi
+  printf -v "$out_dir_name" '%s' "$dir"
+  printf -v "$out_fd_name" '%s' "$lock_fd"
 }
 
 # subject_recipe_root -> the checkout whose sourced recipe is executing

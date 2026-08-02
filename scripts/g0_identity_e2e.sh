@@ -113,6 +113,8 @@ catalog_closure_census() {
 # filesystem without forcing every other gate's temporary data there.
 WORK="${G0_IDENTITY_E2E_WORKDIR:-${G0_E2E_WORKDIR:-$(mktemp -d)}}"
 BIN="$WORK/bin/registry-check"
+WORK_REAPER_LOCK_FD=""
+WORK_REAPABLE_FINALIZED=0
 
 # The shared verdict contract (fgdb-udco). Before it, this gate said
 # "[g0-identity-e2e] FAIL: ..." — the token was right but the prefix pushed it
@@ -149,10 +151,24 @@ die() { gate_fail "$*"; }
 # reached. This trap makes the count unconditional, and says plainly that the
 # rest did not run rather than letting a truncated log read like a whole one.
 VERDICT_REACHED=0
+# Finalize the producer-owned lifecycle record exactly once. The function is
+# defined before private_subject.sh is sourced because gate_init needs the hook
+# now; it resolves reapable_dir_stamp only when the EXIT trap eventually runs.
+finalize_reapable_workdir() {
+  [ "$WORK_REAPABLE_FINALIZED" -eq 0 ] || return 0
+  declare -F reapable_dir_stamp >/dev/null || return 1
+  reapable_dir_stamp "$WORK" g0-identity-work "$WORK_REAPER_LOCK_FD" || return 1
+  WORK_REAPABLE_FINALIZED=1
+}
 # The exit code arrives as $1: this now runs as gate_on_exit's tally hook, so
 # `$?` here would be the library's last command, not the script's exit status.
 report_partial_tally() {
   local rc="$1"
+  if [ "$WORK_REAPABLE_FINALIZED" -eq 0 ] \
+    && declare -F reapable_dir_stamp >/dev/null \
+    && ! finalize_reapable_workdir; then
+    log "work-directory lifecycle record could not be finalized; this directory remains fail-closed and unreapable"
+  fi
   [ "$VERDICT_REACHED" -eq 1 ] && return 0
   log "ABORTED before the verdict (exit $rc): $GATE_PASS passed, $GATE_FAIL failed so far; every assertion after this point did not run"
   return 0
@@ -263,12 +279,22 @@ mkdir -p "$WORK"
 # shellcheck source=lib/private_subject.sh
 . "$ROOT/scripts/lib/private_subject.sh"
 
+if ! reapable_dir_lock_shared "$WORK" WORK_REAPER_LOCK_FD; then
+  gate_unrun "could not acquire the g0_identity_e2e work-directory liveness lock"
+  exit 2
+fi
+
 mkdir -p "$WORK/bin"
 log "acquiring the subject for this tree state"
-if ! SUBJECT_DIR="$(subject_acquire "$ROOT")"; then
+SUBJECT_REAPER_LOCK_FD=""
+if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD; then
   log "FATAL: building registry-check from this tree failed (see $SUBJECT_DIR/build.log)"
   exit 2
 fi
+reapable_lock_fd_is_open "$SUBJECT_REAPER_LOCK_FD" || {
+  log "FATAL: subject liveness lock was not retained by this gate"
+  exit 2
+}
 BIN="$SUBJECT_DIR/registry-check"
 subject_is_fresh "$BIN" "$ROOT" || {
   log "FATAL: $BIN is not newer than $(subject_newest_source "$ROOT") — the build did not produce this tree's artifact"
@@ -2008,6 +2034,11 @@ fi
 # churn there is not a defect and firing on it is what fgdb-flbb fixed. The
 # linked-input check is the instrument that actually covers those bytes.
 assert_linked_inputs_unwritten
+if finalize_reapable_workdir; then
+  ok "work directory carries an inode-aware REAPABLE-AFTER record protected by the live gate lock"
+else
+  die "work directory lifecycle record could not be finalized; it is not eligible for the scoped reaper"
+fi
 log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-completion-schema,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
 VERDICT_REACHED=1
 gate_verdict || exit 1

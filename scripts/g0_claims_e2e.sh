@@ -63,10 +63,15 @@ mkdir -p "$WORK"
 
 mkdir -p "$WORK/bin"
 log "acquiring the subject for this tree state"
-if ! SUBJECT_DIR="$(subject_acquire "$ROOT")"; then
+SUBJECT_REAPER_LOCK_FD=""
+if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD; then
   log "FATAL: building registry-check from this tree failed (see $SUBJECT_DIR/build.log)"
   exit 2
 fi
+reapable_lock_fd_is_open "$SUBJECT_REAPER_LOCK_FD" || {
+  log "FATAL: subject liveness lock was not retained by this gate"
+  exit 2
+}
 BIN="$SUBJECT_DIR/registry-check"
 subject_is_fresh "$BIN" "$ROOT" || {
   log "FATAL: $BIN is not newer than $(subject_newest_source "$ROOT") — the build did not produce this tree's artifact"
