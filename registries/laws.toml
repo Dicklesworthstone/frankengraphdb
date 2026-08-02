@@ -35,24 +35,36 @@
 #
 # STATUS IS WHAT A FUTURE GUARD KEYS ON, and the three values are not
 # decorative:
-#   registered           the plan states this rule at source_location. A
-#                        citation resolving here is licensed.
+#   registered           the rule is adopted and anchored at source_location
+#                        (aNN:LINE or plan:LINE for a stated plan line;
+#                        enforcement:NAME for a rule whose authority is the
+#                        checker law that enforces it). A citation resolving
+#                        here is licensed.
 #   unadjudicated        cited, and something real is being pointed at, but its
 #                        legal status is not established. A citation resolving
 #                        here is NOT yet licensed; it is owner-facing work.
 #   fabrication-candidate cited, with no locatable referent. A citation
 #                        resolving here must FAIL once the guard lands.
+#   struck               adjudicated a fabrication by owner ruling; its
+#                        citations were repaired away in the same landing, the
+#                        name licenses nothing, and the row remains as the
+#                        permanent record.
 #
-# NOTHING HAS BEEN STRUCK. The fabrication candidates are recorded here rather
-# than deleted from the catalog, because the citations are the demand signal for
-# this file and destroying them would destroy the only record of what the
-# catalog believes its own rules are.
+# STRIKE RECORD. FG-LAW-07 and FG-LAW-08 were struck by owner ruling on
+# 2026-08-01 (mv6g sitting, fgdb-u259) with their three citations repaired in
+# the same landing. The rows remain — deleting them would destroy the only
+# record of what the catalog once believed its own rules were, and the struck
+# status is what makes a future re-citation fail rather than resurrect them.
 #
 # Row schema:
 #   [[law]]
 #   id              = "FG-LAW-NN"        # stable, permanent, never reused
 #   name            = "..."              # the phrase catalog prose cites
-#   source_location = "aNN:LINE"         # REQUIRED when status = "registered"
+#   source_location = "aNN:LINE"         # REQUIRED when status = "registered";
+#                                        # also "plan:LINE" (statement outside
+#                                        # the appendix slices) or
+#                                        # "enforcement:NAME" (checker-law
+#                                        # anchored, mv6g sitting 2026-08-02)
 #   statement       = "..."              # what the rule actually says
 #   enforcement     = "..."              # REQUIRED when status = "registered"
 #   status          = "registered" | "unadjudicated" | "fabrication-candidate"
@@ -109,20 +121,20 @@ note = "Cited both as \"the SequenceNeutralSpec law\" and \"the SequenceNeutralS
 [[law]]
 id = "FG-LAW-05"
 name = "D1 closure"
-source_location = "a10:1912"
-statement = ""
-enforcement = ""
-status = "unadjudicated"
-note = "The citation carries the a10:1912 anchor and that line is real, but it defines the CommitCommand/ControlCommand/LogicalCommandRecord/PreparedCommitRecord transaction order unit and states no closure law. The token D1 is real elsewhere in the plan (28 occurrences: the D1/D2/Raft path, the D1 boundary), so this names something that exists whose legal status is not established. OWNER DECISION NEEDED: promote to a registered law with a correct anchor, or demote the phrase to a description."
+source_location = "plan:392"
+statement = "Payload durability barrier D1 is complete only when the final semantic capsule AND its entire mandatory strong closure are sealed and directory-durable: the prepared record inserted, authenticated nonretaining locator entries published, the updated RootManifest persisted, and a RootSlot durably published before D1 is complete or a payload receipt may be emitted. Bytes not yet admitted to a prepared root remain staging data and are unreachable after a crash."
+enforcement = "Chronicle's two-fsync commit path enforces closure-before-receipt at runtime, with the §15 crash-point matrix as its permanent CI gate; catalog retention rules cite the law for StrongRef retention of D1-closure members (e.g. the candidate PayloadAvailabilityCertificate held while ConfigurationTransitionSpec is retained)."
+status = "registered"
+note = "Promoted by owner ruling in the mv6g sitting (2026-08-01/02, rounds 3 and 6; swarm OWNER_RULINGS record). The original citation carried anchor a10:1912, which is real but defines the transaction order unit and states no closure law; the statement lives at plan line 392 (§5.2 step 5), and the plan:LINE anchor form was added to carry it. The citing catalog row still carries the stale a10:1912 inline anchor in its prose; this row's anchor supersedes it."
 
 [[law]]
 id = "FG-LAW-06"
 name = "StrongRef-only arm-payload-shape"
-source_location = ""
-statement = ""
-enforcement = ""
-status = "unadjudicated"
-note = "Two citations, both describing an arm payload committed byte-exactly by the covering arm payload digest and registered on the wire path with no field row. That is a coherent and probably real rule — it agrees with the landed fact that a field row may not hang off a wire-only schema — but no anchor is cited and none was found. OWNER DECISION NEEDED: locate and register, or reclassify."
+source_location = "enforcement:field_unresolved_schema"
+statement = "A generated closed-union arm whose payload is a single StrongRef member is committed byte-exactly by the covering arm payload digest and registered on the wire path with no [[field]] row; a [[field]] row may never hang off a wire-only schema."
+enforcement = "field_unresolved_schema: registry-check appendix rejects any field row naming a wire-only host, and the landed corpus carries zero field rows on wire hosts."
+status = "registered"
+note = "Registered by owner ruling in the mv6g sitting (2026-08-01/02, rounds 3 and 6): the rule is real and enforcement-anchored. No plan line states it — the enforcement:NAME anchor form exists for exactly this shape, rather than inventing a prose anchor the plan does not contain."
 
 [[law]]
 id = "FG-LAW-07"
@@ -130,8 +142,8 @@ name = "Appendix A u64 sequence"
 source_location = ""
 statement = ""
 enforcement = ""
-status = "fabrication-candidate"
-note = "Two citations, both in ConfigurationTransitionSpec (a10:1920 source-position tags 3 and 4), both landed by mint 3c1c936. No anchor, no referent under any spelling tried. NOT STRUCK — owner permission required."
+status = "struck"
+note = "STRUCK by owner ruling in the mv6g sitting (2026-08-01, round 1; fgdb-u259): a fabrication from mint 3c1c936 — a law name invented for 'this member is a u64'. Both citing rationale rows (ConfigurationTransitionSpec a10:1920 source-position tags 3 and 4) were repaired in the same landing to state the u64 fact plainly. The row remains as the permanent record that this phrase claims no authority and must never be cited again."
 
 [[law]]
 id = "FG-LAW-08"
@@ -139,8 +151,8 @@ name = "Appendix A u64 index"
 source_location = ""
 statement = ""
 enforcement = ""
-status = "fabrication-candidate"
-note = "One citation, ConfigurationTransitionSpec a10:1920 source-position tag 5, mint 3c1c936. No anchor, no referent. NOT STRUCK — owner permission required."
+status = "struck"
+note = "STRUCK by owner ruling in the mv6g sitting (2026-08-01, round 1; fgdb-u259): same fabrication mint as FG-LAW-07 (3c1c936). The single citing rationale row (ConfigurationTransitionSpec a10:1920 source-position tag 5) was repaired in the same landing. The row remains as the permanent record that this phrase claims no authority."
 
 [[law]]
 id = "FG-LAW-09"

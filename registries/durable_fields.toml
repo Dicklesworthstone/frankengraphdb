@@ -1935,7 +1935,7 @@ identity_class = "inline"
 reference_semantics = "none"
 construction_order = 30
 role_predicate = "role-local"
-retention_and_cut_rule = "a10:1920 source-position tag 3; exact covered logical-command prefix under the Appendix A u64 sequence law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+retention_and_cut_rule = "a10:1920 source-position tag 3; exact covered logical-command prefix, a u64 sequence embedded by value and retained and cut with ConfigurationTransitionSpec"
 version_status = "reserved"
 max_size_bytes = 8
 
@@ -1949,7 +1949,7 @@ identity_class = "inline"
 reference_semantics = "none"
 construction_order = 30
 role_predicate = "role-local"
-retention_and_cut_rule = "a10:1920 source-position tag 4; exact covered committed-transaction prefix under the Appendix A u64 sequence law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+retention_and_cut_rule = "a10:1920 source-position tag 4; exact covered committed-transaction prefix, a u64 sequence embedded by value and retained and cut with ConfigurationTransitionSpec"
 version_status = "reserved"
 max_size_bytes = 8
 
@@ -1963,7 +1963,7 @@ identity_class = "inline"
 reference_semantics = "none"
 construction_order = 30
 role_predicate = "role-local"
-retention_and_cut_rule = "a10:1920 source-position tag 5; exact covered Raft-log position under the Appendix A u64 index law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+retention_and_cut_rule = "a10:1920 source-position tag 5; exact covered Raft-log position, a u64 index embedded by value and retained and cut with ConfigurationTransitionSpec"
 version_status = "reserved"
 max_size_bytes = 8
 

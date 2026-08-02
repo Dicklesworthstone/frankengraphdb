@@ -42,9 +42,14 @@ pub const KNOWN_LAW_KEYS: [&str; 8] = [
     "note",
 ];
 
-/// The closed status vocabulary. `registered` licenses a citation; the other
-/// two do not, and a future citation guard keys on exactly this distinction.
-pub const LAW_STATUSES: [&str; 3] = ["registered", "unadjudicated", "fabrication-candidate"];
+/// The closed status vocabulary. `registered` licenses a citation; the others
+/// do not, and the citation guard keys on exactly this distinction. `struck`
+/// records a fabrication adjudicated by owner ruling (mv6g sitting,
+/// 2026-08-01/02): the name licenses nothing, its citations were repaired away
+/// in the same landing, and the row remains as the permanent record that the
+/// phrase claims no authority.
+pub const LAW_STATUSES: [&str; 4] =
+    ["registered", "unadjudicated", "fabrication-candidate", "struck"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Law {
@@ -165,18 +170,36 @@ pub fn registry_path(root: &Path) -> PathBuf {
 
 /// `aNN:LINE` — the anchor form every resolvable citation in the catalog uses.
 fn is_source_anchor(value: &str) -> bool {
-    let Some((slice, line)) = value.split_once(':') else {
+    let Some((prefix, rest)) = value.split_once(':') else {
         return false;
     };
-    let mut chars = slice.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_lowercase()
-        && chars.clone().count() == 2
-        && chars.all(|c| c.is_ascii_digit())
-        && !line.is_empty()
-        && line.chars().all(|c| c.is_ascii_digit())
+    match prefix {
+        // "plan:LINE" — a normative statement outside the appendix slices
+        // (owner ruling, mv6g sitting 2026-08-01/02: FG-LAW-05's statement
+        // lives at §5.2, plan line 392, not in any aNN slice).
+        "plan" => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()),
+        // "enforcement:name" — an enforcement-anchored registration (same
+        // sitting: FG-LAW-06 is real but stated nowhere in the plan; its
+        // authority is the checker law that enforces it). Grammar here,
+        // resolution in the test suite — the same split the aNN anchors use.
+        "enforcement" => {
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        }
+        _ => {
+            let mut chars = prefix.chars();
+            let Some(first) = chars.next() else {
+                return false;
+            };
+            first.is_ascii_lowercase()
+                && chars.clone().count() == 2
+                && chars.all(|c| c.is_ascii_digit())
+                && !rest.is_empty()
+                && rest.chars().all(|c| c.is_ascii_digit())
+        }
+    }
 }
 
 fn is_law_id(value: &str) -> bool {
@@ -280,7 +303,7 @@ pub fn validate_laws(registry: &LawRegistry) -> Vec<Violation> {
                     "law_source_anchor_missing",
                     &law.id,
                     format!(
-                        "registered law has source_location {:?}, which is not an aNN:LINE anchor; the anchor is what makes the law falsifiable",
+                        "registered law has source_location {:?}, which is not an aNN:LINE, plan:LINE, or enforcement:NAME anchor; the anchor is what makes the law falsifiable",
                         law.source_location
                     ),
                 ));
@@ -375,32 +398,21 @@ pub const GENERIC_DETERMINERS: [&str; 9] = [
 
 /// Citations of laws the owner has not yet adjudicated, as a per-law CEILING.
 ///
-/// These are real findings, not exemptions: each entry names a law whose status
-/// is `unadjudicated` or `fabrication-candidate`, so its citations are NOT
-/// licensed and the rows carrying them are owner-facing work. They are carried
-/// as a bounded, self-expiring census rather than as a red gate because
-/// `registries/laws.toml` records that the fabrication candidates were
-/// deliberately NOT struck — only the owner may strike them — so the tree
-/// cannot be made green by repair alone.
+/// EMPTIED 2026-08-02 by owner ruling (mv6g sitting; fgdb-u259): FG-LAW-05 and
+/// FG-LAW-06 were registered, FG-LAW-07 and FG-LAW-08 were struck with their
+/// citations repaired in the same landing. The machinery stays live: a future
+/// adjudication may add entries, a NEW citation of any unregistered law fails
+/// immediately at the default ceiling of zero, and the stale and over-ceiling
+/// branches are proven to fire by the test suite through
+/// `validate_citations_with_ceiling`.
 ///
 /// It is a ceiling and it cannot go stale, which is what separates it from an
-/// ordinary waiver. A NEW citation of one of these laws exceeds the ceiling and
+/// ordinary waiver. A NEW citation of a listed law exceeds the ceiling and
 /// fails. Repairing one is free. Repairing the last one drops the observed
 /// count to zero, and an entry with zero observed citations fails as stale — so
 /// the entry must be deleted when its cause is gone, and the list can only
 /// shrink.
-pub const OPEN_ADJUDICATION_CEILING: [(&str, usize); 4] = [
-    // FG-LAW-05 "D1 closure": anchor a10:1912 is real but states no closure
-    // law. Owner decision: register with a correct anchor, or demote.
-    ("FG-LAW-05", 1),
-    // FG-LAW-06 "StrongRef-only arm-payload-shape": coherent and probably real,
-    // no anchor found. Owner decision: locate and register, or reclassify.
-    ("FG-LAW-06", 2),
-    // FG-LAW-07 "Appendix A u64 sequence": fabrication candidate, mint 3c1c936.
-    ("FG-LAW-07", 2),
-    // FG-LAW-08 "Appendix A u64 index": fabrication candidate, mint 3c1c936.
-    ("FG-LAW-08", 1),
-];
+pub const OPEN_ADJUDICATION_CEILING: [(&str, usize); 0] = [];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CitationFrame {
@@ -613,6 +625,17 @@ pub fn resolve_citation<'a>(registry: &'a LawRegistry, name: &str) -> Option<&'a
 /// The guard. Fails closed on an unresolvable citation, on an unrecognised
 /// citation shape, and on a citation of a law the owner has not registered.
 pub fn validate_citations(registry: &LawRegistry, occurrences: &[CitationToken]) -> Vec<Violation> {
+    validate_citations_with_ceiling(registry, occurrences, &OPEN_ADJUDICATION_CEILING)
+}
+
+/// The guard body, parameterized over the ceiling so the test suite can prove
+/// the stale and over-ceiling branches fire even while the shipped ceiling is
+/// empty. Production always enters through `validate_citations`.
+pub fn validate_citations_with_ceiling(
+    registry: &LawRegistry,
+    occurrences: &[CitationToken],
+    ceiling: &[(&str, usize)],
+) -> Vec<Violation> {
     let mut out = Vec::new();
     let mut unlicensed: Vec<(&str, &CitationToken)> = Vec::new();
 
@@ -656,26 +679,26 @@ pub fn validate_citations(registry: &LawRegistry, occurrences: &[CitationToken])
         }
     }
 
-    for (law_id, ceiling) in OPEN_ADJUDICATION_CEILING {
+    for (law_id, limit) in ceiling.iter().copied() {
         let observed = unlicensed.iter().filter(|(id, _)| *id == law_id).count();
         if observed == 0 {
             out.push(Violation::new(
                 "law_citation_open_adjudication_stale",
                 law_id,
                 format!(
-                    "the open-adjudication ceiling carries {law_id} at {ceiling}, but the catalog cites it {observed} times; either the law is now registered or its citations were repaired, and a ceiling entry outlives its cause only by being deleted"
+                    "the open-adjudication ceiling carries {law_id} at {limit}, but the catalog cites it {observed} times; either the law is now registered or its citations were repaired, and a ceiling entry outlives its cause only by being deleted"
                 ),
             ));
         }
     }
 
     for (law_id, occurrence) in &unlicensed {
-        let ceiling = OPEN_ADJUDICATION_CEILING
+        let limit = ceiling
             .iter()
             .find(|(id, _)| id == law_id)
             .map_or(0, |(_, n)| *n);
         let observed = unlicensed.iter().filter(|(id, _)| id == law_id).count();
-        if observed > ceiling {
+        if observed > limit {
             let status = registry
                 .laws
                 .iter()
@@ -688,7 +711,7 @@ pub fn validate_citations(registry: &LawRegistry, occurrences: &[CitationToken])
                     CITATION_SUBJECT, occurrence.line, occurrence.row_id
                 ),
                 format!(
-                    "cites {law_id}, whose status is {status:?}; only a `registered` law licenses a citation, and this law is cited {observed} times against an open-adjudication ceiling of {ceiling}: ...{}...",
+                    "cites {law_id}, whose status is {status:?}; only a `registered` law licenses a citation, and this law is cited {observed} times against an open-adjudication ceiling of {limit}: ...{}...",
                     occurrence.excerpt
                 ),
             ));

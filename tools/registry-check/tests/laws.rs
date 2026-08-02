@@ -13,7 +13,8 @@
 
 use registry_check::laws::{
     CITATION_SUBJECT, CitationClass, Law, LawRegistry, OPEN_ADJUDICATION_CEILING,
-    extract_citations, load_from_repo, resolve_citation, validate_citations, validate_laws,
+    extract_citations, load_from_repo, resolve_citation, validate_citations,
+    validate_citations_with_ceiling, validate_laws,
 };
 use std::path::{Path, PathBuf};
 
@@ -69,8 +70,21 @@ fn every_registered_anchor_resolves_in_the_plan() {
     let mut checked = 0usize;
     for law in registry.laws.iter().filter(|l| l.status == "registered") {
         let anchor = law.source_location.split_once(':');
-        assert!(anchor.is_some(), "{} has no aNN:LINE anchor", law.id);
-        let (_slice, digits) = anchor.expect("anchor presence asserted above");
+        assert!(anchor.is_some(), "{} has no anchor", law.id);
+        let (prefix, digits) = anchor.expect("anchor presence asserted above");
+        if prefix == "enforcement" {
+            // An enforcement-anchored law resolves against the checker source:
+            // the named checker law must exist as a violation-code literal, so
+            // the anchor stays falsifiable — a reader opens the checker and
+            // looks, exactly as they would open a plan line.
+            assert!(
+                checker_sources().contains(&format!("\"{digits}\"")),
+                "{} anchors to enforcement {digits:?}, which appears nowhere in the checker",
+                law.id
+            );
+            checked += 1;
+            continue;
+        }
         assert!(
             !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()),
             "{} anchor line {digits:?} is not a number",
@@ -184,7 +198,18 @@ fn registered_law_without_enforcement_is_rejected() {
 /// every fabricated citation in the catalog had.
 #[test]
 fn registered_law_without_anchor_is_rejected() {
-    for bad in ["", "somewhere in the plan", "a01", "1412", "A01:1412"] {
+    for bad in [
+        "",
+        "somewhere in the plan",
+        "a01",
+        "1412",
+        "A01:1412",
+        "plan:",
+        "plan:x392",
+        "Plan:392",
+        "enforcement:",
+        "enforcement:Field-Unresolved",
+    ] {
         let r = mutate(|law| {
             law.status = "registered".into();
             law.source_location = bad.into();
@@ -199,14 +224,52 @@ fn registered_law_without_anchor_is_rejected() {
 
 #[test]
 fn a_real_anchor_is_accepted() {
-    let r = mutate(|law| {
-        law.status = "registered".into();
-        law.source_location = "a01:1412".into();
-    });
+    for good in ["a01:1412", "plan:392", "enforcement:field_unresolved_schema"] {
+        let r = mutate(|law| {
+            law.status = "registered".into();
+            law.source_location = good.into();
+        });
+        assert!(
+            !codes(&r).contains(&"law_source_anchor_missing".to_string()),
+            "a well-formed anchor {good:?} must not be rejected: {:?}",
+            codes(&r)
+        );
+    }
+}
+
+/// The concatenated checker sources an enforcement anchor resolves against:
+/// every violation code is emitted from one of the crate's top-level modules.
+fn checker_sources() -> String {
+    let src = repo_root().join("tools/registry-check/src");
+    let mut out = String::new();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&src)
+        .expect("checker src dir is readable")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "checker source set must not be empty");
+    for path in entries {
+        out.push_str(&std::fs::read_to_string(&path).expect("checker source is readable"));
+    }
+    out
+}
+
+/// CONTROL — the enforcement-anchor resolution above can fail. The grammar
+/// accepts any well-formed name; the resolution layer (the anchor test) is what
+/// rejects a name the checker does not carry, so this proves the name used by
+/// the real registry is not vacuously "found" by a reader that matches
+/// anything.
+#[test]
+fn an_enforcement_anchor_naming_a_nonexistent_checker_law_would_fail_resolution() {
+    let checker = checker_sources();
     assert!(
-        !codes(&r).contains(&"law_source_anchor_missing".to_string()),
-        "a well-formed anchor must not be rejected: {:?}",
-        codes(&r)
+        !checker.contains("\"zz_no_such_checker_law\""),
+        "the control name must not exist in the checker"
+    );
+    assert!(
+        checker.contains("\"field_unresolved_schema\""),
+        "the real anchor target must exist in the checker"
     );
 }
 
@@ -361,9 +424,11 @@ fn citation_census_is_not_vacuous() {
         cited.len() - licensed,
     );
 
-    // MEASURED 2026-07-27: 93 law tokens, 92 citations of 9 distinct names, 1
-    // generic ("No source law requires ..."), 0 unrecognised; 86 licensed by a
-    // registered law and 6 open adjudications under the ceiling. These are
+    // MEASURED 2026-07-27: 93 law tokens, 92 citations of 9 distinct names,
+    // 86 licensed and 6 open adjudications under the ceiling. RE-MEASURED
+    // 2026-08-02 after the fgdb-u259 adjudication landing: the three fabricated
+    // u64 citations were repaired away and FG-LAW-05/06 registered, leaving 89
+    // citations of 7 distinct names, all licensed, ceiling empty. These are
     // floors, not pins: a repair may lawfully shrink them, an extractor that
     // stops seeing the corpus may not.
     assert!(
@@ -377,7 +442,7 @@ fn citation_census_is_not_vacuous() {
         cited.len()
     );
     assert!(
-        distinct.len() >= 8,
+        distinct.len() >= 7,
         "distinct cited law names collapsed to {}: {distinct:?}",
         distinct.len()
     );
@@ -496,28 +561,27 @@ fn a_citation_of_an_unregistered_law_is_not_licensed() {
 /// CONTROL — the open-adjudication ceiling cannot go stale. An entry whose
 /// citations have all been repaired fails, so the list can only shrink. This is
 /// what stops it from becoming the permanent waiver that every such list
-/// becomes.
+/// becomes. The shipped ceiling is empty (every entry's cause is gone, fgdb-u259),
+/// so the branch is proven through the parameterized guard with a synthetic
+/// ceiling naming the struck row the catalog no longer cites.
 #[test]
 fn a_stale_open_adjudication_entry_fails() {
     let registry = registry();
-    let text = catalog_text();
-    let ids: Vec<&str> = OPEN_ADJUDICATION_CEILING
-        .iter()
-        .map(|(id, _)| *id)
-        .collect();
-    // Repair every citation of the first ceilinged law by deleting the lines
-    // that carry it, leaving its ceiling entry behind with nothing to cover.
-    let target = registry
-        .laws
-        .iter()
-        .find(|law| ids.contains(&law.id.as_str()))
-        .expect("ceiling names a real law");
-    let repaired: String = text
-        .lines()
-        .filter(|line| !line.contains(&format!("{} law", target.name)))
-        .map(|line| format!("{line}\n"))
-        .collect();
-    let codes = citation_codes(&registry, &repaired);
+    assert!(
+        registry
+            .laws
+            .iter()
+            .any(|law| law.id == "FG-LAW-07" && law.status == "struck"),
+        "the control rides the struck row the mv6g ruling recorded"
+    );
+    let codes: Vec<String> = validate_citations_with_ceiling(
+        &registry,
+        &extract_citations(&catalog_text()),
+        &[("FG-LAW-07", 1)],
+    )
+    .into_iter()
+    .map(|violation| violation.code)
+    .collect();
     assert!(
         codes.contains(&"law_citation_open_adjudication_stale".to_string()),
         "a ceiling entry with no remaining citation must fail as stale: {codes:?}"
@@ -525,25 +589,31 @@ fn a_stale_open_adjudication_entry_fails() {
 }
 
 /// CONTROL — the ceiling is a ceiling. One more citation of an unadjudicated
-/// law than the census declares is a failure, so the pin cannot grow silently.
+/// law than its entry declares is a failure, so the pin cannot grow silently.
+/// Proven through the parameterized guard for the same reason as the stale
+/// control; the shipped empty ceiling's own "any new citation fails at zero"
+/// behavior is covered by `a_citation_of_an_unregistered_law_is_not_licensed`.
 #[test]
 fn exceeding_the_open_adjudication_ceiling_fails() {
     let registry = registry();
-    let ceilinged = registry
+    let struck = registry
         .laws
         .iter()
-        .find(|law| {
-            OPEN_ADJUDICATION_CEILING
-                .iter()
-                .any(|(id, _)| id == &law.id)
-        })
-        .expect("ceiling names a real law");
+        .find(|law| law.id == "FG-LAW-07")
+        .expect("the struck row is retained as a record");
     let mut text = catalog_text();
     text.push_str(&format!(
         "rationale = \"a01:1412 one more citation under the {} law\"\n",
-        ceilinged.name
+        struck.name
     ));
-    let codes = citation_codes(&registry, &text);
+    let codes: Vec<String> = validate_citations_with_ceiling(
+        &registry,
+        &extract_citations(&text),
+        &[("FG-LAW-07", 0)],
+    )
+    .into_iter()
+    .map(|violation| violation.code)
+    .collect();
     assert!(
         codes.contains(&"law_citation_not_licensed".to_string()),
         "exceeding the ceiling must fail: {codes:?}"
