@@ -64,12 +64,18 @@ mkdir -p "$WORK"
 mkdir -p "$WORK/bin"
 log "acquiring the subject for this tree state"
 SUBJECT_REAPER_LOCK_FD=""
-if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD; then
+SUBJECT_REAPER_PARENT_LOCK_FD=""
+if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD \
+  SUBJECT_REAPER_PARENT_LOCK_FD; then
   log "FATAL: building registry-check from this tree failed (see $SUBJECT_DIR/build.log)"
   exit 2
 fi
 reapable_lock_fd_is_open "$SUBJECT_REAPER_LOCK_FD" || {
   log "FATAL: subject liveness lock was not retained by this gate"
+  exit 2
+}
+reapable_lock_fd_is_open "$SUBJECT_REAPER_PARENT_LOCK_FD" || {
+  log "FATAL: subject parent-namespace lock was not retained by this gate"
   exit 2
 }
 BIN="$SUBJECT_DIR/registry-check"

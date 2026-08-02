@@ -114,6 +114,7 @@ catalog_closure_census() {
 WORK="${G0_IDENTITY_E2E_WORKDIR:-${G0_E2E_WORKDIR:-$(mktemp -d)}}"
 BIN="$WORK/bin/registry-check"
 WORK_REAPER_LOCK_FD=""
+WORK_REAPER_PARENT_LOCK_FD=""
 WORK_REAPABLE_FINALIZED=0
 
 # The shared verdict contract (fgdb-udco). Before it, this gate said
@@ -279,6 +280,15 @@ mkdir -p "$WORK"
 # shellcheck source=lib/private_subject.sh
 . "$ROOT/scripts/lib/private_subject.sh"
 
+if ! reapable_parent_lock_shared "${WORK%/*}" \
+  .fgdb-g0-identity-reaper-parent.lock WORK_REAPER_PARENT_LOCK_FD; then
+  gate_unrun "could not acquire the g0_identity_e2e parent-namespace lock"
+  exit 2
+fi
+if ! reapable_lock_fd_is_open "$WORK_REAPER_PARENT_LOCK_FD"; then
+  gate_unrun "g0_identity_e2e parent-namespace lock was not retained"
+  exit 2
+fi
 if ! reapable_dir_lock_shared "$WORK" WORK_REAPER_LOCK_FD; then
   gate_unrun "could not acquire the g0_identity_e2e work-directory liveness lock"
   exit 2
@@ -287,12 +297,18 @@ fi
 mkdir -p "$WORK/bin"
 log "acquiring the subject for this tree state"
 SUBJECT_REAPER_LOCK_FD=""
-if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD; then
+SUBJECT_REAPER_PARENT_LOCK_FD=""
+if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD \
+  SUBJECT_REAPER_PARENT_LOCK_FD; then
   log "FATAL: building registry-check from this tree failed (see $SUBJECT_DIR/build.log)"
   exit 2
 fi
 reapable_lock_fd_is_open "$SUBJECT_REAPER_LOCK_FD" || {
   log "FATAL: subject liveness lock was not retained by this gate"
+  exit 2
+}
+reapable_lock_fd_is_open "$SUBJECT_REAPER_PARENT_LOCK_FD" || {
+  log "FATAL: subject parent-namespace lock was not retained by this gate"
   exit 2
 }
 BIN="$SUBJECT_DIR/registry-check"

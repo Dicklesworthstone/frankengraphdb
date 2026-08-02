@@ -62,10 +62,11 @@
 # STILL NOTHING HERE DELETES A FILE. The owner-authorized reaper remains in
 # scripts/disk_hygiene.sh and is restricted to the two paths named by the
 # fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra ruling. This library owns
-# only the producer half of that protocol: a consumer holds a shared flock for
-# its whole lifetime and refreshes a fail-closed REAPABLE-AFTER record containing
-# the retention boundary plus inode-aware byte accounting. The reaper must take
-# the same lock exclusively, so age can never be its only answer.
+# only the producer half of that protocol: a consumer holds a shared parent-
+# namespace lease and a per-directory shared flock for its whole lifetime, then
+# refreshes a fail-closed REAPABLE-AFTER record containing the retention boundary
+# plus inode-aware byte accounting. The reaper must take both locks exclusively,
+# so neither age nor an unpinned pathname can be its only answer.
 #
 # The publish step is `mv -T` onto a path that does not exist; a pane losing that
 # race keeps its own copy rather than removing anyone's, which degrades exactly
@@ -360,17 +361,40 @@ reapable_lock_fd_is_open() {
   [ -e "/proc/${BASHPID:-$$}/fd/$lock_fd" ]
 }
 
+# reapable_parent_lock_shared <parent-dir> <lock-name> <fd-variable>
+#
+# The child lock proves that one directory is not live. This parent namespace
+# lock closes the rename/swap gap around its name: every producer holds it
+# shared for the whole gate lifetime, while the scoped reaper must take it
+# exclusively before enumerating or removing any candidate in that pool.
+reapable_parent_lock_shared() {
+  local parent_dir="$1" lock_name="$2" out_fd_name="$3" opened_fd
+  [ -d "$parent_dir" ] && [ ! -L "$parent_dir" ] || return 1
+  case "$lock_name" in
+    .fgdb-g0-identity-reaper-parent.lock | .fgdb-reaper-parent.lock) ;;
+    *) return 1 ;;
+  esac
+  : >>"$parent_dir/$lock_name"
+  exec {opened_fd}<>"$parent_dir/$lock_name"
+  if ! flock -s "$opened_fd"; then
+    exec {opened_fd}>&-
+    return 1
+  fi
+  printf -v "$out_fd_name" '%s' "$opened_fd"
+}
+
 # reapable_dir_stamp <dir> <pool> <shared-lock-fd>
 #
 # The stamp is written while the producer holds the shared liveness lock. It is
 # intentionally a strict key=value record rather than an mtime convention: the
-# reaper can reject malformed, cross-pool, or byte-drifted state. A placeholder
-# is written before measurement so the stamp and lock allocations themselves
-# are included in the recorded block count.
+# reaper can reject malformed, cross-pool, or byte-drifted state. The writer
+# converges the record against a settled allocation measurement so the stamp,
+# lock, and delayed-allocation block for the record itself are all included.
 reapable_dir_stamp() {
   local dir="$1" pool="$2" lock_fd="$3"
-  local retention_seconds now_epoch after_epoch measurement
+  local retention_seconds now_epoch after_epoch measurement observed
   local allocated_bytes reclaimable_bytes shared_bytes
+  local attempt
   [ -d "$dir" ] || return 1
   reapable_lock_fd_is_open "$lock_fd" || return 1
   case "$pool" in
@@ -381,32 +405,34 @@ reapable_dir_stamp() {
   [[ "$retention_seconds" =~ ^[0-9]+$ ]] || return 1
   now_epoch="$(date -u +%s)" || return 1
   after_epoch=$((now_epoch + retention_seconds))
-  {
-    printf 'format=fgdb-reapable-v1\n'
-    printf 'pool=%s\n' "$pool"
-    printf 'reapable_after_epoch=%s\n' "$after_epoch"
-    printf 'measured_at_epoch=%s\n' "$now_epoch"
-    printf 'producer_pid=%s\n' "$$"
-    printf 'allocated_bytes=0\n'
-    printf 'reclaimable_bytes=0\n'
-    printf 'shared_bytes=0\n'
-  } >"$dir/REAPABLE-AFTER"
-  measurement="$(reapable_measure_allocated_bytes "$dir")" || return 1
-  IFS=$'\t' read -r allocated_bytes reclaimable_bytes shared_bytes \
-    <<<"$measurement"
-  [[ "$allocated_bytes" =~ ^[0-9]+$ ]] || return 1
-  [[ "$reclaimable_bytes" =~ ^[0-9]+$ ]] || return 1
-  [[ "$shared_bytes" =~ ^[0-9]+$ ]] || return 1
-  {
-    printf 'format=fgdb-reapable-v1\n'
-    printf 'pool=%s\n' "$pool"
-    printf 'reapable_after_epoch=%s\n' "$after_epoch"
-    printf 'measured_at_epoch=%s\n' "$now_epoch"
-    printf 'producer_pid=%s\n' "$$"
-    printf 'allocated_bytes=%s\n' "$allocated_bytes"
-    printf 'reclaimable_bytes=%s\n' "$reclaimable_bytes"
-    printf 'shared_bytes=%s\n' "$shared_bytes"
-  } >"$dir/REAPABLE-AFTER"
+  measurement=$'0\t0\t0'
+  for ((attempt = 1; attempt <= 4; attempt++)); do
+    IFS=$'\t' read -r allocated_bytes reclaimable_bytes shared_bytes \
+      <<<"$measurement"
+    [[ "$allocated_bytes" =~ ^[0-9]+$ ]] || return 1
+    [[ "$reclaimable_bytes" =~ ^[0-9]+$ ]] || return 1
+    [[ "$shared_bytes" =~ ^[0-9]+$ ]] || return 1
+    {
+      printf 'format=fgdb-reapable-v1\n'
+      printf 'pool=%s\n' "$pool"
+      printf 'reapable_after_epoch=%s\n' "$after_epoch"
+      printf 'measured_at_epoch=%s\n' "$now_epoch"
+      printf 'producer_pid=%s\n' "$$"
+      printf 'allocated_bytes=%s\n' "$allocated_bytes"
+      printf 'reclaimable_bytes=%s\n' "$reclaimable_bytes"
+      printf 'shared_bytes=%s\n' "$shared_bytes"
+    } >"$dir/REAPABLE-AFTER"
+    # ext4 delayed allocation can leave the first `%b` observation one block
+    # short even though the record already exists. Settle the record, then
+    # iterate until the record describes its own final allocation footprint.
+    sync -f "$dir/REAPABLE-AFTER" || return 1
+    observed="$(reapable_measure_allocated_bytes "$dir")" || return 1
+    if [ "$observed" = "$measurement" ]; then
+      return 0
+    fi
+    measurement="$observed"
+  done
+  return 1
 }
 
 # subject_cache_dir -> the directory shared subjects live in
@@ -478,31 +504,42 @@ subject_acquire() {
   return 0
 }
 
-# subject_acquire_leased <root> <dir-variable> <fd-variable>
+# subject_acquire_leased <root> <dir-variable> <fd-variable> <parent-fd-variable>
 #
 # Production gates use this wrapper rather than command substitution around
-# subject_acquire: the wrapper executes in the gate shell, so its shared lock FD
-# survives for the gate's full lifetime. The old printing API remains for the
-# hermetic provenance/residue controls whose caches are outside the authorized
-# /data/tmp/fgdb-subject pool.
+# subject_acquire: the wrapper executes in the gate shell, so both its parent-
+# namespace lease and child lock FDs survive for the gate's full lifetime. The
+# old printing API remains for the hermetic provenance/residue controls whose
+# caches are outside the authorized /data/tmp/fgdb-subject pool.
 subject_acquire_leased() {
-  local root="$1" out_dir_name="$2" out_fd_name="$3"
-  local dir="" key lock_fd
+  local root="$1" out_dir_name="$2" out_fd_name="$3" out_parent_fd_name="$4"
+  local dir="" key lock_fd parent_lock_fd cache_dir
+  cache_dir="$(subject_cache_dir)" || return 1
+  mkdir -p "$cache_dir" || return 1
+  if ! reapable_parent_lock_shared \
+    "$cache_dir" .fgdb-reaper-parent.lock parent_lock_fd; then
+    printf -v "$out_dir_name" '%s' "$dir"
+    return 1
+  fi
   if ! dir="$(subject_acquire "$root")"; then
+    exec {parent_lock_fd}>&-
     printf -v "$out_dir_name" '%s' "$dir"
     return 1
   fi
   if ! reapable_dir_lock_shared "$dir" lock_fd; then
+    exec {parent_lock_fd}>&-
     printf -v "$out_dir_name" '%s' "$dir"
     return 1
   fi
   key="$(subject_key "$root")" || {
     exec {lock_fd}>&-
+    exec {parent_lock_fd}>&-
     printf -v "$out_dir_name" '%s' "$dir"
     return 1
   }
   if ! subject_cache_entry_is_valid "$dir" "$root" "$key"; then
     exec {lock_fd}>&-
+    exec {parent_lock_fd}>&-
     printf -v "$out_dir_name" '%s' "$dir"
     return 1
   fi
@@ -513,12 +550,14 @@ subject_acquire_leased() {
     && [[ "${dir##*/}" =~ ^subject-[0-9a-f]{64}$ ]]; then
     if ! reapable_dir_stamp "$dir" registry-check-subject "$lock_fd"; then
       exec {lock_fd}>&-
+      exec {parent_lock_fd}>&-
       printf -v "$out_dir_name" '%s' "$dir"
       return 1
     fi
   fi
   printf -v "$out_dir_name" '%s' "$dir"
   printf -v "$out_fd_name" '%s' "$lock_fd"
+  printf -v "$out_parent_fd_name" '%s' "$parent_lock_fd"
 }
 
 # subject_recipe_root -> the checkout whose sourced recipe is executing

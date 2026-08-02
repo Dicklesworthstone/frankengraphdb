@@ -36,12 +36,18 @@ echo "==> build threat-check (private, provenance-controlled subject)"
 # shellcheck source=lib/private_subject.sh
 . "$ROOT/scripts/lib/private_subject.sh"
 SUBJECT_REAPER_LOCK_FD=""
-if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD; then
+SUBJECT_REAPER_PARENT_LOCK_FD=""
+if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD \
+  SUBJECT_REAPER_PARENT_LOCK_FD; then
   gate_unrun "threat-check build from this tree failed (see $SUBJECT_DIR/build.log)"
   exit 2
 fi
 if ! reapable_lock_fd_is_open "$SUBJECT_REAPER_LOCK_FD"; then
   gate_unrun "threat-check subject liveness lock was not retained"
+  exit 2
+fi
+if ! reapable_lock_fd_is_open "$SUBJECT_REAPER_PARENT_LOCK_FD"; then
+  gate_unrun "threat-check subject parent-namespace lock was not retained"
   exit 2
 fi
 BIN="$SUBJECT_DIR/threat-check"
