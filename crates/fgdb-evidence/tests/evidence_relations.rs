@@ -20,6 +20,12 @@
 //! - `EB2 allocation-shaped serialization`: append `String::capacity()` to the
 //!   encoded population. `identical_content_has_one_address_independent_of_allocation_shape`
 //!   failed (1/6).
+//! - `EB3 omitted strata identity`: remove field tag 4 from the production
+//!   transcript. `envelope_address_changes_for_every_bound_component` failed
+//!   on `strata_identity.variant` (1/6).
+//! - `EB4 omitted propensity-support identity`: remove field tag 5 from the
+//!   production transcript. `envelope_address_changes_for_every_bound_component`
+//!   failed on `propensity_support_identity.variant` (1/6).
 //! - `FB1 advisory wins`: return `selection_policy_oid` from `fallback()`.
 //!   `mandatory_fallback_is_preserved_for_every_claim_kind` and
 //!   `analytic_fallback_does_not_alias_the_advisory_selection` failed (2/6).
@@ -28,15 +34,15 @@
 //!   `replay_class_canonical_form_reaches_every_distinct_variant` failed (1/6).
 //!
 //! Thus all six integration relations are mutation-proven; none ships on
-//! coverage or reasoning alone. The separate `E0061` compile-fail doctest pins
-//! that construction without the required fallback argument is impossible.
+//! coverage or reasoning alone. Separate `E0061` and `E0308` compile-fail
+//! doctests pin the mandatory fallback and the distinct strata/support roles.
 
 use std::collections::BTreeSet;
 
 use fgdb_claim::{EvidenceClaim, RefinementStatus, StatisticalErrorControl};
 use fgdb_evidence::{
-    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, REPLAY_CLASS_VOCABULARY_VERSION,
-    ReplayClass,
+    CalibrationWindow, EVIDENCE_ENVELOPE_BINDING_VERSION, EvidenceEnvelope, FallbackBehavior,
+    PropensitySupportIdentity, REPLAY_CLASS_VOCABULARY_VERSION, ReplayClass, StrataIdentity,
 };
 use fgdb_types::ObjectId;
 
@@ -81,6 +87,8 @@ struct EnvelopeParts {
     claim: EvidenceClaim,
     evidence_oid: ObjectId,
     selection_policy_oid: ObjectId,
+    strata_identity: StrataIdentity,
+    propensity_support_identity: PropensitySupportIdentity,
     calibration_window: Option<CalibrationWindow>,
     regime_epoch: u64,
     fallback: FallbackBehavior,
@@ -92,6 +100,8 @@ impl EnvelopeParts {
             self.claim.clone(),
             self.evidence_oid,
             self.selection_policy_oid,
+            self.strata_identity,
+            self.propensity_support_identity,
             self.calibration_window,
             self.regime_epoch,
             self.fallback,
@@ -114,6 +124,8 @@ fn baseline_parts() -> EnvelopeParts {
         claim: statistical_claim(),
         evidence_oid: oid(0x11),
         selection_policy_oid: oid(0x22),
+        strata_identity: StrataIdentity::Bound(oid(0x44)),
+        propensity_support_identity: PropensitySupportIdentity::Bound(oid(0x55)),
         calibration_window: Some(CalibrationWindow::new(0, u64::MAX).expect("nonempty window")),
         regime_epoch: u64::MAX,
         fallback: FallbackBehavior::DeterministicPolicy {
@@ -449,6 +461,7 @@ fn claim_field_pairs() -> Vec<(&'static str, EvidenceClaim, EvidenceClaim)> {
 
 #[test]
 fn envelope_address_changes_for_every_bound_component() {
+    assert_eq!(EVIDENCE_ENVELOPE_BINDING_VERSION, 2);
     let base = baseline_parts();
 
     for (label, left_claim, right_claim) in claim_field_pairs() {
@@ -466,6 +479,18 @@ fn envelope_address_changes_for_every_bound_component() {
     let mut changed = base.clone();
     changed.selection_policy_oid = oid(0x23);
     changes.push(("selection_policy_oid", changed));
+    let mut changed = base.clone();
+    changed.strata_identity = StrataIdentity::NotApplicable;
+    changes.push(("strata_identity.variant", changed));
+    let mut changed = base.clone();
+    changed.strata_identity = StrataIdentity::Bound(oid(0x45));
+    changes.push(("strata_identity.oid", changed));
+    let mut changed = base.clone();
+    changed.propensity_support_identity = PropensitySupportIdentity::NotApplicable;
+    changes.push(("propensity_support_identity.variant", changed));
+    let mut changed = base.clone();
+    changed.propensity_support_identity = PropensitySupportIdentity::Bound(oid(0x56));
+    changes.push(("propensity_support_identity.oid", changed));
     let mut changed = base.clone();
     changed.calibration_window = None;
     changes.push(("calibration_window.presence", changed));
@@ -518,6 +543,8 @@ fn identical_content_has_one_address_independent_of_allocation_shape() {
         differently_allocated_claim(0),
         oid(1),
         oid(2),
+        StrataIdentity::Bound(oid(4)),
+        PropensitySupportIdentity::Bound(oid(5)),
         Some(CalibrationWindow::new(63, 65).expect("valid")),
         64,
         FallbackBehavior::DeterministicPolicy { policy_oid: oid(3) },
@@ -526,6 +553,8 @@ fn identical_content_has_one_address_independent_of_allocation_shape() {
         differently_allocated_claim(257),
         oid(1),
         oid(2),
+        StrataIdentity::Bound(oid(4)),
+        PropensitySupportIdentity::Bound(oid(5)),
         Some(CalibrationWindow::new(63, 65).expect("valid")),
         64,
         FallbackBehavior::DeterministicPolicy { policy_oid: oid(3) },
@@ -602,6 +631,16 @@ fn seeded_boundary_corpus_is_stable_and_address_distinct() {
             // evidence body OID aliases this entire corpus.
             oid(0xA5),
             generated_oid(&mut sweep),
+            if index % 3 == 0 {
+                StrataIdentity::NotApplicable
+            } else {
+                StrataIdentity::Bound(generated_oid(&mut sweep))
+            },
+            if index % 5 == 0 {
+                PropensitySupportIdentity::NotApplicable
+            } else {
+                PropensitySupportIdentity::Bound(generated_oid(&mut sweep))
+            },
             Some(
                 CalibrationWindow::new(0, EPOCHS[index % EPOCHS.len()].max(1))
                     .expect("end is positive"),
@@ -664,7 +703,16 @@ fn mandatory_fallback_is_preserved_for_every_claim_kind() {
     ];
     for claim in every_claim_kind() {
         for fallback in fallbacks {
-            let envelope = EvidenceEnvelope::new(claim.clone(), oid(1), oid(2), None, 0, fallback);
+            let envelope = EvidenceEnvelope::new(
+                claim.clone(),
+                oid(1),
+                oid(2),
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+                None,
+                0,
+                fallback,
+            );
             assert_eq!(
                 envelope.fallback(),
                 fallback,
@@ -682,6 +730,8 @@ fn analytic_fallback_does_not_alias_the_advisory_selection() {
         statistical_claim(),
         oid(1),
         advisory_selection_oid,
+        StrataIdentity::NotApplicable,
+        PropensitySupportIdentity::NotApplicable,
         None,
         1,
         FallbackBehavior::DeterministicPolicy {
@@ -708,6 +758,8 @@ fn analytic_fallback_does_not_alias_the_advisory_selection() {
         },
         oid(1),
         advisory_selection_oid,
+        StrataIdentity::NotApplicable,
+        PropensitySupportIdentity::NotApplicable,
         None,
         1,
         FallbackBehavior::DeterministicPolicy {

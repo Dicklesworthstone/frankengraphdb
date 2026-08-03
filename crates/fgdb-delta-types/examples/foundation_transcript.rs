@@ -28,7 +28,8 @@ use fgdb_delta_types::{
     ValidTimePeriod,
 };
 use fgdb_evidence::{
-    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, ReplayClass, ReplayCompleteness,
+    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity, ReplayClass,
+    ReplayCompleteness, StrataIdentity,
 };
 use fgdb_resource::{ResourceCeiling, ResourceVector};
 use fgdb_types::{
@@ -507,6 +508,8 @@ fn run_transcript(root: &asupersync::Cx) {
             claim,
             oid(0x20),
             oid(0x21),
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             Some(CalibrationWindow::new(100, 42_000).expect("window")),
             7,
             FallbackBehavior::FailClosed,

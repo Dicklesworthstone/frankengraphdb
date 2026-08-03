@@ -62,7 +62,10 @@ use fgdb_calibrate::{
     },
 };
 use fgdb_claim::{EvidenceClaim, StatisticalErrorControl};
-use fgdb_evidence::{CalibrationWindow, EvidenceEnvelope, FallbackBehavior};
+use fgdb_evidence::{
+    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity,
+    StrataIdentity,
+};
 use fgdb_sketch::{
     count_min::{CountMinDecodeLimits, CountMinError, CountMinProfile, CountMinSketch},
     label_counts::{
@@ -1112,8 +1115,20 @@ fn calibration_window(record: StatisticalLogRecord) -> TestResult<CalibrationWin
 }
 
 fn evidence_envelope(record: StatisticalLogRecord) -> TestResult<EvidenceEnvelope> {
+    let evidence_oid = record.evidence_oid();
+    let statistic = record.statistic();
+    let (strata_identity, propensity_support_identity) = match statistic {
+        StatisticalStatistic::OffPolicyEvaluation { strata_oid, .. } => (
+            StrataIdentity::Bound(strata_oid),
+            PropensitySupportIdentity::Bound(evidence_oid),
+        ),
+        _ => (
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
+        ),
+    };
     let (error_control, population, sampling_rule, power_or_effective_sample_size, assumptions) =
-        match record.statistic() {
+        match statistic {
             StatisticalStatistic::ExplorationBudget {
                 alpha_bits,
                 residual_rate_bits,
@@ -1258,8 +1273,10 @@ fn evidence_envelope(record: StatisticalLogRecord) -> TestResult<EvidenceEnvelop
             power_or_effective_sample_size,
             assumptions,
         },
-        record.evidence_oid(),
+        evidence_oid,
         record.selected_policy_oid(),
+        strata_identity,
+        propensity_support_identity,
         Some(calibration_window(record)?),
         record.regime_epoch(),
         FallbackBehavior::DeterministicPolicy {
@@ -1699,6 +1716,25 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
             .find(|envelope| envelope.evidence_oid() == record.evidence_oid())
             .ok_or_else(|| io::Error::other("promotion envelope omitted a log record"))?;
         assert_eq!(envelope.selection_policy_oid(), oid(40));
+        match record.statistic() {
+            StatisticalStatistic::OffPolicyEvaluation { strata_oid, .. } => {
+                assert_eq!(
+                    envelope.strata_identity(),
+                    StrataIdentity::Bound(strata_oid)
+                );
+                assert_eq!(
+                    envelope.propensity_support_identity(),
+                    PropensitySupportIdentity::Bound(record.evidence_oid())
+                );
+            }
+            _ => {
+                assert_eq!(envelope.strata_identity(), StrataIdentity::NotApplicable);
+                assert_eq!(
+                    envelope.propensity_support_identity(),
+                    PropensitySupportIdentity::NotApplicable
+                );
+            }
+        }
         assert_eq!(
             envelope.fallback(),
             FallbackBehavior::DeterministicPolicy {

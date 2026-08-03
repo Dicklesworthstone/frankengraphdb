@@ -1542,7 +1542,7 @@ mod tests {
     };
     use asupersync::runtime::changepoint::ChangeDirection;
     use fgdb_claim::StatisticalErrorControl;
-    use fgdb_evidence::CalibrationWindow;
+    use fgdb_evidence::{CalibrationWindow, PropensitySupportIdentity, StrataIdentity};
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -1612,6 +1612,8 @@ mod tests {
             statistical_claim(),
             evidence_oid,
             table_oid,
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             None,
             7,
             FallbackBehavior::DeterministicPolicy {
@@ -1715,6 +1717,8 @@ mod tests {
             statistical_claim(),
             evidence_oid,
             fallback_oid,
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             Some(CalibrationWindow::new(60, 66)?),
             7,
             FallbackBehavior::DeterministicPolicy {
@@ -2194,6 +2198,8 @@ mod tests {
             },
             oid(10),
             oid(30),
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             None,
             7,
             FallbackBehavior::DeterministicPolicy {
@@ -2245,6 +2251,8 @@ mod tests {
             statistical_claim(),
             oid(10),
             oid(30),
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             None,
             7,
             FallbackBehavior::FailClosed,
