@@ -2502,4 +2502,39 @@ mod tests {
             ))
         );
     }
+
+    /// The decode doc claims the length comparison runs in `u128` so no
+    /// `limit` choice can make it wrap. Witness: with the limit wide open, a
+    /// declared count of 2^61 limbs makes `declared * 8` exactly 2^64 — a
+    /// u64 comparison would wrap to zero, match the empty magnitude, and
+    /// reach the allocator asking for a 16 EiB reservation. The u128
+    /// comparison must instead name the mismatch before any allocation.
+    #[test]
+    fn hostile_count_cannot_wrap_the_length_check() {
+        let mut hostile = vec![0x01];
+        hostile.extend_from_slice(&(1u64 << 61).to_le_bytes());
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&hostile, LimbLimit::new(usize::MAX)),
+            Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: 1 << 61,
+                actual_bytes: 0
+            })
+        );
+    }
+
+    /// Every limit rejection above sits strictly past the cap; this witnesses
+    /// the boundary itself, so a `>` → `>=` drift in the declared-limbs check
+    /// cannot survive: a value of exactly `max_limbs` limbs must decode under
+    /// that exact limit.
+    #[test]
+    fn decode_accepts_a_value_at_exactly_the_limit() {
+        let mut limbs = vec![0u64; TEST_LIMIT.max_limbs()];
+        *limbs.last_mut().expect("TEST_LIMIT is nonzero") = 1;
+        let value =
+            BigInt::from_canonical_limbs(Sign::Positive, limbs.into_boxed_slice(), TEST_LIMIT)
+                .expect("a value of exactly max_limbs limbs is canonical");
+        let decoded = BigInt::decode_canonical_bytes(&value.encode_canonical_bytes(), TEST_LIMIT)
+            .expect("a value of exactly max_limbs limbs decodes under that limit");
+        assert_eq!(decoded, value);
+    }
 }
