@@ -3539,13 +3539,13 @@ fn idr_time_issuance_freeze_backing_and_lifecycle_consumer_are_source_exact() {
     ];
     let expected_parser_consumers = expected_consumers
         .iter()
-        .filter(|name| name.as_str() != "LocalAttemptRegistrationSpec")
+        .filter(|name| !name.as_str().eq("LocalAttemptRegistrationSpec"))
         .cloned()
         .collect::<BTreeSet<_>>();
     let lifecycle_fields = census
         .fields
         .iter()
-        .filter(|field| field.exact_types.iter().any(|exact| exact == LIFECYCLE))
+        .filter(|field| field.exact_types.iter().any(|exact| exact.eq(LIFECYCLE)))
         .collect::<Vec<_>>();
     assert_eq!(
         lifecycle_fields.len(),
@@ -3562,16 +3562,16 @@ fn idr_time_issuance_freeze_backing_and_lifecycle_consumer_are_source_exact() {
     );
     assert!(
         lifecycle_fields.iter().any(|field| {
-            field.key.schema_family == TIME_FREEZE
-                && field.key.stable_name == "terminal_audit_gate"
-                && field.exact_types == [LIFECYCLE]
+            field.key.schema_family.eq(TIME_FREEZE)
+                && field.key.stable_name.eq("terminal_audit_gate")
+                && field.exact_types.iter().map(String::as_str).eq([LIFECYCLE])
         }),
         "the A16 freeze source must type its terminal_audit_gate exactly"
     );
     let mut freeze_fields = census
         .fields
         .iter()
-        .filter(|field| field.key.schema_family == TIME_FREEZE)
+        .filter(|field| field.key.schema_family.eq(TIME_FREEZE))
         .collect::<Vec<_>>();
     freeze_fields.sort_by_key(|field| {
         field
@@ -3598,7 +3598,7 @@ fn idr_time_issuance_freeze_backing_and_lifecycle_consumer_are_source_exact() {
     assert!(
         freeze_fields
             .iter()
-            .all(|field| field.key.schema_owner == TIME_FREEZE),
+            .all(|field| field.key.schema_owner.eq(TIME_FREEZE)),
         "every A16 freeze field must retain its granular source owner"
     );
     assert!(
@@ -3631,7 +3631,7 @@ fn idr_time_issuance_freeze_backing_and_lifecycle_consumer_are_source_exact() {
         .identity
         .wire
         .iter()
-        .find(|row| row.name == TIME_FREEZE)
+        .find(|row| row.name.eq(TIME_FREEZE))
         .expect("A16 freeze wire backing exists");
     assert_eq!(freeze_wire.wire_type_id, 0x0569);
     assert_eq!(freeze_wire.kind, "record");
@@ -3641,22 +3641,24 @@ fn idr_time_issuance_freeze_backing_and_lifecycle_consumer_are_source_exact() {
         [TIME_FREEZE.to_owned()]
     );
     assert!(catalog.targets.iter().any(|target| {
-        target.source_key == "top|TimeIssuanceAdmissionFreezeSpec"
-            && target.target_row_id == "a16:wire-type:time-issuance-admission-freeze-spec"
-            && target.target_kind == "wire-type"
-            && target.definition_status == "declared"
+        target.source_key.eq("top|TimeIssuanceAdmissionFreezeSpec")
+            && target
+                .target_row_id
+                .eq("a16:wire-type:time-issuance-admission-freeze-spec")
+            && target.target_kind.eq("wire-type")
+            && target.definition_status.eq("declared")
     }));
     assert!(catalog.top_level_candidates.iter().any(|candidate| {
-        candidate.symbol == TIME_FREEZE
-            && candidate.source_kind == "ambiguous"
-            && candidate.identity_class == "wire"
+        candidate.symbol.eq(TIME_FREEZE)
+            && candidate.source_kind.eq("ambiguous")
+            && candidate.identity_class.eq("wire")
     }));
 
     let lifecycle_wire = catalog
         .identity
         .wire
         .iter()
-        .find(|row| row.name == LIFECYCLE)
+        .find(|row| row.name.eq(LIFECYCLE))
         .expect("lifecycle-scaffolding wire row exists");
     assert_eq!(
         lifecycle_wire.allowed_containing_schemas, expected_consumers,
@@ -3668,19 +3670,25 @@ fn idr_time_issuance_freeze_backing_and_lifecycle_consumer_are_source_exact() {
         .identity
         .wire
         .iter_mut()
-        .find(|row| row.name == LIFECYCLE)
+        .find(|row| row.name.eq(LIFECYCLE))
         .expect("lifecycle-scaffolding wire row exists")
         .allowed_containing_schemas
         .iter_mut()
-        .find(|schema| schema.as_str() == TIME_FREEZE)
+        .find(|schema| schema.as_str().eq(TIME_FREEZE))
         .expect("A16 consumer citation exists")
         .push_str("Fabricated");
     let violations = appendix_a::validate_catalog(&fabricated);
     assert!(
         violations.iter().any(|violation| {
-            violation.code == "projection_allowed_containing_schema_unresolved"
-                && violation.row_id == "wire_types::LifecycleScaffoldingNotRequired"
-                && violation.msg.contains("TimeIssuanceAdmissionFreezeSpecFabricated")
+            violation
+                .code
+                .eq("projection_allowed_containing_schema_unresolved")
+                && violation
+                    .row_id
+                    .eq("wire_types::LifecycleScaffoldingNotRequired")
+                && violation
+                    .msg
+                    .contains("TimeIssuanceAdmissionFreezeSpecFabricated")
         }),
         "a fabricated replacement consumer must fail closed: {violations:?}"
     );
