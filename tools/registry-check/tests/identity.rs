@@ -3362,10 +3362,8 @@ fn idr_allowed_containing_schema_resolution_accepts_candidate_or_stronger_and_re
     identity.wire[0].allowed_containing_schemas = vec!["CandidateOnly<Local>".to_owned()];
     identity.ordinary_unions[0].allowed_containing_schemas = vec!["CandidateOnly<Meta>".to_owned()];
 
-    let accepted = identity::validate_allowed_containing_schema_resolution(
-        &identity,
-        ["CandidateOnly"].into_iter(),
-    );
+    let accepted =
+        identity::validate_allowed_containing_schema_resolution(&identity, ["CandidateOnly"]);
     assert!(
         accepted.is_empty(),
         "one candidate backing must cover every generic specialization: {accepted:?}"
@@ -3400,7 +3398,7 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         .wire
         .iter()
         .flat_map(|row| &row.allowed_containing_schemas)
-        .filter(|schema| schema.as_str() != "*")
+        .filter(|schema| !schema.as_str().eq("*"))
         .count();
     let ordinary_union_citations = catalog
         .identity
@@ -3479,7 +3477,7 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         .identity
         .wire
         .iter_mut()
-        .find(|row| row.name == "StrongRef")
+        .find(|row| row.name.eq("StrongRef"))
         .expect("StrongRef wire row exists")
         .allowed_containing_schemas = vec!["ZzFabricatedSchema".to_owned()];
     let violations = appendix_a::validate_catalog(&catalog);
