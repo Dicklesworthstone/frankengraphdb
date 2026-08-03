@@ -3454,7 +3454,7 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         catalog
             .top_level_candidates
             .iter()
-            .any(|row| { row.symbol == "KeyWrap" && row.source_kind == "confirmed" })
+            .any(|row| { row.symbol == "KeyWrap" && row.source_kind.eq("confirmed") })
             && !projected_names.contains("KeyWrap")
             && !catalog
                 .reservations
@@ -3470,7 +3470,7 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
             && !projected_names.contains("ExternalKeyDestructionOperationRecord")
             && !catalog.top_level_candidates.iter().any(|row| {
                 row.symbol == "ExternalKeyDestructionOperationRecord"
-                    && row.source_kind == "confirmed"
+                    && row.source_kind.eq("confirmed")
             }),
         "ExternalKeyDestructionOperationRecord must exercise reservation-only admission"
     );
@@ -9288,6 +9288,23 @@ fn undo_e55p_id256_retype(identity: &mut IdentityRegistries) {
     }
 }
 
+/// Reverse fgdb-nknt's consumer-closure repair on the A20 union for the frozen
+/// A10 assignment witness. This row already belongs to the historical
+/// namespace, so the change is content drift, not a post-erratum membership
+/// increment: removing the whole union would also erase its four historical
+/// arm transcript lines.
+fn undo_nknt_service_promotion_container_repair(identity: &mut IdentityRegistries) {
+    let union = identity
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "ServicePromotionExternalOperationKind")
+        .expect("ServicePromotionExternalOperationKind historical union exists");
+    union.allowed_containing_schemas = vec![
+        "ServicePromotionExternalOperationRecord<Local>".to_owned(),
+        "ServicePromotionExternalOperationRecord<Meta>".to_owned(),
+    ];
+}
+
 /// The eleven collection-element member rows that increment (iii) of the
 /// fgdb-k3sa B2 ruling RE-KEYED off their historical owner and onto the minted
 /// element kind.  These rows are pre-erratum — they were in the namespace long
@@ -11729,6 +11746,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     undo_cq4x_capsule_retarget(&mut pre_erratum);
     undo_mn8i_exact_order_repairs(&mut pre_erratum);
     undo_e55p_id256_retype(&mut pre_erratum);
+    undo_nknt_service_promotion_container_repair(&mut pre_erratum);
     pre_erratum.ordinary_unions.retain(|union| {
         !post_erratum_e55p_union(&union.union_name) && !post_erratum_i1rx_union(&union.union_name)
     });

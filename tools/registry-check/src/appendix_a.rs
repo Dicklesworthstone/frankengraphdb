@@ -11560,7 +11560,7 @@ fn validate_projection_catalog(catalog: &Catalog, out: &mut Vec<Violation>) {
             catalog
                 .top_level_candidates
                 .iter()
-                .filter(|row| row.source_kind == "confirmed")
+                .filter(|row| row.source_kind.eq("confirmed"))
                 .map(|row| row.symbol.as_str()),
         );
     for violation in identity::validate_allowed_containing_schema_resolution(
