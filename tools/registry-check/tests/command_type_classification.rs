@@ -219,6 +219,52 @@ fn dangling_contract_id_is_rejected() {
     );
 }
 
+/// Family resolution (round-12 T4), the differential: the armed members'
+/// classification rows bind member-root ids that are NOT exact contract row
+/// ids — only "{root}:{arm}" rows exist — and the registry validates clean,
+/// so resolution can only have come from the family rule. If someone later
+/// lands an exact member-root row, this assert flags the shape change.
+#[test]
+fn family_root_binding_resolves_through_arm_rows_not_an_exact_row() {
+    let contracts = contracts();
+    let ids: std::collections::BTreeSet<&str> = contracts
+        .contracts
+        .iter()
+        .map(|c| c.command_contract_id.as_str())
+        .collect();
+    for root in [
+        "cc:local:local-attempt-registration-spec",
+        "cc:local:txn-ownership-transition-spec",
+        "cc:local:local-outcome-compaction-spec",
+    ] {
+        assert!(!ids.contains(root), "{root:?} must not be an exact row id");
+        let prefix = format!("{root}:");
+        assert!(
+            ids.iter().any(|id| id.starts_with(prefix.as_str())),
+            "{root:?} must have arm rows"
+        );
+    }
+    let violations = validate_classifications(&registry(), &contracts);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// The ":"-boundary law: a bare prefix of a longer id (no arm delimiter at
+/// the cut) is NOT a member root and must stay unresolved.
+#[test]
+fn bare_prefix_without_arm_boundary_is_rejected() {
+    let r = mutate(|row| {
+        row.class = "RegisteredCommandInput".into();
+        // A strict prefix of "cc:local:local-attempt-registration-spec:..."
+        // that does not end at a ":" boundary.
+        row.command_contract_id = Some("cc:local:local-attempt".into());
+    });
+    assert!(
+        codes(&r).contains(&"classification_contract_unresolved".to_string()),
+        "{:?}",
+        codes(&r)
+    );
+}
+
 #[test]
 fn contract_id_on_non_command_class_is_rejected() {
     let r = mutate(|row| row.command_contract_id = Some("cc-does-not-exist-v1".into()));

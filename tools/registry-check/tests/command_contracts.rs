@@ -89,30 +89,89 @@ fn real_registry_is_clean() {
 }
 
 /// Phase B floor, replacing the Phase A deliberate-empty pin in the same
-/// commit that landed the first rows (the point of pinning it): the F1/F2
-/// seed rows of the owner-confirmed v1 freeze, by id. The population may only
-/// grow from here — a missing seed row is either an illegal deletion (released
+/// commit that landed the first rows (the point of pinning it): the landed
+/// tranche rows of the owner-confirmed v1 freeze, by id. The population may
+/// only grow from here — a missing row is either an illegal deletion (released
 /// tags are permanent, plan line 290) or a gutted file, and both deserve a red.
 #[test]
 fn phase_b_seed_rows_are_present() {
     let registry = registry();
     for id in [
+        // F1/F2 (87cf892)
         "cc:local:recovery-bridge-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
+        // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
+        "cc:local:local-attempt-registration-spec:explicit-begin",
+        "cc:local:local-attempt-registration-spec:autocommit",
+        "cc:local:local-autocommit-write-spec",
+        "cc:local:txn-ownership-transition-spec:reattach",
+        "cc:local:txn-ownership-transition-spec:renew",
+        "cc:local:txn-ownership-expiry-abort-spec",
+        "cc:local:local-statement-registration-spec",
+        "cc:local:local-statement-publication-spec",
+        "cc:local:local-statement-abort-spec",
+        "cc:local:local-prepare-admission-spec",
+        "cc:local:local-read-close-spec",
+        "cc:local:local-terminal-completion-spec",
+        "cc:local:txn-abort-spec",
+        "cc:local:local-outcome-compaction-spec:never-registered",
+        "cc:local:local-outcome-compaction-spec:terminal-ready",
+        "cc:local:local-outcome-expiry-spec",
+        "cc:local:local-conflict-compaction-spec",
     ] {
         assert!(
             registry
                 .contracts
                 .iter()
                 .any(|row| row.command_contract_id == id && row.status == "reserved"),
-            "confirmed F1/F2 seed row {id:?} is missing"
+            "confirmed seed row {id:?} is missing"
         );
     }
     assert!(
-        registry.contracts.len() >= 3,
-        "the population may only grow from the F1/F2 seed"
+        registry.contracts.len() >= 20,
+        "the population may only grow from the landed F1-F3 rows"
     );
+}
+
+/// An armed member's rows share the member's outer tag and differ only by
+/// inner_wire_tag: the arm-slot law keys on (role, union, outer, inner), so
+/// this shape validates clean while a same-inner duplicate or an
+/// armless/armed mix on one outer tag reds contract_arm_slot_duplicate.
+/// Assert the landed shape explicitly: shared outer tag, distinct inner tags.
+#[test]
+fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
+    let registry = registry();
+    for (root, arms) in [
+        ("cc:local:local-attempt-registration-spec", 2usize),
+        ("cc:local:txn-ownership-transition-spec", 2),
+        ("cc:local:local-outcome-compaction-spec", 2),
+    ] {
+        let family: Vec<_> = registry
+            .contracts
+            .iter()
+            .filter(|row| row.command_contract_id.starts_with(&format!("{root}:")))
+            .collect();
+        assert_eq!(
+            family.len(),
+            arms,
+            "family {root:?} has the wrong arm count"
+        );
+        let outer: std::collections::BTreeSet<i64> =
+            family.iter().map(|row| row.outer_wire_tag).collect();
+        assert_eq!(outer.len(), 1, "family {root:?} must share one outer tag");
+        let inner: std::collections::BTreeSet<Option<i64>> =
+            family.iter().map(|row| row.inner_wire_tag).collect();
+        assert_eq!(
+            inner.len(),
+            arms,
+            "family {root:?} must carry distinct inner tags"
+        );
+        assert!(
+            !inner.contains(&None),
+            "an armed row must carry an inner_wire_tag"
+        );
+    }
 }
 
 /// The synthetic baseline must itself be clean, or every mutation below tests
@@ -228,8 +287,54 @@ fn duplicate_arm_slot_is_rejected() {
     let mut r = with_row(|_| {});
     let mut second = synthetic_row();
     second.command_contract_id = "cc-local-branch-retire-v2".into();
-    // Same (role, outer_command_union, outer_wire_tag): a second command
-    // encoded under one tag.
+    // Same (role, outer_command_union, outer_wire_tag), both armless: a
+    // second command encoded under one tag.
+    r.contracts.push(second);
+    assert!(
+        codes(&r).contains(&"contract_arm_slot_duplicate".to_string()),
+        "{:?}",
+        codes(&r)
+    );
+}
+
+/// Two arm rows may share the member's outer tag ONLY through distinct inner
+/// tags; the same (outer, inner) pair is a second command under one tag.
+#[test]
+fn same_outer_and_same_inner_tag_is_rejected() {
+    let mut r = with_row(|c| c.inner_wire_tag = Some(0x0001));
+    let mut second = synthetic_row();
+    second.command_contract_id = "cc-local-branch-retire-v2".into();
+    second.inner_wire_tag = Some(0x0001);
+    r.contracts.push(second);
+    assert!(
+        codes(&r).contains(&"contract_arm_slot_duplicate".to_string()),
+        "{:?}",
+        codes(&r)
+    );
+}
+
+/// Distinct inner tags under one outer tag are the SPECIFIED armed-family
+/// shape (plan line 294) and must validate clean — the differential control
+/// for the two rejections beside it.
+#[test]
+fn distinct_inner_tags_under_one_outer_tag_are_clean() {
+    let mut r = with_row(|c| c.inner_wire_tag = Some(0x0001));
+    let mut second = synthetic_row();
+    second.command_contract_id = "cc-local-branch-retire-v2".into();
+    second.inner_wire_tag = Some(0x0002);
+    r.contracts.push(second);
+    let violations = validate_contracts(&r);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// One outer tag is one armless command or one armed family, never both: an
+/// armless row and an armed row sharing the outer tag hide an open subcommand.
+#[test]
+fn armless_and_armed_rows_on_one_outer_tag_are_rejected() {
+    let mut r = with_row(|_| {});
+    let mut second = synthetic_row();
+    second.command_contract_id = "cc-local-branch-retire-v2".into();
+    second.inner_wire_tag = Some(0x0001);
     r.contracts.push(second);
     assert!(
         codes(&r).contains(&"contract_arm_slot_duplicate".to_string()),

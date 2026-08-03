@@ -271,7 +271,12 @@ fn slot_ref_is_wellformed(slot: &str) -> bool {
 pub fn validate_contracts(registry: &ContractRegistry) -> Vec<Violation> {
     let mut out = Vec::new();
     let mut seen_ids: BTreeSet<&str> = BTreeSet::new();
-    let mut seen_arm_slots: BTreeSet<(&str, &str, i64)> = BTreeSet::new();
+    let mut seen_arm_slots: BTreeSet<(&str, &str, i64, Option<i64>)> = BTreeSet::new();
+    // Per (role, union, outer_tag): (armless row seen, armed row seen). One
+    // outer tag is either one armless command or one armed family, never both
+    // (plan line 294: a family "never hides an open subcommand").
+    let mut outer_modes: std::collections::BTreeMap<(&str, &str, i64), (bool, bool)> =
+        std::collections::BTreeMap::new();
 
     if registry.registry_epoch < 1 {
         out.push(Violation::new(
@@ -345,17 +350,48 @@ pub fn validate_contracts(registry: &ContractRegistry) -> Vec<Violation> {
                 ));
             }
         }
+        // Rows are per concrete inner tag (plan line 294): an armed member's
+        // rows share the member's outer tag and differ by inner_wire_tag, so
+        // the duplicate key includes the inner tag. Sharing an outer tag with
+        // the SAME inner tag (or with none on both) encodes a second command
+        // under one tag.
         if !seen_arm_slots.insert((
             contract.role.as_str(),
             contract.outer_command_union.as_str(),
             contract.outer_wire_tag,
+            contract.inner_wire_tag,
         )) {
             out.push(Violation::new(
                 "contract_arm_slot_duplicate",
                 id,
                 format!(
-                    "(role, outer_command_union, outer_wire_tag) = ({:?}, {:?}, {:#06x}) is claimed by more than one row; duplicate tags encode a second command",
-                    contract.role, contract.outer_command_union, contract.outer_wire_tag
+                    "(role, outer_command_union, outer_wire_tag, inner_wire_tag) = ({:?}, {:?}, {:#06x}, {:?}) is claimed by more than one row; duplicate tags encode a second command",
+                    contract.role,
+                    contract.outer_command_union,
+                    contract.outer_wire_tag,
+                    contract.inner_wire_tag
+                ),
+            ));
+        }
+        let modes = outer_modes
+            .entry((
+                contract.role.as_str(),
+                contract.outer_command_union.as_str(),
+                contract.outer_wire_tag,
+            ))
+            .or_insert((false, false));
+        if contract.inner_wire_tag.is_some() {
+            modes.1 = true;
+        } else {
+            modes.0 = true;
+        }
+        if modes.0 && modes.1 {
+            out.push(Violation::new(
+                "contract_arm_slot_duplicate",
+                id,
+                format!(
+                    "outer tag {:#06x} carries both an armless row and an armed family; one outer tag is one command or one family, never both",
+                    contract.outer_wire_tag
                 ),
             ));
         }

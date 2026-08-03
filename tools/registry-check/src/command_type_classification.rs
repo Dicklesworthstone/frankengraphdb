@@ -237,12 +237,24 @@ pub fn validate_classifications(
                 "class RegisteredCommandInput requires command_contract_id (plan line 294: RegisteredCommandInput{command_contract_id})",
             )),
             ("RegisteredCommandInput", Some(contract_id)) => {
-                if !contract_ids.contains(contract_id) {
+                // Family resolution (round-12 T4): an armed member has one
+                // contract row per inner arm ("{root}:{arm}" ids, the C-a
+                // grammar), so its classification binds the member-root id.
+                // A root resolves iff some row carries exactly that id or an
+                // id in its ":"-delimited family; the ":" boundary keeps a
+                // bare prefix (e.g. "cc:local:local-attempt") from resolving
+                // through an unrelated longer id.
+                let family_prefix = format!("{contract_id}:");
+                let resolves = contract_ids.contains(contract_id)
+                    || contract_ids
+                        .iter()
+                        .any(|id| id.starts_with(family_prefix.as_str()));
+                if !resolves {
                     out.push(Violation::new(
                         "classification_contract_unresolved",
                         subject,
                         format!(
-                            "command_contract_id {contract_id:?} resolves to no command_contracts.toml row"
+                            "command_contract_id {contract_id:?} resolves to no command_contracts.toml row, neither exactly nor as the member root of a {{root}}:{{arm}} family"
                         ),
                     ));
                 }
