@@ -10,19 +10,27 @@
 # `CertificateInput`, `ResultOnly`, `ProjectionInput`, or `RuntimeOnly`.
 # A suffix conveys no semantics."
 #
-# WHY THE POPULATION BELOW IS THREE ROWS, NOT ~40+. MEASURED 2026-07-28 at HEAD
-# 5d42e28: registries/appendix_a_catalog.toml carries 39 logical kinds whose
-# stable name ends in Spec, plus further Spec-named top-level candidates. Nearly
-# all of them are semantic or maintenance COMMAND INPUTS (plan lines 1916, 1918,
-# 1770 enumerate the families), so their class is
+# WHY THE CREATION POPULATION WAS THREE ROWS, NOT ~40+. MEASURED 2026-07-28 at
+# HEAD 5d42e28: registries/appendix_a_catalog.toml carries 39 logical kinds
+# whose stable name ends in Spec, plus further Spec-named top-level candidates.
+# Nearly all of them are semantic or maintenance COMMAND INPUTS (plan lines
+# 1916, 1918, 1770 enumerate the families), so their class is
 # RegisteredCommandInput{command_contract_id} — which requires their
-# command_contracts.toml row to exist first, and those rows are gated on the
+# command_contracts.toml row to exist first, and those rows were gated on the
 # full family expansion (see command_contracts.toml's header and the
 # tag-permanence rationale there; fgdb-5uw2 Phase B). A classification row
 # minted before its contract row would either invent a contract id or carry a
 # dangling one; both are the fail-open this registry exists to prevent. The
-# three rows below are exactly the population whose class is FORCED by the
-# source without a contract id.
+# first three rows below are exactly the creation-time population whose class
+# was FORCED by the source without a contract id.
+#
+# PHASE B SEED (2026-08-02/03). The owner-confirmed v1 tag freeze opened the
+# contract registry's Phase B (see command_contracts.toml's header). The F1/F2
+# contract rows exist as of this increment, so the three F1/F2 command inputs
+# below now carry their source-forced RegisteredCommandInput class with a
+# resolvable contract id, landed in the same increment as their contract rows.
+# The creation-time PreOrderArtifact population stands unchanged; the
+# population only grows.
 #
 # ADJUDICATED NON-MEMBERS, recorded here so nobody re-derives them (the
 # laws.toml pattern: record, never strike):
@@ -53,7 +61,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 1
+registry_epoch = 2
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -74,4 +82,31 @@ type_name = "AuditExternalResolutionReceipt"
 class = "PreOrderArtifact"
 source_location = "a07:1770"
 statement = "AuditExternalResolutionBatch/receipt are pre-order evidence and AuditVisibilityAdvanceSpec is a Protocol-plane maintenance input, never a GlobalSequenceNeutralSpec."
+status = "registered"
+
+# --- Phase B seed (F1/F2): the first RegisteredCommandInput rows, landed in
+# --- the same increment as their command_contracts.toml contract rows.
+
+[[classification]]
+type_name = "RecoveryBridgeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:recovery-bridge-spec"
+source_location = "a19:2561"
+statement = "RecoveryBridgeSpec<Role> is the exact role-specialized first-control body."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBeginReservationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-begin-reservation-spec"
+source_location = "a03:1482"
+statement = "Apply creates LocalBeginReservationRecord, installs Reserved with the replay ref, and constructs TxnOutcomeRecord::BeginStaging; only that visible state permits BEGIN_ACCEPTED."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBeginTerminalSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-begin-terminal-spec"
+source_location = "a03:1482"
+statement = "LocalBeginTerminalSpec alone consumes Reserved and creates LocalNeverRegisteredRecord plus NeverRegisteredDetailed."
 status = "registered"

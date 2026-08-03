@@ -2,12 +2,12 @@
 //!
 //! Every validation rule in `registry_check::command_contracts` gets a test
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
-//! exact violation code. The shipped registry is deliberately EMPTY (plan line
-//! 296's bijection quantifies over live rows and inhabitable arms, and both
-//! domains are measured empty at creation — see the registry header), so the
-//! single-defect mutations run against a synthetic row whose own clean
-//! baseline is asserted first: a fixture control only proves the reader works
-//! on the fixture, so the baseline assert is what licenses the mutations.
+//! exact violation code. The registry shipped deliberately empty until the
+//! owner-confirmed v1 tag freeze opened Phase B; it now carries the F1/F2
+//! seed rows (all `reserved` — see the registry header). The single-defect
+//! mutations still run against a synthetic row whose own clean baseline is
+//! asserted first: a fixture control only proves the reader works on the
+//! fixture, so the baseline assert is what licenses the mutations.
 
 use registry_check::command_contracts::{
     Contract, ContractRegistry, load_contracts, load_from_repo, validate_contracts,
@@ -88,16 +88,30 @@ fn real_registry_is_clean() {
     );
 }
 
-/// Phase A pin, intentional: the registry ships EMPTY because the full family
-/// expansion (the tag authority) has not been derived. fgdb-5uw2 Phase B must
-/// move this pin in the same commit that lands the first rows — that is the
-/// point of pinning it.
+/// Phase B floor, replacing the Phase A deliberate-empty pin in the same
+/// commit that landed the first rows (the point of pinning it): the F1/F2
+/// seed rows of the owner-confirmed v1 freeze, by id. The population may only
+/// grow from here — a missing seed row is either an illegal deletion (released
+/// tags are permanent, plan line 290) or a gutted file, and both deserve a red.
 #[test]
-fn phase_a_registry_is_deliberately_empty() {
-    assert_eq!(
-        registry().contracts.len(),
-        0,
-        "rows landed: update this pin alongside the fgdb-5uw2 Phase B tag-expansion derivation"
+fn phase_b_seed_rows_are_present() {
+    let registry = registry();
+    for id in [
+        "cc:local:recovery-bridge-spec",
+        "cc:local:local-begin-reservation-spec",
+        "cc:local:local-begin-terminal-spec",
+    ] {
+        assert!(
+            registry
+                .contracts
+                .iter()
+                .any(|row| row.command_contract_id == id && row.status == "reserved"),
+            "confirmed F1/F2 seed row {id:?} is missing"
+        );
+    }
+    assert!(
+        registry.contracts.len() >= 3,
+        "the population may only grow from the F1/F2 seed"
     );
 }
 
