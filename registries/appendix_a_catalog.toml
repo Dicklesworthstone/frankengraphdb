@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3724
+target_count = 3725
 projection_fallback_count = 140
-target_source_assignment_sha256 = "056ddae24cca4ae7dd03110c63ac4259f9b9e38ee1bfc1504e608b71d2e633f4"
+target_source_assignment_sha256 = "7144520e7422455c3fb29617eaeb3d511e27efe955084f3295599c10cc6f7171"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 45
+registry_epoch = 46
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -60520,7 +60520,7 @@ symbol = "TimeIssuanceAdmissionFreezeSpec"
 generic_signature = ""
 source_key = "top|TimeIssuanceAdmissionFreezeSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a16:2183"]
 
 [[top_level_candidate]]
@@ -103433,8 +103433,8 @@ wire_type_id = 0x0522
 name = "LifecycleScaffoldingNotRequired"
 kind = "record"
 status = "reserved"
-encoding_context = "a21:2619 exact inline {evidence:NonRequiredAuditEvidence::LifecycleScaffolding} value; 16 source occurrences embed it by value across the exact 14-schema consumer closure, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
-allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalAttemptRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec"]
+encoding_context = "a21:2619 exact inline {evidence:NonRequiredAuditEvidence::LifecycleScaffolding} value; 17 source occurrences embed it by value across the exact 15-schema consumer closure, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
+allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalAttemptRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec", "TimeIssuanceAdmissionFreezeSpec"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -113854,6 +113854,17 @@ encoding_context = "generated concrete role projection [source=top|InitialRestor
 allowed_containing_schemas = ["RecoveryBridgeSpec<Shard>"]
 max_size_bytes = 40
 
+[[wire_type]]
+slice_id = "a16"
+row_id = "a16:wire-type:time-issuance-admission-freeze-spec"
+wire_type_id = 0x0569
+name = "TimeIssuanceAdmissionFreezeSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "a16:2183 exact ordered time-issuance admission-freeze request record; the balanced source body fixes six field names and types terminal_audit_gate as LifecycleScaffoldingNotRequired, while five shorthand field types remain structurally ambiguous and therefore create no fabricated durable-field rows"
+allowed_containing_schemas = ["TimeIssuanceAdmissionFreezeSpec"]
+max_size_bytes = 16777216
+
 [[target]]
 row_id = "a18:target:wire-type-awaiting-source-release-local-restore-phase"
 target_row_id = "a18:wire-type:awaiting-source-release-local-restore-phase"
@@ -113891,5 +113902,13 @@ row_id = "a19:target:wire-type-shard-initial-restore-registry-ref"
 target_row_id = "a19:wire-type:shard-initial-restore-registry-ref"
 slice_id = "a19"
 source_key = "projection|wire_types|ShardInitialRestoreRegistryRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:wire-type-time-issuance-admission-freeze-spec"
+target_row_id = "a16:wire-type:time-issuance-admission-freeze-spec"
+slice_id = "a16"
+source_key = "top|TimeIssuanceAdmissionFreezeSpec"
 target_kind = "wire-type"
 definition_status = "declared"

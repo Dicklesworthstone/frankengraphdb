@@ -3408,7 +3408,7 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         .sum::<usize>();
     assert_eq!(
         (concrete_wire_citations, ordinary_union_citations),
-        (601, 430),
+        (603, 430),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -3488,6 +3488,201 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
                 && violation.msg.contains("ZzFabricatedSchema")
         }),
         "the Appendix A integration must reject an unbacked concrete citation: {violations:?}"
+    );
+}
+
+#[test]
+fn idr_time_issuance_freeze_backing_and_lifecycle_consumer_are_source_exact() {
+    const TIME_FREEZE: &str = "TimeIssuanceAdmissionFreezeSpec";
+    const LIFECYCLE: &str = "LifecycleScaffoldingNotRequired";
+    const FIELD_MARKER: &str = "terminal_audit_gate:LifecycleScaffoldingNotRequired";
+
+    let catalog = real_appendix_catalog();
+    let source = real_plan_source();
+    let appendix = source_range(
+        &source,
+        catalog.source_manifest.start_line,
+        catalog.source_manifest.end_line,
+    );
+    let specs = catalog
+        .slices
+        .iter()
+        .map(|slice| appendix_source::SourceSliceSpec {
+            id: &slice.id,
+            start_line: usize::try_from(slice.start_line).expect("slice start fits"),
+            end_line: usize::try_from(slice.end_line).expect("slice end fits"),
+        })
+        .collect::<Vec<_>>();
+    let census = appendix_source::census_appendix_source(
+        &appendix,
+        usize::try_from(catalog.source_manifest.start_line).expect("source start fits"),
+        &specs,
+    )
+    .expect("source census");
+
+    let expected_consumers = vec![
+        "AuditSigningAttemptSupersedeSpec".to_owned(),
+        "AuditTerminalFreezeSpec".to_owned(),
+        "AuditTerminalPlanAbandonSpec".to_owned(),
+        "CertificateAttemptAbandonSpec".to_owned(),
+        "GlobalAttemptRegistrationSpec".to_owned(),
+        "GlobalBeginReservationSpec".to_owned(),
+        "GlobalFinalCertificationReserveSpec".to_owned(),
+        "GlobalPrepareAdmissionSpec".to_owned(),
+        "GlobalStatementRegistrationSpec".to_owned(),
+        "LocalAttemptRegistrationSpec".to_owned(),
+        "LocalBeginReservationSpec".to_owned(),
+        "LocalFinalCertificationReserveSpec".to_owned(),
+        "LocalPrepareAdmissionSpec".to_owned(),
+        "LocalStatementRegistrationSpec".to_owned(),
+        TIME_FREEZE.to_owned(),
+    ];
+    let expected_parser_consumers = expected_consumers
+        .iter()
+        .filter(|name| name.as_str() != "LocalAttemptRegistrationSpec")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let lifecycle_fields = census
+        .fields
+        .iter()
+        .filter(|field| field.exact_types.iter().any(|exact| exact == LIFECYCLE))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle_fields.len(),
+        16,
+        "the structural census must retain all directly parsed lifecycle-gate occurrences"
+    );
+    assert_eq!(
+        lifecycle_fields
+            .iter()
+            .map(|field| field.key.schema_family.clone())
+            .collect::<BTreeSet<_>>(),
+        expected_parser_consumers,
+        "the directly parsed lifecycle-gate consumer families must remain source exact"
+    );
+    assert!(
+        lifecycle_fields.iter().any(|field| {
+            field.key.schema_family == TIME_FREEZE
+                && field.key.stable_name == "terminal_audit_gate"
+                && field.exact_types == [LIFECYCLE]
+        }),
+        "the A16 freeze source must type its terminal_audit_gate exactly"
+    );
+    let mut freeze_fields = census
+        .fields
+        .iter()
+        .filter(|field| field.key.schema_family == TIME_FREEZE)
+        .collect::<Vec<_>>();
+    freeze_fields.sort_by_key(|field| {
+        field
+            .locations
+            .first()
+            .map(|location| (location.start.line, location.start.column))
+            .expect("every source field has a location")
+    });
+    assert_eq!(
+        freeze_fields
+            .iter()
+            .map(|field| field.key.stable_name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "transition_id",
+            "retiring_profile_oid",
+            "expected_active_projection",
+            "freeze_generation",
+            "expected_reservation_index_ref",
+            "terminal_audit_gate",
+        ],
+        "the A16 freeze field order must remain exactly source ordered"
+    );
+    assert!(
+        freeze_fields
+            .iter()
+            .all(|field| field.key.schema_owner == TIME_FREEZE),
+        "every A16 freeze field must retain its granular source owner"
+    );
+    assert!(
+        freeze_fields[..5]
+            .iter()
+            .all(|field| field.ambiguous && field.exact_types.is_empty()),
+        "the five shorthand field types must remain explicitly ambiguous rather than fabricated"
+    );
+
+    let appendix_text = std::str::from_utf8(&appendix).expect("Appendix A is UTF-8");
+    assert_eq!(
+        appendix_text.matches(FIELD_MARKER).count(),
+        17,
+        "the exact lifecycle-gate field spelling must occur 17 times in Appendix A"
+    );
+    for consumer in &expected_consumers {
+        assert!(
+            appendix_text
+                .lines()
+                .any(|line| line.contains(FIELD_MARKER) && line.contains(consumer)),
+            "source lacks the lifecycle-gate occurrence attributed to {consumer}"
+        );
+    }
+    assert!(
+        !appendix_text.contains("TimeIssuanceAdmissionFreezeSpecFabricated"),
+        "the source control name must remain absent"
+    );
+
+    let freeze_wire = catalog
+        .identity
+        .wire
+        .iter()
+        .find(|row| row.name == TIME_FREEZE)
+        .expect("A16 freeze wire backing exists");
+    assert_eq!(freeze_wire.wire_type_id, 0x0569);
+    assert_eq!(freeze_wire.kind, "record");
+    assert_eq!(freeze_wire.status, "reserved");
+    assert_eq!(
+        freeze_wire.allowed_containing_schemas,
+        [TIME_FREEZE.to_owned()]
+    );
+    assert!(catalog.targets.iter().any(|target| {
+        target.source_key == "top|TimeIssuanceAdmissionFreezeSpec"
+            && target.target_row_id == "a16:wire-type:time-issuance-admission-freeze-spec"
+            && target.target_kind == "wire-type"
+            && target.definition_status == "declared"
+    }));
+    assert!(catalog.top_level_candidates.iter().any(|candidate| {
+        candidate.symbol == TIME_FREEZE
+            && candidate.source_kind == "ambiguous"
+            && candidate.identity_class == "wire"
+    }));
+
+    let lifecycle_wire = catalog
+        .identity
+        .wire
+        .iter()
+        .find(|row| row.name == LIFECYCLE)
+        .expect("lifecycle-scaffolding wire row exists");
+    assert_eq!(
+        lifecycle_wire.allowed_containing_schemas, expected_consumers,
+        "the lifecycle-scaffolding consumer closure must equal the source census"
+    );
+
+    let mut fabricated = catalog;
+    fabricated
+        .identity
+        .wire
+        .iter_mut()
+        .find(|row| row.name == LIFECYCLE)
+        .expect("lifecycle-scaffolding wire row exists")
+        .allowed_containing_schemas
+        .iter_mut()
+        .find(|schema| schema.as_str() == TIME_FREEZE)
+        .expect("A16 consumer citation exists")
+        .push_str("Fabricated");
+    let violations = appendix_a::validate_catalog(&fabricated);
+    assert!(
+        violations.iter().any(|violation| {
+            violation.code == "projection_allowed_containing_schema_unresolved"
+                && violation.row_id == "wire_types::LifecycleScaffoldingNotRequired"
+                && violation.msg.contains("TimeIssuanceAdmissionFreezeSpecFabricated")
+        }),
+        "a fabricated replacement consumer must fail closed: {violations:?}"
     );
 }
 

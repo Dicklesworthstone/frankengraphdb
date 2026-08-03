@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 45
+registry_epoch = 46
 
 [[type]]
 wire_type_id = 0x0001
@@ -5250,8 +5250,8 @@ wire_type_id = 0x0522
 name = "LifecycleScaffoldingNotRequired"
 kind = "record"
 status = "reserved"
-encoding_context = "a21:2619 exact inline {evidence:NonRequiredAuditEvidence::LifecycleScaffolding} value; 16 source occurrences embed it by value across the exact 14-schema consumer closure, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
-allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalAttemptRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec"]
+encoding_context = "a21:2619 exact inline {evidence:NonRequiredAuditEvidence::LifecycleScaffolding} value; 17 source occurrences embed it by value across the exact 15-schema consumer closure, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
+allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalAttemptRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec", "TimeIssuanceAdmissionFreezeSpec"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -5951,3 +5951,12 @@ status = "reserved"
 encoding_context = "generated concrete role projection [source=top|InitialRestoreRegistryRef<Role>; formal=Role; formal_class=Role; role=Shard; role_discriminator=none; validators=ShardRestoreRegistryValue::ActiveHidden@0x0001; guards=exact_initial_restore_state_ref,certified_source_lease_projection,exact_transform_projection,exact_meta_prefix_configuration,no_terminal_or_pin_state]; strong reference to the exact Shard initial registry value; the validator contract creates no standalone durable-field obligations for its nested state or projection members (a19:2557)"
 allowed_containing_schemas = ["RecoveryBridgeSpec<Shard>"]
 max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0569
+name = "TimeIssuanceAdmissionFreezeSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "a16:2183 exact ordered time-issuance admission-freeze request record; the balanced source body fixes six field names and types terminal_audit_gate as LifecycleScaffoldingNotRequired, while five shorthand field types remain structurally ambiguous and therefore create no fabricated durable-field rows"
+allowed_containing_schemas = ["TimeIssuanceAdmissionFreezeSpec"]
+max_size_bytes = 16777216
