@@ -35,6 +35,8 @@
 //!   ordinary_union_wire_contract_mismatch top-level union/wire cross-index drift
 //!   ordinary_union_logical_contract_mismatch whole-schema union/logical kind or consumer drift
 //!   ordinary_union_container_contract_mismatch open or inconsistent consumer closure
+//!   allowed_containing_schema_unresolved a concrete consumer names no confirmed
+//!                           top-level candidate or stronger catalog/identity row
 //!   ordinary_union_arm_duplicate_tag duplicate ordinary-union arm tag
 //!   ordinary_union_arm_metadata_mismatch arm does not match its union owner
 //!   ordinary_union_arm_lifecycle_mismatch arm outlives its ordinary union
@@ -2241,6 +2243,109 @@ pub fn generic_free_family(name: &str) -> &str {
     name.split('<').next().unwrap_or(name)
 }
 
+/// Validate every concrete `allowed_containing_schemas` citation against the
+/// identity registries plus catalog-owned candidate-or-stronger backings.
+///
+/// The identity projections alone are intentionally insufficient: a source-
+/// confirmed top-level schema may legally contain an inline wire type before
+/// that schema receives a projection row, and a permanent reservation is a
+/// stronger backing even when the source census remains structurally
+/// ambiguous.  Appendix A owns those two supplemental classes and passes them
+/// here.  Wildcard `"*"` remains the explicit open-domain spelling and is not a
+/// schema citation.
+pub fn validate_allowed_containing_schema_resolution<'a>(
+    registries: &'a IdentityRegistries,
+    supplemental_backings: impl IntoIterator<Item = &'a str>,
+) -> Vec<Violation> {
+    let mut backed = BTreeSet::new();
+    backed.extend(
+        registries
+            .logical
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .physical
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .bootstrap
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .prebootstrap
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .wire
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .fields
+            .iter()
+            .map(|row| generic_free_family(row.containing_schema.as_str())),
+    );
+    backed.extend(
+        registries
+            .ordinary_unions
+            .iter()
+            .map(|row| generic_free_family(row.union_name.as_str())),
+    );
+    backed.extend(
+        registries
+            .unions
+            .iter()
+            .map(|row| generic_free_family(row.union_name.as_str())),
+    );
+    backed.extend(supplemental_backings.into_iter().map(generic_free_family));
+
+    let mut out = Vec::new();
+    for wire in &registries.wire {
+        for schema in wire
+            .allowed_containing_schemas
+            .iter()
+            .filter(|schema| schema.as_str() != "*")
+        {
+            let family = generic_free_family(schema.trim());
+            if !backed.contains(family) {
+                out.push(v(
+                    "allowed_containing_schema_unresolved",
+                    "wire_types",
+                    &wire.name,
+                    format!(
+                        "allowed containing schema {schema:?} resolves to family {family:?}, which has no confirmed top-level candidate or stronger catalog/identity row"
+                    ),
+                ));
+            }
+        }
+    }
+    for union in &registries.ordinary_unions {
+        for schema in &union.allowed_containing_schemas {
+            let family = generic_free_family(schema.trim());
+            if !backed.contains(family) {
+                out.push(v(
+                    "allowed_containing_schema_unresolved",
+                    "durable_fields",
+                    &union.union_name,
+                    format!(
+                        "allowed containing schema {schema:?} resolves to family {family:?}, which has no confirmed top-level candidate or stronger catalog/identity row"
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Independent, review-updated pins for the released identity assignments.
 ///
 /// Registry rows are the canonical descriptions; these constants are compact
@@ -2254,7 +2359,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:32c93daee916a420";
-    const FIELDS: &str = "fnv1a64:7020ed5083f427dc";
+    const FIELDS: &str = "fnv1a64:0433d1cf84e9883c";
 
     let logical = rows_pin(
         r.logical

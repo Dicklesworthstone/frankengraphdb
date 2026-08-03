@@ -6719,7 +6719,7 @@ name = "PreBootstrapArtifactRef"
 kind = "reference_wrapper"
 status = "active"
 encoding_context = "{artifact_id, authenticated_staging_locator, length, canonical_digest, dispatch_root_generation}; legal ONLY in the registered restore staging inode/root/capsule; never a StrongRef, never in the mark set"
-allowed_containing_schemas = ["restore-staging"]
+allowed_containing_schemas = ["*"]
 max_size_bytes = 128
 
 [[wire_type]]
@@ -6741,7 +6741,7 @@ name = "ServicePromotionExternalOperationKind"
 kind = "discriminant"
 status = "active"
 encoding_context = "closed u8 tag: CatalogReserveHidden | ContinuityEnterPromotionPending | CatalogActivateReserved | ContinuityFinalizeOperational; operation_subject is carried by the containing record"
-allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", "ServicePromotionExternalOperationRecord<Meta>"]
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
 max_size_bytes = 1
 
 [[wire_type]]
@@ -20745,7 +20745,7 @@ containing_schema = "ServicePromotionExternalOperationKind"
 union_path = "ServicePromotionExternalOperationKind"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", "ServicePromotionExternalOperationRecord<Meta>"]
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
 role_predicate = "role-local || role-meta"
 version_status = "active"
 max_size_bytes = 1
@@ -103434,7 +103434,7 @@ name = "LifecycleScaffoldingNotRequired"
 kind = "record"
 status = "reserved"
 encoding_context = "a21:2619 exact inline {evidence:NonRequiredAuditEvidence::LifecycleScaffolding} value; 16 source occurrences embed it by value across the exact 14-schema consumer closure, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
-allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec", "TimeIssuanceAdmissionFreezeSpec"]
+allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalAttemptRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec"]
 max_size_bytes = 16777216
 
 [[wire_type]]

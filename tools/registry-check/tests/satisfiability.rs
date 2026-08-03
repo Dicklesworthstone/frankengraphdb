@@ -66,6 +66,14 @@ enum Coverage {
 /// Every code the checker can emit. Adding a code to the checker without adding a row here
 /// must fail CI — that is the anti-silent-omission property.
 const REGISTRY: &[(&str, Coverage)] = &[
+    (
+        "allowed_containing_schema_unresolved",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &[
+                "idr_allowed_containing_schema_resolution_accepts_candidate_or_stronger_and_rejects_unknown",
+            ],
+        },
+    ),
     // ---- dag_ family: where two of the five known instances live -------------------
     ("dag_future_result", Coverage::Witnessed),
     ("dag_cycle", Coverage::Pending("DAG cycle witness")),

@@ -3350,6 +3350,150 @@ fn idr_wire_backed_top_level_union_rejects_container_scope_drift() {
 }
 
 #[test]
+fn idr_allowed_containing_schema_resolution_accepts_candidate_or_stronger_and_rejects_unknown() {
+    let mut identity = real_identity();
+    for wire in &mut identity.wire {
+        wire.allowed_containing_schemas = vec!["*".to_owned()];
+    }
+    for union in &mut identity.ordinary_unions {
+        union.allowed_containing_schemas = vec![union.union_name.clone()];
+    }
+
+    identity.wire[0].allowed_containing_schemas = vec!["CandidateOnly<Local>".to_owned()];
+    identity.ordinary_unions[0].allowed_containing_schemas = vec!["CandidateOnly<Meta>".to_owned()];
+
+    let accepted = identity::validate_allowed_containing_schema_resolution(
+        &identity,
+        ["CandidateOnly"].into_iter(),
+    );
+    assert!(
+        accepted.is_empty(),
+        "one candidate backing must cover every generic specialization: {accepted:?}"
+    );
+
+    let rejected =
+        identity::validate_allowed_containing_schema_resolution(&identity, std::iter::empty());
+    assert_eq!(
+        rejected
+            .iter()
+            .filter(|violation| violation.code == "allowed_containing_schema_unresolved")
+            .count(),
+        2,
+        "the same unbacked family must be rejected at both wire and ordinary-union citations: {rejected:?}"
+    );
+    assert!(
+        rejected
+            .iter()
+            .any(|violation| violation.registry == "wire_types")
+            && rejected
+                .iter()
+                .any(|violation| violation.registry == "durable_fields"),
+        "one-law-two-artifacts coverage must include both projection surfaces: {rejected:?}"
+    );
+}
+
+#[test]
+fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
+    let mut catalog = real_appendix_catalog();
+    let concrete_wire_citations = catalog
+        .identity
+        .wire
+        .iter()
+        .flat_map(|row| &row.allowed_containing_schemas)
+        .filter(|schema| schema.as_str() != "*")
+        .count();
+    let ordinary_union_citations = catalog
+        .identity
+        .ordinary_unions
+        .iter()
+        .map(|row| row.allowed_containing_schemas.len())
+        .sum::<usize>();
+    assert_eq!(
+        (concrete_wire_citations, ordinary_union_citations),
+        (601, 430),
+        "the law must traverse the complete non-wildcard domain in both generated artifacts"
+    );
+
+    let baseline = appendix_a::validate_catalog(&catalog);
+    assert!(
+        !baseline.iter().any(|violation| {
+            violation.code == "projection_allowed_containing_schema_unresolved"
+        }),
+        "the repaired catalog must close every concrete consumer citation: {baseline:?}"
+    );
+
+    let projected_names = catalog
+        .identity
+        .logical
+        .iter()
+        .map(|row| row.name.as_str())
+        .chain(
+            catalog
+                .identity
+                .physical
+                .iter()
+                .map(|row| row.name.as_str()),
+        )
+        .chain(
+            catalog
+                .identity
+                .bootstrap
+                .iter()
+                .map(|row| row.name.as_str()),
+        )
+        .chain(
+            catalog
+                .identity
+                .prebootstrap
+                .iter()
+                .map(|row| row.name.as_str()),
+        )
+        .chain(catalog.identity.wire.iter().map(|row| row.name.as_str()))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        catalog
+            .top_level_candidates
+            .iter()
+            .any(|row| { row.symbol == "KeyWrap" && row.source_kind == "confirmed" })
+            && !projected_names.contains("KeyWrap")
+            && !catalog
+                .reservations
+                .iter()
+                .any(|row| row.symbol == "KeyWrap"),
+        "KeyWrap must exercise confirmed-candidate-only admission"
+    );
+    assert!(
+        catalog
+            .reservations
+            .iter()
+            .any(|row| row.symbol == "ExternalKeyDestructionOperationRecord")
+            && !projected_names.contains("ExternalKeyDestructionOperationRecord")
+            && !catalog.top_level_candidates.iter().any(|row| {
+                row.symbol == "ExternalKeyDestructionOperationRecord"
+                    && row.source_kind == "confirmed"
+            }),
+        "ExternalKeyDestructionOperationRecord must exercise reservation-only admission"
+    );
+
+    catalog
+        .identity
+        .wire
+        .iter_mut()
+        .find(|row| row.name == "StrongRef")
+        .expect("StrongRef wire row exists")
+        .allowed_containing_schemas = vec!["ZzFabricatedSchema".to_owned()];
+    let violations = appendix_a::validate_catalog(&catalog);
+    assert!(
+        violations.iter().any(|violation| {
+            violation.code == "projection_allowed_containing_schema_unresolved"
+                && violation.row_id == "wire_types::StrongRef"
+                && violation.msg.contains("ZzFabricatedSchema")
+        }),
+        "the Appendix A integration must reject an unbacked concrete citation: {violations:?}"
+    );
+}
+
+#[test]
 fn idr_key_destruction_target_consumer_closure_is_exact() {
     let identity = real_identity();
     let expected = vec![

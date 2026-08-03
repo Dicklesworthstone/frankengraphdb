@@ -11547,6 +11547,32 @@ fn validate_projection_catalog(catalog: &Catalog, out: &mut Vec<Violation>) {
             violation.msg,
         ));
     }
+
+    // A confirmed source candidate is sufficient backing for an inline
+    // consumer citation; a permanent reservation is stronger.  Keep this
+    // catalog-owned half beside the projection validation so the identity law
+    // cannot accidentally narrow itself to projection rows only.
+    let supplemental_container_backings = catalog
+        .reservations
+        .iter()
+        .map(|row| row.symbol.as_str())
+        .chain(
+            catalog
+                .top_level_candidates
+                .iter()
+                .filter(|row| row.source_kind == "confirmed")
+                .map(|row| row.symbol.as_str()),
+        );
+    for violation in identity::validate_allowed_containing_schema_resolution(
+        &catalog.identity,
+        supplemental_container_backings,
+    ) {
+        out.push(Violation::new(
+            &format!("projection_{}", violation.code),
+            format!("{}::{}", violation.registry, violation.row_id),
+            violation.msg,
+        ));
+    }
 }
 
 fn validate_projection_row_derived_identity(row: &ProjectionRowMeta, out: &mut Vec<Violation>) {
