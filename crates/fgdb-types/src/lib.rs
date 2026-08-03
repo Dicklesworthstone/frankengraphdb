@@ -18,6 +18,7 @@ pub mod refs;
 pub mod scalar;
 pub mod temporal;
 pub mod text;
+pub mod value;
 
 pub use bytes::{BoundedBytes, BoundedBytesError};
 pub use context::{
@@ -53,4 +54,11 @@ pub use text::{
     CanonicalText, CanonicalTextError, CollationResolver, CollationResolverError,
     MAX_CANONICAL_SORT_KEY_BYTES, MAX_CANONICAL_TEXT_BYTES, NonBinaryTextBinding, TextArtifactRole,
     TextBinding, TextField,
+};
+pub use value::{
+    CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue,
+    CanonicalPropertyValueError, CanonicalScalarCoercionError, CanonicalScalarKind,
+    CanonicalScalarProfile, CanonicalScalarProfileError, CanonicalScalarProfileIdentityVerifier,
+    MAX_PROFILE_COLLATIONS, MAX_PROPERTY_COLLECTION_ENTRIES, MAX_PROPERTY_NESTING_DEPTH,
+    MAX_PROPERTY_VALUE_BYTES, ScalarProfileArtifactRole,
 };

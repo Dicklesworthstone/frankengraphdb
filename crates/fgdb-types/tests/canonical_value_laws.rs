@@ -22,9 +22,16 @@
 //! interior samples. No clock, no entropy, no new dependencies.
 
 use fgdb_types::{
-    CanonicalBytes, CanonicalDecimal, CanonicalF64, CanonicalScalar, CanonicalText,
-    CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS, MIN_TIMESTAMP_UTC_NANOS,
+    CanonicalBytes, CanonicalDecimal, CanonicalF64, CanonicalList, CanonicalMap, CanonicalMapEntry,
+    CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar,
+    CanonicalScalarCoercionError, CanonicalScalarKind, CanonicalScalarProfile,
+    CanonicalScalarProfileError, CanonicalScalarProfileIdentityVerifier, CanonicalText,
+    CanonicalTimestamp, CollationResolver, CollationResolverError, DecimalError,
+    MAX_PROPERTY_VALUE_BYTES, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
+    MIN_TIMESTAMP_UTC_NANOS, NonBinaryTextBinding, ObjectId, TzdbResolver,
 };
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 
 /// A boundary-heavy scalar set: every arm of the union, and for each numeric
 /// arm the domain edges where sign handling and width handling break.
@@ -541,4 +548,828 @@ fn timestamp_local_wall_is_exactly_instant_plus_offset() {
             "local wall drifted for {value:?}"
         );
     }
+}
+
+// ------------------------------------ family 4: profiled property values ---
+
+const PROFILE_TZDB_OID: ObjectId = ObjectId([0x40; 32]);
+const PROFILE_INSTANT: i128 = 1_735_689_600_123_456_789;
+
+fn oid(fill: u8) -> ObjectId {
+    ObjectId([fill; 32])
+}
+
+#[derive(Clone, Copy)]
+struct ProfileResolver {
+    missing: Option<ObjectId>,
+}
+
+impl ProfileResolver {
+    const AVAILABLE: Self = Self { missing: None };
+
+    const fn missing(object_id: ObjectId) -> Self {
+        Self {
+            missing: Some(object_id),
+        }
+    }
+}
+
+impl CollationResolver for ProfileResolver {
+    fn artifact_available(&self, object_id: &ObjectId) -> bool {
+        self.missing != Some(*object_id)
+    }
+
+    fn canonical_sort_key_len(
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
+    ) -> Result<usize, CollationResolverError> {
+        text.len()
+            .checked_add(1)
+            .ok_or(CollationResolverError::new(1))
+    }
+
+    fn write_canonical_sort_key(
+        &self,
+        binding: &NonBinaryTextBinding,
+        text: &str,
+        output: &mut [u8],
+    ) -> Result<usize, CollationResolverError> {
+        let expected = self.canonical_sort_key_len(binding, text)?;
+        if output.len() != expected {
+            return Err(CollationResolverError::new(2));
+        }
+        output[0] = binding.collation_oid.as_bytes()[0];
+        output[1..].copy_from_slice(text.as_bytes());
+        Ok(expected)
+    }
+
+    fn canonical_sort_key_matches(
+        &self,
+        binding: &NonBinaryTextBinding,
+        text: &str,
+        candidate: &[u8],
+    ) -> Result<bool, CollationResolverError> {
+        Ok(
+            candidate.first() == Some(&binding.collation_oid.as_bytes()[0])
+                && candidate.get(1..) == Some(text.as_bytes()),
+        )
+    }
+}
+
+impl TzdbResolver for ProfileResolver {
+    fn contains_tzdb(&self, tzdb_oid: &ObjectId) -> bool {
+        (*tzdb_oid == PROFILE_TZDB_OID || *tzdb_oid == oid(0x41)) && self.missing != Some(*tzdb_oid)
+    }
+
+    fn canonical_utc_offset_seconds(
+        &self,
+        tzdb_oid: &ObjectId,
+        zone_identifier: &str,
+        instant_utc_nanos: i128,
+    ) -> Option<i32> {
+        ((*tzdb_oid == PROFILE_TZDB_OID || *tzdb_oid == oid(0x41))
+            && zone_identifier == "America/New_York"
+            && instant_utc_nanos == PROFILE_INSTANT)
+            .then_some(-5 * 60 * 60)
+    }
+}
+
+struct HashProfileIdentity;
+
+impl CanonicalScalarProfileIdentityVerifier for HashProfileIdentity {
+    fn verify_canonical_scalar_profile_oid(
+        &self,
+        claimed_oid: ObjectId,
+        canonical_profile: &[u8],
+    ) -> bool {
+        claimed_oid == ObjectId(asupersync::atp::object::compute_hash(canonical_profile))
+    }
+}
+
+fn canonical_profile(
+    resolver: &ProfileResolver,
+) -> Result<CanonicalScalarProfile, CanonicalScalarProfileError> {
+    let descriptor = CanonicalScalarProfile::try_canonical_descriptor_bytes(
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        PROFILE_TZDB_OID,
+        &[oid(0x35), oid(0x34)],
+    )?;
+    let profile_oid = ObjectId(asupersync::atp::object::compute_hash(&descriptor));
+    CanonicalScalarProfile::try_new_verified(
+        profile_oid,
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        PROFILE_TZDB_OID,
+        &[oid(0x35), oid(0x34)],
+        &HashProfileIdentity,
+        resolver,
+    )
+}
+
+fn ucs(value: &str) -> CanonicalText {
+    CanonicalText::new_ucs_basic(value).expect("small UCS_BASIC fixture")
+}
+
+fn scalar_value(value: CanonicalScalar) -> CanonicalPropertyValue {
+    CanonicalPropertyValue::Scalar(value)
+}
+
+fn map_value(entries: Vec<(&str, CanonicalPropertyValue)>) -> CanonicalPropertyValue {
+    CanonicalPropertyValue::Map(
+        CanonicalMap::try_new(
+            entries
+                .into_iter()
+                .map(|(key, value)| CanonicalMapEntry::new(ucs(key), value))
+                .collect(),
+        )
+        .expect("bounded unique Map fixture"),
+    )
+}
+
+fn hash_profiled_property(
+    profile: &CanonicalScalarProfile,
+    value: &CanonicalPropertyValue,
+    resolver: &ProfileResolver,
+) -> Result<u64, CanonicalScalarProfileError> {
+    let mut hasher = DefaultHasher::new();
+    profile.hash_value(value, resolver, &mut hasher)?;
+    Ok(hasher.finish())
+}
+
+#[derive(Default)]
+struct RecordingHasher {
+    bytes: Vec<u8>,
+    write_calls: usize,
+}
+
+impl Hasher for RecordingHasher {
+    fn finish(&self) -> u64 {
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.write_calls += 1;
+        self.bytes.extend_from_slice(bytes);
+    }
+}
+
+#[test]
+fn scalar_profile_identity_binds_rules_artifacts_and_canonical_collation_set()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let forward = CanonicalScalarProfile::try_canonical_descriptor_bytes(
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        PROFILE_TZDB_OID,
+        &[oid(0x34), oid(0x35)],
+    )?;
+    let reverse = CanonicalScalarProfile::try_canonical_descriptor_bytes(
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        PROFILE_TZDB_OID,
+        &[oid(0x35), oid(0x34)],
+    )?;
+    assert_eq!(
+        forward, reverse,
+        "set order must not alter profile identity"
+    );
+    assert_eq!(
+        profile.profile_oid(),
+        ObjectId(asupersync::atp::object::compute_hash(&forward))
+    );
+    assert_eq!(
+        profile.profile_oid(),
+        ObjectId([
+            0x15, 0xfa, 0x82, 0x70, 0xd5, 0xd3, 0x31, 0x07, 0xca, 0x32, 0x48, 0x6b, 0x62, 0x78,
+            0xa2, 0xf4, 0xda, 0x79, 0x36, 0x71, 0x04, 0xca, 0x45, 0x2a, 0x09, 0x9c, 0xef, 0x41,
+            0xd3, 0x75, 0x82, 0xe7,
+        ]),
+        "the frozen profile identity witnesses every fixed rule and artifact byte"
+    );
+    assert_eq!(profile.non_binary_collation_oids(), &[oid(0x34), oid(0x35)]);
+
+    let changed = CanonicalScalarProfile::try_canonical_descriptor_bytes(
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        oid(0x41),
+        &[oid(0x34), oid(0x35)],
+    )?;
+    assert_ne!(
+        forward, changed,
+        "changing an artifact must change the verified descriptor"
+    );
+    assert_eq!(
+        CanonicalScalarProfile::try_new_verified(
+            profile.profile_oid(),
+            oid(0x31),
+            oid(0x32),
+            oid(0x33),
+            oid(0x41),
+            &[oid(0x34), oid(0x35)],
+            &HashProfileIdentity,
+            &resolver,
+        ),
+        Err(CanonicalScalarProfileError::ProfileIdentityUnverified {
+            claimed: profile.profile_oid(),
+        })
+    );
+    assert_eq!(
+        CanonicalScalarProfile::try_canonical_descriptor_bytes(
+            oid(0x31),
+            oid(0x32),
+            oid(0x33),
+            PROFILE_TZDB_OID,
+            &[oid(0x34), oid(0x34)],
+        ),
+        Err(CanonicalScalarProfileError::DuplicateCollation {
+            object_id: oid(0x34),
+        })
+    );
+    for (role, object_id) in [
+        (
+            fgdb_types::ScalarProfileArtifactRole::UnicodeData,
+            oid(0x31),
+        ),
+        (
+            fgdb_types::ScalarProfileArtifactRole::Normalization,
+            oid(0x32),
+        ),
+        (
+            fgdb_types::ScalarProfileArtifactRole::Segmentation,
+            oid(0x33),
+        ),
+        (fgdb_types::ScalarProfileArtifactRole::Collation, oid(0x34)),
+        (
+            fgdb_types::ScalarProfileArtifactRole::Tzdb,
+            PROFILE_TZDB_OID,
+        ),
+    ] {
+        assert_eq!(
+            canonical_profile(&ProfileResolver::missing(object_id)),
+            Err(CanonicalScalarProfileError::MissingArtifact { role, object_id })
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn canonical_map_sorts_string_keys_by_ordered_scalar_bytes_and_rejects_duplicates() {
+    let map = CanonicalMap::try_new(vec![
+        CanonicalMapEntry::new(ucs("b"), scalar_value(CanonicalScalar::Int(3))),
+        CanonicalMapEntry::new(ucs("aa"), scalar_value(CanonicalScalar::Int(2))),
+        CanonicalMapEntry::new(ucs("a"), scalar_value(CanonicalScalar::Int(1))),
+    ])
+    .expect("bounded unique Map");
+    let ordered_keys: Vec<&str> = map
+        .entries()
+        .iter()
+        .map(|entry| entry.key().as_str())
+        .collect();
+    assert_eq!(ordered_keys, ["a", "aa", "b"]);
+
+    let key_bytes: Vec<Vec<u8>> = map
+        .entries()
+        .iter()
+        .map(|entry| {
+            CanonicalScalar::Text(entry.key().clone())
+                .encode()
+                .expect("bounded key")
+        })
+        .collect();
+    assert!(
+        key_bytes.windows(2).all(|window| window[0] < window[1]),
+        "stored Map order must be strictly increasing canonical scalar bytes"
+    );
+
+    assert_eq!(
+        CanonicalMap::try_new(vec![
+            CanonicalMapEntry::new(ucs("same"), scalar_value(CanonicalScalar::Int(1))),
+            CanonicalMapEntry::new(ucs("same"), scalar_value(CanonicalScalar::Int(2))),
+        ]),
+        Err(CanonicalPropertyValueError::DuplicateMapKey)
+    );
+}
+
+#[test]
+fn canonical_map_order_and_bytes_agree_at_prefix_key_and_value_boundaries()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let maps = [
+        map_value(vec![]),
+        map_value(vec![("a", scalar_value(CanonicalScalar::Int(0)))]),
+        map_value(vec![
+            ("a", scalar_value(CanonicalScalar::Int(0))),
+            ("b", scalar_value(CanonicalScalar::Int(0))),
+        ]),
+        map_value(vec![("a", scalar_value(CanonicalScalar::Int(1)))]),
+        map_value(vec![("b", scalar_value(CanonicalScalar::Int(0)))]),
+    ];
+    assert!(maps.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let encoded = maps
+        .iter()
+        .map(|value| profile.encode_value(value, &resolver))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+    for (left_index, left) in maps.iter().enumerate() {
+        for (right_index, right) in maps.iter().enumerate() {
+            assert_eq!(
+                profile.compare(left, right, &resolver)?,
+                encoded[left_index].cmp(&encoded[right_index])
+            );
+            assert_eq!(
+                left == right,
+                encoded[left_index] == encoded[right_index],
+                "distinct Map values must not alias canonical bytes"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn profiled_property_encoding_round_trips_and_byte_order_equals_value_order()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let nested = map_value(vec![
+        ("b", scalar_value(CanonicalScalar::Bool(true))),
+        (
+            "a",
+            CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![
+                    scalar_value(CanonicalScalar::Null),
+                    scalar_value(CanonicalScalar::Int(7)),
+                ])
+                .expect("bounded List"),
+            ),
+        ),
+    ]);
+    let corpus = [
+        scalar_value(CanonicalScalar::Null),
+        scalar_value(CanonicalScalar::Int(-1)),
+        scalar_value(CanonicalScalar::Int(1)),
+        CanonicalPropertyValue::List(CanonicalList::try_new(vec![]).expect("empty List")),
+        CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![scalar_value(CanonicalScalar::Int(1))])
+                .expect("bounded List"),
+        ),
+        nested,
+    ];
+    let encoded: Vec<Vec<u8>> = corpus
+        .iter()
+        .map(|value| profile.encode_value(value, &resolver))
+        .collect::<Result<_, _>>()?;
+
+    for (value, bytes) in corpus.iter().zip(&encoded) {
+        let decoded = profile.decode_value_with_resolver(bytes, &resolver)?;
+        assert_eq!(&decoded, value);
+        assert_eq!(
+            hash_profiled_property(&profile, &decoded, &resolver)?,
+            hash_profiled_property(&profile, value, &resolver)?
+        );
+        assert_eq!(profile.encode_value(&decoded, &resolver)?, *bytes);
+    }
+    for (left_index, left) in corpus.iter().enumerate() {
+        for (right_index, right) in corpus.iter().enumerate() {
+            assert_eq!(
+                profile.compare(left, right, &resolver)?,
+                encoded[left_index].cmp(&encoded[right_index]),
+                "profile bytes disagree with value order for {left:?} vs {right:?}"
+            );
+        }
+    }
+
+    let empty = CanonicalPropertyValue::List(
+        CanonicalList::try_new(vec![]).expect("empty List is within every structural bound"),
+    );
+    let one = CanonicalPropertyValue::List(
+        CanonicalList::try_new(vec![scalar_value(CanonicalScalar::Int(1))])
+            .expect("one-element List is bounded"),
+    );
+    let one_zero = CanonicalPropertyValue::List(
+        CanonicalList::try_new(vec![
+            scalar_value(CanonicalScalar::Int(1)),
+            scalar_value(CanonicalScalar::Int(0)),
+        ])
+        .expect("two-element List is bounded"),
+    );
+    let two = CanonicalPropertyValue::List(
+        CanonicalList::try_new(vec![scalar_value(CanonicalScalar::Int(2))])
+            .expect("one-element List is bounded"),
+    );
+    assert!(empty < one && one < one_zero && one_zero < two);
+    let list_bytes = [empty, one, one_zero, two]
+        .iter()
+        .map(|value| profile.encode_value(value, &resolver))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(list_bytes.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let golden = CanonicalPropertyValue::List(
+        CanonicalList::try_new(vec![
+            scalar_value(CanonicalScalar::Null),
+            scalar_value(CanonicalScalar::Int(1)),
+        ])
+        .expect("small golden List"),
+    );
+    assert_eq!(
+        profile.encode_value(&golden, &resolver)?,
+        vec![
+            0x08, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x02, 0x01, 0x80, 0x01, 0x00, 0x01, 0x00,
+            0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00,
+        ],
+        "nested canonical bytes are a frozen independent contract"
+    );
+    Ok(())
+}
+
+#[test]
+fn profile_hash_feed_is_domain_separated_canonical_property_bytes()
+-> Result<(), CanonicalScalarProfileError> {
+    const HASH_DOMAIN: &[u8] = b"fgdb:canonical-property-value-hash:v1\0";
+
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let value = map_value(vec![(
+        "key",
+        CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![scalar_value(CanonicalScalar::Int(7))])
+                .expect("small List"),
+        ),
+    )]);
+    let canonical = profile.encode_value(&value, &resolver)?;
+    let mut recording = RecordingHasher::default();
+    profile.hash_value(&value, &resolver, &mut recording)?;
+
+    let mut expected = Vec::from(HASH_DOMAIN);
+    expected.extend_from_slice(&canonical);
+    assert_eq!(recording.bytes, expected);
+    assert_eq!(recording.write_calls, 1, "the profile binds one hash write");
+    Ok(())
+}
+
+#[test]
+fn property_decoder_rejects_unsorted_and_duplicate_map_bytes_instead_of_repairing()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let one_a = profile.encode_value(
+        &map_value(vec![("a", scalar_value(CanonicalScalar::Int(1)))]),
+        &resolver,
+    )?;
+    let one_b = profile.encode_value(
+        &map_value(vec![("b", scalar_value(CanonicalScalar::Int(2)))]),
+        &resolver,
+    )?;
+
+    let mut poisoned_a = one_a[1..one_a.len() - 1].to_vec();
+    let mut field_cursor = 1usize; // collection-item control precedes the key field
+    while poisoned_a[field_cursor] != 0 {
+        assert_eq!(poisoned_a[field_cursor], 1);
+        field_cursor += 2;
+    }
+    let value_field = field_cursor + 1;
+    assert_eq!(poisoned_a[value_field], 1);
+    poisoned_a[value_field + 1] = 0xff; // decoded scalar tag is unknown
+
+    let mut poisoned_single = vec![0x09];
+    poisoned_single.extend_from_slice(&poisoned_a);
+    poisoned_single.push(0);
+    assert_eq!(
+        profile.decode_value_with_resolver(&poisoned_single, &resolver),
+        Err(CanonicalScalarProfileError::PropertyValue(
+            CanonicalPropertyValueError::UnknownTag(0xff),
+        ))
+    );
+
+    let mut unsorted = vec![0x09];
+    unsorted.extend_from_slice(&one_b[1..one_b.len() - 1]);
+    unsorted.extend_from_slice(&poisoned_a);
+    unsorted.push(0);
+    assert_eq!(
+        profile.decode_value_with_resolver(&unsorted, &resolver),
+        Err(CanonicalScalarProfileError::PropertyValue(
+            CanonicalPropertyValueError::NonCanonicalEncoding,
+        ))
+    );
+
+    let mut duplicate = vec![0x09];
+    duplicate.extend_from_slice(&one_a[1..one_a.len() - 1]);
+    duplicate.extend_from_slice(&poisoned_a);
+    duplicate.push(0);
+    assert_eq!(
+        profile.decode_value_with_resolver(&duplicate, &resolver),
+        Err(CanonicalScalarProfileError::PropertyValue(
+            CanonicalPropertyValueError::DuplicateMapKey,
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn property_decoder_is_total_over_seeded_malformed_bytes_within_bound()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let mut state = 0x6a09_e667_f3bc_c909_u64;
+
+    for length in 0..=128 {
+        for _ in 0..32 {
+            let mut bytes = Vec::with_capacity(length);
+            for _ in 0..length {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                bytes.push((state >> 24) as u8);
+            }
+            let _result = profile.decode_value_with_resolver(&bytes, &resolver);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn scalar_profile_coercion_is_closed_exact_and_separate_from_query_coercion()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+
+    let decimal = profile
+        .coerce_scalar(
+            CanonicalScalar::Int(42),
+            CanonicalScalarKind::Decimal,
+            &resolver,
+        )
+        .expect("42 is exactly representable at scale 18");
+    assert_eq!(
+        decimal,
+        CanonicalScalar::Decimal(CanonicalDecimal::from_integer(42).expect("exact decimal"))
+    );
+    assert_eq!(
+        profile
+            .coerce_scalar(decimal, CanonicalScalarKind::Int, &resolver)
+            .expect("integral decimal is exactly representable"),
+        CanonicalScalar::Int(42)
+    );
+
+    let largest_exact_integer = 9_999_999_999_999_999_i64;
+    assert_eq!(
+        profile
+            .coerce_scalar(
+                CanonicalScalar::Int(largest_exact_integer),
+                CanonicalScalarKind::Decimal,
+                &resolver,
+            )
+            .expect("the largest scale-18 integral decimal must be exact"),
+        CanonicalScalar::Decimal(
+            CanonicalDecimal::from_integer(i128::from(largest_exact_integer))
+                .expect("boundary decimal fixture"),
+        )
+    );
+    let first_inexact_integer = 10_000_000_000_000_000_i64;
+    assert_eq!(
+        profile.coerce_scalar(
+            CanonicalScalar::Int(first_inexact_integer),
+            CanonicalScalarKind::Decimal,
+            &resolver,
+        ),
+        Err(CanonicalScalarCoercionError::Decimal(
+            DecimalError::CoefficientOutOfRange {
+                coefficient: 10_000_000_000_000_000_000_000_000_000_000_000,
+                precision: 34,
+            }
+        ))
+    );
+
+    let fractional =
+        CanonicalScalar::Decimal(CanonicalDecimal::from_coefficient(1).expect("small coefficient"));
+    assert_eq!(
+        profile.coerce_scalar(fractional, CanonicalScalarKind::Int, &resolver),
+        Err(CanonicalScalarCoercionError::InexactNumeric {
+            source: CanonicalScalarKind::Decimal,
+            target: CanonicalScalarKind::Int,
+        })
+    );
+    assert_eq!(
+        profile.coerce_scalar(
+            CanonicalScalar::Int(1),
+            CanonicalScalarKind::Float,
+            &resolver,
+        ),
+        Err(CanonicalScalarCoercionError::Unsupported {
+            source: CanonicalScalarKind::Int,
+            target: CanonicalScalarKind::Float,
+        })
+    );
+    assert_eq!(
+        profile.coerce_scalar(
+            CanonicalScalar::Null,
+            CanonicalScalarKind::Timestamp,
+            &resolver,
+        ),
+        Err(CanonicalScalarCoercionError::Unsupported {
+            source: CanonicalScalarKind::Null,
+            target: CanonicalScalarKind::Timestamp,
+        })
+    );
+    assert_eq!(
+        profile
+            .coerce_scalar(CanonicalScalar::Null, CanonicalScalarKind::Null, &resolver,)
+            .expect("Null identity coercion"),
+        CanonicalScalar::Null,
+    );
+
+    let owned_bytes = CanonicalBytes::new(vec![1, 2, 3, 4]).expect("small bounded Bytes");
+    let source_allocation = owned_bytes.as_slice().as_ptr();
+    let identity = profile
+        .coerce_scalar(
+            CanonicalScalar::Bytes(owned_bytes),
+            CanonicalScalarKind::Bytes,
+            &resolver,
+        )
+        .expect("Bytes identity coercion");
+    let identity_allocation = match identity {
+        CanonicalScalar::Bytes(bytes) => bytes.as_slice().as_ptr(),
+        other => {
+            assert!(
+                matches!(&other, CanonicalScalar::Bytes(_)),
+                "Bytes identity coercion returned {other:?}"
+            );
+            source_allocation
+        }
+    };
+    assert_eq!(identity_allocation, source_allocation);
+    Ok(())
+}
+
+#[test]
+fn profile_rejects_value_artifacts_outside_its_exact_binding()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let outside = NonBinaryTextBinding::new(oid(0x31), oid(0x32), oid(0x33), oid(0x36));
+    let text = CanonicalText::new_non_binary("x", outside, &resolver)
+        .expect("fixture resolver can derive the outside collation");
+    let value = scalar_value(CanonicalScalar::Text(text));
+    assert_eq!(
+        profile.encode_value(&value, &resolver),
+        Err(CanonicalScalarProfileError::CollationNotAdmitted { actual: oid(0x36) })
+    );
+    Ok(())
+}
+
+#[test]
+fn recursive_profile_validation_rejects_every_nested_artifact_substitution()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+
+    for (role, expected, binding) in [
+        (
+            fgdb_types::ScalarProfileArtifactRole::UnicodeData,
+            oid(0x31),
+            NonBinaryTextBinding::new(oid(0x36), oid(0x32), oid(0x33), oid(0x34)),
+        ),
+        (
+            fgdb_types::ScalarProfileArtifactRole::Normalization,
+            oid(0x32),
+            NonBinaryTextBinding::new(oid(0x31), oid(0x36), oid(0x33), oid(0x34)),
+        ),
+        (
+            fgdb_types::ScalarProfileArtifactRole::Segmentation,
+            oid(0x33),
+            NonBinaryTextBinding::new(oid(0x31), oid(0x32), oid(0x36), oid(0x34)),
+        ),
+    ] {
+        let text = CanonicalText::new_non_binary("nested", binding, &resolver)
+            .expect("fixture resolver derives every test binding");
+        let value = map_value(vec![(
+            "outer",
+            CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![scalar_value(CanonicalScalar::Text(text))])
+                    .expect("small nested List"),
+            ),
+        )]);
+        assert_eq!(
+            profile.encode_value(&value, &resolver),
+            Err(CanonicalScalarProfileError::ArtifactBindingMismatch {
+                role,
+                expected,
+                actual: oid(0x36),
+            })
+        );
+
+        let key = CanonicalText::new_non_binary("nested-key", binding, &resolver)
+            .expect("fixture resolver derives every test key binding");
+        let key_value = CanonicalPropertyValue::Map(
+            CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+                key,
+                scalar_value(CanonicalScalar::Null),
+            )])
+            .expect("small single-entry Map"),
+        );
+        assert_eq!(
+            profile.encode_value(&key_value, &resolver),
+            Err(CanonicalScalarProfileError::ArtifactBindingMismatch {
+                role,
+                expected,
+                actual: oid(0x36),
+            })
+        );
+    }
+
+    let outside_collation = NonBinaryTextBinding::new(oid(0x31), oid(0x32), oid(0x33), oid(0x36));
+    let text = CanonicalText::new_non_binary("nested", outside_collation, &resolver)
+        .expect("fixture resolver derives the outside collation");
+    let value = map_value(vec![(
+        "outer",
+        CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![scalar_value(CanonicalScalar::Text(text))])
+                .expect("small nested List"),
+        ),
+    )]);
+    assert_eq!(
+        profile.encode_value(&value, &resolver),
+        Err(CanonicalScalarProfileError::CollationNotAdmitted { actual: oid(0x36) })
+    );
+    let outside_key = CanonicalText::new_non_binary("nested-key", outside_collation, &resolver)
+        .expect("fixture resolver derives the outside key collation");
+    let key_value = CanonicalPropertyValue::Map(
+        CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+            outside_key,
+            scalar_value(CanonicalScalar::Null),
+        )])
+        .expect("small single-entry Map"),
+    );
+    assert_eq!(
+        profile.encode_value(&key_value, &resolver),
+        Err(CanonicalScalarProfileError::CollationNotAdmitted { actual: oid(0x36) })
+    );
+
+    let timestamp = CanonicalTimestamp::zoned(
+        PROFILE_INSTANT,
+        -5 * 60 * 60,
+        "America/New_York",
+        oid(0x41),
+        &resolver,
+    )
+    .expect("alternate tzdb fixture is internally valid");
+    let value = map_value(vec![(
+        "outer",
+        CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![scalar_value(CanonicalScalar::Timestamp(timestamp))])
+                .expect("small nested List"),
+        ),
+    )]);
+    assert_eq!(
+        profile.encode_value(&value, &resolver),
+        Err(CanonicalScalarProfileError::ArtifactBindingMismatch {
+            role: fgdb_types::ScalarProfileArtifactRole::Tzdb,
+            expected: PROFILE_TZDB_OID,
+            actual: oid(0x41),
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn property_aggregate_size_is_enforced_before_the_looser_nesting_bound()
+-> Result<(), CanonicalScalarProfileError> {
+    let resolver = ProfileResolver::AVAILABLE;
+    let profile = canonical_profile(&resolver)?;
+    let mut value = scalar_value(CanonicalScalar::Null);
+    for _ in 0..23 {
+        value = CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![value]).expect("encoded size through depth 23 is admitted"),
+        );
+    }
+    let largest_admitted = profile.encode_value(&value, &resolver)?;
+    let largest_admitted_len = largest_admitted.len();
+    drop(largest_admitted);
+    assert_eq!(largest_admitted_len, 41_943_036);
+    assert!(largest_admitted_len <= MAX_PROPERTY_VALUE_BYTES);
+    assert_eq!(
+        CanonicalMap::try_new(vec![CanonicalMapEntry::new(ucs("k"), value.clone())]),
+        Err(CanonicalPropertyValueError::EncodedValueTooLarge {
+            actual: 83_886_099,
+            maximum: MAX_PROPERTY_VALUE_BYTES,
+        })
+    );
+    assert_eq!(
+        CanonicalList::try_new(vec![value]),
+        Err(CanonicalPropertyValueError::EncodedValueTooLarge {
+            actual: 83_886_076,
+            maximum: MAX_PROPERTY_VALUE_BYTES,
+        })
+    );
+    Ok(())
 }

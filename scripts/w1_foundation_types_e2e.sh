@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # foundation_types_e2e (bead fgdb-w1-foundation-types-tjk): one deterministic
-# pass over all six foundation crates — canonical scalars under
-# STRICT_PORTABLE, ZWeight promotion across the i128 boundary, every
+# pass over all six foundation crates — a verified STRICT_PORTABLE scalar
+# profile, canonical scalar/Map/List values and exact coercion, ZWeight
+# promotion across the i128 boundary, every
 # delta-row arm through template -> committed marker -> ordered batch, one
 # evidence envelope per §15.0 claim kind with a scripted lattice violation,
 # and a resource-admission loop ending in a typed ceiling rejection.
@@ -47,6 +48,9 @@ grep -q "scalar reject forged collation sort key" "$FIRST"
 grep -q "scalar reject absent tzdb resolver" "$FIRST"
 grep -q "scalar reject missing tzdb artifact" "$FIRST"
 grep -q "timestamp reject tzdb offset mismatch" "$FIRST"
+grep -q "scalar profile oid=.*collations=1 missing-artifact-rejection=missing UnicodeData artifact" "$FIRST"
+grep -q "property Map/List round trip: profile_oid=.*keys=a,aa,b bytes=" "$FIRST"
+grep -q "scalar profile coercion: decimal=Decimal.*integer=Int(42).*float-rejection=unsupported scalar coercion Int -> Float" "$FIRST"
 grep -q "decimal half-even boundary: source=25e-19 coefficient=2" "$FIRST"
 grep -q "decimal reject profile overflow" "$FIRST"
 grep -q "zweight demoted back: Some(170141183460469231731687303715884105727)" "$FIRST"

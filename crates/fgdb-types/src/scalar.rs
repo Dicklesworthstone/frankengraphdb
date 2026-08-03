@@ -56,7 +56,8 @@ use crate::{
     decimal::{CanonicalDecimal, DecimalDecodeError},
     ids::ObjectId,
     temporal::{
-        CanonicalTimestamp, MAX_ZONE_IDENTIFIER_BYTES, TimestampDecodeError, TzdbResolver,
+        CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
+        MAX_ZONE_IDENTIFIER_BYTES, MIN_TIMESTAMP_UTC_NANOS, TimestampDecodeError, TzdbResolver,
         validate_zone_identifier,
     },
     text::{
@@ -81,10 +82,91 @@ const TAG_TEXT: u8 = 0x05;
 const TAG_TIMESTAMP: u8 = 0x06;
 const TAG_BYTES: u8 = 0x07;
 
+const BOOL_FALSE_BYTE: u8 = 0;
+const BOOL_TRUE_BYTE: u8 = 1;
+const TEXT_BINDING_UCS_BASIC: u8 = 0;
+const TEXT_BINDING_NON_BINARY: u8 = 1;
+const TIMESTAMP_ZONE_ABSENT: u8 = 0;
+const TIMESTAMP_ZONE_PRESENT: u8 = 1;
+
 const COMPARABLE_GROUP_BYTES: usize = 8;
 const COMPARABLE_ENCODED_GROUP_BYTES: usize = 9;
 const COMPARABLE_FULL_GROUP_MARKER: u8 = 0xFF;
 const COMPARABLE_TERMINAL_MARKER: u8 = 0xF7;
+
+const STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN: &[u8] =
+    b"fgdb:strict-portable-scalar-semantics:v1\0";
+const STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION: u16 = 1;
+const SIGNED_ORDER_SIGN_FLIP_BIG_ENDIAN: u8 = 1;
+const FLOAT_ORDER_TOTAL_ORDER_TRANSFORM: u8 = 1;
+const DECIMAL_ORDER_CANONICAL_COEFFICIENT: u8 = 1;
+const VARIABLE_BYTES_MEMCOMPARABLE_GROUPS: u8 = 1;
+const TEXT_ORDER_SORT_KEY_THEN_UTF8: u8 = 1;
+const TEXT_UTF8_VALIDATE_NO_REPAIR: u8 = 1;
+const TIMESTAMP_ORDER_INSTANT_OFFSET_ZONE: u8 = 1;
+const ZONE_IDENTIFIER_CANONICAL_IANA_SYNTAX: u8 = 1;
+const SCALAR_DESCRIPTOR_RULE_BYTES: &[u8] = &[
+    // Variant tags are also the fixed cross-kind ranks.
+    TAG_NULL,
+    TAG_BOOL,
+    TAG_INT,
+    TAG_DECIMAL,
+    TAG_FLOAT,
+    TAG_TEXT,
+    TAG_TIMESTAMP,
+    TAG_BYTES,
+    BOOL_FALSE_BYTE,
+    BOOL_TRUE_BYTE,
+    SIGNED_ORDER_SIGN_FLIP_BIG_ENDIAN,
+    FLOAT_ORDER_TOTAL_ORDER_TRANSFORM,
+    DECIMAL_ORDER_CANONICAL_COEFFICIENT,
+    VARIABLE_BYTES_MEMCOMPARABLE_GROUPS,
+    TEXT_ORDER_SORT_KEY_THEN_UTF8,
+    TEXT_UTF8_VALIDATE_NO_REPAIR,
+    TIMESTAMP_ORDER_INSTANT_OFFSET_ZONE,
+    ZONE_IDENTIFIER_CANONICAL_IANA_SYNTAX,
+    TEXT_BINDING_UCS_BASIC,
+    TEXT_BINDING_NON_BINARY,
+    TIMESTAMP_ZONE_ABSENT,
+    TIMESTAMP_ZONE_PRESENT,
+    COMPARABLE_GROUP_BYTES as u8,
+    COMPARABLE_ENCODED_GROUP_BYTES as u8,
+    COMPARABLE_FULL_GROUP_MARKER,
+    COMPARABLE_TERMINAL_MARKER,
+];
+
+pub(crate) const STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN: usize =
+    STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN.len()
+        + 2
+        + SCALAR_DESCRIPTOR_RULE_BYTES.len()
+        + 8
+        + 4 * 8
+        + 2 * 16
+        + 4
+        + 8;
+
+/// Appends the artifact-independent atomic scalar contract bound by a
+/// `CanonicalScalarProfile` descriptor. The caller pre-reserves the exact
+/// [`STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN`] bytes, so this performs no
+/// allocation of its own.
+pub(crate) fn append_strict_portable_scalar_descriptor(out: &mut Vec<u8>) {
+    out.extend_from_slice(STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN);
+    out.extend_from_slice(&STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION.to_le_bytes());
+    out.extend_from_slice(SCALAR_DESCRIPTOR_RULE_BYTES);
+    out.extend_from_slice(&CANONICAL_NAN_BITS.to_le_bytes());
+    for bound in [
+        MAX_SCALAR_PAYLOAD,
+        MAX_SCALAR_BYTES,
+        MAX_CANONICAL_TEXT_BYTES,
+        MAX_CANONICAL_SORT_KEY_BYTES,
+    ] {
+        out.extend_from_slice(&(bound as u64).to_le_bytes());
+    }
+    out.extend_from_slice(&MIN_TIMESTAMP_UTC_NANOS.to_le_bytes());
+    out.extend_from_slice(&MAX_TIMESTAMP_UTC_NANOS.to_le_bytes());
+    out.extend_from_slice(&MAX_UTC_OFFSET_SECONDS.to_le_bytes());
+    out.extend_from_slice(&(MAX_ZONE_IDENTIFIER_BYTES as u64).to_le_bytes());
+}
 
 /// Maximum complete encoded payload (excluding the scalar tag) accepted by
 /// this profile. This is an aggregate bound: non-binary text cannot consume
@@ -196,14 +278,14 @@ impl CanonicalScalar {
     /// Fixed cross-type rank of the `STRICT_PORTABLE` profile.
     fn type_rank(&self) -> u8 {
         match self {
-            CanonicalScalar::Null => 0,
-            CanonicalScalar::Bool(_) => 1,
-            CanonicalScalar::Int(_) => 2,
-            CanonicalScalar::Decimal(_) => 3,
-            CanonicalScalar::Float(_) => 4,
-            CanonicalScalar::Text(_) => 5,
-            CanonicalScalar::Timestamp(_) => 6,
-            CanonicalScalar::Bytes(_) => 7,
+            CanonicalScalar::Null => TAG_NULL,
+            CanonicalScalar::Bool(_) => TAG_BOOL,
+            CanonicalScalar::Int(_) => TAG_INT,
+            CanonicalScalar::Decimal(_) => TAG_DECIMAL,
+            CanonicalScalar::Float(_) => TAG_FLOAT,
+            CanonicalScalar::Text(_) => TAG_TEXT,
+            CanonicalScalar::Timestamp(_) => TAG_TIMESTAMP,
+            CanonicalScalar::Bytes(_) => TAG_BYTES,
         }
     }
 
@@ -216,25 +298,76 @@ impl CanonicalScalar {
     /// Allocation is fallible and the aggregate payload bound is checked
     /// before the output buffer is allocated.
     pub fn encode(&self) -> Result<Vec<u8>, ScalarEncodeError> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Returns the complete canonical byte length without allocating.
+    pub(crate) fn canonical_encoded_len(&self) -> Result<usize, ScalarEncodeError> {
+        let payload_len = match self {
+            Self::Null => 0,
+            Self::Bool(_) => 1,
+            Self::Int(_) | Self::Float(_) => 8,
+            Self::Decimal(_) => 16,
+            Self::Text(value) => text_scalar_payload_len(value)?,
+            Self::Timestamp(value) => timestamp_scalar_payload_len(value)?,
+            Self::Bytes(value) => comparable_encoded_len(value.as_slice())?,
+        };
+        if payload_len > MAX_SCALAR_PAYLOAD {
+            return Err(ScalarEncodeError::PayloadTooLarge {
+                tag: self.type_rank(),
+                length: payload_len,
+                maximum: MAX_SCALAR_PAYLOAD,
+            });
+        }
+        payload_len
+            .checked_add(1)
+            .ok_or(ScalarEncodeError::EncodedSizeOverflow)
+    }
+
+    /// Reuses caller-owned storage for one complete canonical encoding.
+    pub(crate) fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), ScalarEncodeError> {
+        out.clear();
+        let requested = self.canonical_encoded_len()?;
+        out.try_reserve_exact(requested)
+            .map_err(|_| ScalarEncodeError::AllocationFailed { requested })?;
         match self {
-            CanonicalScalar::Null => tagged_fixed_payload(TAG_NULL, &[]),
-            CanonicalScalar::Bool(value) => tagged_fixed_payload(TAG_BOOL, &[u8::from(*value)]),
+            CanonicalScalar::Null => out.push(TAG_NULL),
+            CanonicalScalar::Bool(value) => {
+                out.push(TAG_BOOL);
+                out.push(if *value {
+                    BOOL_TRUE_BYTE
+                } else {
+                    BOOL_FALSE_BYTE
+                });
+            }
             CanonicalScalar::Int(value) => {
-                tagged_fixed_payload(TAG_INT, &ordered_i64(*value).to_be_bytes())
+                out.push(TAG_INT);
+                out.extend_from_slice(&ordered_i64(*value).to_be_bytes());
             }
-            CanonicalScalar::Decimal(value) => tagged_fixed_payload(
-                TAG_DECIMAL,
-                &ordered_i128(value.coefficient()).to_be_bytes(),
-            ),
+            CanonicalScalar::Decimal(value) => {
+                out.push(TAG_DECIMAL);
+                out.extend_from_slice(&ordered_i128(value.coefficient()).to_be_bytes());
+            }
             CanonicalScalar::Float(value) => {
-                tagged_fixed_payload(TAG_FLOAT, &ordered_f64_bits(value.to_bits()).to_be_bytes())
+                out.push(TAG_FLOAT);
+                out.extend_from_slice(&ordered_f64_bits(value.to_bits()).to_be_bytes());
             }
-            CanonicalScalar::Text(value) => encode_text_scalar(value),
-            CanonicalScalar::Timestamp(value) => encode_timestamp_scalar(value),
+            CanonicalScalar::Text(value) => append_text_scalar(value, out)?,
+            CanonicalScalar::Timestamp(value) => append_timestamp_scalar(value, out),
             CanonicalScalar::Bytes(value) => {
-                encode_one_comparable_field(TAG_BYTES, value.as_slice())
+                out.push(TAG_BYTES);
+                append_comparable(value.as_slice(), out);
             }
         }
+        if out.len() != requested {
+            return Err(ScalarEncodeError::EncodedSizeInvariantMismatch {
+                expected: requested,
+                actual: out.len(),
+            });
+        }
+        Ok(())
     }
 
     /// Decodes one scalar, consuming the entire input. Every malformed form
@@ -275,8 +408,8 @@ impl CanonicalScalar {
                 Ok(CanonicalScalar::Null)
             }
             TAG_BOOL => match exact(1)?[0] {
-                0 => Ok(CanonicalScalar::Bool(false)),
-                1 => Ok(CanonicalScalar::Bool(true)),
+                BOOL_FALSE_BYTE => Ok(CanonicalScalar::Bool(false)),
+                BOOL_TRUE_BYTE => Ok(CanonicalScalar::Bool(true)),
                 other => Err(ScalarDecodeError::BadBool(other)),
             },
             TAG_INT => {
@@ -307,38 +440,49 @@ impl CanonicalScalar {
     }
 }
 
-fn tagged_fixed_payload(tag: u8, payload: &[u8]) -> Result<Vec<u8>, ScalarEncodeError> {
-    let requested = payload
-        .len()
-        .checked_add(1)
-        .ok_or(ScalarEncodeError::EncodedSizeOverflow)?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(requested)
-        .map_err(|_| ScalarEncodeError::AllocationFailed { requested })?;
-    out.push(tag);
-    out.extend_from_slice(payload);
-    Ok(out)
-}
-
-fn allocate_tagged_payload(tag: u8, payload_len: usize) -> Result<Vec<u8>, ScalarEncodeError> {
+/// Returns the complete scalar encoding length for a borrowed Map key.
+///
+/// Map construction uses this path to enforce aggregate bounds without
+/// cloning the key or allocating an encoded-key cache.
+pub(crate) fn canonical_text_scalar_encoded_len(
+    value: &CanonicalText,
+) -> Result<usize, ScalarEncodeError> {
+    let payload_len = text_scalar_payload_len(value)?;
     if payload_len > MAX_SCALAR_PAYLOAD {
         return Err(ScalarEncodeError::PayloadTooLarge {
-            tag,
+            tag: TAG_TEXT,
             length: payload_len,
             maximum: MAX_SCALAR_PAYLOAD,
         });
     }
-    let requested = payload_len
+    payload_len
         .checked_add(1)
-        .ok_or(ScalarEncodeError::EncodedSizeOverflow)?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(requested)
-        .map_err(|_| ScalarEncodeError::AllocationFailed { requested })?;
-    out.push(tag);
-    Ok(out)
+        .ok_or(ScalarEncodeError::EncodedSizeOverflow)
 }
 
-fn encode_text_scalar(value: &CanonicalText) -> Result<Vec<u8>, ScalarEncodeError> {
+/// Reuses caller-owned storage for one borrowed canonical Text scalar.
+///
+/// This is the Map-key encoding path. It is deliberately borrowed so a Map
+/// never clones its owned String key merely to derive canonical bytes.
+pub(crate) fn encode_canonical_text_into(
+    value: &CanonicalText,
+    out: &mut Vec<u8>,
+) -> Result<(), ScalarEncodeError> {
+    out.clear();
+    let requested = canonical_text_scalar_encoded_len(value)?;
+    out.try_reserve_exact(requested)
+        .map_err(|_| ScalarEncodeError::AllocationFailed { requested })?;
+    append_text_scalar(value, out)?;
+    if out.len() != requested {
+        return Err(ScalarEncodeError::EncodedSizeInvariantMismatch {
+            expected: requested,
+            actual: out.len(),
+        });
+    }
+    Ok(())
+}
+
+fn text_scalar_payload_len(value: &CanonicalText) -> Result<usize, ScalarEncodeError> {
     let text_len = comparable_encoded_len(value.as_bytes())?;
     let payload_len = match value.binding() {
         TextBinding::UcsBasic => 1usize
@@ -355,59 +499,58 @@ fn encode_text_scalar(value: &CanonicalText) -> Result<Vec<u8>, ScalarEncodeErro
                 .ok_or(ScalarEncodeError::EncodedSizeOverflow)?
         }
     };
-    let mut out = allocate_tagged_payload(TAG_TEXT, payload_len)?;
+    Ok(payload_len)
+}
+
+fn append_text_scalar(value: &CanonicalText, out: &mut Vec<u8>) -> Result<(), ScalarEncodeError> {
+    out.push(TAG_TEXT);
     match value.binding() {
         TextBinding::UcsBasic => {
-            out.push(0);
-            append_comparable(value.as_bytes(), &mut out);
+            out.push(TEXT_BINDING_UCS_BASIC);
+            append_comparable(value.as_bytes(), out);
         }
         TextBinding::NonBinary(binding) => {
-            out.push(1);
-            append_oid(&mut out, binding.unicode_data_oid);
-            append_oid(&mut out, binding.normalization_oid);
-            append_oid(&mut out, binding.segmentation_oid);
-            append_oid(&mut out, binding.collation_oid);
+            out.push(TEXT_BINDING_NON_BINARY);
+            append_oid(out, binding.unicode_data_oid);
+            append_oid(out, binding.normalization_oid);
+            append_oid(out, binding.segmentation_oid);
+            append_oid(out, binding.collation_oid);
             let sort_key = value
                 .canonical_sort_key()
                 .ok_or(ScalarEncodeError::MissingCanonicalSortKey)?;
-            append_comparable(sort_key, &mut out);
-            append_comparable(value.as_bytes(), &mut out);
+            append_comparable(sort_key, out);
+            append_comparable(value.as_bytes(), out);
         }
     }
-    Ok(out)
+    Ok(())
 }
 
-fn encode_timestamp_scalar(value: &CanonicalTimestamp) -> Result<Vec<u8>, ScalarEncodeError> {
+fn timestamp_scalar_payload_len(value: &CanonicalTimestamp) -> Result<usize, ScalarEncodeError> {
     let zone_payload_len = match value.zone() {
         None => 0,
         Some(zone) => comparable_encoded_len(zone.identifier().as_bytes())?
             .checked_add(32)
             .ok_or(ScalarEncodeError::EncodedSizeOverflow)?,
     };
-    let payload_len = 16usize
+    16usize
         .checked_add(4)
         .and_then(|len| len.checked_add(1))
         .and_then(|len| len.checked_add(zone_payload_len))
-        .ok_or(ScalarEncodeError::EncodedSizeOverflow)?;
-    let mut out = allocate_tagged_payload(TAG_TIMESTAMP, payload_len)?;
+        .ok_or(ScalarEncodeError::EncodedSizeOverflow)
+}
+
+fn append_timestamp_scalar(value: &CanonicalTimestamp, out: &mut Vec<u8>) {
+    out.push(TAG_TIMESTAMP);
     out.extend_from_slice(&ordered_i128(value.instant_utc_nanos()).to_be_bytes());
     out.extend_from_slice(&ordered_i32(value.utc_offset_seconds()).to_be_bytes());
     match value.zone() {
-        None => out.push(0),
+        None => out.push(TIMESTAMP_ZONE_ABSENT),
         Some(zone) => {
-            out.push(1);
-            append_comparable(zone.identifier().as_bytes(), &mut out);
-            append_oid(&mut out, zone.tzdb_oid());
+            out.push(TIMESTAMP_ZONE_PRESENT);
+            append_comparable(zone.identifier().as_bytes(), out);
+            append_oid(out, zone.tzdb_oid());
         }
     }
-    Ok(out)
-}
-
-fn encode_one_comparable_field(tag: u8, value: &[u8]) -> Result<Vec<u8>, ScalarEncodeError> {
-    let payload_len = comparable_encoded_len(value)?;
-    let mut out = allocate_tagged_payload(tag, payload_len)?;
-    append_comparable(value, &mut out);
-    Ok(out)
 }
 
 fn comparable_encoded_len(value: &[u8]) -> Result<usize, ScalarEncodeError> {
@@ -495,14 +638,14 @@ fn decode_text_scalar(
     let mut cursor = ScalarCursor::new(TAG_TEXT, payload)?;
     let binding_tag = cursor.read_u8(ScalarField::TextBinding)?;
     let text = match binding_tag {
-        0 => {
+        TEXT_BINDING_UCS_BASIC => {
             let text_bytes = cursor.read_comparable(ScalarField::Text, MAX_CANONICAL_TEXT_BYTES)?;
             cursor.finish()?;
             let text = String::from_utf8(text_bytes)
                 .map_err(|_| ScalarDecodeError::Text(CanonicalTextError::InvalidUtf8))?;
             CanonicalText::from_owned_ucs_basic(text).map_err(ScalarDecodeError::Text)?
         }
-        1 => {
+        TEXT_BINDING_NON_BINARY => {
             let binding = NonBinaryTextBinding::new(
                 cursor.read_oid(ScalarField::UnicodeDataObjectId)?,
                 cursor.read_oid(ScalarField::NormalizationObjectId)?,
@@ -546,13 +689,13 @@ fn decode_timestamp_scalar(
     ));
     let zone_flag = cursor.read_u8(ScalarField::TimestampZoneFlag)?;
     let timestamp = match zone_flag {
-        0 => {
+        TIMESTAMP_ZONE_ABSENT => {
             cursor.finish()?;
             CanonicalTimestamp::offset_only(instant, offset).map_err(|error| {
                 ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
             })?
         }
-        1 => {
+        TIMESTAMP_ZONE_PRESENT => {
             let zone_bytes = cursor.read_comparable(
                 ScalarField::TimestampZoneIdentifier,
                 MAX_ZONE_IDENTIFIER_BYTES,
@@ -778,6 +921,10 @@ impl Ord for CanonicalScalar {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ScalarEncodeError {
     EncodedSizeOverflow,
+    EncodedSizeInvariantMismatch {
+        expected: usize,
+        actual: usize,
+    },
     PayloadTooLarge {
         tag: u8,
         length: usize,
@@ -793,6 +940,10 @@ impl std::fmt::Display for ScalarEncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EncodedSizeOverflow => write!(f, "scalar encoded size overflow"),
+            Self::EncodedSizeInvariantMismatch { expected, actual } => write!(
+                f,
+                "scalar encoder produced {actual} bytes, expected {expected}"
+            ),
             Self::PayloadTooLarge {
                 tag,
                 length,
