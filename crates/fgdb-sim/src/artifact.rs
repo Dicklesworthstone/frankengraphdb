@@ -173,7 +173,41 @@ pub enum Scenario {
 }
 
 impl Scenario {
+    /// How many scenarios exist.
+    ///
+    /// Load-bearing, and the middle link of a three-step chain that makes the
+    /// registry impossible to leave incomplete without noticing:
+    ///
+    /// 1. adding a variant breaks [`Scenario::index`]'s exhaustive match — a
+    ///    **compile error**, so the author cannot not-notice;
+    /// 2. fixing that forces them to choose an index, which forces this count;
+    /// 3. `scenario_registry_is_complete` then fails until [`SCENARIOS`] gains
+    ///    the matching row.
+    ///
+    /// Doctrine #1 rules out the usual answer (a `linkme`/`inventory`-style
+    /// distributed slice is an external crate), and a runtime registry is
+    /// ruled out by the replay contract — see [`SCENARIOS`]. A const table
+    /// plus a compile error is what remains, and it is not a lesser option:
+    /// the compile error fires earlier than any registration call would.
+    pub const COUNT: usize = 2;
+
+    /// A dense index per variant, `0..COUNT`.
+    ///
+    /// Exists so completeness is checkable by arithmetic rather than by
+    /// someone remembering to update a list.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::DurableAppend => 0,
+            Self::LostAppend => 1,
+        }
+    }
+
     /// The stable wire name, used in [`Replay::encode`].
+    ///
+    /// Stable in the durable sense: it appears in emitted replay commands and
+    /// in filed artifacts, so renaming one silently invalidates every replay
+    /// string already written down.
     #[must_use]
     pub const fn id(self) -> &'static str {
         match self {
@@ -182,13 +216,103 @@ impl Scenario {
         }
     }
 
-    fn parse(text: &str) -> Result<Self, String> {
-        match text {
-            "durable-append" => Ok(Self::DurableAppend),
-            "lost-append" => Ok(Self::LostAppend),
-            other => Err(format!("unknown scenario {other:?}")),
-        }
+    /// The registry row for this scenario.
+    #[must_use]
+    pub fn entry(self) -> &'static ScenarioEntry {
+        &SCENARIOS[self.index()]
     }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        resolve(text).map_err(|error| error.to_string())
+    }
+}
+
+/// One registered scenario: what it is, and what bounded model it explores.
+///
+/// `state_model` is not decoration. A campaign that exhausts a scenario
+/// reports [`crate::campaign::CampaignOutcome::BoundedExhausted`], which is
+/// required to name the model it exhausted — so the name has to live
+/// somewhere durable, next to the scenario rather than in the campaign that
+/// happened to run it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScenarioEntry {
+    /// The stable wire id. Must equal [`Scenario::id`].
+    pub id: &'static str,
+    /// The scenario itself.
+    pub scenario: Scenario,
+    /// What the scenario asserts, for a filed report.
+    pub asserts: &'static str,
+    /// The declared bounded state model this scenario explores.
+    pub state_model: &'static str,
+}
+
+/// The scenario registry.
+///
+/// **Why a const table and not a registration API.** A replay must resolve its
+/// scenario id in a *fresh process* — that is the whole point of
+/// [`Replay::encode`] producing a string a human can paste. A registry
+/// populated at runtime cannot promise that: whether an id resolves would
+/// depend on which registration calls that particular binary happened to make
+/// before the lookup, so the same artifact would replay in one process and
+/// fail in another. Every entry being a compile-time constant makes
+/// resolution a property of the binary rather than of its startup path.
+///
+/// Indexed by [`Scenario::index`]; `scenario_registry_is_complete` pins that.
+pub static SCENARIOS: [ScenarioEntry; Scenario::COUNT] = [
+    ScenarioEntry {
+        id: "durable-append",
+        scenario: Scenario::DurableAppend,
+        asserts: "every acknowledged byte survives the crash",
+        state_model: "single-writer four-sector append, one flush, one crash",
+    },
+    ScenarioEntry {
+        id: "lost-append",
+        scenario: Scenario::LostAppend,
+        asserts: "nothing survives the crash",
+        state_model: "single-writer four-sector append, one flush, one crash",
+    },
+];
+
+/// Why an id did not resolve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownScenario {
+    /// The id that was asked for.
+    pub asked: String,
+}
+
+impl std::fmt::Display for UnknownScenario {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The known set is listed because the caller is usually holding a
+        // replay string from a filed artifact and needs to know whether the
+        // id is stale or simply misspelled. "unknown scenario" alone forces
+        // them into the source to find out.
+        write!(f, "unknown scenario {:?}; registered ids are ", self.asked)?;
+        for (position, entry) in SCENARIOS.iter().enumerate() {
+            if position > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{:?}", entry.id)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for UnknownScenario {}
+
+/// Resolves a stable id to its scenario.
+///
+/// # Errors
+///
+/// Returns [`UnknownScenario`], which names the registered ids, when `id` is
+/// not one of them.
+pub fn resolve(id: &str) -> Result<Scenario, UnknownScenario> {
+    SCENARIOS
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.scenario)
+        .ok_or_else(|| UnknownScenario {
+            asked: id.to_string(),
+        })
 }
 
 /// Everything needed to re-run a failure: which scenario, under which seeded
