@@ -389,6 +389,34 @@ that does not build the product**, and an agent doing exactly what the queue tel
 is doing the wrong thing through no fault of its own. The swarm is not drifting for
 lack of direction; it is drifting because the queue points there.
 
+### The quantified version, measured 2026-08-01 with `bv --robot-triage`
+
+The ratio above understates it. The graph is now **633 beads, 330 closed (52%)**, and
+of the 303 not closed:
+
+| | |
+|---|---|
+| dependency-blocked | **279** |
+| actionable | **24 (7.9%)** |
+| in progress | 13 |
+| cycles | none |
+
+Velocity is not the problem — 330 closed in 30 days, 139 in the last 7, mean 1.35 days
+to close. **The problem is that 92% of open work cannot be started.** And `bv`'s own
+top picks come back scoring ~0.10 with `unblocks: 0` — it is not recommending
+low-value work out of bad judgement; it is reporting that nothing better is reachable.
+
+That is the mechanism behind "ceremony gravity" stated exactly: catalog and procedure
+beads are unblocked *because they depend on nothing*, so as the engine graph deepens
+they become an ever-larger share of what any agent can legally pick up. The queue is
+not mis-sorted. It is nearly empty, and ceremony is what is left in it.
+
+The lever this points at is not re-prioritisation but **depth**: the highest-value
+action is finishing whichever bead unblocks the most others. `bv` ranks that as
+`fgdb-w1-foundation-types-tjk` (the `fgdb-types`/`bigint`/`delta-types`/`claim`/
+`evidence`/`resource` foundations), which another pane is actively landing — so the
+swarm is, on this measure, already pointed correctly.
+
 Re-prioritising 67 beads is an ownership decision. The recommendation is Track E:
 **stop treating G0 catalog completeness as a prerequisite for engine work.** It is a
 gate on shipping, not a gate on building.
