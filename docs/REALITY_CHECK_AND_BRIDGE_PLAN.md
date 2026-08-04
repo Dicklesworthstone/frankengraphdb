@@ -153,7 +153,11 @@ path is a layer whose integration risk is unmeasured.
 ### Track E — Steering the swarm away from ceremony gravity
 
 - **E1.** Stop treating G0 catalog completeness as a prerequisite for engine work. It
-  is a gate on *shipping*, not on *building*.
+  is a gate on *shipping*, not on *building*. This got **stronger** on 2026-08-01: the
+  single exception this document claimed — the root-manifest/Strata registration in
+  `fgdb-ge6a` — turned out on measurement not to be one. Registration there is waiting
+  on the engine, not the other way round. **No catalog bead currently blocks any
+  engine bead.**
 - **E2.** Every new engine bead must name the differential that proves it.
 
 ---
@@ -334,9 +338,33 @@ normative format contract, which means none of the catalog's cross-cutting machi
 — identity class, construction order, retention and cut rules, golden corpora, GC
 reachability under FG-INV-14 — currently applies to the only place graph data lives.
 
-That does put G0 catalog work on the critical path of the first runnable engine, and
-it is worth naming precisely because it is the **one** place where "catalog blocks
-engine" is true. It should not become a precedent for the general case.
+> **Corrected again, 2026-08-01, and this one reverses the conclusion.** I wrote
+> that this put catalog work on the critical path — "the one place where *catalog
+> blocks engine* is true". **It is the reverse.** I took the catalog token to start
+> registering `DeltaBlockVersion` at its reserved `0x04d4`, measured the format
+> first, and released the token without editing.
+>
+> Registering a format freezes it as the normative contract, and what Strata writes
+> today is not the format the plan specifies. Its header is `4 + 2 + 4` bytes — magic,
+> format, entry count — so six of the nine normative fields (`partition_id`,
+> `descriptor_key`, `stripe_range`, `property_patch_refs`, `predecessor`,
+> `canonical_logical_digest`) are simply absent. Worse, the plan requires entries
+> "encoded under the registered identity-column codec (≤16 B/entry — **raw 128-bit
+> identities would cap near 95 entries**)"; today's entry is **72 bytes of raw
+> 128-bit identities**, exactly what that sentence exists to forbid. At 72 B/entry a
+> 4 KiB block holds 56 entries against a target of 256. Cataloguing that would
+> enshrine a >4× density regression as the on-disk contract.
+>
+> So `fgdb-w3-tier-d-ctj` gating `fgdb-ge6a` is **correct**, and my earlier removal
+> of that edge was wrong. Its rollup reads "closed (3 closed)" — that counts *child
+> beads*, not scope; skip-list nodes, predecessor chains, EBR, the overflow log and
+> hub striping are all still unbuilt. **A closed rollup is not a finished bead.**
+
+What survives is the exposure itself: a durable format is in production use with no
+catalog row, so none of the catalog's cross-cutting machinery reaches the only place
+graph data lives. The remedy is to finish the format and register it once — not to
+register the interim shape and churn it. **There is no catalog work on this critical
+path that could start today; the path runs through tier D itself.**
 
 A second refinement caught an edge I had just drawn too coarsely: the spine was
 initially blocked on all of `fgdb-w3-tier-d-ctj`, a large bead with several in-flight
@@ -370,10 +398,13 @@ gate on shipping, not a gate on building.
 ## Revision history
 
 - **2026-07-31, pass 1** — initial measurement and bridge plan (JadeSnow).
-- **2026-08-01, pass 3** — `fgdb-z5y0` landed (`8c53adb`), and `fgdb-ge6a`'s premise
-  was re-derived by its own author and found **wrong**: the root-manifest chain does
-  not dangle. The real defect is larger and is corrected in place above. A reality
-  check whose own findings are exempt from re-derivation is just a longer opinion.
+- **2026-08-01, pass 3** — `fgdb-z5y0` landed (`8c53adb`), `fgdb-1xqd` fixed
+  (`89c969e`), and `fgdb-ge6a` was re-derived by its own author **twice**, wrong both
+  times: the root-manifest chain does not dangle, and the catalog work is not on the
+  critical path — the engine format is unfinished and registration correctly waits on
+  it. Both corrections are in place above. A reality check whose own findings are
+  exempt from re-derivation is just a longer opinion; two reversals in one pass is
+  what that principle costs when it is actually applied.
 - **2026-07-31, pass 2** — ambition rounds 1–3 revised in place; Phase 3a and Phase 5
   added. Phase 5 found the spine-scheduling gap (`fgdb-j0vu`), the uncatalogued Strata
   formats (`fgdb-ge6a`), the oracle's identity-recycling hole (`fgdb-s50d`) and a
