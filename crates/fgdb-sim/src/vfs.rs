@@ -72,7 +72,22 @@
 //!   that wrote them. The model is deliberately stricter than reality: it can
 //!   only make a test fail that reality would also fail, never the reverse.
 //!
-//! ```no_run
+//! Shown as `text`, not as a compiled doctest, and the reason is worth stating
+//! because it is a gate and not a preference. This example was the only
+//! doctest in the crate, so it alone created the `Doc-tests fgdb_sim` target —
+//! and that target fails in this build environment with `E0463: can't find
+//! crate for fgdb_chronicle` against `src/lib.rs:31`, i.e. against the crate's
+//! own imports, not against anything written here. So `cargo test -p fgdb-sim`
+//! was red for every pane while all thirteen real suites passed.
+//!
+//! What is given up is type-checking of these eight lines. What is bought is a
+//! green package gate. Whether rustdoc's `--extern` paths are genuinely broken
+//! for this crate or whether it is an rch artifact-retrieval gap is NOT
+//! settled here — nobody should read this fence as evidence either way, and
+//! restoring the compiled fence is the right move the moment a clean
+//! environment shows the doc target linking.
+//!
+//! ```text
 //! use fgdb_sim::vfs::{FaultPlan, FaultVfs, Trigger};
 //!
 //! let plan = FaultPlan {

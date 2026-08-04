@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod artifact;
+pub mod shrink;
 pub mod vfs;
 
 use fgdb_chronicle::commit::{CommitCoordinator, CommitError};

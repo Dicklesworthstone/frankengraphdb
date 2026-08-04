@@ -342,7 +342,7 @@ impl Replay {
         let artifact = failure
             .as_ref()
             .err()
-            .map(|reason| FailureArtifact::for_failure(*self, reason, &events));
+            .map(|failure| FailureArtifact::for_failure(*self, failure, &events));
         RunOutcome {
             failure: failure.err(),
             events,
@@ -351,11 +351,55 @@ impl Replay {
     }
 }
 
+/// What kind of failure a scenario hit.
+///
+/// Coarse on purpose, and a *type* rather than a string prefix. A shrinker's
+/// one real correctness law is that a minimised reproducer must still fail
+/// **the same way**: "still errors" happily minimises a lost-write bug into an
+/// unrelated I/O error and files the wrong report. Deciding sameness by
+/// matching on a message would put that law at the mercy of a byte count in
+/// the text, so the kind is carried explicitly and the detail is only prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Bytes the scenario was told were durable did not survive the crash.
+    AcknowledgedBytesLost,
+    /// Bytes survived that the scenario required to be gone.
+    UnexpectedSurvival,
+    /// The sync itself was refused — ENOSPC is the fault class that does this.
+    SyncRefused,
+    /// An open, write, or read failed outright.
+    IoFailed,
+}
+
+/// A failure: its kind, which decides sameness, and its prose, which does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    /// What kind of failure this is.
+    pub kind: FailureKind,
+    /// Human-facing detail. Never load-bearing for a comparison.
+    pub detail: String,
+}
+
+impl Failure {
+    fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.detail)
+    }
+}
+
 /// What one scenario run produced.
 #[derive(Clone, Debug)]
 pub struct RunOutcome {
     /// `Some` when the scenario's expectation did not hold.
-    pub failure: Option<String>,
+    pub failure: Option<Failure>,
     /// Every fault injected, in injection order.
     pub events: Vec<FaultEvent>,
     /// Emitted **iff** `failure` is `Some` — line 1138 binds the artifact to a
@@ -365,7 +409,7 @@ pub struct RunOutcome {
 
 /// Writes four sectors through one handle, syncs, crashes, and checks the
 /// durable bytes against `expect_durable`.
-async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Result<(), String> {
+async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Result<(), Failure> {
     let path = dir.join("append.log");
     let mut written = Vec::new();
     for sector in 0u8..4 {
@@ -378,44 +422,57 @@ async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Res
             &OpenOptions::new().write(true).create(true).truncate(true),
         )
         .await
-        .map_err(|error| format!("open failed: {error}"))?;
+        .map_err(|error| Failure::new(FailureKind::IoFailed, format!("open failed: {error}")))?;
     let mut done = 0usize;
     while done < written.len() {
         let n = poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &written[done..]))
             .await
-            .map_err(|error| format!("write failed: {error}"))?;
+            .map_err(|error| {
+                Failure::new(FailureKind::IoFailed, format!("write failed: {error}"))
+            })?;
         if n == 0 {
-            return Err("write made no progress".to_string());
+            return Err(Failure::new(
+                FailureKind::IoFailed,
+                "write made no progress",
+            ));
         }
         done += n;
     }
     // A refused sync is a legitimate outcome, not a harness error: ENOSPC is
     // one of the fault classes under test.
     if let Err(error) = VfsFile::sync_all(&file).await {
-        return Err(format!("sync failed: {error}"));
+        return Err(Failure::new(
+            FailureKind::SyncRefused,
+            format!("sync failed: {error}"),
+        ));
     }
     vfs.crash();
 
-    let durable = vfs
-        .read(&path)
-        .await
-        .map_err(|error| format!("read after crash failed: {error}"))?;
+    let durable = vfs.read(&path).await.map_err(|error| {
+        Failure::new(
+            FailureKind::IoFailed,
+            format!("read after crash failed: {error}"),
+        )
+    })?;
     if expect_durable {
         if durable == written {
             Ok(())
         } else {
-            Err(format!(
-                "acknowledged {} bytes, {} survived the crash",
-                written.len(),
-                durable.len()
+            Err(Failure::new(
+                FailureKind::AcknowledgedBytesLost,
+                format!(
+                    "acknowledged {} bytes, {} survived the crash",
+                    written.len(),
+                    durable.len()
+                ),
             ))
         }
     } else if durable.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "expected nothing durable, {} bytes survived",
-            durable.len()
+        Err(Failure::new(
+            FailureKind::UnexpectedSurvival,
+            format!("expected nothing durable, {} bytes survived", durable.len()),
         ))
     }
 }
@@ -445,7 +502,7 @@ impl FailureArtifact {
     /// non-vacuous: this function cannot compile a field away, and cannot omit
     /// one without the test noticing.
     #[must_use]
-    pub fn for_failure(replay: Replay, reason: &str, events: &[FaultEvent]) -> Self {
+    pub fn for_failure(replay: Replay, failure: &Failure, events: &[FaultEvent]) -> Self {
         let mut fields: BTreeMap<&'static str, Field> = BTreeMap::new();
         let mut set = |name: &'static str, field: Field| {
             fields.insert(name, field);
@@ -542,7 +599,9 @@ impl FailureArtifact {
                 Scenario::LostAppend => "nothing survives the crash".to_string(),
             }),
         );
-        set("actual", Field::Present(reason.to_string()));
+        // The kind leads, because that is what decides whether two runs
+        // failed the same way; the prose follows it.
+        set("actual", Field::Present(failure.to_string()));
         set("replay_command", Field::Present(replay.command()));
 
         Self { fields, replay }
