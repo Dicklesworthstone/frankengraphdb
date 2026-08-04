@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aead;
+pub mod argon2id;
 pub mod blake2b;
 pub mod blake3;
 pub mod chacha20;
