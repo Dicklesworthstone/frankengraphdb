@@ -112,11 +112,72 @@ read_meta() {
   M_START="$(sed -n 5p "$meta" 2>/dev/null)"
 }
 
+# torn_meta — is the holder file present but unusable?
+#
+# A hold whose first three fields are not all present is TORN, not legacy. The
+# distinction is the whole point: a legacy three-line hold has who/epoch/ttl and
+# only lacks the pid, so it reads `indeterminate` and a human can vouch for it.
+# A torn hold has no epoch, and `hold_line` then computes its age from epoch 0
+# and prints a confident "for 29764144m" — a plausible, parseable, completely
+# false answer. That is the shape this repo already refuses in its gates: three
+# states, not two, and a state that did not complete must never report like one
+# that did.
+torn_meta() {
+  [ -z "${M_WHO:-}" ] || [ -z "${M_EPOCH:-}" ] || [ -z "${M_TTL:-}" ]
+}
+
 # write_meta — record a hold: who / epoch / ttl / pid / pid start time.
+#
+# ENOSPC-SAFE BY CONSTRUCTION, because it was not: `printf >"$meta"` creates the
+# file, then fails mid-write when the filesystem is full, leaving a zero-byte
+# holder inside a lock directory `mkdir` already took. MEASURED 2026-08-04 —
+# scripts/token.sh acquire catalog ... hit "printf: write error: No space left
+# on device" during fgdb-5ekk and left exactly that: catalog.lock/holder at 0
+# bytes, reported ever since as "HELD by ? for 29764144m (ttl ?m)".
+#
+# Publication is now write-elsewhere-then-rename: a full write to a temp file in
+# the SAME directory (so the rename is same-filesystem and therefore atomic),
+# verified for both exit status and the exact expected line count, and only then
+# moved onto the real name. A reader consequently sees either the previous state
+# or a complete record, never a half-written one. The line-count check is not
+# redundant with the exit status: a short write can succeed per-call and still
+# leave a truncated file when the failure lands between the printf and the flush.
 write_meta() {
-  printf '%s\n%s\n%s\n%s\n%s\n' \
-    "$who" "$(now)" "$ttl" "$holder_pid" "$(pid_starttime "$holder_pid")" \
-    >"$meta"
+  local tmp
+  tmp="$meta.$$.tmp"
+  if ! printf '%s\n%s\n%s\n%s\n%s\n' \
+      "$who" "$(now)" "$ttl" "$holder_pid" "$(pid_starttime "$holder_pid")" \
+      >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [ "$(wc -l <"$tmp" 2>/dev/null || echo 0)" -ne 5 ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$meta" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  return 0
+}
+
+# publish_or_release — take-side wrapper: if the hold cannot be recorded, do not
+# keep the lock.
+#
+# The old acquire path called write_meta and ignored its status, so a failed
+# metadata write still printed ACQUIRED and exited 0: the caller was told it held
+# the catalog token while the holder file was empty. Rolling the mkdir back is
+# what makes "acquire failed" and "no lease exists" the same observable state,
+# which is the property that lets a later acquire proceed without anyone having
+# to steal a lease.
+publish_or_release() {
+  if write_meta; then
+    return 0
+  fi
+  rm -f "$meta" 2>/dev/null
+  rmdir "$lock" 2>/dev/null
+  return 1
 }
 
 # verdict — the one liveness test. Sets LIVENESS to alive|dead|indeterminate
@@ -171,7 +232,7 @@ take_after_clearing() {
   rm -f "$meta"
   rmdir "$lock" 2>/dev/null
   if mkdir "$lock" 2>/dev/null; then
-    write_meta
+    publish_or_release || return 1
     return 0
   fi
   return 1
@@ -181,11 +242,18 @@ case "$cmd" in
   acquire)
     [ -z "$tok" ] && { echo "usage: token.sh acquire <token> <agent> [ttl_min] [holder_pid]" >&2; exit 2; }
     if mkdir "$lock" 2>/dev/null; then
-      write_meta
+      if ! publish_or_release; then
+        echo "FAILED to record the hold for $tok (could not publish the holder file; the filesystem may be full). The lock was released, so no torn lease remains — check disk space and retry." >&2
+        exit 1
+      fi
       echo "ACQUIRED $tok by $who (ttl ${ttl}m, holder pid $holder_pid)"
       exit 0
     fi
     read_meta
+    if torn_meta; then
+      echo "TORN $tok: a lock directory exists but its holder record is incomplete (who=${M_WHO:-<empty>} epoch=${M_EPOCH:-<empty>} ttl=${M_TTL:-<empty>}). This is a HALF-WRITTEN acquire, not evidence that no writer exists, and it is NOT reapable by the liveness path — there is no pid to test. Do not steal, remove, or edit it on this evidence: get coordinator confirmation that no lane holds $tok, then repair through the approved path." >&2
+      exit 1
+    fi
     verdict
     case "$LIVENESS" in
       dead)
@@ -280,6 +348,15 @@ case "$cmd" in
       lock="$L"
       meta="$L/holder"
       read_meta
+      # A torn hold is reported as TORN and never as HELD-with-an-age. Deriving
+      # an age from a missing epoch is what produced "HELD by ? for 29764144m"
+      # for the ENOSPC-torn catalog token: fifty-six years, printed with the same
+      # confidence as a real answer, and indistinguishable at a glance from a
+      # legacy hold that a human may legitimately vouch for.
+      if torn_meta; then
+        echo "$n: TORN — lock directory exists but the holder record is incomplete (who=${M_WHO:-<empty>} epoch=${M_EPOCH:-<empty>} ttl=${M_TTL:-<empty>}); no age or liveness can be derived. NOT reapable by the liveness path and NOT evidence that no writer exists; needs coordinator confirmation plus the approved repair path."
+        continue
+      fi
       verdict
       case "$LIVENESS" in
         dead)      v="; holder pid $M_PID DEAD ($EVIDENCE) — reapable on next acquire" ;;
