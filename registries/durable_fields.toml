@@ -4108,6 +4108,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0007
+stable_name = "expected_restore_registry_state"
+exact_wire_type = "PromotedAwaitingReopenMetaRestorePhase"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "inline precondition discriminant refined to the PromotedAwaitingReopen arm (arm_tag 0x0003) of MetaRestorePhase; the completion spec is rejected in any other registry state, so the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a18:2381, a20:2601)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
 containing_schema = "GlobalRestoreServiceFinalCertificate"
 field_tag = 0x0002
 stable_name = "finalize_record_ref"

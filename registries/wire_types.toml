@@ -5960,3 +5960,12 @@ status = "reserved"
 encoding_context = "a16:2183 exact ordered time-issuance admission-freeze request record; the balanced source body fixes six field names and types terminal_audit_gate as LifecycleScaffoldingNotRequired, while five shorthand field types remain structurally ambiguous and therefore create no fabricated durable-field rows"
 allowed_containing_schemas = ["TimeIssuanceAdmissionFreezeSpec"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x056a
+name = "PromotedAwaitingReopenMetaRestorePhase"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the PromotedAwaitingReopen arm (arm_tag 0x0003) of the MetaRestorePhase union; a precondition carries the refined union's u8 tag and never the arm payload (a20:2601)"
+allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec"]
+max_size_bytes = 1

@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3725
-projection_fallback_count = 140
-target_source_assignment_sha256 = "7144520e7422455c3fb29617eaeb3d511e27efe955084f3295599c10cc6f7171"
+target_count = 3727
+projection_fallback_count = 141
+target_source_assignment_sha256 = "653e5b43fb4ae23a5350ee67d535fc707dcab634ea6b13c3c6e671b412ff1787"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -113903,6 +113903,49 @@ target_row_id = "a19:wire-type:shard-initial-restore-registry-ref"
 slice_id = "a19"
 source_key = "projection|wire_types|ShardInitialRestoreRegistryRef"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:promoted-awaiting-reopen-meta-restore-phase"
+wire_type_id = 0x056a
+name = "PromotedAwaitingReopenMetaRestorePhase"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the PromotedAwaitingReopen arm (arm_tag 0x0003) of the MetaRestorePhase union; a precondition carries the refined union's u8 tag and never the arm payload (a20:2601)"
+allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:wire-type-promoted-awaiting-reopen-meta-restore-phase"
+target_row_id = "a20:wire-type:promoted-awaiting-reopen-meta-restore-phase"
+slice_id = "a20"
+source_key = "projection|wire_types|PromotedAwaitingReopenMetaRestorePhase"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-completion-spec-expected-restore-registry-state"
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0007
+stable_name = "expected_restore_registry_state"
+exact_wire_type = "PromotedAwaitingReopenMetaRestorePhase"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "inline precondition discriminant refined to the PromotedAwaitingReopen arm (arm_tag 0x0003) of MetaRestorePhase; the completion spec is rejected in any other registry state, so the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a18:2381, a20:2601)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-completion-spec-expected-restore-registry-state"
+target_row_id = "a20:field:global-restore-service-completion-spec-expected-restore-registry-state"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceCompletionSpec|GlobalRestoreServiceCompletionSpec.expected_restore_registry_state|expected_restore_registry_state"
+target_kind = "field"
 definition_status = "declared"
 
 [[target]]

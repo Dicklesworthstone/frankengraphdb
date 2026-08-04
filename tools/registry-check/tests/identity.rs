@@ -3435,7 +3435,9 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         .sum::<usize>();
     assert_eq!(
         (concrete_wire_citations, ordinary_union_citations),
-        (603, 430),
+        // 603 -> 604 (fgdb-a20-restore-promotion-ivsp): the Meta completion
+        // precondition constrains its generated discriminant to the one exact host.
+        (604, 430),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -11058,6 +11060,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     //     under the fgdb-gpms state-value ruling: an inline tag-refined
     //     discriminant, not a reference. Younger than the witness for the same
     //     reason as the two above.
+    //   ("GlobalRestoreServiceCompletionSpec", "expected_restore_registry_state") —
+    //     field_tag 0x0007, exact_wire_type PromotedAwaitingReopenMetaRestorePhase
+    //     (wire 0x056a), source anchor a18:2381, a20:2601. The Meta-only
+    //     tag-refined inline discriminant resolves the registered Meta arm at 0x0003;
+    //     it is younger than the historical witness just as the Local twin above.
     let post_erratum_a20_field = |schema: &str, name: &str| {
         matches!(
             (schema, name),
@@ -11068,6 +11075,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
                 | (
                     "LocalRestoreServiceCompletionSpec",
+                    "expected_restore_registry_state"
+                )
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
                     "expected_restore_registry_state"
                 )
         )
@@ -11955,7 +11966,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // (StrongRef + cardinality=many, direct element targets), claimed by
         // post_erratum_a13_branch_reference_field. The current field count
         // carries them and the reconstruction stays at the frozen 225.
-        pre_erratum.fields.len() + 794,
+        // 794 -> 795 (fgdb-a20-restore-promotion-ivsp):
+        // GlobalRestoreServiceCompletionSpec.expected_restore_registry_state is the
+        // Meta-phase twin. It is claimed by post_erratum_a20_field; the current field
+        // count carries it and frozen reconstruction remains 225.
+        pre_erratum.fields.len() + 795,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
@@ -16848,9 +16863,12 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
     // claim and this law's domain covers it on exactly the same terms.
     // 7 -> 8 (fgdb-5uj5): LocalAbortFinalCertificationSelection, wire 0x0562,
     // applies that same law to AdmittedTxnAbortCommand.required_selection.
+    // 8 -> 9 (fgdb-a20-restore-promotion-ivsp):
+    // PromotedAwaitingReopenMetaRestorePhase, wire 0x056a, applies the existing
+    // MetaRestorePhase arm at 0x0003 to the completion precondition.
     assert_eq!(
         claimants.len(),
-        8,
+        9,
         "refinement-claim population moved; a new tag-refined wrapper must be added here \
          deliberately, not discovered by a green run: {claimants:?}"
     );
@@ -17344,7 +17362,10 @@ fn idr_payload_bearing_arm_values_preserve_the_complete_payload() {
         tag_only_subjects,
         BTreeSet::from([
             "LocalAbortFinalCertificationSelection",
-            "PromotedAwaitingReopenLocalRestorePhase"
+            "PromotedAwaitingReopenLocalRestorePhase",
+            // fgdb-a20-restore-promotion-ivsp: the Meta twin has the same
+            // tag-only payload accounting as the pre-existing Local twin.
+            "PromotedAwaitingReopenMetaRestorePhase"
         ]),
         "the tag-only discriminant population moved"
     );
