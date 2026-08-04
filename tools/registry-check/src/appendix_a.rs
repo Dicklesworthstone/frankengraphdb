@@ -15882,7 +15882,7 @@ name = "Probe"
         );
 
         // CONFORMANT CONTROL: certify the universe and only the universe code
-        // disappears. The 74 stay, so the certification gates the CLAIM and
+        // disappears. The 73 stay, so the certification gates the CLAIM and
         // does not weaken the coverage law it guards.
         let certified = run_coverage(&forced, &census, &[], &["a20"]);
         assert!(
