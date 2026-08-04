@@ -19,6 +19,7 @@ pub mod argon2id;
 pub mod blake2b;
 pub mod blake3;
 pub mod chacha20;
+pub mod cx;
 pub mod poly1305;
 pub mod zeroize;
 
