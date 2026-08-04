@@ -86,6 +86,14 @@ pub const BLOCK_MAGIC: [u8; 4] = *b"FGSB";
 /// a database reopenable from its `manifest.root` alone).
 pub const BLOCK_FORMAT_V3: u16 = 3;
 
+/// Durable object kind for a Tier-D delta block.
+///
+/// This is part of the §5.1 logical-identity header. It is deliberately
+/// separate from the block payload framing: a future durable object with the
+/// same bytes must not share a logical object identity merely because its
+/// payload happens to begin with `FGSB`.
+pub const DELTA_BLOCK_OBJECT_KIND: u16 = 0x0301;
+
 /// The V3 framing ID for the §6.2 identity-column scalar codec.  The scalar
 /// codec deliberately has no durable envelope; this caller owns its ID,
 /// descriptor, exact count, and payload framing.
@@ -757,7 +765,8 @@ pub fn scan_neighbours(
 /// §5.1's keyed `logical_object_id` over the block's canonical bytes, the same
 /// function Chronicle's capsules use — not a private hash — so a block is a
 /// logical object in the same sense everything else is, scoped to its database's
-/// key and security namespace rather than globally guessable.
+/// key, security namespace, and durable object kind rather than globally
+/// guessable.
 ///
 /// The identity is over the CANONICAL bytes, so it inherits canonicality: two
 /// encoders that disagree about order produce different bytes and therefore
@@ -773,10 +782,19 @@ pub fn block_id(
     namespace: DatabaseSecurityNamespaceId,
     bytes: &[u8],
 ) -> ObjectId {
-    // Empty canonical header, payload is the block: the same shape
-    // `IdentifiedObject::new` uses for a capsule's plaintext. The block's own
-    // magic already separates it from any other payload with equal bytes.
-    ObjectId(fgdb_crypto::logical_object_id(k_oid, &namespace.0, &[], bytes).0)
+    // The canonical header binds the durable kind exactly as
+    // `IdentifiedObject::new` does for a capsule's plaintext. The payload magic
+    // distinguishes block *format*; it is not a substitute for namespacing the
+    // ObjectId by durable object kind.
+    ObjectId(
+        fgdb_crypto::logical_object_id(
+            k_oid,
+            &namespace.0,
+            &DELTA_BLOCK_OBJECT_KIND.to_le_bytes(),
+            bytes,
+        )
+        .0,
+    )
 }
 
 /// Decode a block that must be the one named by `expected`.

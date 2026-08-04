@@ -31,7 +31,7 @@
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile, decode_container, encode_container};
 use fgdb_delta_types::{DeltaRow, RelationId};
 use fgdb_strata::writer::BlockWriter;
-use fgdb_strata::{block_id, decode_block};
+use fgdb_strata::{DELTA_BLOCK_OBJECT_KIND, block_id, decode_block};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, ObjectId, VId};
 
@@ -43,18 +43,11 @@ const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77
 
 /// The object kind a Strata delta block is sealed under.
 ///
-/// **IT IS NOT PART OF THE IDENTITY, and my first draft of this comment claimed it
-/// was.** Plan L278 defines `ObjectId = BLAKE3_keyed(K_oid, "fgdb:logical:v1" ‖
-/// namespace ‖ header ‖ payload)` — the kind is carried alongside, not hashed in.
-/// Measured, then checked against the plan: chronicle is right and the comment was
-/// wrong, which is the same defect shape this workspace keeps finding, so it is
-/// corrected here rather than quietly deleted.
-///
-/// Type confusion is guarded a layer up instead, by
-/// `IdentifiedObject::verifies_as_same_object`, which compares digest, KIND, length
-/// and canonical plaintext before any deduplication or substitution. The law at the
-/// bottom of this file pins both halves: equal identity, unequal object.
-const STRATA_BLOCK_KIND: u16 = 0x0301;
+/// It is part of the §5.1 logical-identity header. A durable object kind is not
+/// merely a substitution-time check: equal bytes under two durable kinds are
+/// distinct logical objects, and `IdentifiedObject::verifies_as_same_object`
+/// remains the defense-in-depth check for the complete authenticated shape.
+const STRATA_BLOCK_KIND: u16 = DELTA_BLOCK_OBJECT_KIND;
 
 fn keys() -> CapsuleKeys {
     CapsuleKeys {
@@ -247,22 +240,14 @@ fn a_block_rotted_beyond_the_budget_fails_closed() {
     );
 }
 
-/// A BLOCK AND A COMMIT CAPSULE WITH IDENTICAL BYTES SHARE AN OBJECT ID, and the
-/// substitution guard is what keeps them apart.
+/// A BLOCK AND A COMMIT CAPSULE WITH IDENTICAL BYTES HAVE DISTINCT OBJECT IDs.
 ///
-/// This is the design plan L278 specifies, not a gap: the identity binds key,
-/// namespace, header and payload — not the kind — so content-addressing
-/// deduplicates identical bytes across kinds, and `verifies_as_same_object`
-/// refuses to SUBSTITUTE one for the other by comparing the kind explicitly.
-/// Asserting equality here rather than difference is deliberate: a later change
-/// that folded the kind into the digest would silently break deduplication, and
-/// this law is what would notice.
-///
-/// The practical separation for Strata is elsewhere and stronger: a block begins
-/// with `FGSB` and a delta template does not, so no block's bytes can equal a
-/// template's however the identity is computed.
+/// The §5.1 transcript binds the durable object kind into its logical header,
+/// preventing cross-kind aliasing before storage lookup. The substitution guard
+/// remains defense in depth: it checks the authenticated kind, length, and
+/// canonical plaintext as well as the digest.
 #[test]
-fn identity_ignores_object_kind_and_the_substitution_guard_does_not() {
+fn identity_binds_object_kind_and_the_substitution_guard_agrees() {
     let (bytes, _) = block_bytes();
     let as_block = keys().seal(&bytes).expect("seals").object_id;
     let as_other = CapsuleKeys {
@@ -272,9 +257,9 @@ fn identity_ignores_object_kind_and_the_substitution_guard_does_not() {
     .seal(&bytes)
     .expect("seals")
     .object_id;
-    assert_eq!(
+    assert_ne!(
         as_block, as_other,
-        "plan L278 does not bind object_kind into the identity"
+        "the logical identity header binds durable object kind"
     );
 
     // And the guard that DOES separate them, at substitution time.
@@ -292,7 +277,7 @@ fn identity_ignores_object_kind_and_the_substitution_guard_does_not() {
         &[],
         &bytes,
     );
-    assert_eq!(block.object_id(), other.object_id());
+    assert_ne!(block.object_id(), other.object_id());
     assert!(
         !block.verifies_as_same_object(&other),
         "identical bytes of a different KIND must not be substitutable"
