@@ -3765,7 +3765,7 @@ fn generate_scheduled_case(seed: u64) -> ScheduledTxnCase {
                 vid: witness,
                 expected: 1,
             }];
-            if seed % 5 == 0 {
+            if seed.is_multiple_of(5) {
                 left.push(TxnAction::Guard {
                     tx: 1,
                     vid: contested,
@@ -3957,10 +3957,10 @@ async fn run_scheduled_transaction(
     }
     .await;
 
-    if let Err(error) = result {
-        if let Ok(mut state) = state.lock(&cx).await {
-            state.errors.push(error);
-        }
+    if let Err(error) = result
+        && let Ok(mut state) = state.lock(&cx).await
+    {
+        state.errors.push(error);
     }
 }
 
