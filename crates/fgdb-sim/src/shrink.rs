@@ -41,7 +41,7 @@
 //! either. Stated rather than implied.
 
 use crate::artifact::{Failure, FailureKind, Replay};
-use crate::vfs::{FaultPlan, Trigger};
+use crate::vfs::{FaultEvent, FaultPlan, Trigger};
 use std::path::Path;
 
 /// One accepted reduction, in the order it was applied.
@@ -199,4 +199,75 @@ pub fn shrink(replay: Replay, dir: &Path) -> Option<Shrunk> {
         steps,
         rejected,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Divergence diagnostics
+// ---------------------------------------------------------------------------
+
+/// Where a replay stopped matching its recording.
+///
+/// §15.1 asks for the *second* half of the replay-minimisation bullet:
+/// "divergence diagnostics explain exactly where a replay departed from its
+/// recording". An equality assertion says only *that* two runs differ, which
+/// is the least useful moment to be told nothing — a determinism failure is
+/// precisely the case where a reader cannot guess.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Divergence {
+    /// Index of the first event that does not match, 0-based.
+    pub index: usize,
+    /// What the recording had there. `None` means the recording ended first.
+    pub recorded: Option<FaultEvent>,
+    /// What the replay produced there. `None` means the replay ended first.
+    pub replayed: Option<FaultEvent>,
+}
+
+impl std::fmt::Display for Divergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fault log diverged at index {}: ", self.index)?;
+        match (&self.recorded, &self.replayed) {
+            (Some(recorded), Some(replayed)) => write!(
+                f,
+                "recording had {:?}, replay produced {:?}",
+                recorded.kind, replayed.kind
+            ),
+            (Some(recorded), None) => write!(
+                f,
+                "replay ended early; recording still had {:?}",
+                recorded.kind
+            ),
+            (None, Some(replayed)) => write!(
+                f,
+                "replay ran past the recording and produced {:?}",
+                replayed.kind
+            ),
+            // Unreachable by construction: `diverge` returns None when both
+            // sides are exhausted. Rendered rather than panicked, because a
+            // diagnostic that aborts while explaining a failure is worse than
+            // one that prints something odd.
+            (None, None) => write!(f, "both logs ended (no divergence)"),
+        }
+    }
+}
+
+/// The first index at which `replayed` departs from `recorded`, if any.
+///
+/// A length difference is a divergence at the first missing index, not a
+/// separate kind of result: "the replay stopped after three faults" and "the
+/// replay produced a different third fault" are the same question asked of
+/// index 3, and a caller should not have to handle them differently.
+#[must_use]
+pub fn diverge(recorded: &[FaultEvent], replayed: &[FaultEvent]) -> Option<Divergence> {
+    for index in 0..recorded.len().max(replayed.len()) {
+        let left = recorded.get(index);
+        let right = replayed.get(index);
+        if left != right {
+            return Some(Divergence {
+                index,
+                recorded: left.cloned(),
+                replayed: right.cloned(),
+            });
+        }
+    }
+    None
 }

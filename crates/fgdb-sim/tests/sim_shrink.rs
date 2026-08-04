@@ -12,7 +12,7 @@
 //! refuse it. Without that test the rest would pass against the broken version.
 
 use fgdb_sim::artifact::{FailureKind, Replay, Scenario};
-use fgdb_sim::shrink::shrink;
+use fgdb_sim::shrink::{diverge, shrink};
 use fgdb_sim::vfs::{DEFAULT_SECTOR_BYTES, FaultPlan, Trigger};
 use std::path::PathBuf;
 
@@ -211,4 +211,111 @@ fn an_already_minimal_reproducer_reports_no_steps_but_still_tried() {
         "no candidate was even tried; empty steps would then mean nothing"
     );
     assert_eq!(shrunk.replay.plan, minimal.plan);
+}
+
+// ---------------------------------------------------------------------------
+// Divergence diagnostics (§15.1: "explain exactly where a replay departed")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_faithful_replay_reports_no_divergence() {
+    let dir = scratch_dir("diverge-control");
+    let replay = overspecified_replay();
+    let first = replay.run(&dir);
+    let second = replay.run(&dir);
+    assert!(
+        !first.events.is_empty(),
+        "a run with no faults cannot witness anything about divergence"
+    );
+    assert_eq!(
+        diverge(&first.events, &second.events),
+        None,
+        "a deterministic replay of the same value diverged from itself"
+    );
+}
+
+#[test]
+fn divergence_names_the_first_differing_index_and_both_sides() {
+    let dir = scratch_dir("diverge-real");
+    // Two different seeds under a coin-flip schedule: the fault logs differ,
+    // and the diagnostic has to say WHERE rather than merely that they do.
+    let plan = |seed| FaultPlan {
+        seed,
+        fsync_lie: Trigger::PerMille(500),
+        torn_write: Trigger::PerMille(500),
+        ..FaultPlan::faultless()
+    };
+    let a = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: plan(0x1774_0000_0000_0010),
+    }
+    .run(&dir);
+    let b = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: plan(0x1774_0000_0000_0011),
+    }
+    .run(&dir);
+
+    match diverge(&a.events, &b.events) {
+        None => assert_eq!(
+            a.events, b.events,
+            "diverge() said the logs match while they differ"
+        ),
+        Some(divergence) => {
+            // Everything before the reported index must actually agree, or the
+            // diagnostic is pointing at the wrong place — which is worse than
+            // no diagnostic, because it sends a reader to innocent code.
+            assert_eq!(
+                a.events[..divergence.index],
+                b.events[..divergence.index],
+                "events before the reported index already differ"
+            );
+            assert!(
+                divergence.recorded.is_some() || divergence.replayed.is_some(),
+                "a divergence with neither side present explains nothing"
+            );
+            assert!(
+                !divergence.to_string().is_empty(),
+                "the rendered diagnostic is what a reader actually sees"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_truncated_replay_diverges_at_the_first_missing_event() {
+    let dir = scratch_dir("diverge-truncated");
+    // NOT overspecified_replay(): the fsync lie returns from flush_through
+    // before the tear and the flip can fire, so that plan records exactly ONE
+    // event and there is nothing to truncate. Tear + flip both land on the
+    // same flush, giving two. (The premise assertion below is what caught
+    // this — the same short-circuit that invalidated the first kind-guard.)
+    let full = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            seed: 0x1774_0000_0000_0012,
+            torn_write: Trigger::Always,
+            bit_flip: Trigger::Always,
+            ..FaultPlan::faultless()
+        },
+    }
+    .run(&dir);
+    assert!(
+        full.events.len() >= 2,
+        "need at least two events to truncate meaningfully, got {:?}",
+        full.events
+    );
+    let truncated = &full.events[..full.events.len() - 1];
+
+    let divergence =
+        diverge(&full.events, truncated).expect("a shorter replay must diverge from its recording");
+    assert_eq!(divergence.index, full.events.len() - 1);
+    assert!(
+        divergence.recorded.is_some(),
+        "the recording had an event at the missing index"
+    );
+    assert_eq!(
+        divergence.replayed, None,
+        "the replay ended there, and the diagnostic must say so"
+    );
 }
