@@ -119,6 +119,13 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:local-outcome-compaction-spec:terminal-ready",
         "cc:local:local-outcome-expiry-spec",
         "cc:local:local-conflict-compaction-spec",
+        // F4 allocation-escape-and-finalization (frozen ordinals 0x0012-0x0015)
+        "cc:local:allocation-reservation-transition-spec:escaping-reserve",
+        "cc:local:allocation-reservation-transition-spec:binding-compaction",
+        "cc:local:local-final-certification-reserve-spec",
+        "cc:local:local-final-certification-cancel-spec",
+        "cc:local:finalization-allocation-disposition-spec:consumed",
+        "cc:local:finalization-allocation-disposition-spec:abandoned-spent",
     ] {
         assert!(
             registry
@@ -129,8 +136,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 20,
-        "the population may only grow from the landed F1-F3 rows"
+        registry.contracts.len() >= 26,
+        "the population may only grow from the landed F1-F4 rows"
     );
 }
 
@@ -146,6 +153,8 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:local-attempt-registration-spec", 2usize),
         ("cc:local:txn-ownership-transition-spec", 2),
         ("cc:local:local-outcome-compaction-spec", 2),
+        ("cc:local:allocation-reservation-transition-spec", 2),
+        ("cc:local:finalization-allocation-disposition-spec", 2),
     ] {
         let family: Vec<_> = registry
             .contracts

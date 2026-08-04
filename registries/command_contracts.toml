@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 3
+registry_epoch = 4
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -183,6 +183,184 @@ consumed_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]      
 written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_record" ]  # [C][F]
 checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
 backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F4 allocation-escape-and-finalization — frozen ordinals 18-21. The source
+# gives two closed local families; every arm below is therefore a separate
+# reserved contract row, sharing its family's outer tag.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:allocation-reservation-transition-spec:escaping-reserve"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0012                                                   # [S] frozen dense ordinal 18
+input_schema_id = "AllocationReservationTransitionSpec<Local>"           # [S] L1900 closed Local family
+input_wire_tag = 0x0012                                                   # [C]
+inner_wire_tag = 0x0001                                                   # [S] EscapingReserve is first in L1900 source order
+body_schema_id = "AllocationReservationTransitionSpec<Local>"            # [S] the arm is embedded by value in this family
+result_schema_id = "EscapingAllocationReservationRecord"                 # [S] L1896 installs this record
+applied_record_schema_id = "EscapingAllocationReservationRecord"         # [S] L1896 applied record
+handler_symbol = "fgdb_apply::local::allocation_reservation_transition_spec::escaping_reserve"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 requires every Local allocation-reservation transition
+sequence_effects = "before the first escaping object is constructed, atomically consumes the exact fresh lease offsets, installs the escaping reservation record and allocation-binding root, and advances the workspace generation; an exact retry returns the same record and result bytes"  # [S] L1896
+expected_state_schema_id = "LocalTxnWorkspaceGeneration"                  # [S] L1896 expected_workspace_generation_ref
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] registration_ref carries the Local authority binding
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm is spelled for this pre-terminal allocation transition
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1896 spells terminal_audit_gate
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:allocation-reservation-transition-spec:escaping-reserve"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|id_allocator_state", "SemanticPayload|Local|txn_workspace_generation" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|id_allocator_state", "SemanticPayload|Local|txn_allocation_binding_root", "SemanticPayload|Local|txn_workspace_generation" ]  # [C][F]
+checkpoint_floor_classes = [ "id-allocation" ]                            # [C][F]
+backup_restore_gc_classes = [ "id-allocation" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:allocation-reservation-transition-spec:binding-compaction"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0012                                                   # [S] shared family outer tag
+input_schema_id = "AllocationReservationTransitionSpec<Local>"           # [S]
+input_wire_tag = 0x0012                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] BindingCompaction is second in L1900 source order
+body_schema_id = "AllocationReservationTransitionSpec<Local>"            # [S] arm embedded by value
+result_schema_id = "TxnAllocationBindingRoot"                             # [S] L1900 replaces closed-attempt detail under this root
+applied_record_schema_id = "TxnAllocationBindingRoot"                     # [S] durable root successor
+handler_symbol = "fgdb_apply::local::allocation_reservation_transition_spec::binding_compaction"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 requires every Local allocation-reservation transition
+sequence_effects = "may replace closed-attempt detail only with a checked cumulative spent-range extension and exact tombstone commitment; it never returns capacity"  # [S] L1900
+expected_state_schema_id = "TxnAllocationBindingRoot"                     # [S] the checked root being compacted
+authority_arm = "SourceUnspelled"                                         # [S] L1900 gives no authority-bearing body for this embedded arm
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] all Local sequence-neutral wrappers carry the generated gate (L1914)
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:allocation-reservation-transition-spec:binding-compaction"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_allocation_binding_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_allocation_binding_root" ]   # [C][F]
+checkpoint_floor_classes = [ "id-allocation" ]                            # [C][F]
+backup_restore_gc_classes = [ "id-allocation" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-final-certification-reserve-spec"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0013                                                   # [S] frozen dense ordinal 19
+input_schema_id = "LocalFinalCertificationReserveSpec"                    # [S] L1748 exact Local body
+input_wire_tag = 0x0013                                                   # [C]
+body_schema_id = "LocalFinalCertificationReserveSpec"                     # [S]
+result_schema_id = "LocalFinalCertificationReservation"                  # [S] L1750 installed Active successor
+applied_record_schema_id = "LocalFinalCertificationReservation"          # [S] L1750 reservation-index value
+handler_symbol = "fgdb_apply::local::local_final_certification_reserve_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 finalization allocation reserve
+sequence_effects = "revalidates the final selection, installs one Active final-certification reservation and its coordinate/resource/constraint/escrow holds, and updates IdAllocatorState before effects, capsule, or audit bytes can be constructed"  # [S] L1748, L1904
+expected_state_schema_id = "TerminalCertificationReservationRoot<Local>"  # [S] L1752 reserve CASes absence or a cancelled predecessor
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L1748 direct field
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm in the exact body
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1748 direct field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-final-certification-reserve-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|terminal_certification_reservation_root", "SemanticPayload|Local|id_allocator_state" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|terminal_certification_reservation_root", "SemanticPayload|Local|id_allocator_state", "SemanticPayload|Local|terminal_coordinate_hold_root", "SemanticPayload|Local|terminal_obligation_hold_root" ]  # [C][F]
+checkpoint_floor_classes = [ "final-certification", "id-allocation" ]   # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle", "id-allocation" ]        # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-final-certification-cancel-spec"   # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0014                                                   # [S] frozen dense ordinal 20
+input_schema_id = "LocalFinalCertificationCancelSpec"                     # [S] L1754 exact Local cancellation path
+input_wire_tag = 0x0014                                                   # [C]
+body_schema_id = "LocalFinalCertificationCancelSpec"                      # [S]
+result_schema_id = "LocalFinalCertificationReservation"                  # [S] L1754 produces CancelledBeforeSignature
+applied_record_schema_id = "LocalFinalCertificationReservation"          # [S] reservation successor
+handler_symbol = "fgdb_apply::local::local_final_certification_cancel_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 finalization allocation disposition
+sequence_effects = "before a signing plan, lock, terminal command, or candidate exists, moves the exact Active reservation to CancelledBeforeSignature and releases exactly its holds; recovery may then build a higher generation or certified abort"  # [S] L1754
+expected_state_schema_id = "LocalFinalCertificationReservation"          # [S] exact Active reservation
+authority_arm = "NoTerminalPlanLockShareOrOrderProof"                     # [S] L1754 requires this exact proof
+authority_evidence_target_schema_id = "NoTerminalPlanLockShareOrOrderProof"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] cancellation precedes terminal audit construction
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] generated Local wrapper gate (L1914)
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-final-certification-cancel-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|terminal_certification_reservation_root", "SemanticPayload|Local|terminal_coordinate_hold_root", "SemanticPayload|Local|terminal_obligation_hold_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|terminal_certification_reservation_root", "SemanticPayload|Local|terminal_coordinate_hold_root", "SemanticPayload|Local|terminal_obligation_hold_root" ]  # [C][F]
+checkpoint_floor_classes = [ "final-certification" ]                     # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:finalization-allocation-disposition-spec:consumed"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0015                                                   # [S] frozen dense ordinal 21
+input_schema_id = "FinalizationAllocationDispositionSpec<Local>"         # [S] L1904 closed Local family
+input_wire_tag = 0x0015                                                   # [C]
+inner_wire_tag = 0x0001                                                   # [S] Consumed is first in L1904 source order
+body_schema_id = "FinalizationAllocationDispositionSpec<Local>"          # [S] arm embedded by value
+result_schema_id = "FinalizationAllocationReservationRecord<Local>"      # [S] L1904 replaces Active with Consumed
+applied_record_schema_id = "FinalizationAllocationReservationRecord<Local>"  # [S]
+handler_symbol = "fgdb_apply::local::finalization_allocation_disposition_spec::consumed"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 required Local semantic row
+sequence_effects = "on commit atomically replaces the Active finalization-allocation reservation with Consumed carrying the exact terminal input and marker identities; capacity is never returned"  # [S] L1904
+expected_state_schema_id = "FinalizationAllocationReservationRecord<Local>"  # [S] Active record
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] the active Local final-certification reservation retains the Local authority binding (L1750)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] generated Local wrapper gate (L1914)
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:finalization-allocation-disposition-spec:consumed"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|finalization_allocation_reservation" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|finalization_allocation_reservation" ]   # [C][F]
+checkpoint_floor_classes = [ "id-allocation" ]                            # [C][F]
+backup_restore_gc_classes = [ "id-allocation" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:finalization-allocation-disposition-spec:abandoned-spent"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0015                                                   # [S] shared family outer tag
+input_schema_id = "FinalizationAllocationDispositionSpec<Local>"         # [S]
+input_wire_tag = 0x0015                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] AbandonedSpent is second in L1904 source order
+body_schema_id = "FinalizationAllocationDispositionSpec<Local>"          # [S] arm embedded by value
+result_schema_id = "FinalizationAllocationReservationRecord<Local>"      # [S] L1904 replaces Active with AbandonedSpent
+applied_record_schema_id = "FinalizationAllocationReservationRecord<Local>"  # [S]
+handler_symbol = "fgdb_apply::local::finalization_allocation_disposition_spec::abandoned_spent"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 required Local semantic row
+sequence_effects = "on cancel or abort atomically replaces the Active finalization-allocation reservation with AbandonedSpent carrying the exact terminal-or-cancel identity and tombstone summary; capacity is never returned"  # [S] L1904
+expected_state_schema_id = "FinalizationAllocationReservationRecord<Local>"  # [S] Active record
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] active Local reservation retains the Local authority binding (L1750)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] generated Local wrapper gate (L1914)
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:finalization-allocation-disposition-spec:abandoned-spent"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|finalization_allocation_reservation" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|finalization_allocation_reservation" ]   # [C][F]
+checkpoint_floor_classes = [ "id-allocation" ]                            # [C][F]
+backup_restore_gc_classes = [ "id-allocation" ]                          # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

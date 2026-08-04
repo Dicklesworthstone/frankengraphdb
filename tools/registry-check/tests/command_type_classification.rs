@@ -60,6 +60,10 @@ fn source_forced_seed_population_is_present() {
         "TxnSubmissionSpec",
         "AuditExternalResolutionBatch",
         "AuditExternalResolutionReceipt",
+        "AllocationReservationTransitionSpec",
+        "LocalFinalCertificationReserveSpec",
+        "LocalFinalCertificationCancelSpec",
+        "FinalizationAllocationDispositionSpec",
     ] {
         assert!(
             registry
@@ -70,8 +74,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 3,
-        "the population may only grow from the three-row seed"
+        registry.classifications.len() >= 21,
+        "the population may only grow from the landed F1-F4 rows"
     );
 }
 
@@ -236,6 +240,8 @@ fn family_root_binding_resolves_through_arm_rows_not_an_exact_row() {
         "cc:local:local-attempt-registration-spec",
         "cc:local:txn-ownership-transition-spec",
         "cc:local:local-outcome-compaction-spec",
+        "cc:local:allocation-reservation-transition-spec",
+        "cc:local:finalization-allocation-disposition-spec",
     ] {
         assert!(!ids.contains(root), "{root:?} must not be an exact row id");
         let prefix = format!("{root}:");

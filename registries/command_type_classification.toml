@@ -69,13 +69,49 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 3
+registry_epoch = 4
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
 class = "PreOrderArtifact"
 source_location = "a10:1918"
 statement = "TxnSubmissionSpec is not an ordered input: transaction submission is the pre-order construction pipeline that yields CommitCommand."
+status = "registered"
+
+# --- F4 tranche (allocation escape and finalization). Armed families bind
+# --- their member roots; the command-contract validator resolves those roots
+# --- through the two exact arm rows under each shared outer tag.
+
+[[classification]]
+type_name = "AllocationReservationTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:allocation-reservation-transition-spec"
+source_location = "a09:1900"
+statement = "AllocationReservationTransitionSpec<Local> is the generated closed Local allocation transition union with exactly EscapingReserve and BindingCompaction inner tags."
+status = "registered"
+
+[[classification]]
+type_name = "LocalFinalCertificationReserveSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-final-certification-reserve-spec"
+source_location = "a09:1748"
+statement = "LocalFinalCertificationReserveSpec is the exact Local final-certification reservation body."
+status = "registered"
+
+[[classification]]
+type_name = "LocalFinalCertificationCancelSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-final-certification-cancel-spec"
+source_location = "a09:1754"
+statement = "LocalFinalCertificationCancelSpec names the exact Active reservation and NoTerminalPlanLockShareOrOrderProof before moving the reservation to CancelledBeforeSignature."
+status = "registered"
+
+[[classification]]
+type_name = "FinalizationAllocationDispositionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:finalization-allocation-disposition-spec"
+source_location = "a09:1904"
+statement = "FinalizationAllocationDispositionSpec<Local> has exactly the source-ordered Consumed and AbandonedSpent arms and no Meta instantiation."
 status = "registered"
 
 [[classification]]
