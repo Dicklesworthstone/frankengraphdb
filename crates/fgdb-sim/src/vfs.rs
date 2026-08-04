@@ -230,6 +230,23 @@ pub enum FaultKind {
     },
 }
 
+impl FaultKind {
+    /// The fault class this belongs to, as a stable name.
+    ///
+    /// Stable because it is reported in graded replay bundles
+    /// (`crate::completeness`), where a renamed class silently changes what a
+    /// bundle claims was reproduced.
+    #[must_use]
+    pub const fn class(self) -> &'static str {
+        match self {
+            Self::FsyncLie { .. } => "fsync-lie",
+            Self::TornWrite { .. } => "torn-write",
+            Self::BitFlip { .. } => "bit-flip",
+            Self::OutOfSpace { .. } => "out-of-space",
+        }
+    }
+}
+
 /// One injected fault, in injection order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaultEvent {
