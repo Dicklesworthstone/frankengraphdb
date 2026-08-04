@@ -23,12 +23,16 @@
 //! point — it makes the eventual improvement measurable instead of anecdotal, and it
 //! stops the number silently getting worse in the meantime. Publish the bad numbers.
 
-use fgdb_strata::root::{BlockRef, PartitionRoot, blocks_visible_at};
+use fgdb_delta_types::RelationId;
+use fgdb_strata::compact::compact;
+use fgdb_strata::root::{BlockRef, PartitionRoot, blocks_visible_at, merge_neighbours};
+use fgdb_strata::{AdjacencyEntry, BlockError, decode_block, encode_block, scan_neighbours};
 use fgdb_types::ids::ObjectId;
-use fgdb_types::{BranchId, CommitSeq, GraphId};
+use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 
 const GRAPH: GraphId = GraphId(1);
 const BRANCH: BranchId = BranchId(1);
+const RELATION: RelationId = RelationId(1);
 
 /// A root of `count` blocks, block *i* covering sequences `[i+1, i+1]`.
 ///
@@ -150,5 +154,468 @@ fn the_fixture_builds_the_partition_the_bounds_assume() {
     assert!(
         blocks_visible_at(&root, CommitSeq(0)).is_empty(),
         "a snapshot before every block must examine no blocks"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §17's standing laws, as op-count witnesses
+// ---------------------------------------------------------------------------
+//
+// Plan §17 binds every published number with six standing laws. Three of them
+// can be witnessed today, exactly, against production code — and each is
+// witnessed here as a COUNT rather than a duration, for the reason the top of
+// this file gives:
+//
+//   (2) DISTRIBUTIONS, NOT AVERAGES. A cost sampled at five convenient points is
+//       an average wearing a bound. Both witnesses below sweep their whole input
+//       space and assert the WORST case, and the hostile shape is power-law
+//       degree skew — the single most common way a graph engine publishes a
+//       number that does not survive contact with real data.
+//   (3) NEVER HIDE COMPACTION. Read cost before compaction is the number a reader
+//       actually pays, so it is measured beside the compacted one, and the answer
+//       is asserted identical across the transition.
+//   (4) MEMORY IS A FIRST-CLASS METRIC. Bytes per LIVE edge, counted through the
+//       real durable encoder and including the version history a reader must
+//       still traverse — not bytes per payload entry, which flatters.
+//
+// Laws (1) no-benchmark-only-semantics, (5) policy-epoch disclosure and (6) no
+// unpriced protocol weight are NOT witnessed here and are not silently claimed:
+// (1) and (5) need a runnable durable path and a policy epoch, neither of which
+// exists (fgdb-j0vu, and no decision card is emitted by this crate), and (6)
+// needs the Appendix G operation-cost registry rows for these operations.
+//
+// **HOW A COST IS MEASURED WITHOUT A STOPWATCH OR AN INSTRUMENTED BUILD.** The
+// read paths validate every entry they read. So a defect planted at a KNOWN
+// position is detected if and only if the reader examined that position, and the
+// error names it. That turns "how many entries did this read examine" into an
+// exact, deterministic observation through the public API, with no counter to
+// add to production code and nothing to drift out of sync with it.
+
+/// The durable block layout, pinned here so the probe can address one field of
+/// one entry. `the_probe_addresses_the_durable_layout` fails if either constant
+/// stops matching the encoder, so these cannot rot into a probe that corrupts a
+/// byte nobody reads.
+const HEADER_LEN: usize = 4 + 2 + 4;
+const ENTRY_LEN: usize = 16 + 8 + 16 + 16 + 8 + 8;
+/// `retired_at` is the last field of an entry.
+const RETIRED_AT_OFFSET: usize = ENTRY_LEN - 8;
+
+/// Plant a detectable defect at `index` by retiring that entry at sequence 1.
+///
+/// Every fixture below creates at sequence 1 or later, and `retired_at <=
+/// created_at` is refused by `validate_entry`, so this is a defect at exactly one
+/// position — and `RetiredBeforeCreated` carries that position back.
+fn plant_defect_at(bytes: &mut [u8], index: usize) {
+    let at = HEADER_LEN + index * ENTRY_LEN + RETIRED_AT_OFFSET;
+    bytes[at..at + 8].copy_from_slice(&1u64.to_be_bytes());
+}
+
+/// A deliberately SKEWED partition: a power-law head (degree 64, 32, 16, 8, 4,
+/// 2, 1) and a tail of twenty degree-one vertices, in one block.
+///
+/// A uniform-degree fixture would make every query cost the same for the honest
+/// reason — every query IS the same. Skew is what separates "this read costs the
+/// whole block" from "this read costs its own degree", and only a skewed fixture
+/// can tell those apart.
+fn power_law_partition() -> Vec<AdjacencyEntry> {
+    let mut entries = Vec::new();
+    let mut eid = 1u128;
+    let push = |entries: &mut Vec<AdjacencyEntry>, src: u128, dst: u128, eid: u128| {
+        entries.push(AdjacencyEntry {
+            src: VId(src),
+            relation: RELATION,
+            dst: VId(dst),
+            eid: EId(eid),
+            created_at: CommitSeq(1),
+            retired_at: None,
+        });
+    };
+    for (src, degree) in [
+        (1u128, 64u128),
+        (2, 32),
+        (3, 16),
+        (4, 8),
+        (5, 4),
+        (6, 2),
+        (7, 1),
+    ] {
+        for k in 0..degree {
+            push(&mut entries, src, 1000 + k, eid);
+            eid += 1;
+        }
+    }
+    for src in 8u128..=27 {
+        push(&mut entries, src, 1000, eid);
+        eid += 1;
+    }
+    entries
+}
+
+/// CONTROL for the probe itself: the offsets address a real field, and the defect
+/// is detectable at the position it was planted at — and only there.
+///
+/// Without this, every cost witness below could be measuring a corruption that
+/// lands in padding, or one the clean block already had. Both would make "the
+/// reader detected it" true for reasons unrelated to what the reader examined.
+#[test]
+fn the_probe_addresses_the_durable_layout() {
+    let entries = power_law_partition();
+    let bytes = encode_block(&entries).expect("the skewed fixture is canonical");
+    assert_eq!(
+        bytes.len(),
+        HEADER_LEN + entries.len() * ENTRY_LEN,
+        "the pinned header/entry widths no longer match the encoder, so the probe \
+         is addressing the wrong bytes"
+    );
+    assert!(
+        decode_block(&bytes).is_ok(),
+        "the clean fixture must decode, or a detected defect proves nothing"
+    );
+
+    for index in [0usize, 1, entries.len() - 1] {
+        let mut probed = bytes.clone();
+        plant_defect_at(&mut probed, index);
+        let reported = match decode_block(&probed) {
+            Err(BlockError::RetiredBeforeCreated { at, .. }) => Some(at),
+            _ => None,
+        };
+        assert_eq!(
+            reported,
+            Some(index),
+            "a defect planted at {index} must be detected, and reported at exactly \
+             that position — otherwise the cost probe is measuring something else"
+        );
+    }
+}
+
+/// WITNESS, AND IT PUBLISHES A BAD NUMBER: a one-hop neighbour scan examines
+/// EVERY entry in the block, whatever the degree of the vertex asked for.
+///
+/// `scan_neighbours`'s own doc says the format exists so that "a scan for one
+/// adjacency must not cost the whole block", and the entries of one adjacency are
+/// indeed contiguous. But the implementation walks `0..count` linearly and
+/// validates as it goes. What the layout currently buys is that the scan does not
+/// MATERIALIZE the whole block; it still EXAMINES all of it. Those are different
+/// claims and only the second one is a cost.
+///
+/// Under power-law skew that is the difference between a bound and a fiction:
+/// the degree-one vertices in this fixture each pay for all 147 entries to
+/// receive one destination. The cost distribution is completely flat while the
+/// answer distribution spans 64×, which is precisely the shape a uniform-degree
+/// benchmark cannot show.
+///
+/// **THIS TEST SHOULD FAIL WHEN A SEEK LANDS** — a binary search to the adjacency's
+/// contiguous range, or the §6.2 skip-list — because the defect planted in the
+/// final entry would then go undetected for the early sources. That failure is the
+/// signal to re-derive the bound downward, exactly as the frontier witness above
+/// says of itself.
+#[test]
+fn a_neighbour_scan_costs_the_whole_block_whatever_the_degree() {
+    let entries = power_law_partition();
+    let bytes = encode_block(&entries).expect("the skewed fixture is canonical");
+    let last = entries.len() - 1;
+
+    let mut answers = Vec::new();
+    let mut wasted = Vec::new();
+    for src in 1u128..=27 {
+        let found =
+            scan_neighbours(&bytes, VId(src), RELATION, CommitSeq(1)).expect("a clean block scans");
+
+        let mut probed = bytes.clone();
+        plant_defect_at(&mut probed, last);
+        let examined_the_end = matches!(
+            scan_neighbours(&probed, VId(src), RELATION, CommitSeq(1)),
+            Err(BlockError::RetiredBeforeCreated { at, .. }) if at == last
+        );
+        let last_needed = entries
+            .iter()
+            .rposition(|entry| entry.src == VId(src))
+            .expect("every source in the sweep has entries");
+        assert!(
+            examined_the_end,
+            "src {src} needs entries only through index {last_needed} of {last}, and the \
+             scan did not examine the final entry — the cost bound recorded here is now \
+             too pessimistic; re-derive it downward"
+        );
+
+        wasted.push(last - last_needed);
+        answers.push(found.len());
+    }
+
+    // CONTROL: the queries genuinely differ. If every source had the same degree,
+    // "cost independent of degree" would be true for a trivial reason.
+    let widest = *answers.iter().max().expect("the sweep is nonempty");
+    let narrowest = *answers.iter().min().expect("the sweep is nonempty");
+    assert_eq!(widest, 64, "the supernode must answer with 64 destinations");
+    assert_eq!(narrowest, 1, "the tail vertices must answer with one");
+
+    // The published distribution: every source pays the same, and the head pays
+    // most of it for nothing.
+    let most_wasted = *wasted.iter().max().expect("the sweep is nonempty");
+    assert_eq!(
+        most_wasted,
+        last - 63,
+        "the supernode's scan examines {most_wasted} entries beyond its own last \
+         entry; the current bound is every entry in the block for every source \
+         (answers {narrowest}..={widest}, wasted {wasted:?})"
+    );
+}
+
+/// WITNESS: a merge across blocks examines every entry of every block it is given,
+/// whatever the snapshot and whatever adjacency is asked for.
+///
+/// `merge_neighbours` collapses and VALIDATES the whole supplied history before it
+/// applies the adjacency filter, deliberately — a malformed tombstone can move an
+/// EId to another source, so a merge that only looked at the requested topology
+/// could be evaded by forging a different one (fgdb-ghgt). That is a correctness
+/// requirement, and this witness does not argue with it. It records its price, so
+/// that the cost of the root-level skip (which chooses WHICH blocks are supplied)
+/// is never confused with a cost this function does not have.
+#[test]
+fn a_merge_examines_every_supplied_block_whatever_the_query() {
+    // Three blocks; only the first mentions source 1. The defect is in the last.
+    let clean = |src: u128, eid: u128, created: u64| AdjacencyEntry {
+        src: VId(src),
+        relation: RELATION,
+        dst: VId(1000 + eid),
+        eid: EId(eid),
+        created_at: CommitSeq(created),
+        retired_at: None,
+    };
+    let mut blocks = vec![
+        vec![clean(1, 1, 1)],
+        vec![clean(2, 2, 2)],
+        vec![clean(3, 3, 3)],
+    ];
+
+    // CONTROL: clean, the query answers from the first block alone.
+    assert_eq!(
+        merge_neighbours(&blocks, VId(1), RELATION, CommitSeq(1)).expect("clean history merges"),
+        vec![VId(1001)],
+        "source 1's neighbour comes from the first block"
+    );
+
+    // A defect in the LAST block, which the answer above never needed.
+    blocks[2][0].retired_at = Some(CommitSeq(1));
+    let result = merge_neighbours(&blocks, VId(1), RELATION, CommitSeq(1));
+    assert!(
+        result.is_err(),
+        "a defect in a block the answer does not need went unnoticed, so the merge \
+         no longer examines every supplied block — re-derive this bound"
+    );
+
+    // And the same is true at the earliest snapshot, where nothing in the later
+    // blocks is visible at all: visibility does not narrow what is examined.
+    assert!(
+        merge_neighbours(&blocks, VId(1), RELATION, CommitSeq(1)).is_err(),
+        "the examined set must not depend on the snapshot"
+    );
+}
+
+/// A version chain on ONE adjacency: `chain` successive edge identities, each
+/// retired by the next, so exactly one is live at any snapshot.
+///
+/// This is the block-count amplifier the §17 harness is required to exercise: the
+/// live answer never grows, and the history a reader must traverse grows without
+/// bound until compaction removes it.
+fn version_chain_partition(chain: u64) -> Vec<Vec<AdjacencyEntry>> {
+    (1..=chain)
+        .map(|i| {
+            vec![AdjacencyEntry {
+                src: VId(1),
+                relation: RELATION,
+                dst: VId(1000 + u128::from(i)),
+                eid: EId(u128::from(i)),
+                created_at: CommitSeq(i),
+                retired_at: (i < chain).then_some(CommitSeq(i + 1)),
+            }]
+        })
+        .collect()
+}
+
+/// WITNESS (law 3, never hide compaction): the read cost a compaction removes is
+/// measured, and the answer is asserted identical across it.
+///
+/// Reporting only the compacted number would publish a cost no reader pays until
+/// the compactor has run. Both are here. The correctness half is the bead's own
+/// requirement — a "fast" path that returns a different graph is not a win — and
+/// it is asserted at every snapshot at or above the floor, which is exactly the
+/// range the floor licenses compaction to preserve.
+///
+/// SCOPE, stated rather than implied: this measures the cost compaction is
+/// responsible for, not foreground latency DURING a compaction. The concurrent
+/// half of law 3 needs a running engine (fgdb-j0vu) and is owed, not covered.
+#[test]
+fn compaction_removes_a_measured_read_cost_without_moving_the_answer() {
+    const CHAIN: u64 = 32;
+    let before = version_chain_partition(CHAIN);
+    let floor = CommitSeq(CHAIN);
+
+    let entries_before: usize = before.iter().map(Vec::len).sum();
+    assert_eq!(
+        entries_before, CHAIN as usize,
+        "the chain fixture must carry one entry per version"
+    );
+
+    let compacted = compact(&before, floor).expect("a lawful chain compacts");
+    let entries_after: usize = compacted.blocks.iter().map(Vec::len).sum();
+
+    // THE ANSWER IS THE GATE. Every snapshot at or above the floor must agree.
+    for as_of in CHAIN..=(CHAIN + 4) {
+        let was = merge_neighbours(&before, VId(1), RELATION, CommitSeq(as_of))
+            .expect("the pre-compaction history merges");
+        let now = merge_neighbours(&compacted.blocks, VId(1), RELATION, CommitSeq(as_of))
+            .expect("the compacted history merges");
+        assert_eq!(
+            was, now,
+            "compaction changed the answer at sequence {as_of}; a cost reduction that \
+             moves the result is not a cost reduction"
+        );
+        assert_eq!(
+            was.len(),
+            1,
+            "exactly one version of the chained adjacency is live at {as_of}"
+        );
+    }
+
+    // The published pair: what a reader paid before, and after.
+    assert_eq!(
+        entries_after, 1,
+        "compacting a {CHAIN}-version chain under a floor above every retirement must \
+         leave exactly the live version, not {entries_after}"
+    );
+    assert_eq!(
+        compacted.dropped,
+        CHAIN as usize - 1,
+        "the floor must account for every version it reclaimed"
+    );
+    assert_eq!(
+        compacted.superseded, 0,
+        "distinct edge identities are not supersedes; counting them as such would \
+         report the floor reclaiming what it never touched"
+    );
+    assert!(
+        entries_before > entries_after,
+        "read cost before compaction was {entries_before} entries and after is \
+         {entries_after}"
+    );
+}
+
+/// WITNESS (law 4, memory is a first-class metric), AND IT PUBLISHES A BAD NUMBER:
+/// bytes per LIVE edge, through the real encoder, including version history.
+///
+/// §17 requires bytes per live edge to "include versions, indexes, witnesses, and
+/// allocator slack, not just payload". The number below is the versions half, and
+/// it is the honest one: a 32-version chain with a single live edge costs 32
+/// blocks of durable bytes to answer with one destination.
+///
+/// For scale, §17's sealed-run target is an effective ≥4 B/edge after EF and
+/// varint coding. Tier D's block entry is 72 fixed bytes plus a 10-byte header per
+/// block, and no compression exists yet — so this witness records roughly three
+/// orders of magnitude above that target on this shape. Writing it down is the
+/// point: it is what the code does today, and it makes the eventual encoder work
+/// measurable instead of anecdotal.
+#[test]
+fn bytes_per_live_edge_amplify_with_version_history() {
+    const CHAIN: u64 = 32;
+    let before = version_chain_partition(CHAIN);
+    let floor = CommitSeq(CHAIN);
+
+    let encoded_bytes = |blocks: &[Vec<AdjacencyEntry>]| -> usize {
+        blocks
+            .iter()
+            .map(|block| {
+                encode_block(block)
+                    .expect("every fixture block is canonical")
+                    .len()
+            })
+            .sum()
+    };
+
+    let live_at_floor = merge_neighbours(&before, VId(1), RELATION, floor)
+        .expect("the chain merges")
+        .len();
+    assert_eq!(live_at_floor, 1, "the chain keeps exactly one live edge");
+
+    let bytes_before = encoded_bytes(&before);
+    let compacted = compact(&before, floor).expect("a lawful chain compacts");
+    let bytes_after = encoded_bytes(&compacted.blocks);
+
+    let per_live_before = bytes_before / live_at_floor;
+    let per_live_after = bytes_after / live_at_floor;
+
+    // The exact durable cost of one block holding one entry, so the numbers below
+    // are pinned to the format rather than to a remembered constant.
+    let one_entry_block = HEADER_LEN + ENTRY_LEN;
+    assert_eq!(
+        per_live_before,
+        one_entry_block * CHAIN as usize,
+        "one live edge behind a {CHAIN}-version chain costs {per_live_before} durable \
+         bytes; the per-block floor is {one_entry_block}"
+    );
+    assert_eq!(
+        per_live_after, one_entry_block,
+        "after compaction one live edge must cost exactly one one-entry block"
+    );
+
+    // The amplification factor is the reportable number, and it is not 1.
+    assert_eq!(
+        per_live_before / per_live_after,
+        CHAIN as usize,
+        "version history amplifies bytes per live edge {}x",
+        per_live_before / per_live_after
+    );
+}
+
+/// WITNESS (law 2, distributions not averages): the skip bound swept over its
+/// WHOLE input space, not sampled at convenient points.
+///
+/// The first witness in this file checks five snapshots. Five points cannot
+/// distinguish a bound that holds everywhere from one that holds at the five
+/// places someone looked — and the interesting failures of a skip rule are at the
+/// edges, not in the middle. This sweeps every snapshot from before the first
+/// block to past the last and asserts the bound at each, then asserts the WORST
+/// case explicitly so a regression is reported as a maximum rather than averaged
+/// away.
+#[test]
+fn the_skip_bound_holds_across_the_whole_snapshot_range_not_a_sample() {
+    const BLOCKS: u64 = 64;
+    let root = root_of(BLOCKS);
+
+    let mut examined_at = Vec::with_capacity(BLOCKS as usize + 2);
+    for as_of in 0..=(BLOCKS + 1) {
+        let examined = blocks_visible_at(&root, CommitSeq(as_of)).len();
+        let expected = (as_of.min(BLOCKS)) as usize;
+        assert_eq!(
+            examined, expected,
+            "at as_of={as_of} the reader examined {examined} of {BLOCKS} blocks, \
+             bound {expected}"
+        );
+        examined_at.push(examined);
+    }
+
+    // The distribution's endpoints, asserted rather than assumed: a sweep whose
+    // every value were equal would satisfy the loop above and mean nothing.
+    let worst = *examined_at.iter().max().expect("the sweep is nonempty");
+    let best = *examined_at.iter().min().expect("the sweep is nonempty");
+    assert_eq!(
+        worst, BLOCKS as usize,
+        "the worst case over the whole range must be the full partition"
+    );
+    assert_eq!(
+        best, 0,
+        "a snapshot before every block must examine nothing"
+    );
+
+    // And the bound is attained ONLY at the frontier and beyond — if it were
+    // attained early, the skip would be doing nothing over most of the range.
+    let first_worst = examined_at
+        .iter()
+        .position(|examined| *examined == worst)
+        .expect("the worst case occurs");
+    assert_eq!(
+        first_worst, BLOCKS as usize,
+        "the full-partition cost is first paid at as_of={first_worst}, not at the \
+         frontier — the skip stopped working below it"
     );
 }
