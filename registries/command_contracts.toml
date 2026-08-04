@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 4
+registry_epoch = 5
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -183,6 +183,95 @@ consumed_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]      
 written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_record" ]  # [C][F]
 checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
 backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F5a checkpoint/floor/history-cut — frozen ordinals 22-24. These three
+# armless controls are the source-spelled prefix of F5; configuration, format,
+# and delta-retention members remain in their own ordered increment.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:checkpoint-install-spec"                  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0016                                                   # [S] frozen dense ordinal 22
+input_schema_id = "CheckpointInstallSpec"                                 # [S] L429 exact Local body
+input_wire_tag = 0x0016                                                   # [C]
+body_schema_id = "CheckpointInstallSpec"                                  # [S]
+result_schema_id = "RecoveryCheckpoint"                                   # [S] L429 constructs the checkpoint before install
+applied_record_schema_id = "ProvisionalRetentionCutSet"                   # [S] L429 applies the operational provisional cut
+handler_symbol = "fgdb_apply::local::checkpoint_install_spec"             # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 checkpoint family projection
+sequence_effects = "is the first retained command after its covered basis; atomically replaces the current checkpoint and paired floor, installs the exact operational provisional cut when required, performs only registered resets, and changes no other field"  # [S] L429
+expected_state_schema_id = "LogicalStatePayload"                          # [S] L429 verifies the current basis and projection
+authority_arm = "SourceUnspelled"                                         # [S] the exact L429 body has no separate authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] generated Local wrapper gate (L1914)
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:checkpoint-install-spec"      # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|logical_state_payload" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|recovery_checkpoint", "SemanticPayload|Local|config_payload_floor", "SemanticPayload|Local|retention_map" ]  # [C][F]
+checkpoint_floor_classes = [ "recovery-checkpoint", "retention-cut" ]   # [C][F]
+backup_restore_gc_classes = [ "recovery-checkpoint", "retention-cut" ]  # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:initial-config-floor-install-spec"        # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0017                                                   # [S] frozen dense ordinal 23
+input_schema_id = "InitialConfigFloorInstallSpec"                         # [S] L1966 exact Local body
+input_wire_tag = 0x0017                                                   # [C]
+body_schema_id = "InitialConfigFloorInstallSpec"                          # [S]
+result_schema_id = "ConfigPayloadFloor"                                   # [S] L1966 installs initial_config_payload_floor_ref
+applied_record_schema_id = "LogicalStatePayload"                          # [S] sole CheckpointInstalled -> Operational transition
+handler_symbol = "fgdb_apply::local::initial_config_floor_install_spec"   # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 floor family projection
+sequence_effects = "the sole Local CheckpointInstalled-to-Operational transition; installs the exact checkpoint-matching initial configuration payload floor at the expected logical command sequence"  # [S] L1966
+expected_state_schema_id = "LogicalStatePayload"                          # [S] checkpoint_installed_state
+authority_arm = "SourceUnspelled"                                         # [S] exact body names no separate authority field
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1966 direct field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:initial-config-floor-install-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|recovery_checkpoint" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+checkpoint_floor_classes = [ "configuration-floor" ]                     # [C][F]
+backup_restore_gc_classes = [ "configuration-floor" ]                    # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:history-cut-activation-spec"              # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0018                                                   # [S] frozen dense ordinal 24
+input_schema_id = "HistoryCutActivationSpec"                              # [S] L1972 exact Local body
+input_wire_tag = 0x0018                                                   # [C]
+body_schema_id = "HistoryCutActivationSpec"                               # [S]
+result_schema_id = "ActivatedRetentionCutSet"                             # [S] L1972 apply creates this set
+applied_record_schema_id = "RetentionMap"                                 # [S] atomically replaces the provisional map entry
+handler_symbol = "fgdb_apply::local::history_cut_activation_spec"         # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 history-cut family projection
+sequence_effects = "is the sole Local strengthening path from the provisional cut; it creates the activated cut set and atomically replaces the exact retention-map entry after verifying the contiguous suffix"  # [S] L1972
+expected_state_schema_id = "RetentionMap"                                 # [S] expected_retention_map_basis
+authority_arm = "SourceUnspelled"                                         # [S] exact body names no separate authority field
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1972 direct field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:history-cut-activation-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|retention_map" ]          # [C][F]
+written_state_slots = [ "SemanticPayload|Local|retention_map" ]           # [C][F]
+checkpoint_floor_classes = [ "retention-cut" ]                            # [C][F]
+backup_restore_gc_classes = [ "retention-cut" ]                           # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

@@ -69,13 +69,40 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 4
+registry_epoch = 5
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
 class = "PreOrderArtifact"
 source_location = "a10:1918"
 statement = "TxnSubmissionSpec is not an ordered input: transaction submission is the pre-order construction pipeline that yields CommitCommand."
+status = "registered"
+
+# --- F5a checkpoint/floor/history-cut prefix. These are separately ordered
+# --- inputs and therefore each binds one armless contract row.
+
+[[classification]]
+type_name = "CheckpointInstallSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:checkpoint-install-spec"
+source_location = "a12:429"
+statement = "CheckpointInstallSpec is the exact first retained command after its covered basis and installs the checkpoint, paired floor, and operational provisional cut as one authority transfer."
+status = "registered"
+
+[[classification]]
+type_name = "InitialConfigFloorInstallSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:initial-config-floor-install-spec"
+source_location = "a12:1966"
+statement = "InitialConfigFloorInstallSpec is the sole local CheckpointInstalled -> Operational transition."
+status = "registered"
+
+[[classification]]
+type_name = "HistoryCutActivationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:history-cut-activation-spec"
+source_location = "a12:1972"
+statement = "HistoryCutActivationSpec is the sole local strengthening path and atomically replaces the provisional retention-map entry with the activated cut set."
 status = "registered"
 
 # --- F4 tranche (allocation escape and finalization). Armed families bind

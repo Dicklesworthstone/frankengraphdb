@@ -126,6 +126,10 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:local-final-certification-cancel-spec",
         "cc:local:finalization-allocation-disposition-spec:consumed",
         "cc:local:finalization-allocation-disposition-spec:abandoned-spent",
+        // F5a checkpoint/floor/history-cut (frozen ordinals 0x0016-0x0018)
+        "cc:local:checkpoint-install-spec",
+        "cc:local:initial-config-floor-install-spec",
+        "cc:local:history-cut-activation-spec",
     ] {
         assert!(
             registry
@@ -136,8 +140,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 26,
-        "the population may only grow from the landed F1-F4 rows"
+        registry.contracts.len() >= 29,
+        "the population may only grow from the landed F1-F4/F5a rows"
     );
 }
 

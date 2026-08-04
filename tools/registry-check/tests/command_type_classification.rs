@@ -64,6 +64,9 @@ fn source_forced_seed_population_is_present() {
         "LocalFinalCertificationReserveSpec",
         "LocalFinalCertificationCancelSpec",
         "FinalizationAllocationDispositionSpec",
+        "CheckpointInstallSpec",
+        "InitialConfigFloorInstallSpec",
+        "HistoryCutActivationSpec",
     ] {
         assert!(
             registry
@@ -74,8 +77,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 21,
-        "the population may only grow from the landed F1-F4 rows"
+        registry.classifications.len() >= 27,
+        "the population may only grow from the landed F1-F4/F5a rows"
     );
 }
 
