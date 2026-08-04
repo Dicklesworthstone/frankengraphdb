@@ -264,6 +264,17 @@ impl Replay {
     /// # Errors
     ///
     /// Returns a message naming the first field that did not parse.
+    //
+    // Not a JWT decode. This parses our own replay descriptor —
+    // "scenario:seed:sector:lie:torn:flip:budget", seven colon-separated
+    // fields — and there is no token, signature, key, claim set or expiry
+    // anywhere in it. MEASURED: zero occurrences of `jsonwebtoken` in any
+    // manifest in this workspace, and doctrine 1's closed dependency universe
+    // forbids adding one, so a JWT finding here is a false positive BY
+    // CONSTRUCTION rather than by inspection. The name stays `decode` because
+    // it is the counterpart of `encode`; renaming a correct API to satisfy a
+    // scanner's substring match would cost more than the waiver.
+    // ubs:ignore
     pub fn decode(text: &str) -> Result<Self, String> {
         let parts: Vec<&str> = text.split(':').collect();
         let [scenario, seed, sector, lie, torn, flip, budget] = parts.as_slice() else {
