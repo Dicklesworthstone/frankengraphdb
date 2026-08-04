@@ -16,7 +16,7 @@
 //! smaller, and it is red.
 //!
 //! So [`shrink`] accepts a candidate only when it fails with the **same
-//! [`FailureKind`]** as the original. The kind is carried on
+//! [`crate::artifact::FailureKind`]** as the original. The kind is carried on
 //! [`Failure`] as a value precisely so this check cannot degrade into matching
 //! on a message whose text contains a byte count.
 //!
@@ -40,7 +40,7 @@
 //! weaker than "globally minimal" — which delta debugging does not promise
 //! either. Stated rather than implied.
 
-use crate::artifact::{Failure, FailureKind, Replay};
+use crate::artifact::{Failure, Replay};
 use crate::vfs::{FaultEvent, FaultPlan, Trigger};
 use std::path::Path;
 
@@ -58,7 +58,7 @@ pub struct ShrinkStep {
 pub struct Shrunk {
     /// The minimal replay that still fails the original way.
     pub replay: Replay,
-    /// The failure it reproduces. Its [`FailureKind`] equals the original's —
+    /// The failure it reproduces. Its [`crate::artifact::FailureKind`] equals the original's —
     /// that is the postcondition, asserted by [`shrink`] before returning.
     pub failure: Failure,
     /// Reductions accepted, in order. Empty means the input was already
