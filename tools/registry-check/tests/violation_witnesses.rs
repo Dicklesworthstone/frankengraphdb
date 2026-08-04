@@ -787,7 +787,25 @@ fn topology_live_graph_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "layer_inversion", fact: "the foundation layer stops allowing its own outgoing edges", mutate: |r| layer_mut(r, "foundation").allowed_outgoing_layers.clear() },
     TopologyWitness { code: "narrowing_violated", fact: "the narrowing row is repointed at a live crate it does not admit", mutate: |r| r.dependency_narrowings[0].crate_name = "fgdb-calibrate".into() },
     TopologyWitness { code: "required_edge_missing", fact: "a required edge is repointed at a project its source does not depend on", mutate: |r| r.required_dependencies.iter_mut().find(|edge| edge.id == "calibrate-over-asupersync").expect("the calibrate edge is registered").to = "franken_networkx".into() },
-    TopologyWitness { code: "posture_status_drift", fact: "a deferred posture is declared live", mutate: |r| r.postures[0].status = "live".into() },
+    // NOT `postures[0]`, and the reason is a landed regression rather than
+    // taste. `postures[0]` is `embedded`, and fgdb-j0vu activated its entry
+    // crate, so the mutation became `live` -> `live`: a NO-OP, and the witness
+    // went silent while the law it witnesses was working perfectly. Selecting
+    // the first STILL-DEFERRED posture keeps the fact a real fact across future
+    // activations. The law is not weakened — the mutated fact is still exactly
+    // "a posture whose entry crate is absent from the workspace declares itself
+    // live", which is the same half of `posture_status_drift` this row always
+    // covered. When the LAST posture activates this mutation becomes a no-op
+    // again, and the harness reds with `posture_status_drift [...] -> {}` rather
+    // than passing — the correct direction to fail, and the message names itself.
+    TopologyWitness { code: "posture_status_drift", fact: "a posture whose entry crate is absent from the workspace is declared live", mutate: |r| {
+        let deferred = r
+            .postures
+            .iter_mut()
+            .find(|posture| posture.status == "deferred")
+            .expect("at least one posture must still be deferred for this witness to be plantable");
+        deferred.status = "live".into();
+    } },
     TopologyWitness { code: "tooling_dependency", fact: "a crate that has dependencies is registered as G0 tooling", mutate: |r| r.registry.tooling_members.push("crates/fgdb-calibrate".into()) },
     // The only two-fact row in the file, and it is two because the law cannot
     // be reached with one: with the whole composition layer planned, every
