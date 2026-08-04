@@ -510,7 +510,7 @@ impl DistinctSketch {
 
     /// Encodes the complete profile and logical state into one canonical value.
     ///
-    /// The representation uses fixed-width big-endian fields followed by the
+    /// The representation uses fixed-width little-endian fields followed by the
     /// canonically indexed one-byte register array. Equal logical states
     /// therefore produce byte-identical values without relying on host word
     /// size.
@@ -656,6 +656,12 @@ impl DistinctSketch {
     }
 
     /// Returns a deterministic Q32 estimate and its selected estimator branch.
+    ///
+    /// The conventional small-range correction switches from linear counting
+    /// to the raw harmonic estimator. The combined estimate is not globally
+    /// monotone across that boundary: increasing the final zero register can
+    /// select the raw branch and lower the reported estimate. Callers comparing
+    /// estimates over time must therefore account for [`DistinctEstimate::method`].
     #[must_use]
     pub fn estimate_fixed(&self) -> DistinctEstimate {
         let register_count = self.registers.len() as u64;
@@ -683,6 +689,11 @@ impl DistinctSketch {
     }
 
     /// Returns the fixed-point estimate rounded to the nearest integer.
+    ///
+    /// This convenience projection discards the selected estimator branch and
+    /// inherits its documented switch discontinuity. Use [`Self::estimate_fixed`]
+    /// when a comparison must distinguish branch changes from within-branch
+    /// estimate movement.
     #[must_use]
     pub fn estimate(&self) -> u64 {
         self.estimate_fixed().rounded()
@@ -924,11 +935,11 @@ fn decode_hash_algorithm(actual: u8) -> Result<DistinctHashAlgorithm, DistinctCo
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct DistinctDecoder<'bytes> {
@@ -969,11 +980,11 @@ impl<'bytes> DistinctDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, DistinctCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, DistinctCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), DistinctCodecError> {
@@ -1170,7 +1181,7 @@ mod tests {
         assert_eq!(&forward_bytes[..VERSION_OFFSET], b"FGDBDST1");
         assert_eq!(
             &forward_bytes[VERSION_OFFSET..HASH_ALGORITHM_OFFSET],
-            &1_u16.to_be_bytes()
+            &1_u16.to_le_bytes()
         );
         assert_eq!(
             forward_bytes[HASH_ALGORITHM_OFFSET],
@@ -1179,15 +1190,15 @@ mod tests {
         assert_eq!(forward_bytes[PRECISION_OFFSET], profile().precision);
         assert_eq!(
             &forward_bytes[SEED_OFFSET..MAX_REGISTERS_OFFSET],
-            &profile().seed.to_be_bytes()
+            &profile().seed.to_le_bytes()
         );
         assert_eq!(
             &forward_bytes[MAX_REGISTERS_OFFSET..REGISTER_COUNT_OFFSET],
-            &(profile().max_registers as u64).to_be_bytes()
+            &(profile().max_registers as u64).to_le_bytes()
         );
         assert_eq!(
             &forward_bytes[REGISTER_COUNT_OFFSET..CANONICAL_HEADER_BYTES],
-            &(forward.register_count() as u64).to_be_bytes()
+            &(forward.register_count() as u64).to_le_bytes()
         );
 
         let decoded =
@@ -1415,7 +1426,7 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_version, small_profile),
             Err(DistinctCodecError::UnsupportedVersion { actual: 2 })
@@ -1449,7 +1460,7 @@ mod tests {
 
         let mut insufficient_ceiling = encoded.clone();
         insufficient_ceiling[MAX_REGISTERS_OFFSET..REGISTER_COUNT_OFFSET]
-            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_be_bytes());
+            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_le_bytes());
         let insufficient_profile = DistinctProfile {
             max_registers: (1 << MIN_PRECISION) - 1,
             ..small_profile
@@ -1466,7 +1477,7 @@ mod tests {
 
         let mut wrong_count = encoded.clone();
         wrong_count[REGISTER_COUNT_OFFSET..CANONICAL_HEADER_BYTES]
-            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_be_bytes());
+            .copy_from_slice(&((1_u64 << MIN_PRECISION) - 1).to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_count, small_profile),
             Err(DistinctCodecError::RegisterCountMismatch {
@@ -1477,7 +1488,7 @@ mod tests {
 
         let mut enormous_count = encoded.clone();
         enormous_count[REGISTER_COUNT_OFFSET..CANONICAL_HEADER_BYTES]
-            .copy_from_slice(&u64::MAX.to_be_bytes());
+            .copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(matches!(
             read_fixture(&enormous_count, small_profile),
             Err(DistinctCodecError::IntegerUnrepresentable)
@@ -1534,6 +1545,111 @@ mod tests {
                     maximum: maximum_rank(MIN_PRECISION),
                 }
             ))
+        );
+    }
+
+    #[test]
+    fn linear_counting_accumulation_is_monotone_and_split_merge_is_exact()
+    -> Result<(), DistinctError> {
+        // This sampled run stays wholly within LinearCounting, where fewer zero
+        // registers cannot lower the estimate. The combined estimator is not
+        // monotone across its branch boundary; that discontinuity is pinned by
+        // estimator_switch_discontinuity_is_explicit_and_frozen below.
+        let mut running = sketch()?;
+        let mut previous = running.estimate_fixed();
+        assert_eq!(previous.method, DistinctEstimateMethod::LinearCounting);
+        for key in 0..64_u64 {
+            running.observe(&key.to_le_bytes());
+            let now = running.estimate_fixed();
+            assert_eq!(
+                now.method,
+                DistinctEstimateMethod::LinearCounting,
+                "the branch-scoped monotonicity fixture crossed estimators after key {key}"
+            );
+            assert!(
+                now.scaled >= previous.scaled,
+                "linear-counting estimate fell after key {key}"
+            );
+            previous = now;
+        }
+
+        // Split/merge equivalence. Merge takes the register-wise maximum and
+        // observing takes the same maximum, so partitioning the stream must be
+        // EXACT here too -- asserted on canonical bytes rather than on the
+        // estimate, since two different register vectors can round to the same
+        // estimate and would hide a merge that lost a register.
+        let mut whole = sketch()?;
+        for key in 0..48_u64 {
+            whole.observe(&key.to_le_bytes());
+        }
+        let mut first = sketch()?;
+        for key in 0..24_u64 {
+            first.observe(&key.to_le_bytes());
+        }
+        let mut second = sketch()?;
+        for key in 24..48_u64 {
+            second.observe(&key.to_le_bytes());
+        }
+        first.try_merge(&second)?;
+        assert_eq!(
+            first.try_to_canonical_bytes().expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "partitioned accumulation must equal whole-stream accumulation"
+        );
+
+        // Overlapping partitions must also agree, because register maxima are
+        // idempotent: a key counted in both shards may not inflate the state.
+        let mut overlap_first = sketch()?;
+        for key in 0..32_u64 {
+            overlap_first.observe(&key.to_le_bytes());
+        }
+        let mut overlap_second = sketch()?;
+        for key in 16..48_u64 {
+            overlap_second.observe(&key.to_le_bytes());
+        }
+        overlap_first.try_merge(&overlap_second)?;
+        assert_eq!(
+            overlap_first
+                .try_to_canonical_bytes()
+                .expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "overlapping shards must not inflate the merged state"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn estimator_switch_discontinuity_is_explicit_and_frozen() {
+        let small_profile = DistinctProfile {
+            precision: MIN_PRECISION,
+            hash_algorithm: DistinctHashAlgorithm::SeededHasherV1,
+            seed: 0x5357_4954_4348_4252,
+            max_registers: 1 << MIN_PRECISION,
+        };
+        let mut before = DistinctSketch::try_new(small_profile).expect("small valid profile");
+        before.registers[..15].fill(1);
+        let linear = before.estimate_fixed();
+        assert_eq!(linear.method, DistinctEstimateMethod::LinearCounting);
+        assert_eq!(linear.zero_registers, 1);
+        assert_eq!(linear.rounded(), 44);
+
+        let mut after = before.clone();
+        after.registers[15] = 1;
+        assert!(
+            before
+                .registers
+                .iter()
+                .zip(&after.registers)
+                .all(|(&left, &right)| left <= right),
+            "the transition fixture must only increase register state"
+        );
+        let raw = after.estimate_fixed();
+        assert_eq!(raw.method, DistinctEstimateMethod::RawHarmonic);
+        assert_eq!(raw.zero_registers, 0);
+        assert_eq!(raw.rounded(), 22);
+        assert!(
+            raw.scaled < linear.scaled,
+            "the frozen branch transition must retain its documented discontinuity"
         );
     }
 

@@ -1,0 +1,1402 @@
+# =============================================================================
+# threat_model.toml — the deployment-independent threat/trust model (G0)
+# =============================================================================
+# Bead: fgdb-g0-threat-model-nqd
+# Provenance: plan §12.1-§12.2 (threat/authority model, token attenuation law),
+# §16 item 8 (external-authority surface), §3.4 (registered rejections),
+# §5.1 (IncarnationContinuityProfile), §13.7 (ArchiveReadOnlyOpen), §19 G0.
+#
+# WHY THIS REGISTRY EXISTS. Every later security mechanism is scoped by the
+# frame declared here: no claim may outrun its trust assumptions. FG-INV-20
+# ("authorization precedes every observation or effect") is the invariant; this
+# registry is the frame in which that invariant's clauses are scoped, and the
+# generated document docs/THREAT_AND_TRUST_MODEL.md is its published rendering.
+#
+# THE THREE LAWS THIS REGISTRY ENFORCES THAT NOTHING ELSE DOES.
+#
+#   1. Exposure completeness. Every (actor, asset) cell is dispositioned exactly
+#      once as defended / conditional / undefended, each naming an assumption.
+#      A silently absent cell is the failure mode this law exists to catch: an
+#      unstated exposure reads exactly like a defended one.
+#   2. Narrowing-only attenuation. The authority lattice has no independent
+#      order: its order IS the macaroon attenuation law. Every dimension
+#      declares one narrowing operator, and every widening mutation of every
+#      dimension has a named negative fixture.
+#   3. Posture product-space closure. The registered postures are not a list;
+#      they are the admissible cells of a declared product space under named
+#      exclusion laws. Every one of the twelve cells is either a registered
+#      posture, a deferred posture with a named owner bead, or excluded by an
+#      exclusion law that cites its plan anchor.
+#
+# WHAT THIS REGISTRY DELIBERATELY DOES NOT DO. It does not bind realized
+# operation classes to external-authority footprint cells. §16 item 8 states
+# where each authority sits on the synchronous path; it does not name which of
+# the sixteen operation classes each realized path uses. Inventing that binding
+# here would manufacture a G0 fact from a W9 measurement, so every footprint
+# cell carries operation_class_basis = "trigger_site_only" and defers the
+# realized binding to fgdb-w9-authority-surface-gp9j, which publishes the §16
+# table against implemented paths.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "threat_model"
+document_path = "docs/THREAT_AND_TRUST_MODEL.md"
+replay_command = "cargo run -p registry-check --bin threat-check -- --root ."
+bound_invariants = ["FG-INV-08", "FG-INV-20"]
+bound_evidence = ["FG-EVID-05"]
+# Exact cardinalities the plan fixes by enumeration. A row added or dropped
+# without moving these is a schema drift, not an edit.
+actor_count = 8
+asset_count = 8
+assumption_count = 10
+out_of_scope_count = 5
+identity_count = 9
+operation_class_count = 16
+authority_dimension_count = 27
+presentation_binding_count = 3
+binding_transition_count = 9
+attenuation_law_count = 11
+external_authority_count = 11
+posture_count = 2
+deferred_posture_count = 2
+exclusion_law_count = 3
+footprint_cell_count = 11
+exposure_cell_count = 64
+id_table_hash = "fnv1a64:48faccd46e13140a"
+semantic_contract_hash = "fnv1a64:a005965fbe24413f"
+
+# -----------------------------------------------------------------------------
+# Checked source blocks. The generated document embeds these plan line ranges
+# verbatim between markers; the checker re-reads both sides and fails on drift.
+# A threat model that paraphrases its own source is not a threat model.
+# -----------------------------------------------------------------------------
+
+[[source_block]]
+id = "plan-registered-rejections-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 153
+plan_end_line = 157
+line_count = 5
+byte_count = 2123
+fnv1a64 = "0x4a2df61662a30a18"
+covers = "§3.4 — what we deliberately reject"
+
+[[source_block]]
+id = "plan-threat-and-authority-model-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 860
+plan_end_line = 864
+line_count = 5
+byte_count = 1709
+fnv1a64 = "0xd1dc0f1309ba3f22"
+covers = "§12.1 — threat and authority model"
+
+[[source_block]]
+id = "plan-token-attenuation-law-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 866
+plan_end_line = 868
+line_count = 3
+byte_count = 2699
+fnv1a64 = "0xca2e2b07c03f527f"
+covers = "§12.2 — token lifecycle, root issuance, and the attenuation law"
+
+[[source_block]]
+id = "plan-external-authority-surface-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 1226
+plan_end_line = 1230
+line_count = 5
+byte_count = 3186
+fnv1a64 = "0x2675c58e0d4312a5"
+covers = "§16 item 8 — the external-authority surface"
+
+# =============================================================================
+# THE TRUST MATRIX
+# =============================================================================
+# The eight actors of §12.1, in source order. Each is considered adversarially:
+# the disposition columns state what the model defends against THIS actor, not
+# what this actor is expected to do. That framing is what lets an honest
+# participant (the transparency witness) and an in-boundary participant
+# (embedded host code) sit in the same table as an untrusted client without
+# either being flattered.
+# =============================================================================
+
+[[actor]]
+id = "untrusted_client"
+title = "Untrusted client"
+source_order = 1
+trust_class = "untrusted"
+inside_trust_boundary = false
+summary = "Any principal presenting a token over a protocol surface. Authenticated is not trusted: every observation and effect is gated by EffectiveAuthority before retrieval, statistics, traversal, or expansion."
+source_anchor = "§12.1"
+defended_assets = [
+  "plaintext_graph_data:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "authority_and_policy_state:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "key_material:A-PROCESS-TRUSTED",
+  "history_order_and_nonequivocation:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "audit_completeness:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "identity_and_allocation_continuity:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "result_and_replay_evidence:A-TENANT-ISOLATION-BY-AUTHORITY",
+]
+conditional_assets = [
+  "derived_state_and_observable_metadata:A-LEAKAGE-MEASURED-NOT-PROVED",
+]
+undefended_assets = []
+
+[[actor]]
+id = "mutually_hostile_tenant"
+title = "Mutually hostile tenant"
+source_order = 2
+trust_class = "hostile"
+inside_trust_boundary = false
+summary = "A co-resident tenant assumed adversarial to every other tenant. Isolation is EffectiveAuthority plus descriptor masking, not deployment separation: a capability that cannot see an edge type cannot observe its existence via degree either."
+source_anchor = "§12.1"
+defended_assets = [
+  "plaintext_graph_data:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "authority_and_policy_state:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "key_material:A-PROCESS-TRUSTED",
+  "history_order_and_nonequivocation:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "audit_completeness:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "identity_and_allocation_continuity:A-TENANT-ISOLATION-BY-AUTHORITY",
+  "result_and_replay_evidence:A-TENANT-ISOLATION-BY-AUTHORITY",
+]
+conditional_assets = [
+  "derived_state_and_observable_metadata:A-LEAKAGE-MEASURED-NOT-PROVED",
+]
+undefended_assets = []
+
+[[actor]]
+id = "honest_but_curious_storage"
+title = "Honest-but-curious storage"
+source_order = 3
+trust_class = "honest_but_curious"
+inside_trust_boundary = false
+summary = "Storage media, volumes, and the operators of them. Follows the protocol and returns the bytes it was given, but reads everything it holds and observes object sizes and access order."
+source_anchor = "§12.1"
+defended_assets = [
+  "plaintext_graph_data:A-STORAGE-CIPHERTEXT-ONLY",
+  "authority_and_policy_state:A-STORAGE-CIPHERTEXT-ONLY",
+  "key_material:A-PROCESS-TRUSTED",
+  "result_and_replay_evidence:A-STORAGE-CIPHERTEXT-ONLY",
+]
+conditional_assets = [
+  "history_order_and_nonequivocation:A-WITNESS-DETECT-ONLY",
+  "audit_completeness:A-WITNESS-DETECT-ONLY",
+  "identity_and_allocation_continuity:A-EXTERNAL-AUTHORITY-IN-BOUNDARY",
+  "derived_state_and_observable_metadata:A-LEAKAGE-MEASURED-NOT-PROVED",
+]
+undefended_assets = []
+
+[[actor]]
+id = "crash_fault_replica"
+title = "Crash-fault replica"
+source_order = 4
+trust_class = "crash_fault"
+inside_trust_boundary = true
+summary = "A consensus member that may stop, lag, lose its tail, or restart, but never lies. Ordinary Raft tolerates exactly this failure class; a Byzantine replica is a registered out-of-scope failure, not a covered one."
+source_anchor = "§12.1"
+defended_assets = [
+  "plaintext_graph_data:A-RAFT-CRASH-ONLY",
+  "authority_and_policy_state:A-RAFT-CRASH-ONLY",
+  "key_material:A-PROCESS-TRUSTED",
+  "history_order_and_nonequivocation:A-RAFT-CRASH-ONLY",
+  "audit_completeness:A-RAFT-CRASH-ONLY",
+  "identity_and_allocation_continuity:A-EXTERNAL-AUTHORITY-IN-BOUNDARY",
+  "result_and_replay_evidence:A-RAFT-CRASH-ONLY",
+]
+conditional_assets = [
+  "derived_state_and_observable_metadata:A-LEAKAGE-MEASURED-NOT-PROVED",
+]
+undefended_assets = []
+
+[[actor]]
+id = "malicious_or_stale_donor"
+title = "Malicious or stale donor"
+source_order = 5
+trust_class = "potentially_malicious"
+inside_trust_boundary = false
+summary = "A replication, seeding, or backup donor supplying object bytes. Donor bytes are verified against content-addressed identity and the receiver's own closure requirements; a decode proof alone establishes neither completeness nor semantic validity."
+source_anchor = "§12.1"
+defended_assets = [
+  "plaintext_graph_data:A-DONOR-UNTRUSTED-BYTES",
+  "authority_and_policy_state:A-DONOR-UNTRUSTED-BYTES",
+  "key_material:A-PROCESS-TRUSTED",
+  "history_order_and_nonequivocation:A-DONOR-UNTRUSTED-BYTES",
+  "audit_completeness:A-DONOR-UNTRUSTED-BYTES",
+  "identity_and_allocation_continuity:A-EXTERNAL-AUTHORITY-IN-BOUNDARY",
+  "result_and_replay_evidence:A-DONOR-UNTRUSTED-BYTES",
+]
+conditional_assets = [
+  "derived_state_and_observable_metadata:A-LEAKAGE-MEASURED-NOT-PROVED",
+]
+undefended_assets = []
+
+[[actor]]
+id = "independent_transparency_witness"
+title = "Independent transparency witness"
+source_order = 6
+trust_class = "independent_verifier"
+inside_trust_boundary = false
+summary = "An external co-signer of history commitments. Considered adversarially it may withhold or equivocate about inclusion, which is why non-equivocation is a conditional claim under declared witnessed-transparency premises; it never observes plaintext, because it is shown commitments."
+source_anchor = "§12.1"
+defended_assets = [
+  "plaintext_graph_data:A-STORAGE-CIPHERTEXT-ONLY",
+  "authority_and_policy_state:A-STORAGE-CIPHERTEXT-ONLY",
+  "key_material:A-PROCESS-TRUSTED",
+  "identity_and_allocation_continuity:A-EXTERNAL-AUTHORITY-IN-BOUNDARY",
+  "result_and_replay_evidence:A-STORAGE-CIPHERTEXT-ONLY",
+]
+conditional_assets = [
+  "history_order_and_nonequivocation:A-WITNESS-DETECT-ONLY",
+  "audit_completeness:A-WITNESS-DETECT-ONLY",
+]
+undefended_assets = [
+  "derived_state_and_observable_metadata:A-LEAKAGE-MEASURED-NOT-PROVED",
+]
+
+[[actor]]
+id = "trusted_embedded_host_code"
+title = "Trusted embedded host code"
+source_order = 7
+trust_class = "trusted"
+inside_trust_boundary = true
+summary = "Native code in the embedding process: the host application and its native Rust procedures. It is inside the trust boundary by construction — it shares the address space with the key boundary — so the model defends no asset against it. Native procedures are therefore barred from replicated logical effects, merge/apply, constraints, and replay-guaranteed queries."
+source_anchor = "§12.1"
+defended_assets = []
+conditional_assets = []
+undefended_assets = [
+  "plaintext_graph_data:A-HOST-CODE-TRUSTED",
+  "authority_and_policy_state:A-HOST-CODE-TRUSTED",
+  "key_material:A-HOST-CODE-TRUSTED",
+  "history_order_and_nonequivocation:A-HOST-CODE-TRUSTED",
+  "audit_completeness:A-HOST-CODE-TRUSTED",
+  "identity_and_allocation_continuity:A-HOST-CODE-TRUSTED",
+  "derived_state_and_observable_metadata:A-HOST-CODE-TRUSTED",
+  "result_and_replay_evidence:A-HOST-CODE-TRUSTED",
+]
+
+[[actor]]
+id = "compromised_operator_or_server"
+title = "Compromised operator or server process"
+source_order = 8
+trust_class = "trusted"
+inside_trust_boundary = true
+summary = "The executing database process, or an operator with control of it, after compromise. The baseline TRUSTS this boundary: a compromised server process can exfiltrate everything it can decrypt, and this model claims no TEE or Byzantine-confidentiality magic against it. What survives is scoped detection — witnessed transparency and external anti-rollback heads detect their scoped history and administrative attacks; they do not undo disclosure."
+source_anchor = "§12.1"
+defended_assets = []
+conditional_assets = [
+  "history_order_and_nonequivocation:A-WITNESS-DETECT-ONLY",
+  "audit_completeness:A-WITNESS-DETECT-ONLY",
+  "identity_and_allocation_continuity:A-EXTERNAL-AUTHORITY-IN-BOUNDARY",
+]
+undefended_assets = [
+  "plaintext_graph_data:A-NO-TEE",
+  "authority_and_policy_state:A-NO-TEE",
+  "key_material:A-NO-TEE",
+  "derived_state_and_observable_metadata:A-NO-TEE",
+  "result_and_replay_evidence:A-NO-TEE",
+]
+
+# -----------------------------------------------------------------------------
+# Protected assets. Every actor row dispositions every one of these exactly
+# once; the checker expands the eight-by-eight matrix and fails on any cell
+# that is missing, duplicated, or names an unregistered assumption.
+# -----------------------------------------------------------------------------
+
+[[asset]]
+id = "plaintext_graph_data"
+title = "Plaintext graph data"
+source_order = 1
+summary = "Vertex, edge, and property plaintext, and any projection of it, within and outside an authorized scope."
+primary_claim_class = "invariant"
+primary_claim_ref = "FG-INV-20"
+
+[[asset]]
+id = "authority_and_policy_state"
+title = "Authority and policy state"
+source_order = 2
+summary = "SecurityPolicyRoot, RevocationRoot, SecurityStateBinding, issued tokens, leases, and the scope assignments that decide every authorization."
+primary_claim_class = "invariant"
+primary_claim_ref = "FG-INV-20"
+
+[[asset]]
+id = "key_material"
+title = "Key material"
+source_order = 3
+summary = "The key-envelope DAG, issuer MAC key epochs, signer sets, and any wrap that a decrypting path must open."
+primary_claim_class = "invariant"
+primary_claim_ref = "FG-INV-20"
+
+[[asset]]
+id = "history_order_and_nonequivocation"
+title = "History order and non-equivocation"
+source_order = 4
+summary = "The single global commit order, its non-forking lineage across incarnations and branches, and the absence of two authenticated histories for one namespace."
+primary_claim_class = "invariant"
+primary_claim_ref = "FG-INV-08"
+
+[[asset]]
+id = "audit_completeness"
+title = "Audit completeness"
+source_order = 5
+summary = "The gap-free audit ticket, admission-visibility, and resolution pipeline, and the terminal gates that make a Required operation's audit position a precondition of its visibility."
+primary_claim_class = "invariant"
+primary_claim_ref = "FG-INV-08"
+
+[[asset]]
+id = "identity_and_allocation_continuity"
+title = "Identity and allocation continuity"
+source_order = 6
+summary = "Never-recycled VId and AllocationEpoch values and the cluster incarnation that scopes them — the guarantee that a rolled-back closure cannot reissue a spent identity."
+primary_claim_class = "invariant"
+primary_claim_ref = "FG-INV-20"
+
+[[asset]]
+id = "derived_state_and_observable_metadata"
+title = "Derived state and observable metadata"
+source_order = 7
+summary = "Statistics, degrees, cardinalities, cache and plan behaviour, timing, and error classes — everything observable that is not the plaintext itself. Mitigations are padding, quantization, pools, and bounded errors; the residual channel is measured, never proved absent."
+primary_claim_class = "statistical"
+primary_claim_ref = "FG-EVID-05"
+
+[[asset]]
+id = "result_and_replay_evidence"
+title = "Result and replay evidence"
+source_order = 8
+summary = "Canonical results, plan and replay certificates, evidence-slot closures, and durable artifact outputs."
+primary_claim_class = "invariant"
+primary_claim_ref = "FG-INV-20"
+
+# -----------------------------------------------------------------------------
+# Trust assumptions. Every exposure cell names exactly one of these. An
+# assumption is a load-bearing premise, not a hope: each states what it grants
+# and, where the plan bounds it, what it explicitly does not.
+# -----------------------------------------------------------------------------
+
+[[assumption]]
+id = "A-PROCESS-TRUSTED"
+statement = "The baseline trusts the executing database process and the active key boundary to enforce plaintext confidentiality and policy."
+bounds = "Holds only while that process is uncompromised; A-NO-TEE states the consequence when it is not."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-NO-TEE"
+statement = "A compromised server process can exfiltrate what it can decrypt, and this plan claims no TEE or Byzantine-confidentiality magic."
+bounds = "This is a limitation, not a defense. No normative text may claim confidentiality against a compromised server process."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-RAFT-CRASH-ONLY"
+statement = "Ordinary Raft tolerates crash faults, not Byzantine replicas."
+bounds = "A replica that lies is out of scope (OOS-BYZANTINE-CONSENSUS), not a covered failure."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-WITNESS-DETECT-ONLY"
+statement = "Witnessed transparency and audit may detect only their scoped history and administrative attacks, not undo disclosure."
+bounds = "Non-equivocation claims are conditional on the declared witnessed-transparency premises of FG-INV-08; detection is not prevention and never restores confidentiality."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-HOST-CODE-TRUSTED"
+statement = "Embedded host code sharing the process address space is inside the trust boundary."
+bounds = "This is why native procedures are categorically barred from replicated logical effects, merge/apply, constraints, and replay-guaranteed queries: a conformance test cannot prove arbitrary native code deterministic."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-EXTERNAL-AUTHORITY-IN-BOUNDARY"
+statement = "The external authorities are inside the declared trust boundary and carry their own registered HA and durability contract: threshold signer sets with registered rotation, durable CAS heads with an explicit anti-rollback story, and a specified successor-authority migration."
+bounds = "Availability of an authority is an slo row, never an invariant; a permanently dead authority is escaped only by a threshold-authorized succession transition."
+source_anchor = "§16.8"
+
+[[assumption]]
+id = "A-DONOR-UNTRUSTED-BYTES"
+statement = "Donor-supplied bytes are verified against content-addressed identity and the receiver's own closure requirements before use."
+bounds = "Decode proofs alone establish neither backup completeness nor semantic validity."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-STORAGE-CIPHERTEXT-ONLY"
+statement = "A party that holds or witnesses stored bytes observes ciphertext and declared metadata, never plaintext."
+bounds = "Object sizes, counts, and access order remain observable; that residual is governed by A-LEAKAGE-MEASURED-NOT-PROVED."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-TENANT-ISOLATION-BY-AUTHORITY"
+statement = "Isolation between principals and tenants is enforced by EffectiveAuthority and descriptor masking before any observation or effect, not by deployment separation or post-filtering."
+bounds = "Caveats compile to mandatory planner predicates; security applies before expansion, never as a post-filter (FG-INV-20)."
+source_anchor = "§12.1"
+
+[[assumption]]
+id = "A-LEAKAGE-MEASURED-NOT-PROVED"
+statement = "Timing, cardinality, and error leakage is acknowledged; padding, quantization, pools, and bounded errors are mitigations, and any mutual-information or channel-capacity result is a deployment-specific StatisticalClaim."
+bounds = "Adversarial CI fixtures do not prove universal noninterference or a global bits-per-query ceiling. Carried by FG-EVID-05."
+source_anchor = "§12.6"
+
+# -----------------------------------------------------------------------------
+# Registered out-of-scope failures (§3.4). These are rejections with recorded
+# reasons, not omissions. A mechanism listed here may not be assumed by any
+# downstream claim.
+# -----------------------------------------------------------------------------
+
+[[out_of_scope]]
+id = "OOS-FHE-MPC-ORAM"
+title = "FHE, MPC, and ORAM"
+statement = "FHE, MPC, and ORAM are rejected from the initial threat model."
+rationale = "Their cost model is incompatible with the §17 performance contract, and none of them changes the compromised-server exposure that A-NO-TEE already declares."
+rejection_anchor = "§3.4 (i)"
+
+[[out_of_scope]]
+id = "OOS-TEE"
+title = "TEE reliance"
+statement = "No claim rests on a trusted execution environment."
+rationale = "The baseline already trusts the executing process; a TEE would move that boundary without the plan owning its attestation, rollback, and side-channel surface."
+rejection_anchor = "§12.1"
+
+[[out_of_scope]]
+id = "OOS-BYZANTINE-CONSENSUS"
+title = "Byzantine consensus"
+statement = "Byzantine-fault-tolerant consensus is out of scope; ordinary Raft tolerates crash faults only."
+rationale = "A lying replica is not a covered failure. Detection of scoped history attacks comes from witnessed transparency, which is a different mechanism with a different claim class."
+rejection_anchor = "§12.1"
+
+[[out_of_scope]]
+id = "OOS-TRUETIME"
+title = "TrueTime-class infrastructure"
+statement = "TrueTime-class time infrastructure is rejected for 1.0."
+rationale = "HLC plus consensus-fenced read contracts supplies the semantics actually specified, not arbitrary follower linearizability."
+rejection_anchor = "§3.4 (h)"
+
+[[out_of_scope]]
+id = "OOS-NONINTERFERENCE-PROOF"
+title = "Noninterference by measurement"
+statement = "Differential privacy and leakage measurements are scoped mechanisms, never substitutes for noninterference."
+rationale = "A measured channel bound under one fixture, workload, and concurrency assumption is a statistical claim; promoting it to a semantic guarantee is exactly the claim-class violation the constitution's lattice forbids."
+rejection_anchor = "§3.4"
+
+# =============================================================================
+# STABLE SECURITY IDENTITY VOCABULARY (§12.1)
+# =============================================================================
+# Nine identities. The security and adaptive epoch types have distinct wire
+# tags and distinct Rust newtypes and are never comparable or substitutable —
+# the one law in this block that a type system, not a reviewer, must enforce.
+# =============================================================================
+
+[[identity]]
+name = "TenantId"
+source_order = 1
+kind = "stable_identity"
+epoch_domain = "none"
+rust_newtype = "TenantId"
+wire_tag = "fgdb:security-identity:tenant-id:v1"
+summary = "The tenancy an authority is bound to. Fixed for the life of a token chain: attenuation cannot change authority domain."
+
+[[identity]]
+name = "PrincipalId"
+source_order = 2
+kind = "stable_identity"
+epoch_domain = "none"
+rust_newtype = "PrincipalId"
+wire_tag = "fgdb:security-identity:principal-id:v1"
+summary = "The subject an authority speaks for, scoped by tenant."
+
+[[identity]]
+name = "IssuerId"
+source_order = 3
+kind = "stable_identity"
+epoch_domain = "none"
+rust_newtype = "IssuerId"
+wire_tag = "fgdb:security-identity:issuer-id:v1"
+summary = "The root-issuance authority. Part of the immutable root tuple every attenuation link retains."
+
+[[identity]]
+name = "TokenId"
+source_order = 4
+kind = "stable_identity"
+epoch_domain = "none"
+rust_newtype = "TokenId"
+wire_tag = "fgdb:security-identity:token-id:v1"
+summary = "The immutable root token identity and the RevocationSubject::Token identity. Attenuation never creates a new token ID."
+
+[[identity]]
+name = "DatabaseId"
+source_order = 5
+kind = "stable_identity"
+epoch_domain = "none"
+rust_newtype = "DatabaseId"
+wire_tag = "fgdb:security-identity:database-id:v1"
+summary = "The database an authority is scoped to, paired with the database security namespace and cluster incarnation in every binding."
+
+[[identity]]
+name = "SecurityPolicyEpoch"
+source_order = 6
+kind = "security_epoch"
+epoch_domain = "security"
+rust_newtype = "SecurityPolicyEpoch"
+wire_tag = "fgdb:security-epoch:security-policy-epoch:v1"
+summary = "The epoch of the active security policy root. Advances once per applied policy transition with checked arithmetic."
+
+[[identity]]
+name = "RevocationIndex"
+source_order = 7
+kind = "monotone_index"
+epoch_domain = "security"
+rust_newtype = "RevocationIndex"
+wire_tag = "fgdb:security-epoch:revocation-index:v1"
+summary = "The monotone revocation state index. Revocation is monotone; restored access requires a fresh subject or epoch."
+
+[[identity]]
+name = "DecisionPolicyEpoch"
+source_order = 8
+kind = "adaptive_epoch"
+epoch_domain = "adaptive"
+rust_newtype = "DecisionPolicyEpoch"
+wire_tag = "fgdb:adaptive-epoch:decision-policy-epoch:v1"
+summary = "The versioned policy epoch under which an adaptive decision card was emitted. An operational-tuning epoch, structurally unrelated to security state."
+
+[[identity]]
+name = "KeyEpoch"
+source_order = 9
+kind = "security_epoch"
+epoch_domain = "security"
+rust_newtype = "KeyEpoch"
+wire_tag = "fgdb:security-epoch:key-epoch:v1"
+summary = "The epoch of a key identity within the envelope DAG, including the issuer MAC key epoch a root issuance is fenced by."
+
+# =============================================================================
+# THE AUTHORITY LATTICE
+# =============================================================================
+# Operation classes are the closed set of §12.1, in source order. Source order,
+# not alphabetical order: the census sorts, the source spells, and only the
+# source spelling is normative.
+# =============================================================================
+
+[[operation_class]]
+name = "Read"
+ordinal = 1
+summary = "Observe committed graph state through an authorized cursor or view."
+
+[[operation_class]]
+name = "Mutate"
+ordinal = 2
+summary = "Produce logical effects against a branch coordinate."
+
+[[operation_class]]
+name = "Ddl"
+ordinal = 3
+summary = "Change schema objects: labels, edge types, property definitions, constraints, indexes."
+
+[[operation_class]]
+name = "Subscribe"
+ordinal = 4
+summary = "Register and consume a standing query or change subscription."
+
+[[operation_class]]
+name = "Analytics"
+ordinal = 5
+summary = "Run Prism-mediated analytics over an authorized projection."
+
+[[operation_class]]
+name = "Replay"
+ordinal = 6
+summary = "Re-execute a plan certificate against its evidence closure."
+
+[[operation_class]]
+name = "ExecuteProcedure"
+ordinal = 7
+summary = "Invoke a registered procedure or UDF under a declared invocation mode."
+
+[[operation_class]]
+name = "InstallModule"
+ordinal = 8
+summary = "Install or activate a module artifact by ObjectId."
+
+[[operation_class]]
+name = "ExternalIo"
+ordinal = 9
+summary = "Perform an effect crossing the database boundary under a declared external-I/O class."
+
+[[operation_class]]
+name = "Export"
+ordinal = 10
+summary = "Emit a durable artifact output projection of canonical result rows."
+
+[[operation_class]]
+name = "Backup"
+ordinal = 11
+summary = "Pin, certify, seal, and publish a backup closure."
+
+[[operation_class]]
+name = "Restore"
+ordinal = 12
+summary = "Stage, validate, and promote a restore from a published artifact."
+
+[[operation_class]]
+name = "Observe"
+ordinal = 13
+summary = "Read the system graph, telemetry, and transparency proofs."
+
+[[operation_class]]
+name = "Admin"
+ordinal = 14
+summary = "Administer policy, revocation, configuration, and maintenance."
+
+[[operation_class]]
+name = "KeyManage"
+ordinal = 15
+summary = "Rotate, wrap, grant, and stage the destruction of key material."
+
+[[operation_class]]
+name = "Replicate"
+ordinal = 16
+summary = "Participate in consensus, seeding, and donor service."
+
+# -----------------------------------------------------------------------------
+# EffectiveAuthority dimensions, in §12.1 source order, then the four §12.2
+# dimensions the attenuation law adds. The lattice has NO independent order:
+# its order is exactly the conjunction of these per-dimension narrowing
+# operators. That is why every dimension must declare one and why an
+# unclassified dimension is a checker failure rather than a default.
+#
+#   fixed                      - identical in every link; part of the retained root tuple
+#   intersect                  - the link's value must be a subset of the prior value
+#   raise_only                 - the link may only move the bound up
+#   lower_only                 - the link may only move the bound down
+#   append_only                - the link may only add entries
+#   restrict_disclosure_only   - the link may only reduce what is disclosed
+#   restrict_binding_only      - the link may only move to a same-or-higher binding rank
+#   current_state_monotone     - not narrowed by the chain; supplied by monotone current state
+# -----------------------------------------------------------------------------
+
+[[authority_dimension]]
+id = "tenant"
+source_order = 1
+narrowing_operator = "fixed"
+summary = "The tenancy the authority is bound to."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "subject"
+source_order = 2
+narrowing_operator = "fixed"
+summary = "The principal the authority speaks for."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "issuer"
+source_order = 3
+narrowing_operator = "fixed"
+summary = "The root issuer identity."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "audience"
+source_order = 4
+narrowing_operator = "fixed"
+summary = "The audience the root was minted for."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "database_security_namespace"
+source_order = 5
+narrowing_operator = "fixed"
+summary = "The database security namespace the authority is scoped to."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "cluster_incarnation"
+source_order = 6
+narrowing_operator = "fixed"
+summary = "The cluster incarnation the namespace is scoped by."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "token_epoch"
+source_order = 7
+narrowing_operator = "fixed"
+summary = "The token's MAC key epoch, retained from the immutable root tuple."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "security_policy_epoch"
+source_order = 8
+narrowing_operator = "fixed"
+summary = "The security-policy epoch the authority is verified against."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "revocation_index"
+source_order = 9
+narrowing_operator = "current_state_monotone"
+summary = "The current revocation index. Supplied by authenticated current state, not by the chain: a token cannot carry a stale index forward as if it were narrowing."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "operation_classes"
+source_order = 10
+narrowing_operator = "intersect"
+summary = "The subset of the sixteen operation classes the authority admits."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "graph_scope"
+source_order = 11
+narrowing_operator = "intersect"
+summary = "The graph coordinates the authority reaches."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "branch_scope"
+source_order = 12
+narrowing_operator = "intersect"
+summary = "The branch coordinates the authority reaches."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "label_scope"
+source_order = 13
+narrowing_operator = "intersect"
+summary = "The vertex labels the authority may observe or affect."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "edge_scope"
+source_order = 14
+narrowing_operator = "intersect"
+summary = "The edge types the authority may observe or affect, including their contribution to degree."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "property_scope"
+source_order = 15
+narrowing_operator = "intersect"
+summary = "The property slots the authority may observe or affect."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "system_field_scope"
+source_order = 16
+narrowing_operator = "intersect"
+summary = "The reserved system fields the authority may observe."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "temporal_scope"
+source_order = 17
+narrowing_operator = "intersect"
+summary = "The transaction-time and valid-time intervals the authority may select."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "procedure_udf_module_object_ids"
+source_order = 18
+narrowing_operator = "intersect"
+summary = "The finite allow-list of procedure, UDF, and module ObjectIds."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "invocation_mode"
+source_order = 19
+narrowing_operator = "intersect"
+summary = "The permitted invocation modes for those modules, including invoker-versus-definer rights."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "external_io_classes"
+source_order = 20
+narrowing_operator = "intersect"
+summary = "The external-I/O classes the authority admits."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "replay_evidence_resolver_closure"
+source_order = 21
+narrowing_operator = "intersect"
+summary = "The replay evidence slots and resolver closure the authority may draw on."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "redaction_profile"
+source_order = 22
+narrowing_operator = "restrict_disclosure_only"
+summary = "The redaction profile applied to observations and errors. A link may redact more; it can never widen disclosure."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "resource_ceiling"
+source_order = 23
+narrowing_operator = "lower_only"
+summary = "The resource ceiling the authority may consume."
+source_anchor = "§12.1"
+
+[[authority_dimension]]
+id = "effective_not_before"
+source_order = 24
+narrowing_operator = "raise_only"
+summary = "The effective not-before instant. A link may only raise it."
+source_anchor = "§12.2"
+
+[[authority_dimension]]
+id = "effective_expires_at"
+source_order = 25
+narrowing_operator = "lower_only"
+summary = "The effective expiry instant. A link may only lower it; maximum TTL is the explicit revocation-enforcement bound."
+source_anchor = "§12.2"
+
+[[authority_dimension]]
+id = "accepted_caveats"
+source_order = 26
+narrowing_operator = "append_only"
+summary = "Accepted caveats, which compile to the versioned deterministic total resource-bounded PolicyIr and to mandatory planner predicates."
+source_anchor = "§12.2"
+
+[[authority_dimension]]
+id = "presentation_binding"
+source_order = 27
+narrowing_operator = "restrict_binding_only"
+summary = "The presentation binding class the holder must satisfy. A link may preserve it or move to a strictly higher binding rank."
+source_anchor = "§12.2"
+
+# -----------------------------------------------------------------------------
+# Presentation binding classes and the complete narrowing transition matrix.
+#
+# The rank order is derived, not asserted: §12.2 permits a link to "preserve or
+# further restrict presentation binding" and forbids changing "Session/Channel
+# binding to a less restrictive class". ServerInternal is the base class that
+# binds no presentation; SessionBound adds a session and auth generation;
+# ChannelBound adds a transport exporter digest. A transition is legal exactly
+# when it does not lower the rank. All nine cells are registered so the illegal
+# ones are declared rather than merely absent.
+# -----------------------------------------------------------------------------
+
+[[presentation_binding]]
+name = "ServerInternal"
+rank = 0
+summary = "No presentation binding: the token is exercised inside the server with no session or channel proof."
+source_anchor = "§12.2"
+
+[[presentation_binding]]
+name = "SessionBound"
+rank = 1
+summary = "Bound to a session binding and auth generation; presentation requires that live session."
+source_anchor = "§12.2"
+
+[[presentation_binding]]
+name = "ChannelBound"
+rank = 2
+summary = "Bound to a transport exporter digest; presentation requires that exact channel."
+source_anchor = "§12.2"
+
+[[binding_transition]]
+from = "ServerInternal"
+to = "ServerInternal"
+legal = true
+law = "preserve"
+
+[[binding_transition]]
+from = "ServerInternal"
+to = "SessionBound"
+legal = true
+law = "further_restrict"
+
+[[binding_transition]]
+from = "ServerInternal"
+to = "ChannelBound"
+legal = true
+law = "further_restrict"
+
+[[binding_transition]]
+from = "SessionBound"
+to = "ServerInternal"
+legal = false
+law = "weakened_binding"
+
+[[binding_transition]]
+from = "SessionBound"
+to = "SessionBound"
+legal = true
+law = "preserve"
+
+[[binding_transition]]
+from = "SessionBound"
+to = "ChannelBound"
+legal = true
+law = "further_restrict"
+
+[[binding_transition]]
+from = "ChannelBound"
+to = "ServerInternal"
+legal = false
+law = "weakened_binding"
+
+[[binding_transition]]
+from = "ChannelBound"
+to = "SessionBound"
+legal = false
+law = "weakened_binding"
+
+[[binding_transition]]
+from = "ChannelBound"
+to = "ChannelBound"
+legal = true
+law = "preserve"
+
+# -----------------------------------------------------------------------------
+# The attenuation law: six permitted mutations, five prohibitions. This is the
+# definition of the lattice order, so every row names the dimensions it governs
+# and the negative fixture that must reject its violation.
+# -----------------------------------------------------------------------------
+
+[[attenuation_law]]
+id = "ATT-P1"
+class = "permitted"
+mutation = "raise_effective_not_before"
+statement = "A chain link may raise the effective not-before."
+dimension_ids = ["effective_not_before"]
+negative_fixture = "tm_neg_time_extension"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-P2"
+class = "permitted"
+mutation = "lower_effective_expiry"
+statement = "A chain link may lower the effective expiry."
+dimension_ids = ["effective_expires_at"]
+negative_fixture = "tm_neg_time_extension"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-P3"
+class = "permitted"
+mutation = "intersect_authority_scope"
+statement = "A chain link may intersect authority scopes."
+dimension_ids = [
+  "operation_classes",
+  "graph_scope",
+  "branch_scope",
+  "label_scope",
+  "edge_scope",
+  "property_scope",
+  "system_field_scope",
+  "temporal_scope",
+  "procedure_udf_module_object_ids",
+  "invocation_mode",
+  "external_io_classes",
+  "replay_evidence_resolver_closure",
+]
+negative_fixture = "tm_neg_scope_widening"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-P4"
+class = "permitted"
+mutation = "intersect_resource_scope"
+statement = "A chain link may intersect resource scopes."
+dimension_ids = ["resource_ceiling"]
+negative_fixture = "tm_neg_scope_widening"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-P5"
+class = "permitted"
+mutation = "append_accepted_caveats"
+statement = "A chain link may append accepted caveats."
+dimension_ids = ["accepted_caveats"]
+negative_fixture = "tm_neg_caveat_removal"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-P6"
+class = "permitted"
+mutation = "preserve_or_restrict_presentation_binding"
+statement = "A chain link may preserve or further restrict the presentation binding."
+dimension_ids = ["presentation_binding"]
+negative_fixture = "tm_neg_binding_weakening"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-X1"
+class = "prohibited"
+mutation = "extend_time"
+statement = "A chain link cannot extend time."
+dimension_ids = ["effective_not_before", "effective_expires_at"]
+negative_fixture = "tm_neg_time_extension"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-X2"
+class = "prohibited"
+mutation = "change_authority_domain"
+statement = "A chain link cannot change the authority domain."
+dimension_ids = [
+  "tenant",
+  "subject",
+  "issuer",
+  "audience",
+  "database_security_namespace",
+  "cluster_incarnation",
+  "token_epoch",
+  "security_policy_epoch",
+]
+negative_fixture = "tm_neg_domain_change"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-X3"
+class = "prohibited"
+mutation = "widen_disclosure"
+statement = "A chain link cannot widen disclosure."
+dimension_ids = ["redaction_profile"]
+negative_fixture = "tm_neg_disclosure_widening"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-X4"
+class = "prohibited"
+mutation = "move_cohorts"
+statement = "A chain link cannot move cohorts; every link retains the complete root tuple, profile, and cohort."
+dimension_ids = ["issuer", "token_epoch"]
+negative_fixture = "tm_neg_cohort_move"
+source_anchor = "§12.2"
+
+[[attenuation_law]]
+id = "ATT-X5"
+class = "prohibited"
+mutation = "weaken_presentation_binding"
+statement = "A chain link cannot change Session or Channel binding to a less restrictive class."
+dimension_ids = ["presentation_binding"]
+negative_fixture = "tm_neg_binding_weakening"
+source_anchor = "§12.2"
+
+# =============================================================================
+# THE EXTERNAL-AUTHORITY SURFACE (§16 item 8)
+# =============================================================================
+# Eleven authorities, in source order.
+# =============================================================================
+
+[[external_authority]]
+id = "identity_allocation_continuity"
+title = "Identity and allocation continuity"
+source_order = 1
+record_kinds = ["IdentityContinuityRecord", "AllocationEpochReservation"]
+summary = "The externally anti-rollback head that fences an allocation epoch before it may issue an identity."
+
+[[external_authority]]
+id = "cluster_incarnation"
+title = "Cluster incarnation"
+source_order = 2
+record_kinds = ["ClusterIncarnationContinuityRecord"]
+summary = "The continuity head that scopes a database incarnation and its member leases."
+
+[[external_authority]]
+id = "time_authority"
+title = "Time authority"
+source_order = 3
+record_kinds = ["PortableTimeAuthorityObservation"]
+summary = "The profiled authority supplying AuthorityInstant observations with validation evidence."
+
+[[external_authority]]
+id = "audit_continuity"
+title = "Audit continuity"
+source_order = 4
+record_kinds = ["AuditContinuityRecord"]
+summary = "The externally monotone chain that gates ticket issuance, admission visibility, and batched resolution."
+
+[[external_authority]]
+id = "dp_registry"
+title = "Differential-privacy registry"
+source_order = 5
+record_kinds = ["PrivacyContinuityRecord"]
+summary = "The registry that makes a DP charge irreversible before access."
+
+[[external_authority]]
+id = "archive_grant"
+title = "Archive and retention grant"
+source_order = 6
+record_kinds = ["ArchiveRetentionGrant"]
+summary = "The external grant that authorizes archive retention and its hold completion."
+
+[[external_authority]]
+id = "reservation"
+title = "Reservation authority"
+source_order = 7
+record_kinds = ["ReservationAuthorityHead"]
+summary = "The head that reserves externally visible names and slots for a publication."
+
+[[external_authority]]
+id = "catalog"
+title = "Catalog authority"
+source_order = 8
+record_kinds = ["CatalogAuthorityHead"]
+summary = "The head that publishes and authenticates externally visible catalog state."
+
+[[external_authority]]
+id = "restore_dispatch_journal"
+title = "Restore dispatch journal"
+source_order = 9
+record_kinds = ["ExternalCasContinuity"]
+summary = "The restore dispatch journal's ExternalCasContinuity head."
+
+[[external_authority]]
+id = "transparency_witness"
+title = "Transparency witnesses"
+source_order = 10
+record_kinds = ["WitnessPolicy"]
+summary = "The independent witnesses whose co-signatures scope the non-equivocation claim."
+
+[[external_authority]]
+id = "kms_hsm"
+title = "KMS or HSM"
+source_order = 11
+record_kinds = []
+summary = "The external key custodian consulted when a wrap cannot be satisfied locally."
+
+# =============================================================================
+# POSTURES AND THE PRODUCT-SPACE CLOSURE LAW
+# =============================================================================
+# A posture is not a name on a list; it is an admissible cell of a declared
+# product space. The checker enumerates every cell of service_class x
+# role_posture x continuity_profile and proves each is exactly one of:
+# registered, deferred with a named owner bead, or excluded by a named law.
+# =============================================================================
+
+[posture_product_space]
+service_class_axis = ["Operational", "ArchiveReadOnly"]
+role_posture_axis = ["Local", "Sharded"]
+continuity_profile_axis = ["DirectoryBound", "ExternalCas", "NotApplicable"]
+cell_count = 12
+
+[[exclusion_law]]
+id = "PX-1"
+statement = "role_posture = Sharded implies continuity_profile = ExternalCas."
+rationale = "W12 requires ExternalCas; the AllocationContinuityProfile is bound one-to-one to the slot's IncarnationContinuityProfile, so a sharded DirectoryBound slot cannot exist."
+source_anchor = "§5.1"
+
+[[exclusion_law]]
+id = "PX-2"
+statement = "service_class = ArchiveReadOnly implies continuity_profile = NotApplicable."
+rationale = "An archive open performs no incarnation takeover, mints no writer, and mints no service-promotion receipt, so it consumes no incarnation or allocation continuity fence at all."
+source_anchor = "§13.7"
+
+[[exclusion_law]]
+id = "PX-3"
+statement = "service_class = Operational implies continuity_profile != NotApplicable."
+rationale = "Every operational slot is fenced by exactly one registered IncarnationContinuityProfile arm before it may write."
+source_anchor = "§5.1"
+
+[[posture]]
+id = "local_directory_bound"
+title = "Local, DirectoryBound (the embedded posture)"
+service_class = "Operational"
+role_posture = "Local"
+continuity_profile = "DirectoryBound"
+status = "frozen"
+footprint_declaration = "empty"
+empty_justification = "The embedded DirectoryBound posture's footprint table is empty: it consumes zero external authorities. The epoch fence is a local allocation-continuity journal record ordered under the same whole-inode fence and fixed local continuity digest the cluster-incarnation record registers for that profile."
+source_anchor = "§16.8"
+
+[[posture]]
+id = "local_external_cas"
+title = "Local, ExternalCas"
+service_class = "Operational"
+role_posture = "Local"
+continuity_profile = "ExternalCas"
+status = "frozen"
+footprint_declaration = "complete"
+empty_justification = ""
+source_anchor = "§16.8"
+
+[[deferred_posture]]
+id = "sharded_external_cas"
+title = "Sharded, ExternalCas"
+service_class = "Operational"
+role_posture = "Sharded"
+continuity_profile = "ExternalCas"
+owner_bead = "fgdb-w12-meta-authority-transfer"
+reason = "Sharding is W12, after 1.0. The cell is admissible under the product-space laws and its footprint is a W12 deliverable; freezing Meta-side and shard-side sync-path positions here would manufacture a G0 fact from an unbuilt protocol."
+
+[[deferred_posture]]
+id = "archive_read_only_open"
+title = "ArchiveReadOnly, Local"
+service_class = "ArchiveReadOnly"
+role_posture = "Local"
+continuity_profile = "NotApplicable"
+owner_bead = "fgdb-g0-format-arms-90z"
+reason = "§13.7 states in terms that the open-class, posture, and filesystem-profile-variant registry rows are reserved in the §19 G0 decision batch, which g0-format-arms owns. This registry supplies the posture vocabulary that bead consumes."
+
+# -----------------------------------------------------------------------------
+# The v1 footprint for local_external_cas. Every cell states whether the
+# authority sits on a synchronous operation path and exactly where.
+#
+# operation_class_basis is "trigger_site_only" for all eleven rows, and that is
+# a deliberate, checked limitation rather than an oversight: §16 item 8 names
+# the trigger site for each authority but never names which of the sixteen
+# operation classes the realized path uses. Binding realized operation classes
+# is fgdb-w9-authority-surface-gp9j's deliverable, against implemented paths.
+# -----------------------------------------------------------------------------
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "identity_allocation_continuity"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only at allocation-epoch mint: the threshold-signed or witnessed IdentityContinuityRecord is durably CAS-published outside the rollbackable database closure before the epoch may issue an ID."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "cluster_incarnation"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only at ExternalCas lease acquisition and renewal."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "time_authority"
+on_synchronous_path = true
+touch_count = 2
+sync_path_position = "Per protected-output activation tick, batch-subject amortized under §12.8, and per IdRangeLease use window. Deliberately kept off the audit prefix, which is why delivery availability and not visibility availability multiplies in its per-tick availability."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "audit_continuity"
+on_synchronous_path = true
+touch_count = 3
+sync_path_position = "Three times on a Required operation: the strictly serial one-at-a-time TicketIssued issuance CAS, the admission visibility advance, and its share of one batched TicketsResolvedBatch resolution. Only the Protocol-plane AuditVisibilityAdvanceSpec can release a Required entry, so visibility availability multiplies in this authority's availability while apply-durability availability does not."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "dp_registry"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only at DP charges, which are irreversible before access."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "archive_grant"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only in backup and restore flows."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "reservation"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only in backup and restore flows."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "catalog"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only in backup and restore flows."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "restore_dispatch_journal"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only in backup and restore flows."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "transparency_witness"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only at transparency-proof freshness."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+[[footprint]]
+posture_id = "local_external_cas"
+authority_id = "kms_hsm"
+on_synchronous_path = true
+touch_count = 1
+sync_path_position = "Only at a key-unwrap miss."
+operation_class_basis = "trigger_site_only"
+operation_classes = []
+deferred_binding_owner = "fgdb-w9-authority-surface-gp9j"
+
+# -----------------------------------------------------------------------------
+# Claim-scan rules. The generated document is scanned for normative sentences
+# that exceed the trust matrix. This is LINT EVIDENCE, not a noninterference
+# proof, and the distinction is recorded here so nobody later mistakes a green
+# scan for a semantic result.
+#
+# A rule fires when `subject` and `predicate` both occur in one sentence and no
+# `qualifier` occurs in that same sentence.
+# -----------------------------------------------------------------------------
+
+[[claim_scan_rule]]
+id = "TMS-1"
+subject = "compromised server"
+predicate = "confidential"
+# "no normative text may claim" is here because the scan fired on A-NO-TEE's
+# own bounds sentence — the sentence that STATES the prohibition. A rule that
+# flags its own statement of the rule is noise, and the qualifier list is the
+# mechanism for saying so precisely rather than by weakening the subject.
+qualifiers = [
+  "no tee",
+  "cannot",
+  "claims no",
+  "exfiltrate",
+  "not claimed",
+  "no normative text may claim",
+]
+trust_matrix_conflict = "A-NO-TEE: a compromised server process can exfiltrate what it can decrypt."
+severity = "fail"
+
+[[claim_scan_rule]]
+id = "TMS-2"
+subject = "byzantine"
+predicate = "tolerat"
+qualifiers = ["not", "out of scope", "crash faults", "rejected"]
+trust_matrix_conflict = "A-RAFT-CRASH-ONLY: ordinary Raft tolerates crash faults, not Byzantine replicas."
+severity = "fail"
+
+[[claim_scan_rule]]
+id = "TMS-3"
+subject = "noninterference"
+predicate = "prove"
+qualifiers = ["not", "never", "do not", "does not", "substitutes"]
+trust_matrix_conflict = "OOS-NONINTERFERENCE-PROOF: adversarial fixtures do not prove universal noninterference."
+severity = "fail"
+
+[[claim_scan_rule]]
+id = "TMS-4"
+subject = "witness"
+predicate = "undo"
+qualifiers = ["not", "never", "cannot"]
+trust_matrix_conflict = "A-WITNESS-DETECT-ONLY: witnessed transparency detects, and never undoes disclosure."
+severity = "fail"

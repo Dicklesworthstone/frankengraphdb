@@ -197,6 +197,7 @@ impl DegreeHistogram {
     }
 
     /// Encodes the complete profile and buckets into fixed canonical bytes.
+    /// Fixed-width integers use the workspace's little-endian durable law.
     pub fn to_canonical_bytes(
         &self,
     ) -> Result<[u8; DEGREE_HISTOGRAM_CANONICAL_BYTES], DegreeHistogramCodecError> {
@@ -204,20 +205,20 @@ impl DegreeHistogram {
         let mut bytes = [0_u8; DEGREE_HISTOGRAM_CANONICAL_BYTES];
         let mut offset = 0;
         copy_field(&mut bytes, &mut offset, &CANONICAL_MAGIC);
-        copy_field(&mut bytes, &mut offset, &CANONICAL_VERSION.to_be_bytes());
+        copy_field(&mut bytes, &mut offset, &CANONICAL_VERSION.to_le_bytes());
         copy_field(
             &mut bytes,
             &mut offset,
-            &(DEGREE_BUCKETS as u16).to_be_bytes(),
+            &(DEGREE_BUCKETS as u16).to_le_bytes(),
         );
         copy_field(
             &mut bytes,
             &mut offset,
-            &self.max_observations.to_be_bytes(),
+            &self.max_observations.to_le_bytes(),
         );
-        copy_field(&mut bytes, &mut offset, &self.total.to_be_bytes());
+        copy_field(&mut bytes, &mut offset, &self.total.to_le_bytes());
         for count in self.counts {
-            copy_field(&mut bytes, &mut offset, &count.to_be_bytes());
+            copy_field(&mut bytes, &mut offset, &count.to_le_bytes());
         }
         debug_assert_eq!(offset, DEGREE_HISTOGRAM_CANONICAL_BYTES);
         Ok(bytes)
@@ -463,11 +464,11 @@ impl<'bytes> DegreeHistogramDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, DegreeHistogramCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, DegreeHistogramCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), DegreeHistogramCodecError> {
@@ -559,7 +560,7 @@ mod tests {
         let reverse_bytes = reverse.to_canonical_bytes().expect("valid histogram");
         assert_eq!(forward_bytes, reverse_bytes);
         assert_eq!(&forward_bytes[..8], b"FGDBDGH1");
-        assert_eq!(&forward_bytes[8..10], &1_u16.to_be_bytes());
+        assert_eq!(&forward_bytes[8..10], &1_u16.to_le_bytes());
 
         let decoded = DegreeHistogram::try_from_canonical_bytes(&forward_bytes, 20)
             .expect("canonical histogram");
@@ -593,14 +594,14 @@ mod tests {
         ));
 
         let mut wrong_version = encoded;
-        wrong_version[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             DegreeHistogram::try_from_canonical_bytes(&wrong_version, 20),
             Err(DegreeHistogramCodecError::UnsupportedVersion { actual: 2 })
         );
 
         let mut wrong_bucket_count = encoded;
-        wrong_bucket_count[10..12].copy_from_slice(&64_u16.to_be_bytes());
+        wrong_bucket_count[10..12].copy_from_slice(&64_u16.to_le_bytes());
         assert_eq!(
             DegreeHistogram::try_from_canonical_bytes(&wrong_bucket_count, 20),
             Err(DegreeHistogramCodecError::BucketCountMismatch { actual: 64 })
@@ -630,6 +631,69 @@ mod tests {
                 expected: DEGREE_HISTOGRAM_CANONICAL_BYTES,
                 actual: DEGREE_HISTOGRAM_CANONICAL_BYTES + 1,
             })
+        );
+    }
+
+    #[test]
+    fn merge_is_additive_and_not_idempotent() {
+        // `merge_is_checked_commutative_and_associative` cannot constrain this
+        // kernel: max is ALSO commutative and associative, so replacing counter
+        // addition with max leaves that test green. Verified by mutation --
+        // the whole crate suite passed under exactly that substitution.
+        //
+        // Two relations separate the operators. Both are asserted here because
+        // either alone leaves a gap.
+        fn part(values: &[u64]) -> DegreeHistogram {
+            let mut histogram = DegreeHistogram::new(100);
+            for &value in values {
+                histogram.try_observe(value).expect("within ceiling");
+            }
+            histogram
+        }
+
+        // 1. NON-IDEMPOTENCE. Merging a histogram with itself must DOUBLE its
+        // counts; under max it would be a no-op. This is the discriminator
+        // label_counts already relies on, and it is the cheapest one that
+        // distinguishes addition from any absorbing operator.
+        let single = part(&[1, 1, 5]);
+        let mut doubled = single.clone();
+        doubled.try_merge(&single).expect("matching profile");
+        assert_ne!(
+            doubled, single,
+            "merging a histogram with itself must not be a no-op: addition is \
+             not idempotent, and a merge that absorbs would be indistinguishable \
+             from max"
+        );
+        assert_eq!(doubled.len(), single.len() * 2);
+        for (bucket, count) in doubled.canonical_counts().iter().enumerate() {
+            assert_eq!(
+                *count,
+                single.canonical_counts()[bucket] * 2,
+                "bucket {bucket} must double under self-merge"
+            );
+        }
+
+        // 2. MASS CONSERVATION over a disjoint split. Partitioning a stream and
+        // merging must equal accumulating it whole -- the property distributed
+        // StatsSegment accumulation rests on. Asserted on canonical bytes, not
+        // just totals, so a merge that moved mass between buckets while keeping
+        // the sum right would still fail.
+        let left = [0_u64, 1, 3, 1];
+        let right = [2_u64, 8, 9, 1];
+        let mut whole = DegreeHistogram::new(100);
+        for &value in left.iter().chain(right.iter()) {
+            whole.try_observe(value).expect("within ceiling");
+        }
+        let mut split = part(&left);
+        split.try_merge(&part(&right)).expect("matching profile");
+        assert_eq!(
+            split.to_canonical_bytes(),
+            whole.to_canonical_bytes(),
+            "splitting the stream and merging must equal accumulating it whole"
+        );
+        assert_eq!(
+            split.len(),
+            u64::try_from(left.len() + right.len()).expect("fixture length fits u64")
         );
     }
 

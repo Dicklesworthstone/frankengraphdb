@@ -1,0 +1,236 @@
+# =============================================================================
+# command_type_classification.toml — input-looking type classification (G0)
+# =============================================================================
+# Bead: fgdb-5uw2
+# Provenance: plan §5.1 (COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
+# line 294), verbatim: "The paired `command_type_classification.toml` assigns
+# every independently addressable normative input-looking type—including every
+# type whose stable name ends in `Spec`—exactly one class:
+# `RegisteredCommandInput{command_contract_id}`, `PreOrderArtifact`,
+# `CertificateInput`, `ResultOnly`, `ProjectionInput`, or `RuntimeOnly`.
+# A suffix conveys no semantics."
+#
+# WHY THE CREATION POPULATION WAS THREE ROWS, NOT ~40+. MEASURED 2026-07-28 at
+# HEAD 5d42e28: registries/appendix_a_catalog.toml carries 39 logical kinds
+# whose stable name ends in Spec, plus further Spec-named top-level candidates.
+# Nearly all of them are semantic or maintenance COMMAND INPUTS (plan lines
+# 1916, 1918, 1770 enumerate the families), so their class is
+# RegisteredCommandInput{command_contract_id} — which requires their
+# command_contracts.toml row to exist first, and those rows were gated on the
+# full family expansion (see command_contracts.toml's header and the
+# tag-permanence rationale there; fgdb-5uw2 Phase B). A classification row
+# minted before its contract row would either invent a contract id or carry a
+# dangling one; both are the fail-open this registry exists to prevent. The
+# first three rows below are exactly the creation-time population whose class
+# was FORCED by the source without a contract id.
+#
+# PHASE B SEED (2026-08-02/03). The owner-confirmed v1 tag freeze opened the
+# contract registry's Phase B (see command_contracts.toml's header). The F1/F2
+# contract rows exist as of this increment, so the three F1/F2 command inputs
+# below now carry their source-forced RegisteredCommandInput class with a
+# resolvable contract id, landed in the same increment as their contract rows.
+# The creation-time PreOrderArtifact population stands unchanged; the
+# population only grows.
+#
+# F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
+# attempt-lifecycle command inputs landed with their contract rows. An ARMED
+# member (LocalAttemptRegistrationSpec, TxnOwnershipTransitionSpec,
+# LocalOutcomeCompactionSpec) has one contract row per inner arm, so its
+# classification row binds the MEMBER-ROOT id; the validator resolves a root
+# iff a contract row carries an id of the form "{root}:{arm}" (family
+# resolution — see registry_check::command_type_classification).
+#
+# ADJUDICATED NON-MEMBERS, recorded here so nobody re-derives them (the
+# laws.toml pattern: record, never strike):
+#   CatalogMutationSpec, SchemaMutationSpec, IndexDefinitionSpec,
+#   IndexActivationSpec — plan lines 1770 and 1916 state outright that these
+#   "are not command types" and line 1918 that "the synthetic
+#   catalog/schema/index control types are forbidden"; no schema of these names
+#   exists in any registry (MEASURED, 0 rows repo-wide). They are prose
+#   prohibitions, not types, so they take NO classification row: a row would
+#   itself mint the forbidden name into a registry. Ordinary DDL is a
+#   transaction-carried `SchemaOp` (plan line 1918).
+#   AuditVisibilityAdvanceSpec — named at plan line 1770 as "a Protocol-plane
+#   maintenance input, never a `GlobalSequenceNeutralSpec`", and plan line 974
+#   registers maintenance batch specs as command_contracts.toml Maintenance
+#   rows; its class is therefore RegisteredCommandInput with a Maintenance
+#   contract row — Phase B, not omittable and not landable yet.
+#
+# Row schema (closed; the loader rejects unknown keys before reading fields):
+#   [[classification]]
+#   type_name            = "..."      # stable type name, permanent, never reused
+#   class                = "RegisteredCommandInput" | "PreOrderArtifact" |
+#                          "CertificateInput" | "ResultOnly" |
+#                          "ProjectionInput" | "RuntimeOnly"
+#   command_contract_id  = "..."      # REQUIRED iff class = "RegisteredCommandInput";
+#                                     # forbidden otherwise
+#   source_location      = "aNN:LINE" # REQUIRED — the plan line that forces the class
+#   statement            = "..."      # the forcing quote, verbatim or tightly excerpted
+#   status               = "registered"
+#
+# registry_epoch changes only when rows are added or retired (plan line 290).
+registry_epoch = 3
+
+[[classification]]
+type_name = "TxnSubmissionSpec"
+class = "PreOrderArtifact"
+source_location = "a10:1918"
+statement = "TxnSubmissionSpec is not an ordered input: transaction submission is the pre-order construction pipeline that yields CommitCommand."
+status = "registered"
+
+[[classification]]
+type_name = "AuditExternalResolutionBatch"
+class = "PreOrderArtifact"
+source_location = "a07:1770"
+statement = "AuditExternalResolutionBatch/receipt are pre-order evidence and AuditVisibilityAdvanceSpec is a Protocol-plane maintenance input, never a GlobalSequenceNeutralSpec."
+status = "registered"
+
+[[classification]]
+type_name = "AuditExternalResolutionReceipt"
+class = "PreOrderArtifact"
+source_location = "a07:1770"
+statement = "AuditExternalResolutionBatch/receipt are pre-order evidence and AuditVisibilityAdvanceSpec is a Protocol-plane maintenance input, never a GlobalSequenceNeutralSpec."
+status = "registered"
+
+# --- Phase B seed (F1/F2): the first RegisteredCommandInput rows, landed in
+# --- the same increment as their command_contracts.toml contract rows.
+
+[[classification]]
+type_name = "RecoveryBridgeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:recovery-bridge-spec"
+source_location = "a19:2561"
+statement = "RecoveryBridgeSpec<Role> is the exact role-specialized first-control body."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBeginReservationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-begin-reservation-spec"
+source_location = "a03:1482"
+statement = "Apply creates LocalBeginReservationRecord, installs Reserved with the replay ref, and constructs TxnOutcomeRecord::BeginStaging; only that visible state permits BEGIN_ACCEPTED."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBeginTerminalSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-begin-terminal-spec"
+source_location = "a03:1482"
+statement = "LocalBeginTerminalSpec alone consumes Reserved and creates LocalNeverRegisteredRecord plus NeverRegisteredDetailed."
+status = "registered"
+
+# --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,
+# --- landed in the same increment as their contract rows. Armed members bind
+# --- the member-root id (round-12 T4 family resolution).
+
+[[classification]]
+type_name = "LocalAttemptRegistrationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-attempt-registration-spec"
+source_location = "a03:1484"
+statement = "LocalAttemptRegistrationSpec has the closed binding ExplicitBegin|Autocommit; apply changes explicit Reserved to BoundDetailed or creates the autocommit BoundDetailed lineage and constructs LocalAttemptRegistration."
+status = "registered"
+
+[[classification]]
+type_name = "LocalAutocommitWriteSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-autocommit-write-spec"
+source_location = "a03:1484"
+statement = "Exactly one registered amendment: the fused single-statement autocommit write arm LocalAutocommitWriteSpec, whose coordinator-local permit verification and admission precede every observation while durable registration lands atomically with the commit."
+status = "registered"
+
+[[classification]]
+type_name = "TxnOwnershipTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:txn-ownership-transition-spec"
+source_location = "a10:1918"
+statement = "Required Local semantic rows include TxnOwnershipTransitionSpec<Local>."
+status = "registered"
+
+[[classification]]
+type_name = "TxnOwnershipExpiryAbortSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:txn-ownership-expiry-abort-spec"
+source_location = "a10:1918"
+statement = "Required Local semantic rows include TxnOwnershipExpiryAbortSpec<Local>."
+status = "registered"
+
+[[classification]]
+type_name = "LocalStatementRegistrationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-statement-registration-spec"
+source_location = "a03:1486"
+statement = "Apply byte-matches the current full binding, requires no Open statement, constructs LocalStatementRegistration, and inserts Open."
+status = "registered"
+
+[[classification]]
+type_name = "LocalStatementPublicationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-statement-publication-spec"
+source_location = "a03:1488"
+statement = "Buffered apply creates the role-valid applied publication reference, resource transfer, and independent-retention record; it creates ActiveDeliverable only through a legal inline activation, otherwise PendingVisibility."
+status = "registered"
+
+[[classification]]
+type_name = "LocalStatementAbortSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-statement-abort-spec"
+source_location = "a03:1488"
+statement = "LocalStatementAbortSpec alone changes Open to Failed|Abandoned, resolves that statement ticket, proves no result/workspace effect, and applies the registration-pinned ContinueAttempt|AbortAttempt policy."
+status = "registered"
+
+[[classification]]
+type_name = "LocalPrepareAdmissionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-prepare-admission-spec"
+source_location = "a03:1528"
+statement = "Apply requires ReadWrite and no prior admission, constructs immutable LocalTerminalAdmissionFence::Armed, and atomically replaces the token's Detailed entry."
+status = "registered"
+
+[[classification]]
+type_name = "LocalReadCloseSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-read-close-spec"
+source_location = "a03:1534"
+statement = "Apply advances LogicalCommandSeq/HLC but not CommitSeq, creates ReadClosed and, for autocommit, atomically detaches the result under the same pending/released/inline-active rule."
+status = "registered"
+
+[[classification]]
+type_name = "LocalTerminalCompletionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-terminal-completion-spec"
+source_location = "a03:1532"
+statement = "It monotonically adds verified bits, validates rather than manufactures the frozen public/capability artifacts, and creates TerminalReady only when the required bitmap is exactly satisfied."
+status = "registered"
+
+[[classification]]
+type_name = "TxnAbortSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:txn-abort-spec"
+source_location = "a03:1536"
+statement = "TxnAbortSpec is only the active/unadmitted lifecycle path; its terminal-abort authority must use the registered LifecycleOperation::RequestTerminalAbort{stage:Active}, and it can never consume a PrepareAdmitted fence or final-certification reservation."
+status = "registered"
+
+[[classification]]
+type_name = "LocalOutcomeCompactionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-outcome-compaction-spec"
+source_location = "a03:1540"
+statement = "Apply requires the summary leaf copy the exact frozen public bytes/receipt, writes the authenticated leaf, and atomically changes TxnOutcomeIndex Detailed to Compacted together with the begin-index compact transition."
+status = "registered"
+
+[[classification]]
+type_name = "LocalOutcomeExpirySpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-outcome-expiry-spec"
+source_location = "a03:1540"
+statement = "LocalOutcomeExpirySpec is the distinct ordered transition; apply atomically changes both indexes to authenticated ExpiredTombstone values and permanently prevents key/token reuse."
+status = "registered"
+
+[[classification]]
+type_name = "LocalConflictCompactionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-conflict-compaction-spec"
+source_location = "a03:1480"
+statement = "LocalConflictCompactionSpec may replace detail only when every possible future transaction has a start/snapshot beyond the selected entry's closed overlap interval and no live witness can add an edge."
+status = "registered"

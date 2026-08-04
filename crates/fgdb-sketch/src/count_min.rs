@@ -455,7 +455,7 @@ impl CountMinSketch {
 
     /// Encodes the complete profile and logical state into one canonical value.
     ///
-    /// The representation uses fixed-width big-endian fields followed by the
+    /// The representation uses fixed-width little-endian fields followed by the
     /// row-major counter matrix. Equal logical states therefore produce
     /// byte-identical values without relying on host word size.
     pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, CountMinCodecError> {
@@ -808,11 +808,11 @@ fn decoded_usize(value: u64) -> Result<usize, CountMinCodecError> {
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct CountMinDecoder<'bytes> {
@@ -844,11 +844,11 @@ impl<'bytes> CountMinDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, CountMinCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, CountMinCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), CountMinCodecError> {
@@ -1067,6 +1067,7 @@ mod tests {
                 let mut value =
                     CountMinSketch::try_new(profile).expect("accuracy profile is bounded");
                 for &(left, right) in &fixture.edges {
+                    // Stable hash-input identity, not a durable scalar field.
                     value
                         .try_observe(&left.to_be_bytes(), 1)
                         .expect("fixture fits declared total weight");
@@ -1144,7 +1145,7 @@ mod tests {
             .expect("valid state encodes");
         assert_eq!(forward_bytes, reverse_bytes);
         assert_eq!(&forward_bytes[..8], b"FGDBCMS1");
-        assert_eq!(&forward_bytes[8..10], &1_u16.to_be_bytes());
+        assert_eq!(&forward_bytes[8..10], &1_u16.to_le_bytes());
 
         let decoded = read_fixture(&forward_bytes).expect("canonical value");
         assert_eq!(decoded, forward);
@@ -1180,7 +1181,7 @@ mod tests {
         }
         assert_eq!(
             actual_hex,
-            "46474442434d53310001000000000000000200000000000000020001000000000000000700000000000000640000000000000004000000000000000300000000000000040000000000000003000000000000000000000000000000030000000000000000"
+            "46474442434d53310100020000000000000002000000000000000100070000000000000064000000000000000400000000000000030000000000000004000000000000000300000000000000000000000000000003000000000000000000000000000000"
         );
     }
 
@@ -1198,21 +1199,21 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_version),
             Err(CountMinCodecError::UnsupportedVersion { actual: 2 })
         );
 
         let mut wrong_hash_algorithm = encoded.clone();
-        wrong_hash_algorithm[26..28].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_hash_algorithm[26..28].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_hash_algorithm),
             Err(CountMinCodecError::UnsupportedHashAlgorithm { actual: 2 })
         );
 
         let mut wrong_count = encoded.clone();
-        wrong_count[60..68].copy_from_slice(&1_u64.to_be_bytes());
+        wrong_count[60..68].copy_from_slice(&1_u64.to_le_bytes());
         assert!(matches!(
             read_fixture(&wrong_count),
             Err(CountMinCodecError::CounterCountMismatch { .. })
@@ -1275,6 +1276,65 @@ mod tests {
                 maximum: encoded.len() - 1,
             })
         );
+    }
+
+    #[test]
+    fn accumulation_is_monotone_and_splitting_the_stream_is_exact() {
+        // Two metamorphic relations, neither previously tested in this crate.
+        //
+        // MONOTONICITY is what makes the one-sided error contract meaningful:
+        // Count-Min may only ever OVERSTATE, so no estimate may fall as more
+        // weight arrives. A decrement path introduced anywhere would break the
+        // `estimate >= truth` half of the accuracy harness, and this catches it
+        // at the algebra rather than statistically.
+        let keys: [&[u8]; 4] = [b"alpha", b"beta", b"gamma", b"delta"];
+        let mut running = sketch();
+        let mut previous = [0_u64; 4];
+        for (round, key) in keys.iter().cycle().take(12).enumerate() {
+            running
+                .try_observe(key, u64::try_from(round % 3 + 1).expect("small weight"))
+                .expect("bounded update");
+            for (index, probe) in keys.iter().enumerate() {
+                let now = running.estimate(probe);
+                assert!(
+                    now >= previous[index],
+                    "estimate for {probe:?} fell from {} to {now} at round {round}",
+                    previous[index]
+                );
+                previous[index] = now;
+            }
+        }
+
+        // SPLIT/MERGE EQUIVALENCE is the property distributed accumulation
+        // rests on: a StatsSegment merged from shards must equal the same
+        // stream accumulated in one place. Count-Min merge is exact counter
+        // addition, so this holds on CANONICAL BYTES, not merely on estimates
+        // -- a weaker assertion on estimates alone would pass even if the
+        // merge disagreed about which counters moved.
+        let left: [(&[u8], u64); 3] = [(b"alpha", 3), (b"beta", 5), (b"alpha", 2)];
+        let right: [(&[u8], u64); 3] = [(b"gamma", 7), (b"alpha", 1), (b"delta", 4)];
+
+        let mut whole = sketch();
+        for (key, weight) in left.iter().chain(right.iter()) {
+            whole.try_observe(key, *weight).expect("bounded update");
+        }
+
+        let mut first = sketch();
+        for (key, weight) in left {
+            first.try_observe(key, weight).expect("bounded update");
+        }
+        let mut second = sketch();
+        for (key, weight) in right {
+            second.try_observe(key, weight).expect("bounded update");
+        }
+        first.try_merge(&second).expect("identical profiles merge");
+
+        assert_eq!(
+            first.try_to_canonical_bytes().expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "splitting the stream and merging must equal accumulating it whole"
+        );
+        assert_eq!(first.total_weight(), whole.total_weight());
     }
 
     #[test]

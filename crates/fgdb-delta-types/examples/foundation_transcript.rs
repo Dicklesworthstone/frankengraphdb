@@ -23,18 +23,21 @@ use fgdb_claim::{
     EvidenceClaim, RefinementStatus, RegistryClaimClass, StatisticalErrorControl, class, justify,
 };
 use fgdb_delta_types::{
-    CommittedMarker, DeltaRow, DeltaTemplateKey, ElementId, EscrowDomainId, LabelId,
+    CommittedMarker, CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId,
     LogicalDeltaBatch, LogicalDeltaTemplate, OperationKey, PropertyKeyId, RelationId, SchemaEpoch,
     ValidTimePeriod,
 };
 use fgdb_evidence::{
-    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, ReplayClass, ReplayCompleteness,
+    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity, ReplayClass,
+    ReplayCompleteness, StrataIdentity,
 };
 use fgdb_resource::{ResourceCeiling, ResourceVector};
 use fgdb_types::{
-    BranchId, CanonicalDecimal, CanonicalF64, CanonicalScalar, CanonicalText, CanonicalTimestamp,
-    CollationResolver, CollationResolverError, CommitSeq, EId, GraphId, MAX_DECIMAL_COEFFICIENT,
-    MarkerRef, NonBinaryTextBinding, ObjectId, ObligationId, ObligationResolution, ObligationStage,
+    BranchId, CanonicalDecimal, CanonicalF64, CanonicalList, CanonicalMap, CanonicalMapEntry,
+    CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, CanonicalScalarProfile,
+    CanonicalScalarProfileIdentityVerifier, CanonicalText, CanonicalTimestamp, CollationResolver,
+    CollationResolverError, CommitSeq, EId, GraphId, MAX_DECIMAL_COEFFICIENT, MarkerRef,
+    NonBinaryTextBinding, ObjectId, ObligationId, ObligationResolution, ObligationStage,
     PurposeContexts, TzdbResolver, VId,
 };
 
@@ -113,6 +116,18 @@ impl TzdbResolver for FoundationResolver {
             && zone_identifier == "America/New_York"
             && instant_utc_nanos == ZONED_FIXTURE_INSTANT)
             .then_some(-5 * 60 * 60)
+    }
+}
+
+struct FoundationProfileIdentity;
+
+impl CanonicalScalarProfileIdentityVerifier for FoundationProfileIdentity {
+    fn verify_canonical_scalar_profile_oid(
+        &self,
+        claimed_oid: ObjectId,
+        canonical_profile: &[u8],
+    ) -> bool {
+        claimed_oid == ObjectId(asupersync::atp::object::compute_hash(canonical_profile))
     }
 }
 
@@ -196,9 +211,49 @@ fn run_transcript(root: &asupersync::Cx) {
     let mut t = Transcript {
         digest: Fnv1a::new(),
     };
-    t.emit("== foundation_types_e2e transcript v4 ==");
+    let contexts = PurposeContexts::narrow_runtime_root(root);
+    t.emit("== foundation_types_e2e transcript v5 ==");
 
-    // 1. Canonical scalars: every variant, encode/decode round trip.
+    // 1. First-class profile plus canonical scalar/property values.
+    let profile_descriptor = CanonicalScalarProfile::try_canonical_descriptor_bytes(
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        oid(0x40),
+        &[oid(0x34)],
+    )
+    .expect("bounded profile descriptor");
+    let profile_oid = ObjectId(asupersync::atp::object::compute_hash(&profile_descriptor));
+    let scalar_profile = CanonicalScalarProfile::try_new_verified(
+        profile_oid,
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        oid(0x40),
+        &[oid(0x34)],
+        &FoundationProfileIdentity,
+        &AVAILABLE_RESOLVER,
+    )
+    .expect("profile identity and artifacts");
+    let missing_profile_artifact = CanonicalScalarProfile::try_new_verified(
+        profile_oid,
+        oid(0x31),
+        oid(0x32),
+        oid(0x33),
+        oid(0x40),
+        &[oid(0x34)],
+        &FoundationProfileIdentity,
+        &MISSING_RESOLVER,
+    )
+    .unwrap_err();
+    t.emit(&format!(
+        "scalar profile oid={} collations={} missing-artifact-rejection={}",
+        hex(scalar_profile.profile_oid().as_bytes()),
+        scalar_profile.non_binary_collation_oids().len(),
+        missing_profile_artifact,
+    ));
+
+    // Every atomic variant, encode/decode round trip.
     let text_binding = NonBinaryTextBinding::new(oid(0x31), oid(0x32), oid(0x33), oid(0x34));
     let pinned_text = CanonicalText::new_non_binary("Straße", text_binding, &AVAILABLE_RESOLVER)
         .expect("pinned text artifacts available");
@@ -307,6 +362,78 @@ fn run_transcript(root: &asupersync::Cx) {
     t.emit(&format!(
         "scalar reject invalid memcomparable marker: {}",
         CanonicalScalar::decode(&malformed_bytes).unwrap_err()
+    ));
+
+    let property_map = CanonicalPropertyValue::Map(
+        CanonicalMap::try_new(vec![
+            CanonicalMapEntry::new(
+                CanonicalText::new_ucs_basic("b").expect("bounded Map key"),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2)),
+            ),
+            CanonicalMapEntry::new(
+                CanonicalText::new_ucs_basic("aa").expect("bounded Map key"),
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(true)),
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+                    ])
+                    .expect("bounded List"),
+                ),
+            ),
+            CanonicalMapEntry::new(
+                CanonicalText::new_ucs_basic("a").expect("bounded Map key"),
+                CanonicalPropertyValue::Scalar(pinned_text_scalar.clone()),
+            ),
+        ])
+        .expect("unique bounded Map"),
+    );
+    let property_encoding = scalar_profile
+        .encode_value(&property_map, &AVAILABLE_RESOLVER)
+        .expect("profiled property encoding");
+    let property_round_trip = scalar_profile
+        .decode_value_with_resolver(&property_encoding, &AVAILABLE_RESOLVER)
+        .expect("profiled property round trip");
+    assert_eq!(property_round_trip, property_map);
+    let map_keys = if let CanonicalPropertyValue::Map(map) = &property_round_trip {
+        map.entries()
+            .iter()
+            .map(|entry| entry.key().as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    } else {
+        String::from("<non-map>")
+    };
+    assert_eq!(map_keys, "a,aa,b");
+    t.emit(&format!(
+        "property Map/List round trip: profile_oid={} keys={} bytes={}",
+        hex(scalar_profile.profile_oid().as_bytes()),
+        map_keys,
+        hex(&property_encoding),
+    ));
+
+    let exact_decimal = scalar_profile
+        .coerce_scalar(
+            CanonicalScalar::Int(42),
+            CanonicalScalarKind::Decimal,
+            &AVAILABLE_RESOLVER,
+        )
+        .expect("exact Int-to-Decimal coercion");
+    let exact_integer = scalar_profile
+        .coerce_scalar(
+            exact_decimal.clone(),
+            CanonicalScalarKind::Int,
+            &AVAILABLE_RESOLVER,
+        )
+        .expect("exact Decimal-to-Int coercion");
+    let float_rejection = scalar_profile
+        .coerce_scalar(
+            CanonicalScalar::Int(42),
+            CanonicalScalarKind::Float,
+            &AVAILABLE_RESOLVER,
+        )
+        .unwrap_err();
+    t.emit(&format!(
+        "scalar profile coercion: decimal={exact_decimal:?} integer={exact_integer:?} float-rejection={float_rejection}"
     ));
 
     // 2. ZWeight promotion across the i128 boundary and back.
@@ -424,25 +551,33 @@ fn run_transcript(root: &asupersync::Cx) {
     ];
     let families: Vec<String> = rows.iter().map(|r| format!("{:?}", r.family())).collect();
     t.emit(&format!("delta families: {}", families.join(",")));
-    let template = LogicalDeltaTemplate::new(
-        DeltaTemplateKey {
+    let template = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![CoordinateEntry {
             graph: GraphId(1),
             branch: BranchId(1),
             relation: RelationId(3),
             schema_epoch: SchemaEpoch(2),
-            intent_semantics_oid: oid(0x11),
-        },
-        rows,
-    );
+            schema_transition: None,
+            rows,
+        }],
+    )
+    .expect("canonical template");
     let marker = MarkerRef {
         marker_oid: oid(0xAA),
         commit_seq: CommitSeq(41999),
     };
-    let batch = LogicalDeltaBatch::order(template, CommittedMarker::attest(marker));
+    let committed_marker = CommittedMarker::attest(marker, &contexts.commit());
+    let batch = LogicalDeltaBatch::order(&template, [0x33; 32], committed_marker);
     t.emit(&format!(
         "ordered batch at commit_seq {:?} with {} rows",
         batch.commit_seq(),
-        batch.template().rows().len()
+        batch
+            .coordinate_entries()
+            .iter()
+            .map(|e| e.rows.len())
+            .sum::<usize>()
     ));
 
     // 4. One envelope per §15.0 claim kind, with the lattice at the boundary.
@@ -498,6 +633,8 @@ fn run_transcript(root: &asupersync::Cx) {
             claim,
             oid(0x20),
             oid(0x21),
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             Some(CalibrationWindow::new(100, 42_000).expect("window")),
             7,
             FallbackBehavior::FailClosed,
@@ -581,7 +718,6 @@ fn run_transcript(root: &asupersync::Cx) {
             .map_or(0, |set| set.len()),
     ));
 
-    let contexts = PurposeContexts::narrow_runtime_root(root);
     let obligation = contexts
         .commit()
         .reserve_prepared_bytes(

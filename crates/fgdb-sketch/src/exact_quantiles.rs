@@ -265,6 +265,7 @@ impl ExactQuantileSketch {
     }
 
     /// Encodes the complete ceiling and sorted multiset into canonical bytes.
+    /// Fixed-width integers use the workspace's little-endian durable law.
     pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, ExactQuantileCodecError> {
         validate_canonical_values(self.max_observations, &self.values)?;
         let payload_bytes = self
@@ -422,11 +423,11 @@ impl ExactQuantileSketch {
                 maximum: self.max_observations,
             });
         }
-        self.values.try_reserve(1).map_err(|_: TryReserveError| {
-            ExactQuantileError::AllocationFailed {
+        self.values
+            .try_reserve_exact(1)
+            .map_err(|_: TryReserveError| ExactQuantileError::AllocationFailed {
                 requested: attempted,
-            }
-        })?;
+            })?;
         let insertion = self.values.partition_point(|existing| *existing <= value);
         self.values.insert(insertion, value);
         Ok(())
@@ -550,11 +551,11 @@ fn decoded_usize(value: u64) -> Result<usize, ExactQuantileCodecError> {
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct ExactQuantileDecoder<'bytes> {
@@ -586,11 +587,11 @@ impl<'bytes> ExactQuantileDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, ExactQuantileCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, ExactQuantileCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), ExactQuantileCodecError> {
@@ -634,6 +635,15 @@ mod tests {
     }
 
     #[test]
+    fn incremental_growth_never_reserves_past_the_profile_ceiling() {
+        let mut sketch = ExactQuantileSketch::new(17);
+        for value in 0_u64..17 {
+            sketch.try_observe(value).expect("observation fits");
+            assert!(sketch.values.capacity() <= sketch.max_observations);
+        }
+    }
+
+    #[test]
     fn canonical_codec_round_trips_and_is_insertion_order_independent() {
         let forward = summary(&[9, 1, 5, 5, 2, u64::MAX, 0]);
         let reverse = summary(&[0, u64::MAX, 2, 5, 5, 1, 9]);
@@ -645,7 +655,7 @@ mod tests {
             .expect("valid sorted multiset");
         assert_eq!(forward_bytes, reverse_bytes);
         assert_eq!(&forward_bytes[..8], b"FGDBEQS1");
-        assert_eq!(&forward_bytes[8..10], &1_u16.to_be_bytes());
+        assert_eq!(&forward_bytes[8..10], &1_u16.to_le_bytes());
 
         let decoded = read_fixture(&forward_bytes).expect("canonical summary");
         assert_eq!(decoded, forward);
@@ -669,14 +679,14 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             read_fixture(&wrong_version),
             Err(ExactQuantileCodecError::UnsupportedVersion { actual: 2 })
         );
 
         let mut above_limit = encoded.clone();
-        above_limit[18..26].copy_from_slice(&101_u64.to_be_bytes());
+        above_limit[18..26].copy_from_slice(&101_u64.to_le_bytes());
         assert_eq!(
             read_fixture(&above_limit),
             Err(ExactQuantileCodecError::ObservationLimitExceeded {
@@ -686,8 +696,8 @@ mod tests {
         );
 
         let mut out_of_order = encoded.clone();
-        out_of_order[26..34].copy_from_slice(&3_u64.to_be_bytes());
-        out_of_order[34..42].copy_from_slice(&2_u64.to_be_bytes());
+        out_of_order[26..34].copy_from_slice(&3_u64.to_le_bytes());
+        out_of_order[34..42].copy_from_slice(&2_u64.to_le_bytes());
         assert_eq!(
             read_fixture(&out_of_order),
             Err(ExactQuantileCodecError::ValuesOutOfOrder {
@@ -790,6 +800,71 @@ mod tests {
             Err(ExactQuantileError::MissingObservation { value: 2 })
         );
         assert_eq!(sketch.canonical_values(), &[1, 3]);
+    }
+
+    #[test]
+    fn merge_preserves_sorted_order_and_is_split_exact() {
+        // `merge_is_commutative_and_associative` cannot constrain this kernel.
+        // The merge walks two sorted runs and picks a side each step; reversing
+        // that choice still yields a commutative, associative merge of the same
+        // multiset -- just in the wrong ORDER. Verified by mutation: flipping
+        // `left_value <= right_value` to `>=` left the entire crate suite green.
+        //
+        // Order is not cosmetic here. `select` and `quantile` index into the
+        // values array, so an unsorted merge silently returns the wrong
+        // quantile rather than failing.
+        fn part(values: &[u64]) -> ExactQuantileSketch {
+            let mut sketch =
+                ExactQuantileSketch::try_with_capacity(64, 16).expect("bounded capacity");
+            for &value in values {
+                sketch.try_observe(value).expect("within ceiling");
+            }
+            sketch
+        }
+
+        // 1. SORTEDNESS. Interleaved runs are used deliberately: two runs whose
+        // ranges do not overlap would merge correctly under either choice, so
+        // they could not distinguish the operators.
+        let mut left = part(&[1, 4, 6, 9]);
+        let right = part(&[2, 3, 7, 8]);
+        left.try_merge(&right).expect("matching profile");
+        let merged = left.canonical_values();
+        assert!(
+            merged.windows(2).all(|pair| pair[0] <= pair[1]),
+            "merged values must be sorted ascending, got {merged:?}"
+        );
+        assert_eq!(merged, &[1, 2, 3, 4, 6, 7, 8, 9]);
+
+        // Duplicates must survive: this is a multiset, so a merge that deduped
+        // would change every quantile above the duplicate.
+        let mut dup_left = part(&[5, 5, 7]);
+        dup_left
+            .try_merge(&part(&[5, 6]))
+            .expect("matching profile");
+        assert_eq!(dup_left.canonical_values(), &[5, 5, 5, 6, 7]);
+
+        // 2. SPLIT EXACTNESS, on canonical bytes. Partitioning a stream and
+        // merging must equal accumulating it whole -- asserted on bytes rather
+        // than on a selected quantile, since two different orderings can agree
+        // at one ordinal and disagree elsewhere.
+        let a = [9_u64, 1, 6, 4];
+        let b = [3_u64, 8, 2, 7];
+        let mut whole = ExactQuantileSketch::try_with_capacity(64, 16).expect("bounded capacity");
+        for &value in a.iter().chain(b.iter()) {
+            whole.try_observe(value).expect("within ceiling");
+        }
+        let mut split = part(&a);
+        split.try_merge(&part(&b)).expect("matching profile");
+        assert_eq!(
+            split.try_to_canonical_bytes().expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "splitting the stream and merging must equal accumulating it whole"
+        );
+
+        // 3. The quantile actually read through the public selector, so the
+        // ordering law is tied to the observable it protects.
+        assert_eq!(split.select(0), Some(1));
+        assert_eq!(split.select(7), Some(9));
     }
 
     #[test]

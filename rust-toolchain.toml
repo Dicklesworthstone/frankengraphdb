@@ -5,4 +5,4 @@
 # Bump deliberately, together with any std-API migration the new nightly
 # requires, and together with the asupersync/fnx foundation pins.
 channel = "nightly-2026-07-05"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "miri", "rust-src", "llvm-tools-preview"]

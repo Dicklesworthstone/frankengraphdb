@@ -11,15 +11,45 @@
 //!   class_escalation         — weaker claim class justifies a stronger one
 //!   unregistered_justifier   — justified_by names an unregistered row
 //!   proof_lane_unresolved    — proof-class clause without a resolvable lane
+//!   proof_lane_declared_while_clause_promoted
+//!                            — a clause off "stub" cites a still-declared lane
+//!   proof_lane_gate_*        — a "checked" lane's gate is undeclared, unresolved
+//!                              or not itself live
+//!   proof_lane_proves_nothing / proof_lane_admits_anything
+//!                            — a "checked" lane's artifact cannot report a
+//!                              failure (no proposition; `sorry`; no INVARIANT)
+//!   proof_lane_system_unreadable
+//!                            — a "checked" lane names a formal system no reader
+//!                              here adjudicates (completeness guard)
+//!   clause_promoted_without_live_checker
+//!                            — a clause is enforced while an entrypoint is not a
+//!                              live checker (promotion law)
+//!   clause_negative_test_is_its_own_checker
+//!                            — an enforced clause's negative test IS its checker
+//!   enforcement_coverage_incomplete / _empty / _drift
+//!                            — "every ID has a live checker" examined fewer ids
+//!                              than exist, had nothing to examine, or disagrees
+//!                              with the declared enforced counts
+//!   checker_liveness_self_test_failed
+//!                            — the liveness readers failed a known answer, so no
+//!                              clean verdict anywhere below is licensed (control;
+//!                              emitted ONCE for the whole run, since one reader
+//!                              serves all three registries that ask it)
 //!   twenty_id_violation      — the twenty-ID spine set is wrong
 //!   hash_mismatch            — twenty-ID table hash pin does not match
 //!   bad_field                — enum/shape violation on a row field
 //!   artifact_missing         — a "live"/"checked" row's artifact is absent
+//!   checker_*                — a "live" checker row is not registered, invoked
+//!                              or capable of failing
+//!   script_undeclared        — a scripts/**/*.sh is neither registered nor declared
+//!   script_disposition_*     — a non-gate declaration is dangling or conflicting
+//!   script_scan_empty        — the scripts/ scan found nothing (control)
 
 use crate::hash::id_table_hash;
-use crate::model::{Clause, Registries};
+use crate::model::{Clause, Manifest, Registries, SCRIPT_ROLES, ScriptDisposition};
 use crate::predicate;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +69,34 @@ impl Violation {
             msg: msg.into(),
         }
     }
+}
+
+/// The closed clause-status vocabulary, and — for each status — whether a
+/// clause in it is ENFORCED.
+///
+/// One list, two consumers, on purpose
+/// (`fgdb-clause-promotion-to-live-is-unguarded-nllh`). The status vocabulary
+/// was previously spelled inline in a `matches!`, and the promotion law that
+/// followed would have been a second `== "live"` beside it. Two spellings of one
+/// vocabulary is how a status added later arrives enforced by nothing: the
+/// schema check would reject it (or be widened to accept it) while the law that
+/// gives `live` its meaning silently skips it. Adding a status here forces the
+/// author to answer the only question that matters about it.
+///
+/// `dormant` is not enforced by design: `invariants.toml`'s header says "an
+/// unimplemented or dormant clause forces its feature off and cannot count as
+/// covered", so it is a stub that has been switched off rather than a promotion.
+pub const CLAUSE_STATUS_ENFORCED: &[(&str, bool)] =
+    &[("live", true), ("stub", false), ("dormant", false)];
+
+/// Is `status` a registered clause status, and does it enforce?
+///
+/// `None` means the status is not in the vocabulary at all.
+pub fn clause_status_is_enforced(status: &str) -> Option<bool> {
+    CLAUSE_STATUS_ENFORCED
+        .iter()
+        .find(|(name, _)| *name == status)
+        .map(|(_, enforced)| *enforced)
 }
 
 /// The canonical claim classes and ranks (must match constitution.toml).
@@ -194,8 +252,10 @@ pub fn check_justification(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_clause(
     r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
     clause: &Clause,
     invariant_id: &str,
     clause_keys: &BTreeSet<String>,
@@ -239,12 +299,25 @@ fn validate_clause(
             ),
         ));
     }
-    if !matches!(clause.status.as_str(), "live" | "stub" | "dormant") {
+    // The clause status vocabulary, read from the ONE list that also decides
+    // whether the promotion law below applies. See [`CLAUSE_STATUS_ENFORCED`]:
+    // two copies of this vocabulary is how a new status would arrive enforced
+    // by nothing.
+    let enforced = clause_status_is_enforced(&clause.status);
+    if enforced.is_none() {
         out.push(Violation::new(
             "bad_field",
             reg,
             id,
-            format!("status {:?} not in {{live, stub, dormant}}", clause.status),
+            format!(
+                "status {:?} not in {{{}}}",
+                clause.status,
+                CLAUSE_STATUS_ENFORCED
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         ));
     }
     if !matches!(clause.first_gate.as_str(), "G0" | "G1" | "G2" | "G3" | "G4") {
@@ -289,6 +362,32 @@ fn validate_clause(
             ));
         }
     }
+    // THE PROMOTION LAW (`fgdb-clause-promotion-to-live-is-unguarded-nllh`).
+    //
+    // `invariants.toml`'s own header states it: "Workstream beads flip status
+    // stub -> live in the same change that LANDS THE CHECKER, never before."
+    // AGENTS.md rests every G1-G4 exit gate on it: "no subsystem ships against
+    // an unenforced invariant ... cannot pass while any invariant it depends on
+    // lacks a live checker in invariants.toml."
+    //
+    // Nothing implemented it. Measured before this was written: promoting a
+    // shipped clause to `live`, changing nothing else, produced ZERO violations
+    // — its checker stayed a `status = "stub"` row pointing at a crate that does
+    // not exist. So did the degenerate case, a live clause whose
+    // `negative_test_entrypoint` IS its `checker_entrypoint`. The whole law for
+    // both fields was "the string resolves to a row".
+    //
+    // What `live` means for a CHECKER row is `crate::liveness`'s question, and
+    // it is answered there rather than a third time here: this is the same
+    // delegation `assess_lane` makes for proof lanes
+    // (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`), which is the same
+    // reader `validate_checker_index` uses (`...-tl0o`). Three faces of one
+    // fact, one reader.
+    //
+    // The negative test is held to the SAME bar as the checker and not a weaker
+    // one, because its entire purpose is to prove the checker can go red — a
+    // negative test that cannot itself fail proves nothing, which is exactly the
+    // shape of every defect in this family.
     // Dependencies must be registered clause keys or top-level FG-INV IDs.
     for dep in &clause.dependencies {
         if !clause_keys.contains(dep) && !invariant_ids.contains(dep) {
@@ -300,36 +399,63 @@ fn validate_clause(
             ));
         }
     }
-    // Proof-class clauses must bind a resolvable proof lane.
-    if clause.claim_class == "proof" {
-        match &clause.proof_lane {
-            None => out.push(Violation::new(
-                "proof_lane_unresolved",
+    if enforced == Some(true) {
+        for defect in prover.assess_clause(clause, &r.checker_index) {
+            out.push(Violation::new(
+                defect.kind.code(),
                 reg,
                 id,
-                "proof-class clause without a proof_lane",
-            )),
-            Some(lane_id) => {
-                if !r.proof_lanes.iter().any(|l| &l.id == lane_id) {
-                    out.push(Violation::new(
-                        "proof_lane_unresolved",
-                        reg,
-                        id,
-                        format!("proof_lane {lane_id:?} does not resolve in proof_lanes.toml"),
-                    ));
-                }
+                format!("clause status is {:?} but {}", clause.status, defect.detail),
+            ));
+        }
+    }
+
+    // Proof-class clauses must bind a resolvable proof lane; any clause that
+    // cites one at all (e.g. bounded_model → TLA+) must have it resolve. ONE
+    // lookup, because two copies of it is how the second law below came to be
+    // checked by neither.
+    let cited = clause
+        .proof_lane
+        .as_ref()
+        .map(|lane_id| (lane_id, r.proof_lanes.iter().find(|l| &l.id == lane_id)));
+    match cited {
+        None => {
+            if clause.claim_class == "proof" {
+                out.push(Violation::new(
+                    "proof_lane_unresolved",
+                    reg,
+                    id,
+                    "proof-class clause without a proof_lane",
+                ));
             }
         }
-    } else if let Some(lane_id) = &clause.proof_lane {
-        // Non-proof clauses may cite a lane (e.g. bounded_model → TLA+),
-        // but it must still resolve.
-        if !r.proof_lanes.iter().any(|l| &l.id == lane_id) {
-            out.push(Violation::new(
-                "proof_lane_unresolved",
-                reg,
-                id,
-                format!("proof_lane {lane_id:?} does not resolve in proof_lanes.toml"),
-            ));
+        Some((lane_id, None)) => out.push(Violation::new(
+            "proof_lane_unresolved",
+            reg,
+            id,
+            format!("proof_lane {lane_id:?} does not resolve in proof_lanes.toml"),
+        )),
+        Some((lane_id, Some(lane))) => {
+            // proof_lanes.toml's header, second law: "A proof-class clause may
+            // cite a declared lane ONLY WHILE ITS OWN STATUS IS \"stub\"." A
+            // declared lane's artifact does not exist yet, so a clause promoted
+            // off `stub` while citing one has been promoted against a proof
+            // nobody has written. The registry stated this combination was
+            // illegal and nothing rejected it
+            // (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`).
+            if lane.status == "declared" && clause.status != "stub" {
+                out.push(Violation::new(
+                    "proof_lane_declared_while_clause_promoted",
+                    reg,
+                    id,
+                    format!(
+                        "clause status is {:?} while its proof_lane {lane_id:?} is still \
+                         \"declared\" (artifact {:?} does not exist yet); a declared lane may \
+                         be cited only while the citing clause is \"stub\"",
+                        clause.status, lane.artifact
+                    ),
+                ));
+            }
         }
     }
     check_justification(
@@ -342,7 +468,11 @@ fn validate_clause(
     );
 }
 
-fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
+fn validate_invariants(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
     let reg = "invariants";
     // Carrier discipline.
     let expected_allowed = ["invariant", "proof", "bounded_model"];
@@ -431,6 +561,7 @@ fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
             }
             validate_clause(
                 r,
+                prover,
                 clause,
                 &inv.id,
                 &clause_keys,
@@ -633,7 +764,159 @@ fn validate_slo(r: &Registries, out: &mut Vec<Violation>) {
     }
 }
 
-fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
+/// Schema and checkedness for the `[[lane]]` rows of
+/// `registries/proof_lanes.toml`.
+///
+/// The checkedness half is [`crate::liveness`], not a second `is_file()` —
+/// `status = "checked"` was `root.join(artifact).is_file()`, the pre-`tl0o`
+/// checker read down to the missing path-safety guard, and the registry header's
+/// own definition ("the artifact exists in-repo AND is CI-checked") had no
+/// implementation of its second conjunct at all
+/// (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`). "Is CI-checked" is
+/// the question `liveness` was written to answer, so the lane delegates rather
+/// than re-deriving: it names its gate and `liveness` proves that gate live.
+///
+/// Same shape as [`validate_checker_index`]: the self-test is consulted FIRST,
+/// because a reader that has stopped reading returns "no defects" for every row,
+/// which is byte-identical to what a healthy registry returns.
+/// AGENTS.md's hardest rule, made non-vacuous
+/// (`fgdb-fginv-spine-zero-live-checkers-v05b`).
+///
+/// *Spec-First Workflow* item 2: **"CI cross-checks that every ID has a live
+/// checker."** The hard rule under it: "no subsystem ships against an unenforced
+/// invariant. A workstream exit gate (G1-G4) cannot pass while any invariant it
+/// depends on lacks a live checker."
+///
+/// Every clause is `stub` and every entrypoint resolves to a `stub` row, so that
+/// cross-check quantified over an EMPTY SET and passed. That is the purest form
+/// of the family this file has spent the evening closing — not a reader that
+/// answers wrongly, but a universally-quantified law with nothing to quantify
+/// over, whose exit code is identical to a fully enforced spine's.
+///
+/// The fix is not "make the twenty live" — that is the verification programme,
+/// not a law. It is to make the emptiness *accounted for*:
+///
+/// * the ledger examines EVERY id `expected_invariant_ids()` names and says so;
+///   a law that examined fewer has not passed, it has stopped looking;
+/// * a spine with no clauses at all is a violation, never a pass, exactly as
+///   `script_scan_empty` is for the scripts/ scan;
+/// * the enforced counts are DECLARED in the registry and checked in BOTH
+///   directions — too few means a clause silently regressed, too many means one
+///   was promoted without the gate review the doctrine requires.
+///
+/// "Is this clause's apparatus live" is not re-derived here: it is
+/// `liveness::Prover::assess_clause`, the same reader the promotion law
+/// (`...-nllh`) uses, which is itself `Prover::assess` — the reader `tl0o` built
+/// and `0f1l` consumed. Four faces, one reader.
+fn validate_enforcement_coverage(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
+    let reg = "invariants";
+    let mut accounted: Vec<String> = Vec::new();
+    let mut clauses_total = 0usize;
+    let mut enforced_clauses: Vec<String> = Vec::new();
+    let mut enforced_invariants: Vec<String> = Vec::new();
+
+    for invariant in &r.invariants.invariants {
+        accounted.push(invariant.id.clone());
+        // An invariant with no clauses enforces nothing: there is no apparatus
+        // to be live. Seeding `true` here would let an emptied invariant count
+        // as enforced, which is this bug one level down.
+        let mut every_clause_enforced = !invariant.clauses.is_empty();
+        for clause in &invariant.clauses {
+            clauses_total += 1;
+            let enforced = clause_status_is_enforced(&clause.status) == Some(true)
+                && prover.assess_clause(clause, &r.checker_index).is_empty();
+            if enforced {
+                enforced_clauses.push(clause.key.clone());
+            } else {
+                every_clause_enforced = false;
+            }
+        }
+        if every_clause_enforced {
+            enforced_invariants.push(invariant.id.clone());
+        }
+    }
+
+    // COMPLETENESS GUARD. The ledger must have accounted for the whole spine.
+    // `expected_invariant_ids()` is the ONE reader for what the spine must be;
+    // `validate_invariants` consumes it to check the registry, this consumes it
+    // to check the LEDGER. Without it a spine that shrank to nothing reports
+    // "0 enforced, 0 declared, pass" — a law that succeeded by having nothing to
+    // check.
+    let expected_ids = expected_invariant_ids();
+    if accounted != expected_ids {
+        out.push(Violation::new(
+            "enforcement_coverage_incomplete",
+            reg,
+            "<coverage>",
+            format!(
+                "the enforcement ledger accounted for {} invariant ids {:?}, but the spine is \
+                 {} ids {:?}; a coverage law that examined fewer rows than exist has not \
+                 passed, it has stopped looking",
+                accounted.len(),
+                accounted,
+                expected_ids.len(),
+                expected_ids
+            ),
+        ));
+    }
+
+    // A law with nothing to check has NOT passed. Same instrument as
+    // `script_scan_empty`: zero rows and a broken reader are indistinguishable
+    // at the exit code, so zero is a violation rather than a pass.
+    if clauses_total == 0 {
+        out.push(Violation::new(
+            "enforcement_coverage_empty",
+            reg,
+            "<coverage>",
+            "the spine declares no clauses at all, so \"every ID has a live checker\" is \
+             quantified over the empty set; a zero here cannot be distinguished from a \
+             registry that failed to load, so it is a violation rather than a pass",
+        ));
+        return;
+    }
+
+    // The declared expectations, checked in BOTH directions.
+    for (what, measured, declared, moved) in [
+        (
+            "clauses",
+            enforced_clauses.len() as i64,
+            r.invariants.expected_enforced_clauses,
+            &enforced_clauses,
+        ),
+        (
+            "invariant ids",
+            enforced_invariants.len() as i64,
+            r.invariants.expected_enforced_invariants,
+            &enforced_invariants,
+        ),
+    ] {
+        if measured != declared {
+            out.push(Violation::new(
+                "enforcement_coverage_drift",
+                reg,
+                "<coverage>",
+                format!(
+                    "registry declares {declared} enforced {what}, measured {measured} over \
+                     {clauses_total} clauses in {} invariant ids; enforced now: {moved:?}. \
+                     Too few means a clause regressed to stub; too many means one was \
+                     promoted without the gate review the doctrine requires — either way the \
+                     declaration and the tree disagree about what this project enforces",
+                    accounted.len()
+                ),
+            ));
+        }
+    }
+}
+
+fn validate_proof_lanes(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
     let reg = "proof_lanes";
     let mut seen = BTreeSet::new();
     for lane in &r.proof_lanes {
@@ -657,17 +940,18 @@ fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
             ));
         }
         match lane.status.as_str() {
-            "declared" => {}
-            "checked" => {
-                if !root.join(&lane.artifact).is_file() {
+            // Both statuses are adjudicated: a `declared` lane still owes a safe
+            // repository-relative artifact path, and that was never checked at
+            // all. The rest of the reads apply only to `checked`, which the
+            // prover decides — not this function, so there is one place that
+            // knows what the word means.
+            "declared" | "checked" => {
+                for defect in prover.assess_lane(lane, &r.checker_index) {
                     out.push(Violation::new(
-                        "artifact_missing",
+                        defect.kind.code(),
                         reg,
                         &lane.id,
-                        format!(
-                            "status is \"checked\" but artifact {:?} does not exist",
-                            lane.artifact
-                        ),
+                        format!("status is {:?} but {}", lane.status, defect.detail),
                     ));
                 }
             }
@@ -681,7 +965,24 @@ fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
     }
 }
 
-fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
+/// Schema and liveness for the `[[checker]]` rows of
+/// `registries/checker_index.toml`.
+///
+/// The liveness half is [`crate::liveness`], not a second `is_file()` — see that
+/// module's header. Two facts matter about the shape of this function:
+///
+/// * the self-test is consulted FIRST, and a broken reader is reported as a
+///   violation rather than allowed to produce a clean sweep. A liveness reader
+///   that has stopped reading returns "no defects" for every row, which is
+///   byte-identical to what a healthy registry returns;
+/// * a live row that is not actually live is reported per row, with the code
+///   naming which of the three claims — registered, invoked, capable of failing
+///   — it failed.
+fn validate_checker_index(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
     let reg = "checker_index";
     let mut seen = BTreeSet::new();
     for c in &r.checker_index {
@@ -707,15 +1008,12 @@ fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>)
         match c.status.as_str() {
             "stub" => {}
             "live" => {
-                if !root.join(&c.artifact).is_file() {
+                for defect in prover.assess(c) {
                     out.push(Violation::new(
-                        "artifact_missing",
+                        defect.kind.code(),
                         reg,
                         &c.symbol,
-                        format!(
-                            "status is \"live\" but artifact {:?} does not exist",
-                            c.artifact
-                        ),
+                        format!("status is \"live\" but {}", defect.detail),
                     ));
                 }
             }
@@ -729,19 +1027,555 @@ fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>)
     }
 }
 
+/// Recursively collect every shell deliverable below `scripts/`.
+///
+/// This walk is deliberately filesystem-derived rather than Git-derived: an
+/// untracked script is already absent from the Git-based shell lint and must
+/// not disappear from this closure too. Every directory-entry error fails the
+/// whole scan closed; silently dropping one child would make an unreadable
+/// subtree indistinguishable from a fully declared one.
+fn collect_shell_scripts(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    let relative_dir = dir.strip_prefix(root).unwrap_or(dir);
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", relative_dir.display()))?;
+    let mut entries = entries.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        format!(
+            "cannot read a directory entry below {}: {e}",
+            relative_dir.display()
+        )
+    })?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| {
+            format!(
+                "cannot classify shell-deliverable candidate {}: {e}",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            )
+        })?;
+        if file_type.is_dir() {
+            collect_shell_scripts(root, &path, out)?;
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().ends_with(".sh") {
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|e| {
+            format!(
+                "scanned path {} escaped repository root {}: {e}",
+                path.display(),
+                root.display()
+            )
+        })?;
+        out.push(relative.to_string_lossy().replace('\\', "/"));
+    }
+    Ok(())
+}
+
+/// Close `checker_index.toml` in the FILE -> ROW direction.
+///
+/// [`validate_checker_index`] closes row -> file: a `live` row's artifact must
+/// exist. Nothing closed the other way, so a `scripts/**/*.sh` could carry every
+/// signal of a gate — `set -euo pipefail`, pinned counts, PASS/FAIL counters —
+/// while no runner and no registry knew it existed. Five top-level scripts did
+/// (`fgdb-orphan-w1-e2e-gates-unregistered-unrun-vuq8`), holding six hard-pinned
+/// magic numbers between them. Before `fgdb-fknh`, the same blind spot remained
+/// below `scripts/lib/` and `scripts/git_hooks/`.
+///
+/// Since `scripts/check.sh` became registry-derived, registration is also what
+/// makes a script RUN, so this is the law that decides whether a deliverable is
+/// a gate at all.
+///
+/// The scan reads the filesystem rather than `git ls-files`: an UNTRACKED script
+/// is exempt from the git-based shell lint, so it must not also be exempt here.
+fn validate_script_closure(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
+    let reg = "checker_index";
+    let dir = root.join("scripts");
+
+    let mut on_disk = Vec::new();
+    if let Err(e) = collect_shell_scripts(root, &dir, &mut on_disk) {
+        out.push(Violation::new(
+            "script_scan_failed",
+            reg,
+            "scripts/",
+            format!("{e} — refusing to report recursive script closure as checked"),
+        ));
+        return;
+    }
+    on_disk.sort();
+
+    // CONTROL. Every verdict below is a statement about a set this function
+    // built by scanning a directory. If the scan comes back empty, the two
+    // readings — "there are no scripts" and "the scanner is broken" — are
+    // indistinguishable, and every "declared" verdict is then quantified over
+    // nothing. `scripts/check.sh` is itself a script, so zero is never correct.
+    if on_disk.is_empty() {
+        out.push(Violation::new(
+            "script_scan_empty",
+            reg,
+            "scripts/",
+            "scanned scripts/ and found no *.sh at all; a zero result here cannot be \
+             distinguished from a broken scan, so it is a violation rather than a pass",
+        ));
+        return;
+    }
+
+    let registered: BTreeSet<&str> = r
+        .checker_index
+        .iter()
+        .map(|c| c.artifact.as_str())
+        .filter(|a| a.starts_with("scripts/"))
+        .collect();
+    let declared: BTreeMap<&str, &ScriptDisposition> = r
+        .script_dispositions
+        .iter()
+        .map(|d| (d.path.as_str(), d))
+        .collect();
+
+    for path in &on_disk {
+        let is_registered = registered.contains(path.as_str());
+        let disposition = declared.get(path.as_str()).copied();
+        match (is_registered, disposition) {
+            (false, None) => out.push(Violation::new(
+                "script_undeclared",
+                reg,
+                path,
+                "shell deliverable is neither a registered checker artifact nor a \
+                 [[script_disposition]] row; register it, or say why it is not a gate",
+            )),
+            (true, Some(d)) => out.push(Violation::new(
+                "script_disposition_conflict",
+                reg,
+                path,
+                format!(
+                    "is a registered checker artifact AND declared a non-gate {:?}; \
+                     exactly one of the two must hold",
+                    d.role
+                ),
+            )),
+            _ => {}
+        }
+    }
+
+    let present: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
+    for d in &r.script_dispositions {
+        if !present.contains(d.path.as_str()) {
+            out.push(Violation::new(
+                "script_disposition_dangling",
+                reg,
+                &d.path,
+                "[[script_disposition]] names a script that does not exist",
+            ));
+        }
+        if !SCRIPT_ROLES.contains(&d.role.as_str()) {
+            out.push(Violation::new(
+                "bad_field",
+                reg,
+                &d.path,
+                format!("role {:?} not in {SCRIPT_ROLES:?}", d.role),
+            ));
+        }
+        if d.reason.trim().is_empty() {
+            out.push(Violation::new(
+                "bad_field",
+                reg,
+                &d.path,
+                "a non-gate declaration requires a reason",
+            ));
+        }
+    }
+}
+
 fn id_matches(id: &str, prefix: &str) -> bool {
     id.strip_prefix(prefix)
         .is_some_and(|rest| rest.len() == 2 && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// `logical_object_kinds.toml` rows with `status = "active"` and the arms of the
+/// `active_logical_object_kinds!` invocation in `crates/fgdb-types/src/refs.rs`
+/// must biject, by code AND by name.
+///
+/// WHY THIS LIVES HERE. The binding is real but was enforced *only* by two
+/// `const _: () = assert!(...)` inside `fgdb-types`, so it fired at compile time
+/// of a foundation crate and nowhere else. A pane could add an `active` row,
+/// watch `registry-check all`, the identity suite, architecture-check and the G0
+/// identity e2e all report green, and leave the whole workspace unable to build.
+/// That is exactly what happened: 84418b2 added `DurableCapabilityValidationEvidence`
+/// (0x028f) as active with no arm, taking the count 10 -> 11, and `main` stayed
+/// broken for hours with every registry gate green.
+///
+/// The const assert also cannot say WHICH row is wrong — it only compares two
+/// counts, so its diagnostic is a bare `assertion failed: count_bytes(...) == ...`.
+/// This checker names the offending symbol in both directions.
+fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
+    let reg = "logical_object_kinds";
+    let refs_path = root.join("crates/fgdb-types/src/refs.rs");
+    let toml_path = root.join("registries/logical_object_kinds.toml");
+
+    // An unreadable input is a violation, never a skip: a checker that silently
+    // does nothing is indistinguishable from one that passed.
+    let Ok(refs_src) = std::fs::read_to_string(&refs_path) else {
+        out.push(Violation::new(
+            "active_logical_kind_source_unreadable",
+            reg,
+            "refs.rs",
+            format!(
+                "cannot read {}; refusing to report the arm binding as checked",
+                refs_path.display()
+            ),
+        ));
+        return;
+    };
+    let Ok(toml_src) = std::fs::read_to_string(&toml_path) else {
+        out.push(Violation::new(
+            "active_logical_kind_source_unreadable",
+            reg,
+            "logical_object_kinds.toml",
+            format!("cannot read {}", toml_path.display()),
+        ));
+        return;
+    };
+
+    // Arms: `    Variant = 0x0001 => "Name",` inside the invocation block.
+    //
+    // The block boundaries and the arm parse are both read out of MASKED source
+    // -- comments and literal contents blanked, every other byte left in place,
+    // so the masked line and the raw line are byte-aligned and an offset in one
+    // names the same column of the other. Only the arm's NAME is taken from the
+    // raw line, bounded by where the masked line says the code ends.
+    //
+    // Reading raw text here was wrong in both directions at once. A commented-
+    // out arm parsed as a live one, so the bijection this function exists to
+    // enforce -- active registry row <-> real Rust arm -- was satisfied by text
+    // the compiler ignores, which is precisely the failure it was written to
+    // catch, reached from the other side. And a trailing comment on a live arm
+    // put the comment's own text inside that arm's name, reporting
+    // `active_logical_kind_name_mismatch` against a row that was correct: a
+    // wrong diagnosis wearing the right verdict.
+    //
+    // `unsafe_ledger::mask_source` is the one reader for "which bytes of this
+    // Rust source are live code". A second comment-stripper here is how a fixed
+    // reader stays fixed while its twin rots.
+    let masked = crate::unsafe_ledger::mask_source(&refs_src);
+    let mut arms: BTreeMap<u32, String> = BTreeMap::new();
+    let mut depth = 0usize;
+    let mut found_macro = false;
+    for (line, raw) in masked.text().lines().zip(refs_src.lines()) {
+        let trimmed = line.trim();
+        if depth == 0 {
+            if trimmed.starts_with("active_logical_object_kinds!") && trimmed.ends_with('{') {
+                depth = 1;
+                found_macro = true;
+            }
+            continue;
+        }
+        // Brace DEPTH, not a bare `}`: the block used to end at the first line
+        // that was exactly `}`, so any nested block inside the invocation closed
+        // the arm set early and every arm below it read as missing.
+        let opens = line.bytes().filter(|b| *b == b'{').count();
+        let closes = line.bytes().filter(|b| *b == b'}').count();
+        let after = (depth + opens).saturating_sub(closes);
+        if after == 0 {
+            depth = 0;
+            continue;
+        }
+        depth = after;
+        let Some(arrow) = line.find("=>") else {
+            continue;
+        };
+        let Some((_variant, code_text)) = line[..arrow].split_once('=') else {
+            continue;
+        };
+        let code_text = code_text.trim().trim_end_matches(',').trim();
+        let Some(hex) = code_text.strip_prefix("0x") else {
+            continue;
+        };
+        let Ok(code) = u32::from_str_radix(hex, 16) else {
+            continue;
+        };
+        // Everything from the arrow to the last live byte of the line. A
+        // trailing comment is blank in the masked line, so `trim_end` drops it
+        // without ever letting it reach the name.
+        let name = raw
+            .get(arrow + 2..line.trim_end().len())
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches('"')
+            .to_owned();
+        if arms.insert(code, name).is_some() {
+            out.push(Violation::new(
+                "active_logical_kind_arm_duplicate",
+                reg,
+                &format!("0x{code:04x}"),
+                "two arms declare the same object_kind code",
+            ));
+        }
+    }
+    if !found_macro {
+        out.push(Violation::new(
+            "active_logical_kind_macro_absent",
+            reg,
+            "refs.rs",
+            "no `active_logical_object_kinds!` invocation found; the arm binding was NOT checked",
+        ));
+        return;
+    }
+
+    // Active rows out of the registry, read as DATA through the one TOML parser
+    // this crate has.
+    //
+    // The line scan this replaced matched `object_kind = 0x`, `name = ` and
+    // `status = ` as literal prefixes of a trimmed line, which is the same
+    // substring-for-structure defect as the arm scanner above, one file over,
+    // and it failed in the direction that manufactures work: `name='Beta'` in
+    // TOML literal quotes, or `name="Beta"` with no spaces around the `=`, made
+    // the row unreadable, so it dropped silently out of the active set and its
+    // perfectly good Rust arm was reported as `arm_without_active_logical_kind`.
+    // A trailing comment on `status` dropped EVERY row and the run reported
+    // `active_logical_kind_none_parsed`. Every one of those is valid TOML that
+    // `appendix_a` -- which generates this very file -- reads without trouble.
+    let table = match crate::toml::parse(&toml_src) {
+        Ok(t) => t,
+        Err(e) => {
+            out.push(Violation::new(
+                "active_logical_kind_registry_unparseable",
+                reg,
+                "logical_object_kinds.toml",
+                format!("cannot parse the registry, so the arm binding was NOT checked: {e}"),
+            ));
+            return;
+        }
+    };
+    let rows = match crate::toml::get_table_array(&table, "kind", "logical_object_kinds.toml") {
+        Ok(rows) => rows,
+        Err(e) => {
+            out.push(Violation::new(
+                "active_logical_kind_registry_unparseable",
+                reg,
+                "logical_object_kinds.toml",
+                format!("cannot read the [[kind]] rows, so the arm binding was NOT checked: {e}"),
+            ));
+            return;
+        }
+    };
+    let mut active: BTreeMap<u32, String> = BTreeMap::new();
+    for (i, row) in rows.iter().enumerate() {
+        let ctx = format!("logical_object_kinds.toml.kind[{i}]");
+        // A row this checker cannot read is a violation, never a silent drop:
+        // dropping it is exactly how a live arm came to look orphaned.
+        let (code, name, status) = match (
+            crate::toml::get_int(row, "object_kind", &ctx),
+            crate::toml::get_str(row, "name", &ctx),
+            crate::toml::get_str(row, "status", &ctx),
+        ) {
+            (Ok(code), Ok(name), Ok(status)) => (code, name, status),
+            _ => {
+                out.push(Violation::new(
+                    "active_logical_kind_row_unreadable",
+                    reg,
+                    &ctx,
+                    "a [[kind]] row is missing object_kind, name or status; its arm binding \
+                     cannot be checked and the row is not assumed inactive",
+                ));
+                continue;
+            }
+        };
+        if status == "active" {
+            active.insert(code as u32, name);
+        }
+    }
+
+    if active.is_empty() {
+        out.push(Violation::new(
+            "active_logical_kind_none_parsed",
+            reg,
+            "logical_object_kinds.toml",
+            "parsed zero active rows; the registry format changed and this check is vacuous",
+        ));
+        return;
+    }
+
+    // The foundation crate consumes this projection as raw bytes and requires
+    // each active row's object_kind/name/status fields to be adjacent and in
+    // that order.  The generator byte-compare alone cannot see a generator
+    // change that preserves its own output, so keep the consumer contract
+    // load-bearing here as well.
+    for (code, name) in &active {
+        let needle = format!("object_kind = 0x{code:04x}\nname = \"{name}\"\nstatus = \"active\"");
+        if !toml_src.contains(&needle) {
+            out.push(Violation::new(
+                "logical_kind_projection_layout",
+                reg,
+                name,
+                "active logical kind projection must keep object_kind, name, and status adjacent in that order for fgdb-types raw-byte consumers",
+            ));
+        }
+    }
+
+    for (c, n) in &active {
+        match arms.get(c) {
+            Some(arm_name) if arm_name == n => {}
+            Some(arm_name) => out.push(Violation::new(
+                "active_logical_kind_name_mismatch",
+                reg,
+                n,
+                format!("row 0x{c:04x} is named {n:?} but its refs.rs arm is named {arm_name:?}"),
+            )),
+            None => out.push(Violation::new(
+                "active_logical_kind_without_arm",
+                reg,
+                n,
+                format!(
+                    "row 0x{c:04x} {n:?} is status=\"active\" but no `active_logical_object_kinds!` \
+                     arm declares it; fgdb-types will not compile. Either add the arm or make the \
+                     row status=\"reserved\""
+                ),
+            )),
+        }
+    }
+    for (c, n) in &arms {
+        if !active.contains_key(c) {
+            out.push(Violation::new(
+                "arm_without_active_logical_kind",
+                reg,
+                n,
+                format!("refs.rs arm 0x{c:04x} {n:?} has no status=\"active\" registry row"),
+            ));
+        }
+    }
+}
+
+/// Every capability atom named by an `activation_predicate` must be declared in
+/// the registry's `capability_atoms` vocabulary.
+///
+/// The atom space used to be OPEN, and that is not a cosmetic gap: an atom that
+/// is merely misspelled evaluates false exactly as an unlanded capability does,
+/// so `mvcc-visibilty` makes its clause unreachable forever. Measured before
+/// this check existed: misspelling one atom shrank the reachable set from 20 to
+/// 19 with no violation of any kind. In a tree where the other 19 clauses were
+/// live, the misspelled one would have escaped enforcement under a green
+/// verdict — permanently, and including after Genesis, because nothing in the
+/// system could ever notice.
+///
+/// Closing the vocabulary is what makes a typo a validation error instead of a
+/// silent absence. The same vocabulary is applied to capability manifests by
+/// [`validate_manifest_atoms`].
+fn validate_capability_atoms(r: &Registries, out: &mut Vec<Violation>) {
+    let reg = "invariants";
+    let declared: BTreeSet<&str> = r
+        .invariants
+        .capability_atoms
+        .iter()
+        .map(String::as_str)
+        .collect();
+    for inv in &r.invariants.invariants {
+        for clause in &inv.clauses {
+            let Ok(expr) = predicate::parse(&clause.activation_predicate) else {
+                // Already reported as `bad_field`; nothing to say twice.
+                continue;
+            };
+            let mut atoms = BTreeSet::new();
+            predicate::atoms(&expr, &mut atoms);
+            for atom in atoms {
+                if !declared.contains(atom.as_str()) {
+                    out.push(Violation::new(
+                        "undeclared_capability_atom",
+                        reg,
+                        &clause.key,
+                        format!(
+                            "activation_predicate names capability atom {atom:?}, which is not \
+                             in registry.capability_atoms. An undeclared atom is indistinguishable \
+                             from a misspelled one: both evaluate false, so the clause is \
+                             unreachable forever and no gate can say so"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Every atom a capability manifest enables must be declared in the same
+/// vocabulary.
+///
+/// This is the other half of the typo class. A manifest naming
+/// `mvcc-visibilty` silently enables nothing; the closure it produces is
+/// smaller than the one the author believed they had asked for, and the gate
+/// reports a pass over it.
+pub fn validate_manifest_atoms(r: &Registries, manifest: &Manifest) -> Vec<Violation> {
+    let declared: BTreeSet<&str> = r
+        .invariants
+        .capability_atoms
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut out = Vec::new();
+    for (field, atoms) in [
+        ("features", &manifest.features),
+        ("postures", &manifest.postures),
+        ("roles", &manifest.roles),
+    ] {
+        for atom in atoms {
+            if !declared.contains(atom.as_str()) {
+                out.push(Violation::new(
+                    "undeclared_manifest_atom",
+                    "manifest",
+                    &manifest.name,
+                    format!(
+                        "{field} names capability atom {atom:?}, which is not in \
+                         invariants.toml registry.capability_atoms; it enables nothing, and a \
+                         misspelling is indistinguishable from a capability that has not landed"
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Run every check. `root` is the repository root (artifact resolution).
 pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     let mut out = Vec::new();
+    // ONE prover for the whole sweep. Three registries now ask `liveness` the
+    // same question — is this checker row live — and the prover exists to cache
+    // the module-map read that answers it. Three provers would be three caches
+    // of one fact, which is this bug family in its performance costume; it is
+    // also why the licence below is consulted once rather than per registry.
+    let prover = crate::liveness::Prover::new(root);
+    // THE CONTROL, first, for the whole run. The liveness readers are
+    // source-text readers, the layer where all four of this repository's "looks
+    // exactly like a pass" tooling bugs lived. If they have stopped reading they
+    // report "no defects" for every row, which is byte-identical to what a
+    // healthy tree reports — so no clean verdict below is licensed until they
+    // have answered a known question correctly.
+    let self_test = crate::liveness::self_test();
+    if !self_test.licensed() {
+        out.push(Violation::new(
+            "checker_liveness_self_test_failed",
+            "checker_index",
+            "<self-test>",
+            format!(
+                "the liveness readers got {} of {} known answers wrong ({}); refusing to \
+                 report any checker row live, any proof lane checked, or any clause \
+                 legally promoted",
+                self_test.failures.len(),
+                self_test.cases,
+                self_test.failures.join(", ")
+            ),
+        ));
+    }
     validate_constitution(r, &mut out);
-    validate_invariants(r, &mut out);
+    validate_invariants(r, &prover, &mut out);
+    validate_enforcement_coverage(r, &prover, &mut out);
     validate_evidence(r, &mut out);
     validate_slo(r, &mut out);
-    validate_proof_lanes(r, root, &mut out);
-    validate_checker_index(r, root, &mut out);
+    validate_proof_lanes(r, &prover, &mut out);
+    validate_checker_index(r, &prover, &mut out);
+    validate_script_closure(r, root, &mut out);
+    validate_active_logical_kind_arms(root, &mut out);
+    validate_capability_atoms(r, &mut out);
     out
 }

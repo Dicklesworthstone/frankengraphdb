@@ -9,7 +9,27 @@
 # in invariants.toml must resolve to a row here. Rows may be stub-registered
 # pre-Genesis (status = "stub") so the g0-invariant-spine bead can bind clause
 # records before their runtime oracles exist — but the symbol must still be a
-# registered, reviewable row, and a "live" row's artifact must exist in-repo.
+# registered, reviewable row.
+#
+# WHAT `status = "live"` MEANS (fgdb-checker-index-live-is-only-file-existence-tl0o).
+# It used to mean `Path::is_file()` — the artifact exists. That is far weaker
+# than what AGENTS.md rests on it ("CI cross-checks that every ID has a live
+# checker"; "no subsystem ships against an unenforced invariant"): a checker
+# could be registered live, be cited by a clause as its enforcement mechanism,
+# be invoked by no gate, and contain no code capable of failing, and every
+# registry gate stayed green. A live row now has to survive three independent
+# reads in `tools/registry-check/src/liveness.rs`:
+#
+#   REGISTERED  the artifact is a safe repository-relative file AND `unit`
+#               resolves inside it;
+#   INVOKED     an executing gate can reach it — a cargo-test artifact must be
+#               an auto-discovered integration test of a workspace member, a
+#               binary artifact must be compiled into a bin target through live
+#               `mod` declarations, a script must be an executable program;
+#   CAN FAIL    the unit a runner reaches has a path to a failing outcome — a
+#               test that can panic, a bin whose `main` can exit nonzero, a
+#               script with a nonzero exit. Read from LIVE code only, so a
+#               commented-out assertion proves nothing.
 #
 # Row schema:
 #   [[checker]]
@@ -17,6 +37,15 @@
 #   kind     = "cargo-test" | "script" | "binary" | "stub"
 #   artifact = "..."        # repo-relative path implementing the symbol
 #   status   = "live" | "stub"
+#   unit     = "symbol" | "artifact"    # REQUIRED on a live row
+#
+# `unit` says what `symbol` names, because nothing else can. Nine live rows name
+# a `#[test] fn` (`unit = "symbol"`; deleting or renaming that function now turns
+# the row red instead of leaving it green over a file that merely still exists).
+# The other twenty-seven are law/gate names for a whole artifact
+# (`architecture_source_coverage`, `cargo-test:claims`, `g0_topology_e2e`, ...)
+# and say so (`unit = "artifact"`). Those are legitimate — the defect was that
+# no spelling rule separated them from a rotted symbol, so both read as a pass.
 # =============================================================================
 
 schema_version = 1
@@ -31,78 +60,91 @@ symbol = "claims_neg_missing_checker"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_neg_waiver_present"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_neg_statistical_in_invariants"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_neg_unregistered_dependency"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_hash_twenty_id_pin"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_escalation_slo_cannot_justify_invariant"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_proof_lane_manifest_resolves"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_class_lattice_narrowing"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_registry_toml_fuzz"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_lint"
 kind = "binary"
 artifact = "tools/registry-check/src/main.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_claims_e2e"
 kind = "script"
 artifact = "scripts/g0_claims_e2e.sh"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_spine_e2e"
 kind = "script"
 artifact = "scripts/g0_spine_e2e.sh"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_identity_e2e"
 kind = "script"
 artifact = "scripts/g0_identity_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # --- Canonical Appendix A catalog scaffold and generated projections. ---
 
@@ -111,18 +153,21 @@ symbol = "appendix_a_catalog_source"
 kind = "binary"
 artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "appendix_a_catalog_projection_diff"
 kind = "binary"
 artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "appendix_a_catalog_closure"
 kind = "binary"
 artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
+unit = "artifact"
 
 # --- Frozen architecture-decision record and reciprocal provenance closure.
 
@@ -131,36 +176,42 @@ symbol = "architecture_source_coverage"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_owner_closure"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_dependency_closure"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_research_dependency_firewall"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_decisions"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/architecture_decisions.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_architecture_decisions_e2e"
 kind = "script"
 artifact = "scripts/g0_architecture_decisions_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # Full verification-label identities. Architecture decisions use these exact
 # symbols so a human-friendly label cannot silently resolve to a different
@@ -172,24 +223,28 @@ symbol = "cargo-test:architecture_decisions"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/architecture_decisions.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "cargo-test:claims"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "cargo-test:proof-lane-resolution"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "e2e:g0_architecture_decisions"
 kind = "script"
 artifact = "scripts/g0_architecture_decisions_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # --- Identity-constitution byte-level walkers (stub-registered; each becomes
 # --- live with its phase-correct downstream owner and planned test artifact).
@@ -197,9 +252,10 @@ status = "live"
 # Owner: fgdb-w1-generated-parsers-i3k.
 [[checker]]
 symbol = "idr_generated_encoder_decoder_roundtrip"
-kind = "stub"
+kind = "cargo-test"
 artifact = "crates/fgdb-codec/tests/generated_durable_roundtrip.rs"
-status = "stub"
+status = "live"
+unit = "artifact"
 
 # Owner: fgdb-w1-format-test-corpora-lyf.
 [[checker]]
@@ -460,3 +516,255 @@ symbol = "fg_inv_20_core_negative"
 kind = "stub"
 artifact = "crates/fgdb-secure-view/src/pre_observation.rs"
 status = "stub"
+
+# --- W1 workspace-wide determinism gate. ---
+# Per-crate suites assert Doctrine #4 for themselves; this one asserts it
+# ACROSS crates — two `cargo test --workspace` runs must agree, for the same
+# pinned tree, on every engine crate at once. Registered "live": the artifact
+# ships with a `--self-test` mutant panel, so the oracle is known to go red.
+
+[[checker]]
+symbol = "w1_cross_crate_determinism_e2e"
+kind = "script"
+artifact = "scripts/w1_cross_crate_determinism_e2e.sh"
+status = "live"
+unit = "artifact"
+
+# --- W1 region-backed collections semantic matrix. Owner: fgdb-5mqr. ---
+
+[[checker]]
+symbol = "w1_collections_e2e"
+kind = "script"
+artifact = "scripts/w1_collections_e2e.sh"
+status = "live"
+unit = "artifact"
+
+# --- G0 threat/trust model, authority lattice, and authority footprint. ---
+# Owner: fgdb-g0-threat-model-nqd.
+
+[[checker]]
+symbol = "threat_model"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/threat_model.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "threat_registry_source"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/threat-check.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "g0_threat_e2e"
+kind = "script"
+artifact = "scripts/g0_threat_e2e.sh"
+status = "live"
+unit = "artifact"
+
+# --- W1 unsafe-boundary ledger: island roster, workspace forbid inheritance, ---
+# --- and the site<->row bijection. Owner: fgdb-w1-unsafe-ledger-icp.        ---
+
+[[checker]]
+symbol = "unsafe_boundary_ledger"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/unsafe_ledger.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "unsafe_ledger_check"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/unsafe-ledger-check.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "w1_unsafe_tool_lanes"
+kind = "script"
+artifact = "scripts/w1_unsafe_tool_lanes.sh"
+status = "live"
+unit = "artifact"
+
+# --- G0 workspace crate/layer topology and the build-versus-consume inventory. ---
+# Owner: fgdb-g0-workspace-topology-1q9m.
+
+[[checker]]
+symbol = "workspace_topology"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/workspace_topology.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "topology_registry_source"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/topology-check.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "g0_topology_e2e"
+kind = "script"
+artifact = "scripts/g0_topology_e2e.sh"
+status = "live"
+unit = "artifact"
+
+# --- The doctrine memorial AGENTS.md designates (fgdb-negative-evidence-ledger-
+# --- does-not-exist-m172). AGENTS.md says a doctrine violation is "memorialized
+# --- in docs/NEGATIVE_EVIDENCE.md"; that file did not exist and was referenced by
+# --- nothing but the sentence itself, so the doctrine's enforcement clause was
+# --- decorative. This gate carries four laws: AGENTS.md self-containment (every
+# --- repository path it names resolves, and the three it names under "NEVER
+# --- create" must NOT), ledger well-formedness, referential integrity of every
+# --- doctrine/bead/commit citation, and a disposition for every revert commit
+# --- whose canonical target is reachable and whose reverse patch-id exactly
+# --- matches one target-parent delta. Revert words in a subject are reported,
+# --- never treated as proof that the commit performed a rollback. It reports the
+# --- unclassified closed-bead residue rather than failing on it, and says so, so
+# --- the gap is measured rather than mistaken for cover.
+
+[[checker]]
+symbol = "g0_negative_evidence_e2e"
+kind = "script"
+artifact = "scripts/g0_negative_evidence_e2e.sh"
+status = "live"
+unit = "artifact"
+
+# --- The gate that actually runs the provers (fgdb-dkrc, residue of
+# --- fgdb-proof-lane-checked-is-only-file-existence-0f1l). 0f1l made
+# --- `status = "checked"` mean something but deliberately ran nothing: there was
+# --- no `lean`, `lake` or TLC invocation anywhere in the repository, so a lane's
+# --- `checked_by` had no gate it could name. This row is that gate. It refuses
+# --- to be vacuous in both directions — zero checked lanes is a failure, and a
+# --- missing prover is a failure rather than a skip. It also fails a proof that
+# --- Lean ACCEPTS while admitting itself: `lean` exits 0 on `sorry` (a warning,
+# --- not an error), measured by red-proof.
+
+[[checker]]
+symbol = "g0_proof_lanes_e2e"
+kind = "script"
+artifact = "scripts/g0_proof_lanes_e2e.sh"
+status = "live"
+unit = "artifact"
+
+# --- The gate that guards the tree-stability tripwire (fgdb-mt2b, residue of
+# --- fgdb-49ng). 49ng landed the tripwire in scripts/lib/gate_verdict.sh: a gate
+# --- whose subject moved underneath it reports UNRUN carrying both shas rather
+# --- than a PASS certifying a tree never wholly tested, or a FAIL blaming
+# --- whichever pane's code was resident. Nothing guarded the guard. Neuter
+# --- gate_check_tree_stable and every gate in this repo stays green — measured,
+# --- and now measured by this row: with it neutered this gate reports 7 failures,
+# --- and with the trap's `exit` regressed to an `rc=` assignment it reports the
+# --- original defect verbatim (token=UNRUN, rc=0 — "did not run" and "success" in
+# --- one breath), caught by exactly one case.
+# --- Six directions, because a tripwire that only fires is as useless as one that
+# --- never does: still+green -> PASS, still+RED -> FAIL with zero UNRUN (the third
+# --- state must not swallow a real failure), a landing mid-run -> UNRUN with two
+# --- differing shas, an UNCOMMITTED tracked edit -> UNRUN with HEAD equal at both
+# --- ends (the case that kills a HEAD-only fingerprint), the EXIT-trap window, and
+# --- a mutation control asserting the UNRUNs come from the tripwire itself.
+# --- The same artifact also guards fgdb-41p3's aggregate attribution: a
+# --- Beads, Rust, shell and gate-driver moves exercise the domain boundaries;
+# --- declaration, result-ledger, live-wiring and intersection mutants all red
+# --- the panel. Registered artifacts remain explicitly all-tracked until a
+# --- narrower reader has its own completeness proof, so an undeclared domain
+# --- cannot become a false-PASS escape hatch.
+# --- Its subject is a synthetic few-KB git repo, not a clone of this one: it costs
+# --- no build slot, cannot race, and never commits in the live worktree — doing
+# --- that to prove this would void whatever check.sh is in flight, which is the
+# --- harm fgdb-49ng exists to remove.
+
+[[checker]]
+symbol = "g0_tree_stability_e2e"
+kind = "script"
+artifact = "scripts/g0_tree_stability_e2e.sh"
+status = "live"
+unit = "artifact"
+
+# =============================================================================
+# script_disposition — the FILE -> ROW direction (fgdb-orphan-w1-e2e-gates-
+# unregistered-unrun-vuq8).
+#
+# The [[checker]] rows above close row -> file: a "live" row's artifact must
+# exist. Nothing closed the other way, so a shell deliverable could sit in
+# scripts/ carrying every signal of a gate — set -euo pipefail, pinned counts,
+# PASS/FAIL counters — while no runner and no registry knew it existed. Six did.
+#
+# Every scripts/**/*.sh must now be either a [[checker]] artifact above or a row
+# here saying why it is not a gate. `role` is one of runner | advisory |
+# candidate | library | hook. Enforced by validate_script_closure, which walks
+# the filesystem recursively (not `git ls-files`, since an untracked script is
+# already exempt from the shell lint and must not be exempt twice).
+# =============================================================================
+
+[[script_disposition]]
+path = "scripts/check.sh"
+role = "runner"
+reason = "the runner itself: it derives and invokes the registered gates, so registering it would make it invoke itself"
+
+[[script_disposition]]
+path = "scripts/br_sync.sh"
+role = "advisory"
+reason = "fgdb-wv3v: the operator entrypoint for an explicit, landing-lease-aware beads export, not a repository checker. Registering this state-mutating helper would make check.sh rewrite tracked .beads/issues.jsonl during its own frozen-input window. Its fail-closed BINDING path, loud fail-open degraded paths, real-br composition, and mutation control are exercised by the registered scripts/g0_tree_stability_e2e.sh gate"
+
+[[script_disposition]]
+path = "scripts/token.sh"
+role = "advisory"
+reason = "fgdb-token-script-disposition-jsc4: operator coordination for advisory catalog, build-slot, and landing leases, not a repository checker. Its acquire, renew, release, and steal commands mutate out-of-tree token state under /data/tmp/fgdb_swarm/tokens; invoking it from check.sh would either contend for a live lease or change coordination state while asserting no repository property"
+
+[[script_disposition]]
+path = "scripts/bead_provenance_preflight.sh"
+role = "advisory"
+reason = "pre-commit advisory for .beads/ authors, not part of any gate chain; its own header says 'Run it BEFORE you commit'. The defect that used to be recorded here (exit 0 on the case it exists to catch) is FIXED — fgdb-bead-provenance-preflight-misses-pin-drift-a5kb: its probe now reports validate_architecture's own bead_provenance verdict and red-proves itself on every run. It stays advisory rather than registered on purpose: check.sh already runs architecture-check, which reports the same violations, and a second reader of one fact inside the gate chain is the defect this project keeps closing"
+
+[[script_disposition]]
+path = "scripts/w1_bigint_e2e.sh"
+role = "candidate"
+reason = "vuq8: assertions MEASURED to hold at 0ada651 (deterministic_transcript byte-identical across two runs; fgdb-bigint declares zero deps of any kind, satisfying the depth-1 cargo tree pin). Not promoted only because registration now makes check.sh execute it, and its `cargo test --all-targets` half is unverified in this environment"
+
+[[script_disposition]]
+path = "scripts/w1_codec_scalar_e2e.sh"
+role = "candidate"
+reason = "vuq8: assertions MEASURED to hold at 0ada651 — scalar_transcript is byte-identical across two runs and emits exactly the 5 evidence rows its pin requires. Not promoted only because registration now makes check.sh execute it"
+
+[[script_disposition]]
+path = "scripts/w1_codec_pipeline_scalar_e2e.sh"
+role = "candidate"
+reason = "vuq8: all four pins MEASURED to hold at 0ada651 — 67 evidence rows, 64 stream-vbyte, 2 identity, 68 transcript lines, byte-identical across two runs. Not promoted only because registration now makes check.sh execute it"
+
+[[script_disposition]]
+path = "scripts/w1_foundation_types_e2e.sh"
+role = "candidate"
+reason = "vuq8: all 16 pinned grep assertions MEASURED present at 0ada651, transcript byte-identical across seeds 1 and 2, and all six foundation crates declare zero deps so the cargo-tree universe check holds. Not promoted only because registration now makes check.sh execute it"
+
+[[script_disposition]]
+path = "scripts/disk_hygiene.sh"
+role = "advisory"
+reason = "fgdb-c4ou + fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra: an explicit operator command, not a gate. Default/report mode never mutates artifacts; it classifies /data/tmp/fgdb_swarm paths and separately reports only the two owner-authorized gate pools using strict producer REAPABLE-AFTER records, exclusive child liveness locks, inode-aware hard-link accounting, retention, canonical-path checks, exact tree metadata identities, and fail-closed mountpoint refusal. The destructive mode requires --reap plus the exact SHA-256 emitted by a prior report over the complete current REAPABLE set; it takes both producer-governed parent-namespace leases, pins parent and candidate descriptors, holds every exclusive lock through confirmation, traverses children only through the candidate descriptor, and removes the root through its pinned parent. It expressly does not claim containment against a CAP_SYS_ADMIN mount race or a process that ignores the lifecycle leases. It asserts nothing about this repository and would red on no defect, while executing its operator mode inside check.sh would be unauthorized mutation; advisory is therefore permanent rather than a candidate awaiting promotion"
+
+[[script_disposition]]
+path = "scripts/git_hooks/install.sh"
+role = "advisory"
+reason = "fgdb-eesn: an explicit operator installer/status command for the landing-lease pre-commit hook. Its --install mode mutates the repository's shared Git hook directory, so executing it inside check.sh would be an unauthorized state change rather than an assertion"
+
+[[script_disposition]]
+path = "scripts/git_hooks/pre-commit.sh"
+role = "hook"
+reason = "fgdb-eesn: invoked by Git only for a commit lifecycle event and enforced only for a landing on main. Running it as a checker would exercise a synthetic shell invocation instead of the Git hook contract; its lease states are red-proved by the registered tree-stability gate"
+
+[[script_disposition]]
+path = "scripts/lib/gate_verdict.sh"
+role = "library"
+reason = "fgdb-udco: shared source-only verdict and tree-stability contract for check.sh and every registered script gate. It registers no gate and asserts nothing standalone; verdict-contract closure proves that every live gate sources it"
+
+[[script_disposition]]
+path = "scripts/lib/landing_lease.sh"
+role = "library"
+reason = "fgdb-eesn: source-only landing-lease policy and state machine used by check.sh, br_sync.sh, and the Git hook. It has no standalone entrypoint; the registered tree-stability gate red-proves its FREE, BINDING, BREAKABLE, and degraded-state behavior"
+
+[[script_disposition]]
+path = "scripts/lib/private_subject.sh"
+role = "library"
+reason = "fgdb-g0-spine-e2e-red-measures-harness-not-spine-iy7e + fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra: source-only content-keyed subject builder used by six registered G0 gates. Each caller owns and executes its freshness and residue controls, retains both the shared parent-namespace lease and child liveness lock for its full process lifetime, and publishes the strict inode-aware REAPABLE-AFTER record; the library itself reports no verdict"

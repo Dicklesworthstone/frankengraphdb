@@ -90,6 +90,10 @@ pub enum SketchFamily {
     Distinct = 5,
     /// Ordered-value zone map.
     ZoneMap = 6,
+    /// Sampled two-edge path correlation table.
+    PathCorrelation = 7,
+    /// Exact label and edge-type counts.
+    LabelCounts = 8,
 }
 
 impl SketchFamily {
@@ -101,6 +105,8 @@ impl SketchFamily {
             4 => Ok(Self::BottomK),
             5 => Ok(Self::Distinct),
             6 => Ok(Self::ZoneMap),
+            7 => Ok(Self::PathCorrelation),
+            8 => Ok(Self::LabelCounts),
             _ => Err(SketchMaintenanceCodecError::UnknownSketchFamily { tag }),
         }
     }
@@ -597,20 +603,14 @@ fn encoded_log_len(record_count: usize) -> Result<usize, SketchMaintenanceCodecE
 }
 
 fn domain_separated_digest(domain: &[u8], canonical_bytes: &[u8]) -> [u8; 32] {
-    let mut transcript = Vec::with_capacity(
-        domain
-            .len()
-            .saturating_add(core::mem::size_of::<u64>())
-            .saturating_add(canonical_bytes.len()),
-    );
-    transcript.extend_from_slice(domain);
-    transcript.extend_from_slice(
-        &u64::try_from(canonical_bytes.len())
-            .unwrap_or(u64::MAX)
-            .to_le_bytes(),
-    );
-    transcript.extend_from_slice(canonical_bytes);
-    asupersync::atp::object::compute_hash(&transcript)
+    let canonical_len = u64::try_from(canonical_bytes.len())
+        .unwrap_or(u64::MAX)
+        .to_le_bytes();
+    let mut hasher = asupersync::atp::object::ContentId::streaming();
+    hasher.update(domain);
+    hasher.update(&canonical_len);
+    hasher.update(canonical_bytes);
+    *hasher.finalize().hash()
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
@@ -640,9 +640,10 @@ fn read_array_32(bytes: &[u8], offset: usize) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOG_HEADER_BYTES, RECORD_BYTES, SketchFamily, SketchMaintenanceCodecError,
-        SketchMaintenanceLog, SketchMaintenanceLogDecodeLimits, SketchMaintenanceLogError,
-        SketchMaintenanceOutcome, SketchMaintenanceRecord,
+        INPUT_DIGEST_DOMAIN, LOG_HEADER_BYTES, RECORD_BYTES, STATE_DIGEST_DOMAIN, SketchFamily,
+        SketchMaintenanceCodecError, SketchMaintenanceLog, SketchMaintenanceLogDecodeLimits,
+        SketchMaintenanceLogError, SketchMaintenanceOutcome, SketchMaintenanceRecord,
+        domain_separated_digest,
     };
     use fgdb_types::ObjectId;
 
@@ -662,6 +663,103 @@ mod tests {
             b"canonical-operand",
             b"canonical-after",
         )
+    }
+
+    #[test]
+    fn streamed_digest_matches_the_materialized_canonical_transcript() {
+        let long_payload = [0xa5; 257];
+        let payloads: [&[u8]; 4] = [b"", b"x", b"canonical-payload", &long_payload];
+        for domain in [STATE_DIGEST_DOMAIN, INPUT_DIGEST_DOMAIN] {
+            for payload in payloads {
+                let mut transcript = Vec::new();
+                transcript.extend_from_slice(domain);
+                transcript.extend_from_slice(
+                    &u64::try_from(payload.len())
+                        .expect("test payload length fits u64")
+                        .to_le_bytes(),
+                );
+                transcript.extend_from_slice(payload);
+                assert_eq!(
+                    domain_separated_digest(domain, payload),
+                    asupersync::atp::object::compute_hash(&transcript)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_outcome_vocabulary_and_frame_headers_are_closed() {
+        // `every_maintained_family_tag_round_trips` closes the FAMILY
+        // vocabulary; the OUTCOME vocabulary had no equivalent. Both carry the
+        // same canonicity obligation: this log is the audit trail for sketch
+        // maintenance, so a decoder that admitted an unknown tag would let two
+        // distinct byte strings denote one logical event. Tag 0 is called out
+        // because it is the byte a zeroed or padded buffer supplies.
+        assert_eq!(
+            SketchMaintenanceOutcome::from_tag(1),
+            Ok(SketchMaintenanceOutcome::Merged)
+        );
+        assert_eq!(
+            SketchMaintenanceOutcome::from_tag(2),
+            Ok(SketchMaintenanceOutcome::RebuildRequired)
+        );
+        for tag in [0_u8, 3, 255] {
+            assert_eq!(
+                SketchMaintenanceOutcome::from_tag(tag),
+                Err(SketchMaintenanceCodecError::UnknownMaintenanceOutcome { tag })
+            );
+        }
+
+        // Frame discipline. The log header is magic[8], version u16, reserved
+        // u16, profile u32, count u32; the record frame repeats magic and
+        // version at its own offsets. Each rejection below is driven by
+        // perturbing exactly one field of an otherwise valid encoding, so the
+        // error identifies that field rather than incidental damage.
+        let mut log = SketchMaintenanceLog::new(8).expect("valid profile");
+        log.append(merge_record(0)).expect("first record");
+        let canonical = log.to_canonical_bytes().expect("canonical bytes");
+        assert!(
+            SketchMaintenanceLog::from_canonical_bytes(&canonical, LIMITS, 8).is_ok(),
+            "the unperturbed encoding must decode, or the cases below prove nothing"
+        );
+
+        let perturbed = |edit: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = canonical.clone();
+            edit(&mut bytes);
+            SketchMaintenanceLog::from_canonical_bytes(&bytes, LIMITS, 8)
+        };
+
+        assert_eq!(
+            perturbed(&|bytes| bytes[0] ^= 0xff),
+            Err(SketchMaintenanceCodecError::LogMagic)
+        );
+        assert_eq!(
+            perturbed(&|bytes| bytes[8..10].copy_from_slice(&9_u16.to_le_bytes())),
+            Err(SketchMaintenanceCodecError::LogVersion { version: 9 })
+        );
+        // A reserved field is not spare space: a nonzero value is a second
+        // spelling of the same log and must be refused, not ignored.
+        assert_eq!(
+            perturbed(&|bytes| bytes[10..12].copy_from_slice(&1_u16.to_le_bytes())),
+            Err(SketchMaintenanceCodecError::LogReserved { reserved: 1 })
+        );
+        assert_eq!(
+            perturbed(&|bytes| bytes[LOG_HEADER_BYTES] ^= 0xff),
+            Err(SketchMaintenanceCodecError::RecordMagic)
+        );
+        assert_eq!(
+            perturbed(&|bytes| {
+                let at = LOG_HEADER_BYTES + 8;
+                bytes[at..at + 2].copy_from_slice(&9_u16.to_le_bytes());
+            }),
+            Err(SketchMaintenanceCodecError::RecordVersion { version: 9 })
+        );
+        // The outcome tag rejection reached through a real frame, closing the
+        // loop between the vocabulary above and the wire format.
+        assert_eq!(
+            perturbed(&|bytes| bytes[LOG_HEADER_BYTES + 11] = 7),
+            Err(SketchMaintenanceCodecError::UnknownMaintenanceOutcome { tag: 7 })
+        );
     }
 
     #[test]
@@ -685,6 +783,50 @@ mod tests {
 
         assert_eq!(replayed, log);
         assert_eq!(replayed.to_canonical_bytes().expect("re-encode"), encoded);
+    }
+
+    #[test]
+    fn every_maintained_family_tag_round_trips() {
+        // The closed vocabulary must cover every family this crate implements;
+        // an unregistered family cannot record its merges at all.
+        const FAMILIES: [SketchFamily; 8] = [
+            SketchFamily::ExactQuantiles,
+            SketchFamily::DegreeHistogram,
+            SketchFamily::CountMin,
+            SketchFamily::BottomK,
+            SketchFamily::Distinct,
+            SketchFamily::ZoneMap,
+            SketchFamily::PathCorrelation,
+            SketchFamily::LabelCounts,
+        ];
+
+        for (index, family) in FAMILIES.into_iter().enumerate() {
+            let tag = u8::try_from(index + 1).expect("closed vocabulary is small");
+            assert_eq!(family as u8, tag);
+            assert_eq!(SketchFamily::from_tag(tag), Ok(family));
+
+            let record = SketchMaintenanceRecord::merged(
+                index as u64,
+                family,
+                PROFILE_OID,
+                MERGE_OID,
+                b"canonical-before",
+                b"canonical-operand",
+                b"canonical-after",
+            );
+            assert_eq!(
+                SketchMaintenanceRecord::from_canonical_bytes(&record.to_canonical_bytes())
+                    .expect("strict record read")
+                    .family,
+                family
+            );
+        }
+
+        let unregistered = u8::try_from(FAMILIES.len() + 1).expect("closed vocabulary is small");
+        assert_eq!(
+            SketchFamily::from_tag(unregistered),
+            Err(SketchMaintenanceCodecError::UnknownSketchFamily { tag: unregistered })
+        );
     }
 
     #[test]

@@ -15,8 +15,49 @@
 #   declared — the lane and its artifact path are registered; the artifact
 #              does not exist yet (pre-Genesis). A proof-class clause may cite
 #              a declared lane only while its own status is "stub".
-#   checked  — the artifact exists in-repo and is CI-checked; registry-check
-#              verifies the file is present.
+#   checked  — the artifact exists in-repo and is CI-checked.
+#
+# WHAT `status = "checked"` MEANS
+# (fgdb-proof-lane-checked-is-only-file-existence-0f1l).
+# It used to mean `Path::is_file()` — the artifact exists — which is the same
+# defect `fgdb-checker-index-live-is-only-file-existence-tl0o` removed from
+# checker_index.toml one artifact over, down to the missing path-safety guard.
+# Two laws stated in this header had no implementation whatsoever:
+#
+#   * NOTHING CHECKED THE PROOF. No `lake build`, no `lean`, no TLC invocation
+#     exists anywhere in this repository. A `.lean` file consisting of
+#     `theorem foo : False := sorry` satisfied `checked`, and so did an empty
+#     one. `sorry` is Lean's admit-anything tactic and is THE standard failure
+#     mode of a formal lane: the file typechecks, the build is green, and
+#     nothing is proven. A `.tla` model with no `.cfg` naming an INVARIANT is a
+#     TLC run that explores the state space and asserts nothing about it.
+#   * "A declared lane may be cited only while the citing clause is stub" was
+#     prose and no code. It is now enforced against invariants.toml
+#     (`proof_lane_declared_while_clause_promoted`).
+#
+# A `checked` lane now has to survive the same three reads a live checker does,
+# in the SAME reader — `tools/registry-check/src/liveness.rs`, not a second copy
+# of it:
+#
+#   REGISTERED  the artifact is a safe repository-relative file. (The path-shape
+#               half applies to a `declared` lane too: `Path::join` discards the
+#               root when handed an absolute path, so an unsafe path passes
+#               `is_file()` the instant somebody promotes the row.)
+#   INVOKED     `checked_by` names a checker_index row, that row is
+#               `status = "live"`, and it is live in the full sense liveness.rs
+#               defines. This is DELEGATED, not re-derived: "is CI-checked" is
+#               the question that module already answers.
+#   CAN FAIL    the prover can still say no — a Lean artifact states a
+#               proposition (`theorem`/`lemma`/`example`) and contains no
+#               `sorry`, `admit`, `axiom` or `native_decide`; a TLA+ artifact
+#               has a companion `.cfg` naming an INVARIANT or PROPERTY with an
+#               operand. Read from LIVE text only, so a commented-out `sorry`
+#               is not an admit and a commented-out INVARIANT is not a check.
+#
+# `axiom` and `native_decide` are reported for the same reason `sorry` is, with
+# the caveat stated out loud: both CAN be legitimate, and neither is legitimate
+# silently. A lane that means one must say so, and no machine-checkable
+# disclosure field exists yet — so the reader errs toward the loud direction.
 #
 # Row schema:
 #   [[lane]]
@@ -25,6 +66,18 @@
 #   model_scope = "..."     # honest scope statement: what the theorem covers
 #   artifact    = "..."     # repo-relative path to the checked artifact
 #   status      = "declared" | "checked"
+#   checked_by  = "..."     # REQUIRED on a "checked" row: the checker_index
+#                           # symbol of the gate that runs this lane's prover.
+#                           # Declared, never guessed — nothing inside a .lean
+#                           # or .tla file says which gate, if any, runs it.
+#
+# Every lane below is `declared`: zero `.lean`, `.tla`, `.cfg` or `lakefile*`
+# files exist in this repository, so the `checked` arm is VACUOUS today. That is
+# precisely why it was fixed now — the defect fires at the moment the first
+# proof artifact lands, which is also the moment it stops being reviewable,
+# because a green `checked` row is indistinguishable from a real proof. The
+# evidence for the arm is therefore fixture-based and licensed by a control
+# (`liveness::self_test`), not by this file.
 # =============================================================================
 
 schema_version = 1
@@ -74,9 +127,10 @@ status = "declared"
 [[lane]]
 id = "lean-version-chain"
 lane = "lean"
-model_scope = "Version-chain shape: finiteness, acyclicity, strict newer-first commit order, single owning object generation (FG-INV-03). Does not cover arena decode or fuzz oracles."
+model_scope = "Version-chain shape (FG-INV-03). ASSUMED, as the per-link obligations the storage layer must establish: an older link is strictly earlier in commit order, and a link never crosses an owning object generation. DERIVED from those: finiteness with an explicit bound (a chain from commit position a has at most a+1 links), acyclicity (no link reaches its own position; reachability is antisymmetric), and the transitive closure of both obligations over whole chains. Does not cover arena decode or the fuzz oracles, and does NOT prove that the storage layer establishes the two assumptions — that is the oracles' half of FG-INV-03. Stated this way deliberately: the previous wording read as though all four properties were proven, when two are hypotheses."
 artifact = "formal/lean/VersionChain.lean"
-status = "declared"
+status = "checked"
+checked_by = "g0_proof_lanes_e2e"
 
 # --- TLA+ lanes (plan §15.5: two-fsync commit + recovery, compaction
 # --- publish/retire, Raft-marker interaction, branch fork/merge).

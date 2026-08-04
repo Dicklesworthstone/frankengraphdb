@@ -15,14 +15,22 @@ resolver = "3"
 members = [
     "crates/fgdb-bigint",
     "crates/fgdb-calibrate",
+    "crates/fgdb-chronicle",
     "crates/fgdb-claim",
     "crates/fgdb-codec",
     "crates/fgdb-collections",
+    "crates/fgdb-crypto",
     "crates/fgdb-delta-types",
     "crates/fgdb-evidence",
+    "crates/fgdb-reference",
     "crates/fgdb-resource",
+    "crates/fgdb-sim",
     "crates/fgdb-sketch",
+    "crates/fgdb-strata",
     "crates/fgdb-types",
+    "crates/fgdb-unsafe-arena",
+    "crates/fgdb-unsafe-simd",
+    "crates/fgdb-unsafe-vfs",
     "tools/registry-check",
 ]
 

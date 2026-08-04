@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1.
+# Appendix A lines 1388-2728; sha256=c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 2
+registry_epoch = 62
 
 [[kind]]
 object_kind = 0x0001
@@ -57,7 +57,7 @@ golden_corpus = "corpus/logical/control_command/"
 object_kind = 0x0006
 name = "CommitMarker"
 status = "active"
-construction_order = 15
+construction_order = 30
 role_predicate = "true"
 max_size_bytes = 4096
 golden_corpus = "corpus/logical/commit_marker/"
@@ -84,7 +84,7 @@ golden_corpus = "corpus/logical/authority_binding_record/"
 object_kind = 0x0009
 name = "CheckpointStateVector"
 status = "reserved"
-construction_order = 35
+construction_order = 25
 role_predicate = "role-local"
 max_size_bytes = 268435456
 golden_corpus = "corpus/logical/checkpoint_state_vector/"
@@ -111,7 +111,7 @@ golden_corpus = "corpus/logical/prepared_commit_record/"
 object_kind = 0x000c
 name = "RecoveryBridgeSpec"
 status = "reserved"
-construction_order = 10
+construction_order = 20
 role_predicate = "restore-machinery"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/recovery_bridge_spec/"
@@ -261,6 +261,726 @@ max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
 
 [[kind]]
+object_kind = 0x0202
+name = "ActivatedRetentionCutSet"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/activated_retention_cut_set/"
+
+[[kind]]
+object_kind = 0x0203
+name = "ActivationMetaProjectionPayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/activation_meta_projection_payload/"
+
+[[kind]]
+object_kind = 0x0204
+name = "ActiveMetaProjectionRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/active_meta_projection_root/"
+
+[[kind]]
+object_kind = 0x0205
+name = "AdministrativeAbortAuthorizationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/administrative_abort_authorization_record/"
+
+[[kind]]
+object_kind = 0x0206
+name = "AdmittedTxnAbortCommand"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/admitted_txn_abort_command/"
+
+[[kind]]
+object_kind = 0x0207
+name = "AllocationEpochReservation"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/allocation_epoch_reservation/"
+
+[[kind]]
+object_kind = 0x020b
+name = "ArchiveLeaseReleaseReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/archive_lease_release_receipt/"
+
+[[kind]]
+object_kind = 0x0213
+name = "AttemptCompactionAttestation"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/attempt_compaction_attestation/"
+
+[[kind]]
+object_kind = 0x0215
+name = "AuditCloneBoundary"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_clone_boundary/"
+
+[[kind]]
+object_kind = 0x0216
+name = "AuditCompletenessProfile"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_completeness_profile/"
+
+[[kind]]
+object_kind = 0x0217
+name = "AuditContinuityRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_continuity_record/"
+
+[[kind]]
+object_kind = 0x0218
+name = "AuditEventRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_event_record/"
+
+[[kind]]
+object_kind = 0x021a
+name = "AuditEventSignerLock"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_event_signer_lock/"
+
+[[kind]]
+object_kind = 0x021b
+name = "AuditEventSigningAttemptPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_event_signing_attempt_plan/"
+
+[[kind]]
+object_kind = 0x021c
+name = "AuditExternalBatchCasReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_external_batch_cas_receipt/"
+
+[[kind]]
+object_kind = 0x021d
+name = "AuditExternalCasReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_external_cas_receipt/"
+
+[[kind]]
+object_kind = 0x021f
+name = "AuditOutcomeRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_outcome_record/"
+
+[[kind]]
+object_kind = 0x0220
+name = "AuditRequirementDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_requirement_decision_record/"
+
+[[kind]]
+object_kind = 0x0222
+name = "AuditResolutionSignerLock"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_resolution_signer_lock/"
+
+[[kind]]
+object_kind = 0x0223
+name = "AuditResolutionSigningAttemptPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_resolution_signing_attempt_plan/"
+
+[[kind]]
+object_kind = 0x0229
+name = "AuditTerminalAttemptRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_attempt_record/"
+
+[[kind]]
+object_kind = 0x022a
+name = "AuditTerminalFreezeIndex"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_freeze_index/"
+
+[[kind]]
+object_kind = 0x022b
+name = "AuditTerminalFreezeRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_freeze_record/"
+
+[[kind]]
+object_kind = 0x022c
+name = "AuditTerminalPlanAbandonment"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_plan_abandonment/"
+
+[[kind]]
+object_kind = 0x022d
+name = "AuditTerminalSigningPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_signing_plan/"
+
+[[kind]]
+object_kind = 0x022e
+name = "AuditTicket"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket/"
+
+[[kind]]
+object_kind = 0x022f
+name = "AuditTicketClaimRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket_claim_record/"
+
+[[kind]]
+object_kind = 0x0230
+name = "AuditTicketResolution"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket_resolution/"
+
+[[kind]]
+object_kind = 0x0235
+name = "AuthenticatedClientResultAckReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authenticated_client_result_ack_receipt/"
+
+[[kind]]
+object_kind = 0x0236
+name = "AuthenticatedClientResultReleaseReceipt"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authenticated_client_result_release_receipt/"
+
+[[kind]]
+object_kind = 0x0238
+name = "AuthorityOwningRestoreAbandonmentTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authority_owning_restore_abandonment_tombstone/"
+
+[[kind]]
+object_kind = 0x0239
+name = "AuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authorization_decision_record/"
+
+[[kind]]
+object_kind = 0x023d
+name = "BackupInventoryBijectionProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_inventory_bijection_proof/"
+
+[[kind]]
+object_kind = 0x0244
+name = "BackupRecoverabilityProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_recoverability_proof/"
+
+[[kind]]
+object_kind = 0x024c
+name = "BeginRegionClosedReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/begin_region_closed_receipt/"
+
+[[kind]]
+object_kind = 0x024e
+name = "BootstrapReservationUsePublicationCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/bootstrap_reservation_use_publication_certificate/"
+
+[[kind]]
+object_kind = 0x0251
+name = "BranchEpochBoundaryReservation"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_epoch_boundary_reservation/"
+
+[[kind]]
+object_kind = 0x0252
+name = "BranchEpochBoundaryReserveSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_epoch_boundary_reserve_spec/"
+
+[[kind]]
+object_kind = 0x0253
+name = "BranchForkBundle"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_fork_bundle/"
+
+[[kind]]
+object_kind = 0x0254
+name = "BranchGrantBundle"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_grant_bundle/"
+
+[[kind]]
+object_kind = 0x0255
+name = "BranchKeyEpochRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_key_epoch_record/"
+
+[[kind]]
+object_kind = 0x0257
+name = "BufferedResultManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/buffered_result_manifest/"
+
+[[kind]]
+object_kind = 0x025a
+name = "CanonicalLocalRefinementCommitReceiptCopy"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_local_refinement_commit_receipt_copy/"
+
+[[kind]]
+object_kind = 0x025b
+name = "CanonicalPreBootstrapEvidenceReencryptionOwner"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_pre_bootstrap_evidence_reencryption_owner/"
+
+[[kind]]
+object_kind = 0x025c
+name = "CanonicalPreBootstrapEvidenceReencryptionProof"
+status = "reserved"
+construction_order = 7
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_pre_bootstrap_evidence_reencryption_proof/"
+
+[[kind]]
+object_kind = 0x025d
+name = "CanonicalRestorePlanAvailabilityCopy"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_restore_plan_availability_copy/"
+
+[[kind]]
+object_kind = 0x025e
+name = "CanonicalRestoreSourceAcquisitionPlanCopy"
+status = "reserved"
+construction_order = 7
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_restore_source_acquisition_plan_copy/"
+
+[[kind]]
+object_kind = 0x0261
+name = "CapabilityMigrationConsumedTombstone"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/capability_migration_consumed_tombstone/"
+
+[[kind]]
+object_kind = 0x0262
+name = "CatalogAuthorityHead"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/catalog_authority_head/"
+
+[[kind]]
+object_kind = 0x0263
+name = "CatalogTombstoneRestoreTargetReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/catalog_tombstone_restore_target_receipt/"
+
+[[kind]]
+object_kind = 0x0265
+name = "CertificateAttemptPlan"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_attempt_plan/"
+
+[[kind]]
+object_kind = 0x0266
+name = "CertificateAttemptRecord"
+status = "reserved"
+construction_order = 16
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_attempt_record/"
+
+[[kind]]
+object_kind = 0x0269
+name = "CertificateSignerLock"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_signer_lock/"
+
+[[kind]]
+object_kind = 0x026b
+name = "CertifiedLegacyLocalArtifactRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_legacy_local_artifact_ref/"
+
+[[kind]]
+object_kind = 0x026c
+name = "CertifiedRoleTransitionRef"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_role_transition_ref/"
+
+[[kind]]
+object_kind = 0x026d
+name = "CertifiedRoleTransitionSuccessorRef"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_role_transition_successor_ref/"
+
+[[kind]]
+object_kind = 0x026e
+name = "CertifiedTransitionArtifactRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_transition_artifact_ref/"
+
+[[kind]]
+object_kind = 0x026f
+name = "ClaimToAppliedUseIdentityDerivationProof"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/claim_to_applied_use_identity_derivation_proof/"
+
+[[kind]]
+object_kind = 0x0270
+name = "ClosedAttemptCompactionFloorRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/closed_attempt_compaction_floor_record/"
+
+[[kind]]
+object_kind = 0x0271
+name = "ClosedAttemptCompactionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/closed_attempt_compaction_spec/"
+
+[[kind]]
+object_kind = 0x0272
+name = "ClosedAttemptEvidenceBundle"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/closed_attempt_evidence_bundle/"
+
+[[kind]]
+object_kind = 0x0274
+name = "CommittedEffectCapsule"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/committed_effect_capsule/"
+
+[[kind]]
+object_kind = 0x0276
+name = "CompactedPreBootstrapEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/compacted_pre_bootstrap_evidence/"
+
+[[kind]]
+object_kind = 0x0277
+name = "ConfigPayloadFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/config_payload_floor/"
+
+[[kind]]
+object_kind = 0x0278
+name = "ConfigurationState"
+status = "reserved"
+construction_order = 5
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/configuration_state/"
+
+[[kind]]
+object_kind = 0x027b
+name = "ConstraintDefinitionSet"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_definition_set/"
+
+[[kind]]
+object_kind = 0x027d
+name = "ConstraintReservationRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_reservation_record/"
+
+[[kind]]
+object_kind = 0x027e
+name = "ConstraintStateDirectoryRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_directory_root/"
+
+[[kind]]
+object_kind = 0x027f
+name = "ConstraintStateRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_root/"
+
+[[kind]]
+object_kind = 0x0280
+name = "ContinuityAuthorityObservationImport"
+status = "reserved"
+construction_order = 56
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/continuity_authority_observation_import/"
+
+[[kind]]
+object_kind = 0x0281
+name = "ControlTerminalBasisHoldRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/control_terminal_basis_hold_root/"
+
+[[kind]]
+object_kind = 0x0282
+name = "CrossLogTransparencyFreshness"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/cross_log_transparency_freshness/"
+
+[[kind]]
+object_kind = 0x0285
+name = "DeliveredDeltaPayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivered_delta_payload/"
+
+[[kind]]
+object_kind = 0x0286
+name = "DeliveryLeaseExpiryEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivery_lease_expiry_evidence/"
+
+[[kind]]
+object_kind = 0x0287
+name = "DerivedGenerationRegistry"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/derived_generation_registry/"
+
+[[kind]]
+object_kind = 0x028a
+name = "DirectoryBoundCreationEvidence"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/directory_bound_creation_evidence/"
+
+[[kind]]
+object_kind = 0x028c
+name = "DistributedDerivedGenerationManifest"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed_derived_generation_manifest/"
+
+[[kind]]
+object_kind = 0x028d
+name = "DistributedSerializationCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed_serialization_certificate/"
+
+[[kind]]
+object_kind = 0x028f
+name = "DurableCapabilityValidationEvidence"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_validation_evidence/"
+
+[[kind]]
+object_kind = 0x0290
+name = "DurableCapabilityVerifierKey"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/durable_capability_verifier_key/"
+
+[[kind]]
 object_kind = 0x0295
 name = "ExportLeaf"
 status = "reserved"
@@ -270,13 +990,1336 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/export_leaf/"
 
 [[kind]]
-object_kind = 0x037c
-name = "PayloadAvailabilityCertificate"
+object_kind = 0x0297
+name = "ExternalKeyDestructionProviderReceipt"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/external_key_destruction_provider_receipt/"
+
+[[kind]]
+object_kind = 0x029c
+name = "GcDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_decision_record/"
+
+[[kind]]
+object_kind = 0x029f
+name = "GcProposal"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_proposal/"
+
+[[kind]]
+object_kind = 0x02a2
+name = "GenesisMetaProjectionPayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/genesis_meta_projection_payload/"
+
+[[kind]]
+object_kind = 0x02a3
+name = "GlobalAttemptCompactionFloor"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_compaction_floor/"
+
+[[kind]]
+object_kind = 0x02a4
+name = "GlobalAttemptRegistration"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_registration/"
+
+[[kind]]
+object_kind = 0x02a5
+name = "GlobalAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_authorization_decision_record/"
+
+[[kind]]
+object_kind = 0x02aa
+name = "GlobalBeginIdempotencyIndex"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_idempotency_index/"
+
+[[kind]]
+object_kind = 0x02ab
+name = "GlobalBeginReservationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_reservation_record/"
+
+[[kind]]
+object_kind = 0x02ac
+name = "GlobalBeginReservationSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_reservation_spec/"
+
+[[kind]]
+object_kind = 0x02ad
+name = "GlobalBranchKeyDistributionPlan"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_branch_key_distribution_plan/"
+
+[[kind]]
+object_kind = 0x02ae
+name = "GlobalClosedAttemptFloorPublishSpec"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_closed_attempt_floor_publish_spec/"
+
+[[kind]]
+object_kind = 0x02af
+name = "GlobalConflictIndex"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_conflict_index/"
+
+[[kind]]
+object_kind = 0x02b0
+name = "GlobalConstraintReservationCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_constraint_reservation_certificate/"
+
+[[kind]]
+object_kind = 0x02b1
+name = "GlobalControlCommand"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_control_command/"
+
+[[kind]]
+object_kind = 0x02b2
+name = "GlobalControlRecord"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_control_record/"
+
+[[kind]]
+object_kind = 0x02b8
+name = "GlobalFinalCertificationReservation"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_final_certification_reservation/"
+
+[[kind]]
+object_kind = 0x02b9
+name = "GlobalFinalCertificationReserveSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_final_certification_reserve_spec/"
+
+[[kind]]
+object_kind = 0x02bd
+name = "GlobalKeyDestructionAuthorizationCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_destruction_authorization_certificate/"
+
+[[kind]]
+object_kind = 0x02be
+name = "GlobalLogicalDeltaBatch"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_logical_delta_batch/"
+
+[[kind]]
+object_kind = 0x02bf
+name = "GlobalPrepareAdmissionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_prepare_admission_spec/"
+
+[[kind]]
+object_kind = 0x02c0
+name = "GlobalReadAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_read_authorization_decision_record/"
+
+[[kind]]
+object_kind = 0x02c1
+name = "GlobalReadCloseSpec"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_read_close_spec/"
+
+[[kind]]
+object_kind = 0x02c2
+name = "GlobalRecoveryCheckpoint"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_recovery_checkpoint/"
+
+[[kind]]
+object_kind = 0x02c3
+name = "GlobalRestoreAbandonParticipantApplyCertificate"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_abandon_participant_apply_certificate/"
+
+[[kind]]
+object_kind = 0x02c4
+name = "GlobalRestoreActivationCertificate"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_activation_certificate/"
+
+[[kind]]
+object_kind = 0x02c5
+name = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_participant_pin_release_completion_certificate/"
+
+[[kind]]
+object_kind = 0x02c6
+name = "GlobalRestoreServiceFinalCertificate"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_service_final_certificate/"
+
+[[kind]]
+object_kind = 0x02c7
+name = "GlobalRestoreServicePrepareCertificate"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_service_prepare_certificate/"
+
+[[kind]]
+object_kind = 0x02c8
+name = "GlobalSequenceNeutralSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_sequence_neutral_spec/"
+
+[[kind]]
+object_kind = 0x02c9
+name = "GlobalStatePayload"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_state_payload/"
+
+[[kind]]
+object_kind = 0x02ca
+name = "GlobalStateRoot"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_state_root/"
+
+[[kind]]
+object_kind = 0x02cb
+name = "GlobalStatementIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_statement_index/"
+
+[[kind]]
+object_kind = 0x02cc
+name = "GlobalStatementRegistration"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_statement_registration/"
+
+[[kind]]
+object_kind = 0x02cd
+name = "GlobalTxnCommand"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_command/"
+
+[[kind]]
+object_kind = 0x02ce
+name = "GlobalTxnOutcomePreparationRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_outcome_preparation_record/"
+
+[[kind]]
+object_kind = 0x02cf
+name = "GlobalTxnOutcomeRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_outcome_record/"
+
+[[kind]]
+object_kind = 0x02d0
+name = "GlobalTxnRecord"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_record/"
+
+[[kind]]
+object_kind = 0x02d1
+name = "GlobalTxnWorkspaceGeneration"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_workspace_generation/"
+
+[[kind]]
+object_kind = 0x02d4
+name = "GroupTimeIssuanceQuiescenceCertificate"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/group_time_issuance_quiescence_certificate/"
+
+[[kind]]
+object_kind = 0x02d5
+name = "IdRangeLease"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/id_range_lease/"
+
+[[kind]]
+object_kind = 0x02d6
+name = "IdentityContinuityRecord"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/identity_continuity_record/"
+
+[[kind]]
+object_kind = 0x02d7
+name = "InitialProtocolStateRecipe"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/initial_protocol_state_recipe/"
+
+[[kind]]
+object_kind = 0x02da
+name = "KeyDestroyProposal"
+status = "reserved"
+construction_order = 80
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_destroy_proposal/"
+
+[[kind]]
+object_kind = 0x02dc
+name = "KeyDestructionAuthorization"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_destruction_authorization/"
+
+[[kind]]
+object_kind = 0x02de
+name = "KeyEnvelopeGrantBytes"
 status = "reserved"
 construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_bytes/"
+
+[[kind]]
+object_kind = 0x02df
+name = "KeyEnvelopeGrantRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_record/"
+
+[[kind]]
+object_kind = 0x02e0
+name = "KeyEnvelopeGrantWindow"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_window/"
+
+[[kind]]
+object_kind = 0x02e1
+name = "KeyEnvelopeNode"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_node/"
+
+[[kind]]
+object_kind = 0x02e2
+name = "KeyEnvelopeRoot"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_root/"
+
+[[kind]]
+object_kind = 0x02e4
+name = "KeyGrantRegistry"
+status = "reserved"
+construction_order = 70
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_grant_registry/"
+
+[[kind]]
+object_kind = 0x02e8
+name = "KeyReferenceInventory"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_reference_inventory/"
+
+[[kind]]
+object_kind = 0x02e9
+name = "KeyReferenceQuarantine"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_reference_quarantine/"
+
+[[kind]]
+object_kind = 0x02ea
+name = "LeaseWindowSuccessorProof"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/lease_window_successor_proof/"
+
+[[kind]]
+object_kind = 0x02eb
+name = "LeasesRevokedOrExpiredThrough"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/leases_revoked_or_expired_through/"
+
+[[kind]]
+object_kind = 0x02ef
+name = "LegacyRetentionAuthorityTransferCertificate"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_certificate/"
+
+[[kind]]
+object_kind = 0x02f0
+name = "LegacyRetentionAuthorityTransferEvidence"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_evidence/"
+
+[[kind]]
+object_kind = 0x02f1
+name = "LegacyRetentionAuthorityTransferPlan"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_plan/"
+
+[[kind]]
+object_kind = 0x02f2
+name = "LegacyRetentionAuthorityTransferRecord"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_record/"
+
+[[kind]]
+object_kind = 0x02f4
+name = "LifecycleAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/lifecycle_authorization_decision_record/"
+
+[[kind]]
+object_kind = 0x02f5
+name = "LocalAttemptRegistration"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_attempt_registration/"
+
+[[kind]]
+object_kind = 0x02f6
+name = "LocalAuditTicketClaimRecord"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_audit_ticket_claim_record/"
+
+[[kind]]
+object_kind = 0x02fb
+name = "LocalBeginIdempotencyIndex"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_idempotency_index/"
+
+[[kind]]
+object_kind = 0x02fc
+name = "LocalBeginReservationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_reservation_record/"
+
+[[kind]]
+object_kind = 0x02fd
+name = "LocalBeginReservationSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_reservation_spec/"
+
+[[kind]]
+object_kind = 0x02ff
+name = "LocalBufferedResultManifest"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_buffered_result_manifest/"
+
+[[kind]]
+object_kind = 0x0300
+name = "LocalConflictIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_conflict_index/"
+
+[[kind]]
+object_kind = 0x0309
+name = "LocalFinalCertificationReservation"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_final_certification_reservation/"
+
+[[kind]]
+object_kind = 0x030a
+name = "LocalFinalCertificationReserveSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_final_certification_reserve_spec/"
+
+[[kind]]
+object_kind = 0x0313
+name = "LocalOrderAttemptInput"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_order_attempt_input/"
+
+[[kind]]
+object_kind = 0x0315
+name = "LocalPrepareAdmissionSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_prepare_admission_spec/"
+
+[[kind]]
+object_kind = 0x0318
+name = "LocalPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_prepared_payload_root/"
+
+[[kind]]
+object_kind = 0x031b
+name = "LocalRestoreActivationCertificate"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_activation_certificate/"
+
+[[kind]]
+object_kind = 0x031c
+name = "LocalRestoreCompletionEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_completion_evidence/"
+
+[[kind]]
+object_kind = 0x031d
+name = "LocalRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_independent_reopen_proof/"
+
+[[kind]]
+object_kind = 0x031e
+name = "LocalRestoreReadyCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_ready_certificate/"
+
+[[kind]]
+object_kind = 0x031f
+name = "LocalRestoreServicePrepareCertificate"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_prepare_certificate/"
+
+[[kind]]
+object_kind = 0x0320
+name = "LocalRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_terminal_tombstone/"
+
+[[kind]]
+object_kind = 0x0321
+name = "LocalResultDeliveryLease"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_result_delivery_lease/"
+
+[[kind]]
+object_kind = 0x0323
+name = "LocalSerializationCertificate"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_serialization_certificate/"
+
+[[kind]]
+object_kind = 0x0324
+name = "LocalStatementIndex"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_statement_index/"
+
+[[kind]]
+object_kind = 0x0325
+name = "LocalStatementRegistration"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_statement_registration/"
+
+[[kind]]
+object_kind = 0x0329
+name = "LocalToGlobalProjection"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_to_global_projection/"
+
+[[kind]]
+object_kind = 0x032a
+name = "LocalToShardProjection"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_to_shard_projection/"
+
+[[kind]]
+object_kind = 0x032c
+name = "LocalTxnWorkspaceGeneration"
+status = "reserved"
+construction_order = 16
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_txn_workspace_generation/"
+
+[[kind]]
+object_kind = 0x0332
+name = "MacaroonRootIssuanceReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/macaroon_root_issuance_receipt/"
+
+[[kind]]
+object_kind = 0x0333
+name = "MacaroonRootIssuanceRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/macaroon_root_issuance_record/"
+
+[[kind]]
+object_kind = 0x0334
+name = "MandatoryInventory"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mandatory_inventory/"
+
+[[kind]]
+object_kind = 0x033f
+name = "MetaConfigPayloadFloor"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_config_payload_floor/"
+
+[[kind]]
+object_kind = 0x0341
+name = "MetaConstraintReservationRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_constraint_reservation_record/"
+
+[[kind]]
+object_kind = 0x0343
+name = "MetaControlProjectionCertificate"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_control_projection_certificate/"
+
+[[kind]]
+object_kind = 0x034e
+name = "MetaMaintenanceCommand"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_maintenance_command/"
+
+[[kind]]
+object_kind = 0x0350
+name = "MetaOrderAttemptInput"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_order_attempt_input/"
+
+[[kind]]
+object_kind = 0x0352
+name = "MetaPreparedCommandRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_prepared_command_record/"
+
+[[kind]]
+object_kind = 0x0357
+name = "MetaRestoreCompletionEvidence"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_completion_evidence/"
+
+[[kind]]
+object_kind = 0x0358
+name = "MetaRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_independent_reopen_proof/"
+
+[[kind]]
+object_kind = 0x035a
+name = "MetaRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_terminal_tombstone/"
+
+[[kind]]
+object_kind = 0x0364
+name = "MutationPermitReadProjection"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mutation_permit_read_projection/"
+
+[[kind]]
+object_kind = 0x0365
+name = "MutationPermitRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mutation_permit_record/"
+
+[[kind]]
+object_kind = 0x0366
+name = "NeverRegisteredEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/never_registered_evidence/"
+
+[[kind]]
+object_kind = 0x0367
+name = "NeverRegisteredFloorSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/never_registered_floor_spec/"
+
+[[kind]]
+object_kind = 0x0369
+name = "NeverRegisteredTerminalRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/never_registered_terminal_record/"
+
+[[kind]]
+object_kind = 0x036a
+name = "NewDatabaseIdentityReservation"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/new_database_identity_reservation/"
+
+[[kind]]
+object_kind = 0x0371
+name = "NoReservationBindingProof"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_reservation_binding_proof/"
+
+[[kind]]
+object_kind = 0x0373
+name = "NoTerminalSignatureOrOrderProof"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_terminal_signature_or_order_proof/"
+
+[[kind]]
+object_kind = 0x0375
+name = "OfflineIssuerVerificationServiceContract"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/offline_issuer_verification_service_contract/"
+
+[[kind]]
+object_kind = 0x0376
+name = "OfflineIssuerVerificationServiceFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/offline_issuer_verification_service_floor/"
+
+[[kind]]
+object_kind = 0x0377
+name = "OfflineMacaroonIssuerEpochCohort"
+status = "reserved"
+construction_order = 28
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/offline_macaroon_issuer_epoch_cohort/"
+
+[[kind]]
+object_kind = 0x0378
+name = "OfflineMacaroonIssuerEpochFenceReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/offline_macaroon_issuer_epoch_fence_receipt/"
+
+[[kind]]
+object_kind = 0x037a
+name = "ParticipantRoutingCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/participant_routing_certificate/"
+
+[[kind]]
+object_kind = 0x037b
+name = "ParticipantRoutingDerivationProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/participant_routing_derivation_proof/"
+
+[[kind]]
+object_kind = 0x037c
+name = "PayloadAvailabilityCertificate"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
 golden_corpus = "corpus/logical/payload_availability_certificate/"
+
+[[kind]]
+object_kind = 0x037d
+name = "PayloadReceiptProposalFreshnessBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/payload_receipt_proposal_freshness_basis/"
+
+[[kind]]
+object_kind = 0x037e
+name = "PendingAttemptCompactionRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pending_attempt_compaction_root/"
+
+[[kind]]
+object_kind = 0x0382
+name = "PortableArchiveGrantLineageProof"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_archive_grant_lineage_proof/"
+
+[[kind]]
+object_kind = 0x0385
+name = "PortableContinuityAuthorityObservation"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_continuity_authority_observation/"
+
+[[kind]]
+object_kind = 0x0388
+name = "PortableRemoteReleaseAckEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_remote_release_ack_evidence/"
+
+[[kind]]
+object_kind = 0x0389
+name = "PortableReservationAuthorityObservation"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_reservation_authority_observation/"
+
+[[kind]]
+object_kind = 0x038a
+name = "PortableRestoreArchiveAcquisitionReceipt"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_archive_acquisition_receipt/"
+
+[[kind]]
+object_kind = 0x038b
+name = "PortableRestoreContinuityAncestryProof"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_continuity_ancestry_proof/"
+
+[[kind]]
+object_kind = 0x038c
+name = "PortableRestoreSourceLeaseAuthorityObservation"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_source_lease_authority_observation/"
+
+[[kind]]
+object_kind = 0x038d
+name = "PortableRestoreSourceLeaseLineageProof"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_source_lease_lineage_proof/"
+
+[[kind]]
+object_kind = 0x038e
+name = "PortableRestoreSourceLeaseReleaseTerminalEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_source_lease_release_terminal_evidence/"
+
+[[kind]]
+object_kind = 0x038f
+name = "PortableSemanticVisibilityCertificate"
+status = "reserved"
+construction_order = 12
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_semantic_visibility_certificate/"
+
+[[kind]]
+object_kind = 0x0392
+name = "PortableTimeAuthorityObservation"
+status = "reserved"
+construction_order = 22
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_time_authority_observation/"
+
+[[kind]]
+object_kind = 0x0393
+name = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_time_authority_registry_transition_terminal_evidence/"
+
+[[kind]]
+object_kind = 0x0394
+name = "PortableTimeExpiryAttestation"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_time_expiry_attestation/"
+
+[[kind]]
+object_kind = 0x0395
+name = "PreBootstrapDispatchTerminalAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pre_bootstrap_dispatch_terminal_accumulator/"
+
+[[kind]]
+object_kind = 0x0396
+name = "PreBootstrapJournalCanonicalizationImportRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pre_bootstrap_journal_canonicalization_import_record/"
+
+[[kind]]
+object_kind = 0x0397
+name = "PreBootstrapPortableTimeExpiryAttestation"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pre_bootstrap_portable_time_expiry_attestation/"
+
+[[kind]]
+object_kind = 0x0398
+name = "PreBootstrapReservationClaimCanonicalImportRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pre_bootstrap_reservation_claim_canonical_import_record/"
+
+[[kind]]
+object_kind = 0x0399
+name = "PreparedOrderAttemptRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_order_attempt_root/"
+
+[[kind]]
+object_kind = 0x039a
+name = "PriorIncarnationLeaseBarrierBootstrapImport"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_barrier_bootstrap_import/"
+
+[[kind]]
+object_kind = 0x039b
+name = "PriorIncarnationLeaseCohortRevocationReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_cohort_revocation_receipt/"
+
+[[kind]]
+object_kind = 0x039c
+name = "PriorIncarnationLeaseCohortWindow"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_cohort_window/"
+
+[[kind]]
+object_kind = 0x039d
+name = "PriorIncarnationLeaseIssuerFenceReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_issuer_fence_receipt/"
+
+[[kind]]
+object_kind = 0x03a0
+name = "ProvisionalRetentionCutSet"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/provisional_retention_cut_set/"
+
+[[kind]]
+object_kind = 0x03a1
+name = "RaftConsensusCutProjection"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_consensus_cut_projection/"
+
+[[kind]]
+object_kind = 0x03a2
+name = "RaftHardState"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_hard_state/"
+
+[[kind]]
+object_kind = 0x03a3
+name = "RaftSnapshot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_snapshot/"
+
+[[kind]]
+object_kind = 0x03a4
+name = "RaftStateRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_state_root/"
+
+[[kind]]
+object_kind = 0x03a5
+name = "ReadAccessAdmissionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_access_admission_record/"
+
+[[kind]]
+object_kind = 0x03a6
+name = "ReadParticipantRoutingCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_participant_routing_certificate/"
+
+[[kind]]
+object_kind = 0x03a7
+name = "ReadPermitRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_permit_record/"
+
+[[kind]]
+object_kind = 0x03a8
+name = "ReadResultReleaseDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_result_release_decision_record/"
+
+[[kind]]
+object_kind = 0x03aa
+name = "RecoveryCheckpoint"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_checkpoint/"
+
+[[kind]]
+object_kind = 0x03ab
+name = "RecoveryIncarnationProjectionResult"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_incarnation_projection_result/"
+
+[[kind]]
+object_kind = 0x03ac
+name = "RecoveryIncarnationTransformPlan"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_incarnation_transform_plan/"
 
 [[kind]]
 object_kind = 0x03ad
@@ -286,6 +2329,24 @@ construction_order = 14
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_authority_configuration_evidence/"
+
+[[kind]]
+object_kind = 0x03ae
+name = "RemoteConfigurationTrustRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_configuration_trust_root/"
+
+[[kind]]
+object_kind = 0x03af
+name = "RemoteGrantRetirementPlan"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_grant_retirement_plan/"
 
 [[kind]]
 object_kind = 0x03b2
@@ -324,6 +2385,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_retention_consume_ack_record/"
 
 [[kind]]
+object_kind = 0x03b6
+name = "RemoteRetentionConsumerRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_consumer_root/"
+
+[[kind]]
 object_kind = 0x03b7
 name = "RemoteRetentionGrantEvidence"
 status = "reserved"
@@ -358,6 +2428,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_retention_no_old_grant_proof/"
+
+[[kind]]
+object_kind = 0x03bb
+name = "RemoteRetentionObligationRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_obligation_root/"
 
 [[kind]]
 object_kind = 0x03bc
@@ -414,6 +2493,708 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_retention_release_tombstone/"
 
 [[kind]]
+object_kind = 0x03c2
+name = "RemoteTrustCompactionPrecondition"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_trust_compaction_precondition/"
+
+[[kind]]
+object_kind = 0x03c3
+name = "ReplayArchiveRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_archive_record/"
+
+[[kind]]
+object_kind = 0x03c4
+name = "ReplayManifest"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_manifest/"
+
+[[kind]]
+object_kind = 0x03c6
+name = "ReservationAuthorityHead"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_authority_head/"
+
+[[kind]]
+object_kind = 0x03c7
+name = "ReservationAuthorityObservationImport"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_authority_observation_import/"
+
+[[kind]]
+object_kind = 0x03c8
+name = "ReservationBurnReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_burn_receipt/"
+
+[[kind]]
+object_kind = 0x03c9
+name = "ReservationClaimOperationRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_claim_operation_record/"
+
+[[kind]]
+object_kind = 0x03ca
+name = "ReservationClaimReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_claim_receipt/"
+
+[[kind]]
+object_kind = 0x03cb
+name = "ReservationConsumptionReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_consumption_receipt/"
+
+[[kind]]
+object_kind = 0x03cc
+name = "ReservationOperationTerminalHistory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_operation_terminal_history/"
+
+[[kind]]
+object_kind = 0x03cd
+name = "ReservationOperationTerminalRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_operation_terminal_record/"
+
+[[kind]]
+object_kind = 0x03ce
+name = "ReservationUseRecord"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_use_record/"
+
+[[kind]]
+object_kind = 0x03cf
+name = "ResourceLedgerState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_state/"
+
+[[kind]]
+object_kind = 0x03d0
+name = "ResourceLedgerTransition"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_transition/"
+
+[[kind]]
+object_kind = 0x03d1
+name = "ResourceLimitPolicy"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_limit_policy/"
+
+[[kind]]
+object_kind = 0x03d2
+name = "RestoreAbandonOperationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_operation_record/"
+
+[[kind]]
+object_kind = 0x03d3
+name = "RestoreAbandonmentManifest"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_manifest/"
+
+[[kind]]
+object_kind = 0x03d4
+name = "RestoreAbandonmentPinPendingOwner"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_pin_pending_owner/"
+
+[[kind]]
+object_kind = 0x03d5
+name = "RestoreAbandonmentReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_receipt/"
+
+[[kind]]
+object_kind = 0x03d6
+name = "RestoreCanonicalAcquisitionWorkingSet"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_canonical_acquisition_working_set/"
+
+[[kind]]
+object_kind = 0x03d7
+name = "RestoreDirectCreationAuthorityRecord"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_direct_creation_authority_record/"
+
+[[kind]]
+object_kind = 0x03d8
+name = "RestoreJournalKeyDestructionSummary"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_journal_key_destruction_summary/"
+
+[[kind]]
+object_kind = 0x03d9
+name = "RestoreJournalKeyDisposition"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_journal_key_disposition/"
+
+[[kind]]
+object_kind = 0x03da
+name = "RestoreLeaseBoundSourceAccessSet"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_bound_source_access_set/"
+
+[[kind]]
+object_kind = 0x03db
+name = "RestoreLeaseOperationTerminalAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_accumulator/"
+
+[[kind]]
+object_kind = 0x03dc
+name = "RestoreLeaseOperationTerminalIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_index/"
+
+[[kind]]
+object_kind = 0x03dd
+name = "RestoreLeaseOperationTerminalRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_record/"
+
+[[kind]]
+object_kind = 0x03de
+name = "RestoreNoTargetObservationProof"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_no_target_observation_proof/"
+
+[[kind]]
+object_kind = 0x03df
+name = "RestorePromotionRootSeal"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_promotion_root_seal/"
+
+[[kind]]
+object_kind = 0x03e0
+name = "RestoreReadyClosureInventory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_ready_closure_inventory/"
+
+[[kind]]
+object_kind = 0x03e1
+name = "RestoreReconciliationCompletionProof"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_reconciliation_completion_proof/"
+
+[[kind]]
+object_kind = 0x03e2
+name = "RestoreReconciliationRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_reconciliation_root/"
+
+[[kind]]
+object_kind = 0x03e3
+name = "RestoreRegistry"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_registry/"
+
+[[kind]]
+object_kind = 0x03e4
+name = "RestoreServicePromotionManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_service_promotion_manifest/"
+
+[[kind]]
+object_kind = 0x03e5
+name = "RestoreServicePromotionReceipt"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_service_promotion_receipt/"
+
+[[kind]]
+object_kind = 0x03e6
+name = "RestoreShardAbandonAck"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_abandon_ack/"
+
+[[kind]]
+object_kind = 0x03e7
+name = "RestoreShardActivationAck"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_activation_ack/"
+
+[[kind]]
+object_kind = 0x03e8
+name = "RestoreShardBootstrapProjection"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_bootstrap_projection/"
+
+[[kind]]
+object_kind = 0x03e9
+name = "RestoreShardBootstrapProjectionCertificate"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_bootstrap_projection_certificate/"
+
+[[kind]]
+object_kind = 0x03ea
+name = "RestoreShardOperationalAck"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_operational_ack/"
+
+[[kind]]
+object_kind = 0x03eb
+name = "RestoreShardReadyBarrier"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_ready_barrier/"
+
+[[kind]]
+object_kind = 0x03ec
+name = "RestoreShardServiceReadyAck"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_service_ready_ack/"
+
+[[kind]]
+object_kind = 0x03ed
+name = "RestoreShardVisibilityAck"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_visibility_ack/"
+
+[[kind]]
+object_kind = 0x03ee
+name = "RestoreSourceAccessRevocationOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_access_revocation_operation_record/"
+
+[[kind]]
+object_kind = 0x03ef
+name = "RestoreSourceAcquisitionBundle"
+status = "reserved"
+construction_order = 46
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_bundle/"
+
+[[kind]]
+object_kind = 0x03f0
+name = "RestoreSourceAcquisitionPlanImportRecord"
+status = "reserved"
+construction_order = 11
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_plan_import_record/"
+
+[[kind]]
+object_kind = 0x03f1
+name = "RestoreSourceAcquisitionSourceGate"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_source_gate/"
+
+[[kind]]
+object_kind = 0x03f2
+name = "RestoreSourceKeyAccessCleanupAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_accumulator/"
+
+[[kind]]
+object_kind = 0x03f3
+name = "RestoreSourceKeyAccessCleanupProgress"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_progress/"
+
+[[kind]]
+object_kind = 0x03f4
+name = "RestoreSourceKeyAccessCleanupRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_record/"
+
+[[kind]]
+object_kind = 0x03f5
+name = "RestoreSourceKeyAccessInventory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_inventory/"
+
+[[kind]]
+object_kind = 0x03f6
+name = "RestoreSourceLeaseAcquireReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_acquire_receipt/"
+
+[[kind]]
+object_kind = 0x03f7
+name = "RestoreSourceLeaseAuthorityObservationImport"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_authority_observation_import/"
+
+[[kind]]
+object_kind = 0x03f9
+name = "RestoreSourceLeaseRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_record/"
+
+[[kind]]
+object_kind = 0x03fa
+name = "RestoreSourceLeaseReleaseOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_release_operation_record/"
+
+[[kind]]
+object_kind = 0x03fb
+name = "RestoreSourceLeaseReleaseOperationSummary"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_release_operation_summary/"
+
+[[kind]]
+object_kind = 0x03fc
+name = "RestoreSourceLeaseRenewOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renew_operation_record/"
+
+[[kind]]
+object_kind = 0x03fd
+name = "RestoreSourceLeaseRenewReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renew_receipt/"
+
+[[kind]]
+object_kind = 0x03fe
+name = "RestoreSourceLeaseRenewalCloseRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renewal_close_record/"
+
+[[kind]]
+object_kind = 0x03ff
+name = "RestoreState"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_state/"
+
+[[kind]]
+object_kind = 0x0400
+name = "RestoreTerminalCleanupAuthority"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_cleanup_authority/"
+
+[[kind]]
+object_kind = 0x0401
+name = "RestoreTerminalPhysicalInventory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_physical_inventory/"
+
+[[kind]]
+object_kind = 0x0402
+name = "RestoreTerminalPinBasis"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_basis/"
+
+[[kind]]
+object_kind = 0x0403
+name = "RestoreTerminalPinDurabilityReceipt"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_durability_receipt/"
+
+[[kind]]
+object_kind = 0x0404
+name = "RestoreTerminalPinReleaseAuthorization"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_release_authorization/"
+
+[[kind]]
+object_kind = 0x0405
+name = "RestoreVisibilityCommitCertificate"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_visibility_commit_certificate/"
+
+[[kind]]
+object_kind = 0x0408
+name = "ResultDeliveryDispositionProof"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_disposition_proof/"
+
+[[kind]]
+object_kind = 0x0409
+name = "ResultDeliveryLease"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_lease/"
+
+[[kind]]
+object_kind = 0x040a
+name = "ResultDeliveryLeaseTimeBasis"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_lease_time_basis/"
+
+[[kind]]
+object_kind = 0x040b
+name = "ResultDeliveryPolicy"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_policy/"
+
+[[kind]]
+object_kind = 0x040c
+name = "ResultEndSendCompletionRecord"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_end_send_completion_record/"
+
+[[kind]]
+object_kind = 0x0410
+name = "ResultResourceEscrow"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_resource_escrow/"
+
+[[kind]]
+object_kind = 0x0411
+name = "ResultSchema"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_schema/"
+
+[[kind]]
+object_kind = 0x0414
+name = "RetentionAuthorityTransferAdoptionSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_authority_transfer_adoption_spec/"
+
+[[kind]]
+object_kind = 0x0415
+name = "RetentionCutBody"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_cut_body/"
+
+[[kind]]
+object_kind = 0x0416
+name = "RetentionMap"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_map/"
+
+[[kind]]
+object_kind = 0x041c
+name = "RoleTimeBoundSubjectInventoryClosure"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_time_bound_subject_inventory_closure/"
+
+[[kind]]
+object_kind = 0x041d
+name = "RoleTimeIssuanceReservationClosure"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_time_issuance_reservation_closure/"
+
+[[kind]]
 object_kind = 0x041e
 name = "RoleTransitionActivationState"
 status = "reserved"
@@ -421,6 +3202,42 @@ construction_order = 44
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/role_transition_activation_state/"
+
+[[kind]]
+object_kind = 0x0421
+name = "RoleTransitionMetaServicePrepareCertificate"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_meta_service_prepare_certificate/"
+
+[[kind]]
+object_kind = 0x0425
+name = "RoleTransitionPromotionRootSeal"
+status = "reserved"
+construction_order = 41
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_promotion_root_seal/"
+
+[[kind]]
+object_kind = 0x0428
+name = "RoleTransitionServicePromotionManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_service_promotion_manifest/"
+
+[[kind]]
+object_kind = 0x042a
+name = "RoleTransitionShardOperationalAck"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_shard_operational_ack/"
 
 [[kind]]
 object_kind = 0x042b
@@ -439,3 +3256,1749 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/root_authority_trust_body/"
+
+[[kind]]
+object_kind = 0x042e
+name = "SealedPreBootstrapDispatchJournalImport"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sealed_pre_bootstrap_dispatch_journal_import/"
+
+[[kind]]
+object_kind = 0x0430
+name = "SequenceNeutralAuditEventBody"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_audit_event_body/"
+
+[[kind]]
+object_kind = 0x0431
+name = "SequenceNeutralAuditResolutionBody"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_audit_resolution_body/"
+
+[[kind]]
+object_kind = 0x0432
+name = "SequenceNeutralSpec"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_spec/"
+
+[[kind]]
+object_kind = 0x0433
+name = "ServiceVisibilityEpochReservation"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/service_visibility_epoch_reservation/"
+
+[[kind]]
+object_kind = 0x0437
+name = "ShardAllocationEpochAuthorityProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_allocation_epoch_authority_projection/"
+
+[[kind]]
+object_kind = 0x0438
+name = "ShardAppliedAck"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_applied_ack/"
+
+[[kind]]
+object_kind = 0x0440
+name = "ShardCheckpointCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_checkpoint_certificate/"
+
+[[kind]]
+object_kind = 0x0441
+name = "ShardCommandRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_command_record/"
+
+[[kind]]
+object_kind = 0x0442
+name = "ShardConfigPayloadFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_config_payload_floor/"
+
+[[kind]]
+object_kind = 0x0443
+name = "ShardConfigurationAdoptionEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_configuration_adoption_evidence/"
+
+[[kind]]
+object_kind = 0x0445
+name = "ShardContinuityAuthorityProjection"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_continuity_authority_projection/"
+
+[[kind]]
+object_kind = 0x0447
+name = "ShardControlCommand"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_control_command/"
+
+[[kind]]
+object_kind = 0x0448
+name = "ShardDecisionApplyCommand"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_decision_apply_command/"
+
+[[kind]]
+object_kind = 0x044b
+name = "ShardEffectBasis"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_effect_basis/"
+
+[[kind]]
+object_kind = 0x044c
+name = "ShardEffectFragment"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_effect_fragment/"
+
+[[kind]]
+object_kind = 0x044d
+name = "ShardEscapingAllocationEvidence"
+status = "reserved"
+construction_order = 12
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_escaping_allocation_evidence/"
+
+[[kind]]
+object_kind = 0x044e
+name = "ShardEscapingAllocationReservationRecord"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_escaping_allocation_reservation_record/"
+
+[[kind]]
+object_kind = 0x0453
+name = "ShardGcPreflightEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_gc_preflight_evidence/"
+
+[[kind]]
+object_kind = 0x0454
+name = "ShardGcPreflightRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_gc_preflight_record/"
+
+[[kind]]
+object_kind = 0x0455
+name = "ShardGcPreflightSpec"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_gc_preflight_spec/"
+
+[[kind]]
+object_kind = 0x0458
+name = "ShardIdRangeLease"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_id_range_lease/"
+
+[[kind]]
+object_kind = 0x045b
+name = "ShardKeyMaterialAvailabilityCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_material_availability_certificate/"
+
+[[kind]]
+object_kind = 0x045c
+name = "ShardKeyMaterialProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_material_projection/"
+
+[[kind]]
+object_kind = 0x045d
+name = "ShardKeyPhysicalDestructionCompletionCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_physical_destruction_completion_certificate/"
+
+[[kind]]
+object_kind = 0x045e
+name = "ShardKeyZeroReferenceCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_zero_reference_certificate/"
+
+[[kind]]
+object_kind = 0x0460
+name = "ShardLogicalStateRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_logical_state_root/"
+
+[[kind]]
+object_kind = 0x0465
+name = "ShardPrepareCommand"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepare_command/"
+
+[[kind]]
+object_kind = 0x0466
+name = "ShardPrepareRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepare_record/"
+
+[[kind]]
+object_kind = 0x0469
+name = "ShardPreparedPayloadRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepared_payload_record/"
+
+[[kind]]
+object_kind = 0x046a
+name = "ShardPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepared_payload_root/"
+
+[[kind]]
+object_kind = 0x046b
+name = "ShardProtocolState"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_protocol_state/"
+
+[[kind]]
+object_kind = 0x046d
+name = "ShardReadWitnessBasis"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_read_witness_basis/"
+
+[[kind]]
+object_kind = 0x046f
+name = "ShardRecoveryCheckpoint"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_recovery_checkpoint/"
+
+[[kind]]
+object_kind = 0x0471
+name = "ShardRestoreAbandonmentTombstone"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_abandonment_tombstone/"
+
+[[kind]]
+object_kind = 0x0472
+name = "ShardRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_independent_reopen_proof/"
+
+[[kind]]
+object_kind = 0x0474
+name = "ShardRestoreSourceAccessClosure"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_source_access_closure/"
+
+[[kind]]
+object_kind = 0x0475
+name = "ShardRestoreSourceLeaseProjection"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_source_lease_projection/"
+
+[[kind]]
+object_kind = 0x0476
+name = "ShardRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_terminal_tombstone/"
+
+[[kind]]
+object_kind = 0x0478
+name = "ShardRoleTransitionReadyBarrier"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_role_transition_ready_barrier/"
+
+[[kind]]
+object_kind = 0x047a
+name = "ShardStatePublicationCertificate"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_state_publication_certificate/"
+
+[[kind]]
+object_kind = 0x047c
+name = "ShardTimeAuthorityProjection"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_time_authority_projection/"
+
+[[kind]]
+object_kind = 0x047d
+name = "ShardTimeAuthorityRetirementAck"
+status = "reserved"
+construction_order = 52
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_time_authority_retirement_ack/"
+
+[[kind]]
+object_kind = 0x047e
+name = "ShardTimeAuthorityRetirementFloor"
+status = "reserved"
+construction_order = 51
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_time_authority_retirement_floor/"
+
+[[kind]]
+object_kind = 0x047f
+name = "ShardTimeBoundSubjectInventoryCertificate"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_time_bound_subject_inventory_certificate/"
+
+[[kind]]
+object_kind = 0x0480
+name = "ShardTimeBoundSubjectRetirementProof"
+status = "reserved"
+construction_order = 36
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_time_bound_subject_retirement_proof/"
+
+[[kind]]
+object_kind = 0x0484
+name = "ShardedGenesisCertificate"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharded_genesis_certificate/"
+
+[[kind]]
+object_kind = 0x0485
+name = "ShardingFreezeRecord"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_freeze_record/"
+
+[[kind]]
+object_kind = 0x0486
+name = "ShardingFreezeSpec"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_freeze_spec/"
+
+[[kind]]
+object_kind = 0x0487
+name = "ShardingMigrationRetentionFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_migration_retention_floor/"
+
+[[kind]]
+object_kind = 0x0488
+name = "ShardingMigrationState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_migration_state/"
+
+[[kind]]
+object_kind = 0x0489
+name = "ShardingRoleTransitionPlan"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_role_transition_plan/"
+
+[[kind]]
+object_kind = 0x048e
+name = "TerminalAbortAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_abort_authority/"
+
+[[kind]]
+object_kind = 0x0490
+name = "TerminalAttemptSummaryRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_attempt_summary_root/"
+
+[[kind]]
+object_kind = 0x0491
+name = "TerminalCertificationReservationRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_certification_reservation_root/"
+
+[[kind]]
+object_kind = 0x0493
+name = "TerminalWriteResultPreparation"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_write_result_preparation/"
+
+[[kind]]
+object_kind = 0x0494
+name = "TimeAuthorityDrainHold"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_drain_hold/"
+
+[[kind]]
+object_kind = 0x0495
+name = "TimeAuthorityEpochTransitionPlan"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_epoch_transition_plan/"
+
+[[kind]]
+object_kind = 0x0496
+name = "TimeAuthorityEpochTransitionRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_epoch_transition_record/"
+
+[[kind]]
+object_kind = 0x0497
+name = "TimeAuthorityIssuanceClosingReceipt"
+status = "reserved"
+construction_order = 19
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_issuance_closing_receipt/"
+
+[[kind]]
+object_kind = 0x0498
+name = "TimeAuthorityIssuanceFence"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_issuance_fence/"
+
+[[kind]]
+object_kind = 0x0499
+name = "TimeAuthorityObservationImport"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_observation_import/"
+
+[[kind]]
+object_kind = 0x049a
+name = "TimeAuthorityProfile"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_profile/"
+
+[[kind]]
+object_kind = 0x049b
+name = "TimeAuthorityRegistry"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_registry/"
+
+[[kind]]
+object_kind = 0x049c
+name = "TimeAuthorityRegistryTransitionReceipt"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_registry_transition_receipt/"
+
+[[kind]]
+object_kind = 0x049e
+name = "TimeAuthorityShutdownReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_shutdown_receipt/"
+
+[[kind]]
+object_kind = 0x049f
+name = "TimeAuthorityTransitionTerminalSummary"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_transition_terminal_summary/"
+
+[[kind]]
+object_kind = 0x04a0
+name = "TimeBoundSubjectInventory"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_bound_subject_inventory/"
+
+[[kind]]
+object_kind = 0x04a1
+name = "TimeBoundSubjectInventoryProof"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_bound_subject_inventory_proof/"
+
+[[kind]]
+object_kind = 0x04a2
+name = "TimeBoundSubjectRetirementProof"
+status = "reserved"
+construction_order = 61
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_bound_subject_retirement_proof/"
+
+[[kind]]
+object_kind = 0x04a4
+name = "TimeSubjectIssuanceReservation"
+status = "reserved"
+construction_order = 19
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_subject_issuance_reservation/"
+
+[[kind]]
+object_kind = 0x04a6
+name = "TimeValidationEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_validation_evidence/"
+
+[[kind]]
+object_kind = 0x04a7
+name = "TopologyAttemptClosureProof"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_attempt_closure_proof/"
+
+[[kind]]
+object_kind = 0x04a8
+name = "TopologyRetirementAck"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_retirement_ack/"
+
+[[kind]]
+object_kind = 0x04a9
+name = "TopologyRetirementFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04aa
+name = "TopologyState"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_state/"
+
+[[kind]]
+object_kind = 0x04ab
+name = "TopologyTransferAck"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_transfer_ack/"
+
+[[kind]]
+object_kind = 0x04ac
+name = "TopologyTransferPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_transfer_plan/"
+
+[[kind]]
+object_kind = 0x04ad
+name = "TopologyTransitionRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_transition_record/"
+
+[[kind]]
+object_kind = 0x04ae
+name = "TransparencyCheckpoint"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint/"
+
+[[kind]]
+object_kind = 0x04af
+name = "TransparencyCheckpointFreshnessBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint_freshness_basis/"
+
+[[kind]]
+object_kind = 0x04b0
+name = "TransparencyCrossLogReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_cross_log_receipt/"
+
+[[kind]]
+object_kind = 0x04b1
+name = "TxnAllocationBindingRoot"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/txn_allocation_binding_root/"
+
+[[kind]]
+object_kind = 0x04b5
+name = "TxnOutcomeRecord"
+status = "reserved"
+construction_order = 18
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/txn_outcome_record/"
+
+[[kind]]
+object_kind = 0x04b6
+name = "TypedCertifiedMetaProjectionPayload"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/typed_certified_meta_projection_payload/"
+
+[[kind]]
+object_kind = 0x04b7
+name = "ValidatedRemoteConfigurationAnchor"
+status = "reserved"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/validated_remote_configuration_anchor/"
+
+[[kind]]
+object_kind = 0x04b8
+name = "VerifierKeyRetirementFloor"
+status = "reserved"
+construction_order = 62
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04b9
+name = "WitnessPolicy"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/witness_policy/"
+
+[[kind]]
+object_kind = 0x04bd
+name = "ZeroReferenceProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/zero_reference_proof/"
+
+[[kind]]
+object_kind = 0x04cc
+name = "BranchMergeLedgerRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_merge_ledger_root/"
+
+[[kind]]
+object_kind = 0x04ce
+name = "CapabilityMigrationIndex"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/capability_migration_index/"
+
+[[kind]]
+object_kind = 0x04d3
+name = "DeliveredBaselinePayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivered_baseline_payload/"
+
+[[kind]]
+object_kind = 0x04d5
+name = "DeltaDeliveryEnvelope"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delta_delivery_envelope/"
+
+[[kind]]
+object_kind = 0x04e0
+name = "EmbeddedResultFullyConsumedRecord"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/embedded_result_fully_consumed_record/"
+
+[[kind]]
+object_kind = 0x04e1
+name = "EscapingAllocationReservationRecord"
+status = "reserved"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/escaping_allocation_reservation_record/"
+
+[[kind]]
+object_kind = 0x04fc
+name = "ProtectedErrorReplayTimeBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/protected_error_replay_time_basis/"
+
+[[kind]]
+object_kind = 0x0500
+name = "ReadYourWritesCapabilityLineageRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_lineage_root/"
+
+[[kind]]
+object_kind = 0x0502
+name = "ReadYourWritesCapabilityTerminalTombstone"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_terminal_tombstone/"
+
+[[kind]]
+object_kind = 0x051e
+name = "TimeSubjectDisposition"
+status = "reserved"
+construction_order = 70
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_subject_disposition/"
+
+[[kind]]
+object_kind = 0x051f
+name = "TimeSubjectTerminalProjection"
+status = "reserved"
+construction_order = 71
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_subject_terminal_projection/"
+
+[[kind]]
+object_kind = 0x0520
+name = "RoleConfigurationRetentionBasis"
+status = "reserved"
+construction_order = 72
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_configuration_retention_basis/"
+
+[[kind]]
+object_kind = 0x0521
+name = "RoleTimeAuthorityDrainFloorSet"
+status = "reserved"
+construction_order = 73
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_time_authority_drain_floor_set/"
+
+[[kind]]
+object_kind = 0x0522
+name = "RoleTimeAuthorityRetirementFloorSet"
+status = "reserved"
+construction_order = 74
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_time_authority_retirement_floor_set/"
+
+[[kind]]
+object_kind = 0x0523
+name = "ContinuityAuthorityCurrentBasis"
+status = "reserved"
+construction_order = 75
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/continuity_authority_current_basis/"
+
+[[kind]]
+object_kind = 0x0524
+name = "ShardRestoreSourceLeaseProjectionSource"
+status = "reserved"
+construction_order = 76
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_source_lease_projection_source/"
+
+[[kind]]
+object_kind = 0x0525
+name = "RestoreClaimedTargetAuthorityRecipe"
+status = "reserved"
+construction_order = 77
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_claimed_target_authority_recipe/"
+
+[[kind]]
+object_kind = 0x0526
+name = "RestoreIdentityKeyPlan"
+status = "reserved"
+construction_order = 78
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_identity_key_plan/"
+
+[[kind]]
+object_kind = 0x0527
+name = "RestoreIdentityKeyDispositionEvidence"
+status = "reserved"
+construction_order = 79
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_identity_key_disposition_evidence/"
+
+[[kind]]
+object_kind = 0x0528
+name = "ResultAckAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_ack_authority/"
+
+[[kind]]
+object_kind = 0x0529
+name = "ResultReleaseEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_release_evidence/"
+
+[[kind]]
+object_kind = 0x052a
+name = "RaftLogSegment"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_log_segment/"
+
+[[kind]]
+object_kind = 0x052b
+name = "CertificateSignatureShare"
+status = "reserved"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_signature_share/"
+
+[[kind]]
+object_kind = 0x052c
+name = "Distributed"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed/"
+
+[[kind]]
+object_kind = 0x052d
+name = "ShardDerivedComponent"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_derived_component/"
+
+[[kind]]
+object_kind = 0x052e
+name = "SubscriptionDeliveryTransitionSpec"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/subscription_delivery_transition_spec/"
+
+[[kind]]
+object_kind = 0x052f
+name = "MetaRelevanceRangeProof"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_relevance_range_proof/"
+
+[[kind]]
+object_kind = 0x0530
+name = "MetaPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_prepared_payload_root/"
+
+[[kind]]
+object_kind = 0x0531
+name = "PreparedOwnershipTransferRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_ownership_transfer_record/"
+
+[[kind]]
+object_kind = 0x0532
+name = "MetaCheckpointCertificate"
+status = "reserved"
+construction_order = 45
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_checkpoint_certificate/"
+
+[[kind]]
+object_kind = 0x0533
+name = "ShardConstraintStateRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_constraint_state_root/"
+
+[[kind]]
+object_kind = 0x0534
+name = "AttemptFamilyState"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/attempt_family_state/"
+
+[[kind]]
+object_kind = 0x0535
+name = "GlobalAttemptIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_index/"
+
+[[kind]]
+object_kind = 0x0536
+name = "MetaReadAuditEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_read_audit_evidence/"
+
+[[kind]]
+object_kind = 0x0537
+name = "NoTerminalPlanLockShareOrOrderProof"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_terminal_plan_lock_share_or_order_proof/"
+
+[[kind]]
+object_kind = 0x0538
+name = "ResultDeliveryState"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_state/"
+
+[[kind]]
+object_kind = 0x0539
+name = "RecoveryTransformSourceBasis"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_transform_source_basis/"
+
+[[kind]]
+object_kind = 0x053a
+name = "RestoreAbandonAuthorityProfile"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_authority_profile/"
+
+[[kind]]
+object_kind = 0x053b
+name = "RestoreAbandonmentTombstoneRef"
+status = "reserved"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_tombstone_ref/"
+
+[[kind]]
+object_kind = 0x053c
+name = "RestoreAbandonmentTombstoneSkeletonRecipe"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_tombstone_skeleton_recipe/"
+
+[[kind]]
+object_kind = 0x053d
+name = "RestoreLeaseOperationTerminalHistory"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_history/"
+
+[[kind]]
+object_kind = 0x053e
+name = "RestoreLeaseReleaseEligibility"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_release_eligibility/"
+
+[[kind]]
+object_kind = 0x053f
+name = "RestoreLeaseState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_state/"
+
+[[kind]]
+object_kind = 0x0540
+name = "CanonicalCatalogRestoreTargetTerminalDisposition"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_catalog_restore_target_terminal_disposition/"
+
+[[kind]]
+object_kind = 0x0541
+name = "RestoreAbandonAuthorityProfileProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_authority_profile_projection/"
+
+[[kind]]
+object_kind = 0x0542
+name = "RestoreLeaseOperationTerminalRecordRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_record_ref/"
+
+[[kind]]
+object_kind = 0x0543
+name = "RestoreRetentionAnchor"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_retention_anchor/"
+
+[[kind]]
+object_kind = 0x0544
+name = "GcPhysicalDispositionImportSpec"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_physical_disposition_import_spec/"
+
+[[kind]]
+object_kind = 0x0545
+name = "GcSemanticState"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_semantic_state/"
+
+[[kind]]
+object_kind = 0x0546
+name = "RecoveryAllocationEpochAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_allocation_epoch_authority/"
+
+[[kind]]
+object_kind = 0x0547
+name = "RecoveryBridgeAuthority"
+status = "reserved"
+construction_order = 51
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_bridge_authority/"
+
+[[kind]]
+object_kind = 0x0548
+name = "RecoveryBridgeSourceLeaseBasis"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_bridge_source_lease_basis/"
+
+[[kind]]
+object_kind = 0x0549
+name = "ReservationAppliedUseIdentity"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_applied_use_identity/"
+
+[[kind]]
+object_kind = 0x054a
+name = "ReservationBurnEligibility"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_burn_eligibility/"
+
+[[kind]]
+object_kind = 0x054b
+name = "ReservationBurnSource"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_burn_source/"
+
+[[kind]]
+object_kind = 0x054c
+name = "ReservationConsumeAuthorizationBasis"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_consume_authorization_basis/"
+
+[[kind]]
+object_kind = 0x054d
+name = "ReservationDispositionEligibility"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/reservation_disposition_eligibility/"
+
+[[kind]]
+object_kind = 0x054e
+name = "RestoreFirstRootPublicationAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_first_root_publication_authority/"
+
+[[kind]]
+object_kind = 0x054f
+name = "RestoreReconciliationStatus"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_reconciliation_status/"
+
+[[kind]]
+object_kind = 0x0550
+name = "DurableCapabilityHeader"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 1024
+golden_corpus = "corpus/logical/durable_capability_header/"
+
+[[kind]]
+object_kind = 0x0551
+name = "ExactDurableCapabilityKindBody"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 8192
+golden_corpus = "corpus/logical/exact_durable_capability_kind_body/"
+
+[[kind]]
+object_kind = 0x0552
+name = "CanonicalDurableCapabilityBytes"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/canonical_durable_capability_bytes/"
+
+[[kind]]
+object_kind = 0x0553
+name = "DurableCapabilityMacInput"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_mac_input/"
+
+[[kind]]
+object_kind = 0x0554
+name = "DurableCapabilityValidationActionScope"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 65536
+golden_corpus = "corpus/logical/durable_capability_validation_action_scope/"
+
+[[kind]]
+object_kind = 0x0555
+name = "DurableCapabilityValidatorSemanticsRegistry"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_validator_semantics_registry/"
+
+[[kind]]
+object_kind = 0x0556
+name = "BranchForkSpec"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_fork_spec/"
+
+[[kind]]
+object_kind = 0x0557
+name = "BranchGrantSpec"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_grant_spec/"
+
+[[kind]]
+object_kind = 0x0558
+name = "ReplayObjectRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_object_ref/"
+
+[[kind]]
+object_kind = 0x0559
+name = "ReplayEvidenceRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_evidence_ref/"
+
+[[kind]]
+object_kind = 0x055a
+name = "AuthorityPermitRef"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authority_permit_ref/"
+
+[[kind]]
+object_kind = 0x055b
+name = "ReadCapablePermitRef"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_capable_permit_ref/"
+
+[[kind]]
+object_kind = 0x055c
+name = "ReadYourWritesCapabilityLineageState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_lineage_state/"
+
+[[kind]]
+object_kind = 0x055d
+name = "LifecycleAuthoritySource"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/lifecycle_authority_source/"
+
+[[kind]]
+object_kind = 0x055e
+name = "GcCancellationAuthorityFor"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_cancellation_authority_for/"
+
+[[kind]]
+object_kind = 0x055f
+name = "GlobalRestoreServiceCompletionSpec"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_service_completion_spec/"
+
+[[kind]]
+object_kind = 0x0560
+name = "GlobalRestoreServiceFinalizeSpec"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_service_finalize_spec/"
+
+[[kind]]
+object_kind = 0x0561
+name = "LocalRestoreActivationSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_activation_spec/"
+
+[[kind]]
+object_kind = 0x0562
+name = "LocalRestoreServiceCompletionSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_completion_spec/"
+
+[[kind]]
+object_kind = 0x0563
+name = "LocalRestoreServicePromotionSpec"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_promotion_spec/"
+
+[[kind]]
+object_kind = 0x0564
+name = "ShardRestoreReopenConfirmSpec"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_reopen_confirm_spec/"
+
+[[kind]]
+object_kind = 0x0565
+name = "ShardRestoreServiceOpenSpec"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_service_open_spec/"
+
+[[kind]]
+object_kind = 0x0566
+name = "CheckpointInstallSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/checkpoint_install_spec/"
+
+[[kind]]
+object_kind = 0x0567
+name = "ConstraintMutationBatch"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_mutation_batch/"
+
+[[kind]]
+object_kind = 0x0568
+name = "HistoryCutActivationSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/history_cut_activation_spec/"
+
+[[kind]]
+object_kind = 0x0569
+name = "InitialConfigFloorInstallSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/initial_config_floor_install_spec/"
+
+[[kind]]
+object_kind = 0x056a
+name = "ResourceChargeEffect"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_charge_effect/"
+
+[[kind]]
+object_kind = 0x056b
+name = "ConstraintStateTransition"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_transition/"
+
+[[kind]]
+object_kind = 0x056c
+name = "ConstraintValidationEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_validation_evidence/"
+
+[[kind]]
+object_kind = 0x056d
+name = "LocalConstraintReservationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_constraint_reservation_record/"
+
+[[kind]]
+object_kind = 0x056e
+name = "ResourceLedgerAppliedRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_applied_record/"
+
+[[kind]]
+object_kind = 0x056f
+name = "ResourceLedgerTransitionSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_transition_spec/"
+
+[[kind]]
+object_kind = 0x0570
+name = "TransparencyCheckpointValidationRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint_validation_record/"
+
+[[kind]]
+object_kind = 0x0571
+name = "KeyEnvelopeNodeInheritedRootsRecord"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_node_inherited_roots_record/"
+
+[[kind]]
+object_kind = 0x0572
+name = "LocalConstraintReservationRecordOwnerRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_constraint_reservation_record_owner_record/"
+
+[[kind]]
+object_kind = 0x0573
+name = "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_terminal_signature_or_order_proof_raft_nonorder_evidence_record/"
+
+[[kind]]
+object_kind = 0x0574
+name = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_barrier_bootstrap_import_sorted_expired_cohort_imports_record/"
+
+[[kind]]
+object_kind = 0x0575
+name = "PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_barrier_bootstrap_import_sorted_issuer_fence_imports_record/"
+
+[[kind]]
+object_kind = 0x0576
+name = "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_barrier_bootstrap_import_sorted_revoked_cohort_imports_record/"
+
+[[kind]]
+object_kind = 0x0577
+name = "RemoteGrantRetirementPlanSortedEntriesRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_grant_retirement_plan_sorted_entries_record/"
+
+[[kind]]
+object_kind = 0x0578
+name = "LocalRestoreServicePrepareSpec"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_prepare_spec/"
+
+[[kind]]
+object_kind = 0x0579
+name = "ServiceCatalogPromotionReservationReceipt"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/service_catalog_promotion_reservation_receipt/"
+
+[[kind]]
+object_kind = 0x057a
+name = "LocalGcApplyQuarantineSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_gc_apply_quarantine_spec/"
+
+[[kind]]
+object_kind = 0x057b
+name = "LocalGcCancellationAuthorizeSpec"
+status = "reserved"
+construction_order = 15
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_gc_cancellation_authorize_spec/"
+
+[[kind]]
+object_kind = 0x057c
+name = "ConfigurationTransitionSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/configuration_transition_spec/"
+
+[[kind]]
+object_kind = 0x057d
+name = "AuditFreezeField"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_freeze_field/"

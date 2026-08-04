@@ -1,0 +1,268 @@
+# =============================================================================
+# unsafe_boundary_ledger.toml — the enumerated unsafe surface (G0)
+# =============================================================================
+# Bead: fgdb-w1-unsafe-ledger-icp
+# Provenance: plan §1 constraint 2 (memory safety is structural), §8.7 (SIMD /
+# memory-level-parallelism discipline), §18.1 (the unsafe-islands row).
+#
+# WHAT THIS FILE IS. Not documentation — the enforcement surface. The workspace
+# sets `unsafe_code = "forbid"`, and Rust's `forbid` cannot be lowered by an
+# inner `allow`. That is deliberate: it means raw-pointer work cannot be
+# sprinkled through ordinary crates at all. It may exist only inside a
+# separately named `fgdb-unsafe-*` boundary crate whose root uses `deny`
+# instead, with narrowly scoped `#[allow(unsafe_code)]` sites. Every one of
+# those sites needs a row here, and CI rejects an unledgered site.
+#
+# WHY THE ROSTER IS DECLARED EVEN WHILE EMPTY. The workspace currently has zero
+# islands and zero unsafe sites. A checker that simply counted sites would
+# report "0 sites, pass" — and would report the same thing if its scanner were
+# broken or this file were deleted. So the roster below is a positive claim
+# with a `status`, and `unsafe-ledger-check` verifies BOTH directions: a
+# `present` island that is missing fails, and a `planned` island that has
+# quietly appeared fails. An island must be admitted here before it lands,
+# never after.
+#
+# Row schema:
+#   [[island]]
+#   name    = "fgdb-unsafe-*"      # crate name under crates/
+#   charter = "..."                # what may live here; bounds the island
+#   status  = "present" | "planned"
+#
+#   [[site]]
+#   row_id            = "..."      # unique, stable
+#   island            = "..."      # must name a declared island
+#   path              = "..."      # repo-relative source file
+#   symbol            = "..."      # the item the allow scopes, verbatim
+#   stated_invariant  = "..."      # the LOCAL safety invariant this site relies on
+#   evidence          = "..."      # test / proof / Miri lane that exercises it
+#   fallback          = "..."      # the scalar or safe implementation it must match
+#   no_claim_boundary = "..."      # what this site does NOT guarantee
+#
+# `stated_invariant`, `evidence`, `fallback` and `no_claim_boundary` may not be
+# empty. A site with a blank evidence field is an unaudited site wearing a
+# ledger row, so the checker rejects it rather than counting it as covered.
+# `no_claim_boundary` exists to stop evidence inflation: a Miri-clean run is
+# evidence for the paths it exercised, never a proof of the site.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "unsafe_boundary_ledger"
+bead = "fgdb-w1-unsafe-ledger-icp"
+
+# -----------------------------------------------------------------------------
+# The roster. Per §18.1 these three are THE ONLY crate roots in the workspace
+# permitted not to use forbid(unsafe_code). `fgdb-unsafe-simd` and
+# `fgdb-unsafe-arena` and `fgdb-unsafe-vfs` have all landed and are `present`.
+# The roster is still a positive claim rather than a formality: the checker
+# fails if a `present` island goes missing, and it fails if a `planned` one
+# appears without its status being moved here first. Both directions, because
+# silence is not agreement.
+# -----------------------------------------------------------------------------
+
+[[island]]
+name = "fgdb-unsafe-simd"
+charter = "SIMD and vector kernels only: codec decode inner loops, digest and cipher inner loops, hash-table control-group probes, linalg kernels, plus AMAC/memory-level-parallelism experiments. Every kernel carries a bit-identical scalar fallback (§8.7); STRICT kernels are fixed by the portable scalar profile and must agree bit-for-bit across every supported dispatch path. AMAC/prefetch policy is physical-only and may never change a result or a logical order."
+status = "present"
+
+[[island]]
+name = "fgdb-unsafe-arena"
+charter = "Bump/region arena internals, generational-handle plumbing, and one sealed private core::alloc::Allocator adapter consumed only through the safe RegionVec facade. No public raw pointers, NonNull, Allocator, allocator-parameterized Vec, private-adapter re-export, or public unsafe fn/impl. Allocation-capable RegionVec methods require QueryCx. Typed drop glue runs through standard Vec<T, A>, and region reclamation must prove bytes_reclaimed == bytes_allocated plus blocks_released == blocks_allocated on cancellation and region close."
+status = "present"
+
+[[island]]
+name = "fgdb-unsafe-vfs"
+charter = "Raw file and memory-mapping syscall surfaces beneath the filesystem-profile layer. Every mapping is exposed to safe callers as a bounded, lifetime-checked view; torn-write and bit-rot behaviour is the caller's contract, never assumed here."
+status = "present"
+
+# -----------------------------------------------------------------------------
+# Sites. Seven today, and the count is CHECKED rather than assumed: the checker
+# self-tests its site scanner against a fixture with a known site count before
+# it is willing to report any total, and it fails the whole run if that
+# self-test does not reproduce exactly. See tools/registry-check/src/
+# unsafe_ledger.rs (`scanner_fixture`).
+#
+# Add a row IN THE SAME COMMIT as the `allow` site it describes.
+# `site_unledgered` fires otherwise, and `ledger_row_orphaned` fires if a row
+# outlives the code it describes. Both have been run against the real tree
+# rather than reasoned about: deleting the `simd-control-prefetch` row from this
+# file fails with `site_unledgered` on control_group.rs:202, and deleting the
+# `allow` attribute above `classify_sse2` fails with `ledger_row_orphaned` on
+# `simd-control-group-sse2`. A boundary nobody has watched reject anything is
+# decoration.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# The safe-facing API, which the rows below do NOT cover. Landed by fgdb-n7mb.
+#
+# Every row here says where unsafe code is WRITTEN. None of them says where it
+# is REACHABLE FROM, and those are different claims: a `pub unsafe fn`, or a
+# `*const`/`*mut` in a public signature, adds no `allow` site at all. The ledger
+# stays complete, the site<->row bijection stays satisfied, every gate above
+# stays green — and the island stops being one, because the whole point of an
+# island is that safe crates consume it through safe APIs. The arena charter
+# three entries up has asserted "No public raw pointers and no public unsafe fn"
+# since it was written; until fgdb-n7mb nothing could fail on it.
+#
+# `public_api` in tools/registry-check/src/unsafe_ledger.rs is that checker, and
+# it runs over the crates rostered above: `island_public_unsafe_fn` and
+# `island_public_raw_pointer` on a violation, `island_public_api_unparsed` when
+# a `pub` token in live code is one the reader did not consume as a visibility
+# (a `macro_rules!` body, or any item shape it does not know), and
+# `island_api_unscannable` for a rostered island with no readable source. Its
+# zero is licensed the same way the site count above is: `safe_facing_fixture`
+# is reproduced exactly — findings AND accounted-for tokens — before any island
+# result is trusted.
+#
+# Run against the real tree rather than reasoned about: appending
+# `pub unsafe fn` to control_group.rs fails with `island_public_unsafe_fn`,
+# appending a `pub fn` taking a `*mut u8` fails with
+# `island_public_raw_pointer`, and removing them returns the tree to zero.
+# Today: three islands, six files, a non-vacuous public surface, no findings.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# fgdb-unsafe-simd — landed by fgdb-w1-unsafe-islands-eqrq.
+#
+# Two sites, deliberately of different kinds. The first must be BIT-IDENTICAL to
+# its fallback and is measured against it; the second must be INVISIBLE and is
+# measured by running the same probe sequence with and without it. A ledger that
+# only knew how to say "matches the scalar path" could not state the second
+# claim, and a prefetch that quietly changed a result would satisfy it.
+# -----------------------------------------------------------------------------
+
+[[site]]
+row_id = "simd-control-group-sse2"
+island = "fgdb-unsafe-simd"
+path = "crates/fgdb-unsafe-simd/src/control_group.rs"
+symbol = "fn classify_sse2(lanes: &[u8; CONTROL_GROUP_WIDTH], tag: u8) -> GroupMasks {"
+stated_invariant = "The load is `_mm_loadu_si128`, the UNALIGNED form, reading exactly 16 bytes from a pointer derived from a live `&[u8; CONTROL_GROUP_WIDTH]`, so the read is in bounds for its full width and the borrow outlives it. Every intrinsic used is SSE2, which the x86-64 ABI guarantees on every x86-64 target; the item carries `cfg(target_arch = \"x86_64\")`, which is what makes that a fact rather than an assumption, and no runtime feature probe exists that could disagree with it. `_mm_movemask_epi8` produces 16 meaningful bits in an i32, so the `as u16` truncation is total, and bit n is lane n — the same lane-to-bit map the scalar profile writes. Nothing in the block writes through a pointer and no value outlives it."
+evidence = "crates/fgdb-unsafe-simd/tests/dispatch_differential.rs — 5424 cases over the whole compiled dispatch matrix, asserting per-case equality AND equality of the rolling output digest against the scalar profile (input fnv1a64:e08c791635b772d8, output fnv1a64:3d03739e421d3f84 on both paths); its companion row proves the harness separates a one-bit-rotated mask from an agreeing one, so the digests are licensed. Family 1 sweeps all 256 control bytes as uniform groups against all 256 tag values (control, 0x00, 0x7f, EMPTY_CONTROL, DELETED_CONTROL per control) — the tag domain is genuinely complete, not masked to 7 bits. src/control_group.rs unit rows — all 65536 sixteen-lane masks through every compiled path, and every control byte against every tag for the scalar profile versus an independently written naive reference. tests/control_group_dispatch_compat.rs — the kernel adapted into fgdb-collections' ControlGroupDispatch and differenced against SCALAR_CONTROL_GROUP_DISPATCH and SWAR_CONTROL_GROUP_DISPATCH."
+fallback = "classify_scalar, the portable specification, reachable on every target via classify_via(DispatchPath::Scalar, ..). The relationship asserted is bit-identity, not approximate agreement: the kernel is defined BY the scalar profile (§8.7 STRICT), so a drift is a defect in the kernel and never a tolerance."
+no_claim_boundary = "Says nothing about targets other than x86-64, where the item does not exist. Says nothing about non-baseline vector features: none are used, so no runtime dispatch decision is being claimed correct. Says nothing about aliasing of the caller's buffer beyond the 16 bytes borrowed for the load. Miri is excluded for this site because it does not execute the x86 intrinsics; ASAN and TSAN are explicit candidates rather than exclusions, and neither has a checked workload today. No performance claim of any kind: no benchmark is attached and none is implied."
+tool_no_claim_boundaries = [
+    "miri|excluded|Miri does not execute the core::arch x86 SSE2 intrinsics used by this site; the scalar differential remains its current evidence.",
+    "asan|candidate|Native AddressSanitizer instrumentation can execute x86 SSE2 intrinsics, but no checked ASAN workload is claimed for this site today.",
+    "tsan|candidate|Native ThreadSanitizer instrumentation can execute x86 SSE2 intrinsics, but no checked TSAN workload is claimed for this site today.",
+]
+
+[[site]]
+row_id = "simd-control-prefetch"
+island = "fgdb-unsafe-simd"
+path = "crates/fgdb-unsafe-simd/src/control_group.rs"
+symbol = "pub fn prefetch_controls(controls: &[u8], offset: usize) {"
+stated_invariant = "`controls.get(offset)` returns a live shared reference or nothing, so the pointer handed to `_mm_prefetch` is always valid for reads of at least one byte for the duration of the call and an out-of-range offset issues no hint at all rather than forming an out-of-bounds pointer. `_mm_prefetch` issues a cache hint and performs no architecturally visible access: it cannot fault, cannot write, and cannot be observed in any result. The strategy is the const generic `_MM_HINT_T0`, so no invalid strategy value can reach the instruction."
+evidence = "src/control_group.rs::prefetch_is_a_no_op_in_and_out_of_range — in-range, last index, one past the end, usize::MAX, and the empty slice, asserting classification is unchanged either side. tests/control_group_dispatch_compat.rs::prefetching_a_control_array_changes_no_classification — 128 wrapping gathers classified with and without hints and compared mask for mask, which is the observable form of the physical-only rule."
+fallback = "A no-op. On every non-x86-64 target the body compiles to `let _ = (controls, offset)`, so the fallback is not a slower path but the absence of one — which is exactly what §8.7 requires of prefetch policy: physical only, never a correctness input."
+no_claim_boundary = "Claims no speedup: no benchmark is attached, and a prefetch that helped nothing would still satisfy every assertion here. Claims nothing about cache state, timing, or memory-level parallelism, none of which are part of the deterministic result contract. Miri is excluded for this site because it does not execute the x86 prefetch intrinsic; ASAN and TSAN are explicit candidates rather than exclusions, and neither has a checked workload today. This site is the one written with a `cfg_attr`-wrapped allow, and it is only counted at all because the site scanner matches attributes structurally (commit 4f58cc3); the prefix scanner it replaced reported this file as holding one site instead of two."
+tool_no_claim_boundaries = [
+    "miri|excluded|Miri does not execute the core::arch x86 prefetch intrinsic used by this site; the no-op differential remains its current evidence.",
+    "asan|candidate|Native AddressSanitizer instrumentation can execute the x86 prefetch intrinsic, but no checked ASAN workload is claimed for this site today.",
+    "tsan|candidate|Native ThreadSanitizer instrumentation can execute the x86 prefetch intrinsic, but no checked TSAN workload is claimed for this site today.",
+]
+
+# -----------------------------------------------------------------------------
+# fgdb-unsafe-arena — landed by fgdb-w1-unsafe-islands-eqrq.
+#
+# TWO sites, and the count is the claim. Chunk carving, alignment,
+# generational handles, stale-handle refusal and byte auditing remain safe Rust.
+# The first site forms N simultaneous exclusive byte views after a safe
+# disjointness proof. The second implements the language-unsafe Allocator
+# contract on one private adapter so standard Vec<T, A> can own typed
+# initialization, moves, reallocation, and drop glue. The adapter, its NonNull
+# vocabulary, and Vec<T, A> never cross the public RegionVec facade.
+# -----------------------------------------------------------------------------
+
+[[site]]
+row_id = "arena-region-blocks-mut"
+island = "fgdb-unsafe-arena"
+path = "crates/fgdb-unsafe-arena/src/region.rs"
+symbol = "pub fn blocks_mut(&mut self, handles: &[Handle]) -> Result<Vec<&mut [u8]>, ArenaError> {"
+stated_invariant = "Four obligations, each discharged before the block rather than argued inside it. (1) IN BOUNDS: every base pointer comes from `Vec::as_mut_ptr` on a chunk of `self`, and `start + len <= chunk_bytes` was established when the block was allocated — `alloc_block` bump-checks the offset against the chunk it carves from, and a chunk is created at its full length with `vec![0u8; chunk_bytes]` and never resized — so `add(start)` and the `len` bytes after it stay inside one allocation. (2) INITIALIZED: chunks are zero-filled at creation and there is no `MaybeUninit` anywhere in the crate, so every byte in range is an initialized `u8`. (3) NO ALIASING: `plan_batch` proves the planned ranges pairwise disjoint and refuses the whole batch on any overlap or repeated handle, so no two views returned by the loop overlap; it also refuses every foreign, unknown, and stale handle, so no entry describes geometry that is not this region's. (4) NO OTHER LIVE BORROW: the views borrow `self` mutably for the caller-visible lifetime, `bases` holds pointers rather than references, and nothing in the block reads or writes through a pointer. The disjointness proof is deliberately NOT inside the unsafe block: it is safe, path-independent code that the safe fallback calls too, so the check that licenses the site is exercised by every test that touches either path."
+evidence = "crates/fgdb-unsafe-arena/tests/edit_path_differential.rs — 192 batch comparisons over three fixed seeds, asserting per-step equality of the whole region image AND of the run digest between the ledgered path and its safe fallback, plus `the_script_exercises_both_success_and_refusal` (the script must contain at least 8 successful and 8 refused batches, across at least three distinct refusal kinds, or it is declared vacuous) and `digests_are_licensed_by_a_one_bit_perturbation` (flipping one bit of one block must move the digest, so digest equality is licensed rather than assumed). src/region.rs unit rows — alignment 1..64 against a deliberately odd bump offset; a released handle refused after its slot is reused at the next generation; a foreign region's handle refused by both `block` and `blocks_mut`; a repeated handle refused as `AliasedBatch` rather than aliased; three disjoint blocks written simultaneously and read back; close and cancel each balancing with a live block outstanding."
+fallback = "EditPath::Sequential, the safe specification: the same batch applied one single-borrow `block_mut` call at a time, with no unsafe on the path and no `cfg` on either path, so the matrix is identical on every target the workspace compiles for. The relationship asserted is bit-identity of the whole region image and of the refusal, not agreement on a summary: both paths plan through the same `plan_batch` and neither writes anything when the batch is refused, so a batch one path would have waved through is a failure rather than an untested input."
+no_claim_boundary = "Says nothing about concurrency: a Region is owned by one holder, every mutating method takes &mut self, and no Send/Sync claim beyond what the compiler derives is made or tested. Says nothing about typed placement or typed consumer integration: those claims belong only to arena-region-vec-allocator and its RegionVec evidence; ART, succinct, and hash storage do not consume this raw byte-view site. The asupersync RegionRecord lifecycle remains fgdb-w3-buffer-g2v work. The fixed-seed differential is checked under Miri; ASAN and TSAN remain explicit candidates with no checked workload. No performance claim of any kind: no benchmark is attached, and a batch borrow that saved nothing over N sequential calls would still satisfy every assertion made here."
+tool_no_claim_boundaries = [
+    "miri|checked|Miri executes this Vec-backed pointer-arithmetic and slice-construction site; the fixed-seed differential is the complete checked workload for this cell.",
+    "asan|candidate|Native AddressSanitizer instrumentation can execute this pointer-arithmetic site, but no checked ASAN workload is claimed for it today.",
+    "tsan|candidate|Native ThreadSanitizer instrumentation can execute this pointer-arithmetic site, but no checked TSAN workload is claimed for it today.",
+]
+
+[[site]]
+row_id = "arena-region-vec-allocator"
+island = "fgdb-unsafe-arena"
+path = "crates/fgdb-unsafe-arena/src/region.rs"
+symbol = "unsafe impl core::alloc::Allocator for PrivateRegionAllocator<'_> {"
+stated_invariant = "This Allocator impl is sound iff seven obligations hold. (1) LIFETIME: PrivateRegionAllocator carries a borrow of RegionScopeState, RegionVec carries that allocator, and RegionScope cannot move or finalize while an ordinary live RegionVec borrows it. A dynamic owner counter catches mem::forget and finalization retains rather than frees storage. (2) LAYOUT: RegionVec refuses align_of::<T>() above MAX_BLOCK_ALIGN before owner mutation; every nonzero callback passes Layout size/alignment to Region::alloc_block, which records both and returns an address padded to that alignment. ZSTs are explicit and use a 64-aligned zero-length sentinel. (3) STABILITY: every chunk is allocated at full length and never resized; moving the outer Vec moves only inner Vec handles, not their buffers. (4) DISJOINTNESS: bump allocation never reuses released byte ranges, so the default Allocator::grow allocation cannot overlap the old block it copies from. (5) PROVENANCE: allocate derives the returned pointer directly from Vec::as_mut_ptr plus the checked slot offset. It never forms a one-byte or whole-chunk mutable reference, so the pointer covers the complete allocation and allocating another block does not uniquely retag the shared backing chunk or invalidate an earlier RegionVec pointer. (6) DEALLOCATION IDENTITY: deallocate compares the callback address and exact size/alignment against one live slot before release; any mismatch becomes a retained allocator fault, never a balanced audit. (7) DROP/UNWIND: standard Vec<T, A> owns initialization, move, and drop glue. RegionVec drops the Vec before releasing its owner lease; if T::drop unwinds, the lease remains live and RegionScope retains the region. The callbacks acquire no lock and perform no I/O, clock, entropy, network, blocking, or detached work."
+evidence = "crates/fgdb-unsafe-arena/tests/edit_path_differential.rs — `typed_operations_and_reallocations_match_ordinary_vec` compares 768 fixed-seed operations and every intermediate value sequence with ordinary Vec while requiring multiple actual region reallocations; `allocation_refusals_leave_the_element_sequence_unchanged` covers budget exhaustion, usize capacity overflow, and a cancelled QueryCx without partial element mutation; `supported_alignments_zsts_and_overaligned_refusal_are_explicit` covers alignments 1..64, 1024 ZST pushes with zero backing allocation, and pre-mutation alignment-128 refusal; `generic_drop_glue_is_exact_on_close_and_cancel` covers growth, replacement, clone-backed resize, truncate, ordinary drop, close, and cancellation with created == dropped; `recursive_and_collection_shaped_values_use_typed_region_storage` covers recursive ART-like generic V, hash-like K/V, and succinct u64 shapes; `forgotten_typed_owner_refuses_finalization` proves OwnersRemain rather than a balanced audit. crates/fgdb-collections/tests/region_backing.rs drives real ART through Node256 growth, deterministic hash storage through 2,048 entries, and succinct words plus rank directories through 4,097 bits; each consumer must produce nonzero regional allocation, drop every typed owner, and finish the cancellation path with bytes_reclaimed == bytes_allocated. Its cancelled-query case also proves ART replacement/removal, hash replacement, and a within-word succinct append refuse at the consumer boundary before state mutation, including paths that would not have grown a buffer. tools/registry-check/tests/unsafe_ledger.rs mutation-proves the exact private self type/trait/method set, NonNull/Allocator/Vec<T,A>/raw-pointer/public-unsafe export refusals, adapter publicize/re-export refusals, and QueryCx-bearing method/trait surface."
+fallback = "Ordinary Vec<T> is the behavioral oracle for values, refusals, moves, and drop counts, but deliberately NOT an allocator-identity fallback: substituting Global would violate the architecture. Three narrower-looking alternatives were rejected explicitly: a shadow Global Vec would make region residency fictional; a handwritten RawVec would add pointer arithmetic, capacity, initialization, move, unwind, and drop obligations instead of delegating them to standard Vec<T, A>; serializing generic T into bytes would lose typed ownership, recursive values, and exact drop glue. The public safe fallback surface is RegionVec itself; Rust provides no safe implementation of core::alloc::Allocator for a custom arena, which is why this single sealed impl remains category A."
+no_claim_boundary = "Claims no concurrent allocation, Send, or Sync: RegionScope is task-local and RegionVec borrows its RefCell/Cell state. ART, hash, and succinct integration is checked only for semantic operation, actual regional allocation, owner release, and balanced cancellation; it makes no collections_e2e five-oracle, consumer latency, throughput, or allocation-pressure claim. The asupersync RegionRecord/RegionHeap close/cancel adapter remains fgdb-w3-buffer-g2v work. Claims no O(1) physical release of individual blocks: logical deallocation updates the audit, while chunk bytes are retained until finalization. Miri checks the typed differential/drop workload with leak detection enabled; the native forgotten-owner case is excluded from Miri because its asserted fail-closed outcome intentionally retains the forgotten allocation. ASAN and TSAN remain explicit candidates with no checked workload."
+tool_no_claim_boundaries = [
+    "miri|checked|Miri executes the private Allocator callbacks, default Vec grow/copy/deallocate path, typed drop glue, ZST/alignment cases, refusal atomicity, and close/cancel audits in the fixed-seed RegionVec workload; the native forgotten-owner case is excluded because its asserted fail-closed outcome intentionally leaks retained storage.",
+    "asan|candidate|Native AddressSanitizer can execute the private allocator and typed Vec workload, but no checked ASAN run is claimed for this site today.",
+    "tsan|candidate|Native ThreadSanitizer can execute this task-local allocator workload, but no checked TSAN run is claimed and no concurrency claim is made for this site today.",
+]
+
+# -----------------------------------------------------------------------------
+# fgdb-unsafe-vfs — landed by fgdb-w1-unsafe-islands-eqrq.
+#
+# Three sites, and the reason there are three rather than one is that they fail
+# differently. `map_range` can map the wrong range; `view_bytes` can hand out a
+# slice wider than what was mapped; `drop` can give back something other than
+# what was taken. A single row saying "the mmap code is correct" would cover all
+# three with one sentence and check none of them.
+#
+# This island could not be avoided the way `fgdb-unsafe-arena`'s scope was
+# narrowed. The dependency universe is closed (doctrine #1), so there is no
+# libc and no `mmap` to call: the syscall is issued directly with one
+# `core::arch::asm!` instruction, and that is the whole reason the crate exists.
+# Everything around it — measuring the file, bounding the request, the
+# page-aligned base, the intra-page delta, and the entire buffered path — is
+# ordinary safe Rust.
+# -----------------------------------------------------------------------------
+
+[[site]]
+row_id = "vfs-mmap-readonly"
+island = "fgdb-unsafe-vfs"
+path = "crates/fgdb-unsafe-vfs/src/view.rs"
+symbol = "pub fn map_range(file: &File, offset: u64, len: usize) -> Result<Mapping, VfsError> {"
+stated_invariant = "The `asm!` block issues exactly one `syscall` instruction under the x86-64 Linux ABI, and every register that ABI touches is declared: number in rax, arguments in rdi/rsi/rdx/r10/r8/r9, result back in rax, and rcx and r11 clobbered by the instruction itself (`lateout(_)`). `options(nostack)` is licensed because the block neither pushes nor pops; `preserves_flags` is deliberately NOT claimed, because `syscall` saves rflags into r11 and masks it. The call cannot violate a memory invariant of this program on its own: `addr` is null, so the kernel picks a fresh range and cannot be asked to replace an existing mapping; `PROT_READ | MAP_PRIVATE` makes the range read-only and unshared; `fd` is borrowed from a live `File` for the duration of the call. Nothing is read or written through a pointer here — the returned value is inspected only as an integer, rejected if it lies in the kernel's `[-4095, -1]` error encoding, and only then narrowed to a `NonNull`. The geometry it records is computed in safe code beforehand: `page_offset` is `offset` rounded down to `PAGE_BYTES`, `delta` is the remainder, and `map_len = delta + len` is a checked add. The precondition that the range lies wholly inside the file is established by `plan_range` before this function is reached, and it is a safety precondition rather than an ergonomic one: a mapping over a hole faults with SIGBUS on access instead of returning an error."
+evidence = "crates/fgdb-unsafe-vfs/tests/map_path_differential.rs — every compiled path over 60+ ranges chosen to straddle page boundaries (intra-page delta 0, 1, 15, 4095, and exact multiples; lengths crossing one, two and three pages), asserting byte equality and digest equality against the file contents, with `the_digest_separates_a_one_bit_change` licensing the digest and `the_ledgered_path_is_actually_in_this_build` refusing to let the harness degrade into the fallback comparing with itself. `the_last_byte_of_the_file_is_readable_on_every_path` covers the partial final page, where an off-by-one in delta or map_len would surface. src/view.rs unit rows — `every_compiled_path_returns_the_same_bytes`, `both_paths_refuse_identically`, and `a_range_past_the_end_is_refused_before_anything_is_mapped`."
+fallback = "MapPath::Buffered, the portable specification: the same byte range read through `std::io`, compiled on every target with no `cfg` on it, and planned by the same safe `plan_range`. The relationship asserted is bit-identity of the bytes and of the refusal label. On Unix the fallback uses a positional read (`FileExt::read_exact_at`) rather than seek-on-a-clone, because `try_clone` dups the descriptor and both handles share one file description — the first version seeked and moved the caller's cursor, which `a_view_does_not_move_the_callers_cursor` caught and now locks."
+no_claim_boundary = "Claims nothing about any target other than x86-64 Linux, where the module does not exist and `open_view` answers `Ok(None)` for this path. Claims nothing about a page size other than 4 KiB: `PAGE_BYTES` is the x86-64 Linux ABI value rather than a queried one because there is no libc to ask, and a kernel with different granularity would fail the call with EINVAL rather than return a view of the wrong bytes. Claims nothing about a file that changes underneath a live mapping — truncation faults with SIGBUS, and keeping the file from shrinking for the life of the view is the caller's contract, as the charter says. Claims nothing about torn writes or bit rot: this crate reports the bytes that are there. Miri is excluded because it does not execute the inline-assembly syscall path; ASAN and TSAN are explicit native-instrumentation candidates rather than exclusions, and neither has a checked workload today. No performance claim of any kind: no benchmark is attached, and a mapping that was slower than the buffered read would satisfy every assertion made here."
+tool_no_claim_boundaries = [
+    "miri|excluded|Miri does not execute the inline-assembly mmap syscall path that owns this site; the buffered-path differential remains its current evidence.",
+    "asan|candidate|Native AddressSanitizer instrumentation can execute inline assembly and the mmap syscall path, but no checked ASAN workload is claimed for this site today.",
+    "tsan|candidate|Native ThreadSanitizer instrumentation can execute inline assembly and the mmap syscall path, but no checked TSAN workload is claimed for this site today.",
+]
+
+[[site]]
+row_id = "vfs-mapping-view-bytes"
+island = "fgdb-unsafe-vfs"
+path = "crates/fgdb-unsafe-vfs/src/view.rs"
+symbol = "pub fn view_bytes(&self) -> &[u8] {"
+stated_invariant = "Four obligations, all established when the mapping was made rather than re-derived here. (1) IN BOUNDS: `map_range` computed `map_len = delta + view_len` and the kernel maps at least `map_len` bytes — it rounds a mapping up to a page, never down — so `addr + delta` and the `view_len` bytes after it lie inside one mapping. (2) LIVE: `addr` is unmapped only by `Drop`, which consumes the `Mapping`, and the returned slice borrows `&self`, so the mapping outlives every reference produced here. (3) INITIALIZED AND READABLE: the mapping is `PROT_READ` over a range `plan_range` proved lies wholly inside the file, so every byte is backed by file contents rather than by a hole. (4) NO MUTABLE ALIAS: the mapping is read-only and this crate never forms a `&mut` into it; another process's writes to the file ARE observable through the view — `MAP_PRIVATE` privatizes only this process's own writes (copy-on-write, which `PROT_READ` makes unreachable) — so the bytes are not a snapshot and coherence with a live writer is the caller's contract, not this site's claim. The slice returned is `view_len` bytes — the length the caller asked for — not `map_len`, so the page rounding is never visible to a safe caller. This item is named `view_bytes` rather than `bytes` because `FileView::bytes` renders an identical signature line in the same file, and the ledger matches a site by (path, symbol)."
+evidence = "crates/fgdb-unsafe-vfs/tests/map_path_differential.rs — `every_compiled_path_agrees_with_the_file_bit_for_bit` reads the slice this site returns on every case and compares it byte for byte and by digest with the file, so a slice one byte too long or offset by one is a failure rather than a latent read past the mapping; `the_last_byte_of_the_file_is_readable_on_every_path` pins the partial-final-page case specifically. src/view.rs::every_compiled_path_returns_the_same_bytes also asserts `view.len()` equals the requested length on every case, which is the bound this site is responsible for."
+fallback = "The same accessor on the buffered backing, which returns `Vec::as_slice` and cannot be out of bounds by construction. `FileView::bytes` dispatches to one or the other, so the differential harness compares this site against a slice whose bound the compiler enforces, on every case it runs."
+no_claim_boundary = "Says nothing about a mapping whose file was truncated after `plan_range` measured it — that faults with SIGBUS, and it is the caller's contract, not this site's. Says nothing about concurrent modification of the file's contents: external writes ARE observable through the view (MAP_PRIVATE privatizes only this process's own writes; probe-proven — a pre-faulted page still shows a later external write), and this crate makes no coherence claim in either direction. Says nothing about alignment of the returned slice beyond `u8`. Miri is excluded because it cannot construct the inline-assembly-backed mapping; ASAN and TSAN are explicit native-instrumentation candidates rather than exclusions, and neither has a checked workload today."
+tool_no_claim_boundaries = [
+    "miri|excluded|Miri cannot construct this mapping because its owning mmap path is inline assembly; the byte-view differential remains its current evidence.",
+    "asan|candidate|Native AddressSanitizer instrumentation can execute the mapping and slice path, but no checked ASAN workload is claimed for this site today.",
+    "tsan|candidate|Native ThreadSanitizer instrumentation can execute the mapping and slice path, but no checked TSAN workload is claimed for this site today.",
+]
+
+[[site]]
+row_id = "vfs-mapping-munmap"
+island = "fgdb-unsafe-vfs"
+path = "crates/fgdb-unsafe-vfs/src/view.rs"
+symbol = "fn drop(&mut self) {"
+stated_invariant = "`addr` and `map_len` are exactly the address and length `mmap` returned and are never modified after construction, so this unmaps precisely what was mapped and nothing else — in particular it cannot unmap a neighbouring mapping, which is the failure mode a recomputed length would produce. `Drop` runs at most once per `Mapping`, and `Mapping` is neither `Copy` nor `Clone` and is never moved out of, so the range cannot be unmapped twice. Every slice handed out by `view_bytes` borrows `&self` and is therefore dead before this point. The syscall follows the same declared x86-64 Linux ABI as the mapping site: number in rax, arguments in rdi and rsi, rcx and r11 clobbered, `nostack` licensed and `preserves_flags` not claimed. The result is checked with `debug_assert!` rather than propagated because `Drop` cannot return a value, and a failing `munmap` on an address the kernel gave us is a defect in this crate rather than a runtime condition a caller could handle."
+evidence = "crates/fgdb-unsafe-vfs/tests/map_path_differential.rs::views_are_independent_and_survive_each_others_drops — four overlapping and non-overlapping views held live at once and dropped in an order deliberately unlike the order they were made, with every surviving view re-read and compared against the file after each drop. A `Drop` that unmapped the wrong range, unmapped a length it recomputed, or unmapped twice shows up there as garbage or a fault rather than as a clean run."
+fallback = "The buffered backing's `Vec`, whose reclamation is the compiler's job and cannot unmap the wrong range. The drop path is exercised on both backings by the same test, so the ledgered path is compared against a reclamation whose correctness is not in question."
+no_claim_boundary = "Says nothing about `munmap` failing at runtime: the `debug_assert!` fires in test and debug builds only, so a release build would ignore an error the kernel should never produce for an address it returned. Says nothing about the memory being zeroed or returned to the OS on any particular schedule. Says nothing about signal-safety or about unwinding through the drop. Miri is excluded because it does not execute the inline-assembly syscall path; ASAN and TSAN are explicit native-instrumentation candidates rather than exclusions, and neither has a checked workload today."
+tool_no_claim_boundaries = [
+    "miri|excluded|Miri does not execute the inline-assembly munmap syscall path that owns this site; the independent-view drop differential remains its current evidence.",
+    "asan|candidate|Native AddressSanitizer instrumentation can execute inline assembly and the munmap syscall path, but no checked ASAN workload is claimed for this site today.",
+    "tsan|candidate|Native ThreadSanitizer instrumentation can execute inline assembly and the munmap syscall path, but no checked TSAN workload is claimed for this site today.",
+]

@@ -1,0 +1,676 @@
+# shellcheck shell=bash
+# =============================================================================
+# gate_verdict.sh — THE verdict contract every gate in this repo reports under
+# (bead fgdb-udco)
+#
+# Sourced by scripts/check.sh and by every live `kind = "script"` artifact in
+# registries/checker_index.toml. It is a library: not executable, registers no
+# gate, asserts nothing on its own. `run_verdict_contract` in scripts/check.sh
+# is the guard that makes conforming to it mandatory.
+#
+# -----------------------------------------------------------------------------
+# WHY THIS EXISTS
+# -----------------------------------------------------------------------------
+# MEASURED 2026-07-27 at d4b0aa2, by EVALUATING each gate's failure emitter with
+# its two streams captured to separate files. Across scripts/check.sh plus the
+# nine live script artifacts — ten gates — there were THREE failure tokens under
+# TWO indentation conventions on TWO streams:
+#
+#   "RED core: <label>"          column 0,  stderr   check.sh
+#   "[g0-claims-e2e] FAIL: ..."  prefixed,  stdout   claims, identity, spine
+#   "    FAIL  <detail>"         indented,  stderr   negative_evidence, proof_lanes
+#   "ERROR: <detail>"            column 0,  stderr   architecture_decisions,
+#                                                    threat, topology, w1_cross_crate
+#
+# So NO gate emitted a line beginning with FAIL at column 0, and `grep '^FAIL'`
+# returned 0 on a red run of all ten. Seven of the ten wrote the failure to
+# stderr only, which means `gate.sh > log` produced a plausible, complete-looking,
+# all-green transcript of a red run. That is silent-green: a gate failing on a
+# stream nobody greps is green to every automated reader.
+#
+# The defect was never one gate's token. It was the ABSENCE OF A CONTRACT — ten
+# gates each choosing its own, so no single query could answer "did this gate
+# fail" across the set. This file is that contract, in one place, so there is one
+# reader to drift rather than ten. scripts/lib/private_subject.sh is the
+# precedent for a shared gate library living here.
+#
+# -----------------------------------------------------------------------------
+# THE CONTRACT
+# -----------------------------------------------------------------------------
+# 1. ONE STREAM.  The verdict transcript is STDOUT. stderr carries diagnostics
+#    only — the prose explaining WHY — and is unconstrained. A reader who keeps
+#    only stdout keeps a complete, honest verdict.
+#
+# 2. ONE TOKEN.   Every failure emits an anchored `FAIL ` line at column 0.
+#    `grep -c '^FAIL ' <stdout>` is THE query, and it is total over all ten
+#    gates. `PASS ` is its counterpart. A gate MAY additionally emit `RED ` and
+#    `UNRUN ` as refinements, but only BESIDE a FAIL line, never instead of one
+#    — so the single query never has to know which gate it is reading. The
+#    vocabulary is closed: PASS, FAIL, RED, UNRUN. Nothing else may appear at
+#    column 0 of stdout.
+#
+# 3. THREE STATES, NOT TWO.  `ran and passed`, `ran and failed`, and `DID NOT
+#    RUN` are three distinct outcomes, and only the first is green. A check that
+#    did not execute its assertions MUST NOT emit the passing token. This is the
+#    same doctrine fgdb-1nqb states for guards, said once here for everything.
+#
+#    WHY IT IS IN THE CONTRACT AND NOT A FOOTNOTE. pane3 mutation-proved on
+#    2026-07-27 that tools/registry-check/tests/identity.rs returns early and
+#    reports `ok. 1 passed` when `.beads/issues.jsonl` is absent: 6 of its 7
+#    assertions and the ONLY witness for ten violation codes are skipped, and
+#    the suite still reports passing. Two quiet roots differing only by
+#    `--exclude='.beads/*'` — separate compiles, because `repo_root()` is
+#    compile-time — ran 5.23s WITH the corpus and 1.06s WITHOUT, and the marker
+#    printed only in the first. The trigger is routine and ours: rch remote
+#    workers do not sync `.beads`, so every offloaded run of that test was
+#    silently vacuous. UNTIL THAT IS FIXED, RUN ANY SUITE THAT READS `.beads`
+#    LOCALLY, NOT THROUGH rch.
+#
+#    A gate that fails invisibly and a test that skips invisibly are the same
+#    defect wearing different clothes: the first is a red nobody's query can
+#    see, the second is a green nobody earned. `gate_verdict` and the EXIT trap
+#    below both refuse to report green over zero executed assertions, so a gate
+#    that skips its whole body reports UNRUN rather than falling through silent.
+#
+# 4. ONE EXIT DISCIPLINE.  Exit 0 if and only if zero FAIL lines AND zero UNRUN
+#    lines were emitted and the gate reached its verdict. THE EXIT CODE REMAINS
+#    AUTHORITATIVE — the tokens exist so that a reader who greps anyway gets a
+#    true answer, not so that grepping becomes the right way to read a gate.
+#
+# -----------------------------------------------------------------------------
+# WHY THE TRAP IS THE LOAD-BEARING PART
+# -----------------------------------------------------------------------------
+# `gate_init` installs an EXIT trap that DERIVES the contract line from the exit
+# code. A gate that dies on an unguarded `set -e` abort, a missing file or a
+# helper refusing to answer still emits `FAIL`, because the trap fires on the
+# exit status rather than on any assertion having noticed. That closes the class
+# the four fail-fast gates were in: they had no PASS/FAIL emitter at all, and
+# converting each of their ~20 `echo "ERROR: ..." >&2; exit 1` sites by hand
+# would have left the contract false on every path no site covers. Deriving the
+# verdict from the exit code makes it impossible for the line to disagree with
+# the instrument that is authoritative.
+# =============================================================================
+
+GATE_NAME=""
+GATE_PASS=0
+GATE_FAIL=0
+GATE_UNRUN=0
+GATE_TALLY_HOOK=""
+GATE_CONTRACT_LINE_EMITTED=0
+GATE_TREE_FP_START=""
+GATE_TREE_LIST_START=""
+GATE_TREE_HEAD_START=""
+GATE_TREE_CHECKED=0
+
+# A non-green exit still answers only the binary question "did every assertion
+# execute and pass?". This code is the refinement for the third state: the gate
+# could not finish its assertions, and it reported only paired UNRUN + FAIL
+# contract lines. A parent must validate both the code and the transcript before
+# propagating UNRUN; several legacy tools also use exit 2 for usage errors.
+GATE_EXIT_UNRUN=2
+
+# gate_tree_fingerprint — the identity of the tree a gate is judging.
+#
+# WHY THIS EXISTS. A gate's assertions are only meaningful about the tree they
+# ran against, and in this swarm the tree moves: several panes land commits
+# continuously while `scripts/check.sh` runs for ~35 minutes. The checker has two
+# clocks — `tools/registry-check/src/*.rs` bakes pins in at COMPILE time with
+# `include_str!`, while `tools/registry-check/tests/identity.rs` reads the corpus
+# at RUN time with `fs::read_to_string`. A commit landing between those two
+# moments desynchronises them, and the pins go red on a tree where every pin is
+# actually correct. Measured cost of that defect: one full diagnostic cycle, a
+# 40-minute landing hold, and two false attributions, all against innocent code.
+#
+# The build tokens do not help. They serialise BUILDS; they do not freeze the
+# working tree, and the landing that breaks the run is a `git commit` by a pane
+# that holds no build slot at all.
+#
+# WHAT IS HASHED, and why each choice. HEAD catches the landing. The content of
+# every TRACKED file catches the rest: a staged edit, an uncommitted working-tree
+# change, a file deleted underneath the run. UNTRACKED paths are deliberately
+# excluded — the gates create their own scratch dirs, logs and quiet roots, so
+# including untracked state would make this tripwire fire on the gate's own work
+# and turn every run UNRUN, which is the "guard disabled by its own trigger"
+# shape. Verified before choosing: `scripts/check.sh` writes only inside its
+# temp work roots and never mutates a tracked file, so a tracked-content
+# fingerprint cannot self-trigger.
+#
+# COST, measured on this repo rather than assumed: 195 tracked files / 24.7 MB,
+# 101 ms per call, twice per gate. Against a ~35-minute run that is 0.005%. The
+# alternative — running each gate against a detached snapshot of the tree so
+# concurrent commits cannot reach it — copies in 47 ms but forces a cold rebuild
+# in the snapshot path, which costs vastly more than the entire tripwire and
+# still cannot say WHY a run was void. Cost did not decide this; the third state
+# did. Detecting and reporting honestly beats hiding the race.
+#
+# Outside a git repo (a quiet root, a scratch copy) both calls return the same
+# sentinel, so the comparison is a no-op — correct, because a tree nothing can
+# commit to cannot be raced.
+# gate_tree_listing — the per-file evidence the fingerprint is derived FROM.
+#
+# WHY IT IS A SEPARATE FUNCTION (bead fgdb-g996). This listing was always
+# computed and then thrown away: the whole tree collapsed to one hex string, so
+# `gate_check_tree_stable` could report THAT the tree moved and never WHAT moved.
+# MEASURED on the first live leased run (2026-07-27 18:29:23-18:40:02): three
+# gates reported a void verdict and a peer edit, a stray tool write and check.sh
+# mutating its own generated docs were INDISTINGUISHABLE in the output. Attributing
+# it afterwards took four instruments, two of which silently under-report — the
+# current JSONL (last-write-wins) and the beads `events` table (no row at all for
+# a `--notes` write). Retaining the listing turns "something moved" into
+# "docs/X.md changed", which is the difference between a report and a rumour.
+#
+# The listing is held in a SHELL VARIABLE, not a temp file: MEASURED 20330 bytes
+# over 199 tracked files, in-process between gate_init and the EXIT trap. No
+# disk, no cleanup, and no interaction with the per-run-tmp-dir hazard.
+#
+# COST, MEASURED on this repo rather than assumed: 105.89 ms for the discarding
+# form, 111.01 ms for the retaining one — +5 ms per sample, two samples per gate,
+# against a ~35-minute run. The listing was already being computed; only the
+# throwing-away is removed.
+gate_tree_listing() {
+  git rev-parse HEAD 2>&1
+  # stderr is folded in on purpose: if a tracked file vanishes mid-run,
+  # sha256sum's error is itself the evidence the tree moved, and a digest that
+  # silently ignored it would report a void run as a clean one. gate_tree_diff
+  # classifies those lines SEPARATELY from content changes, because "the file
+  # could not be read at this instant" and "the file's bytes are different" are
+  # different facts and folding them into one digest made them the same fact.
+  # Both guards are load-bearing. `--` keeps a tracked `--help` from becoming
+  # an option; the `./` prefix keeps a tracked file literally named `-` from
+  # becoming sha256sum's stdin operand. xargs may split at ARG_MAX, so each
+  # batch prefixes its own positional arguments and strips only that display
+  # prefix afterward. Newlines and other odd bytes stay protected by the NUL
+  # transport and sha256sum's escaped record form (fresh-eyes fgdb-3e12).
+  git ls-files -z 2>/dev/null \
+    | xargs -0 bash -c '
+        set -o pipefail
+        [ "$#" -gt 0 ] || exit 0
+        paths=()
+        for path; do paths+=("./$path"); done
+        sha256sum -- "${paths[@]}" | sed "s#  \\./#  #"
+      ' _ 2>&1
+}
+
+gate_tree_fingerprint() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'not-a-git-worktree\n'
+    return 0
+  fi
+  gate_tree_listing | sha256sum | cut -d' ' -f1
+}
+
+# gate_tree_fp_of <listing> — the fingerprint of a listing already in hand, so a
+# caller that needs BOTH does not walk 24.7 MB of tracked content twice.
+#
+# `$(...)` strips trailing newlines and `printf '%s\n'` restores exactly one, so
+# the bytes hashed here are identical to those `gate_tree_fingerprint` pipes.
+# That equality is asserted by the harness rather than assumed: if it ever drifts,
+# a start fingerprint and an end fingerprint would disagree on an unchanged tree
+# and every gate would report UNRUN — the "guard disabled by its own trigger"
+# shape this repo keeps closing.
+gate_tree_fp_of() {
+  printf '%s\n' "$1" | sha256sum | cut -d' ' -f1
+}
+
+# gate_tree_domain_known <domain> — the closed input-domain vocabulary used by
+# check.sh when it attributes a run-level tree movement to individual verdicts.
+#
+# `all-tracked` is the fail-closed boundary. Every registered artifact currently
+# uses it because its runtime readers are intentionally broad. The narrower
+# domains belong only to core gates whose tracked inputs are derived
+# mechanically:
+#
+#   tracked-rust   exactly the `git ls-files -- '*.rs'` set UBS scans
+#   tracked-shell  exactly the tracked *.sh / *.bash set shell lint scans
+#   rust-format    Rust sources plus Cargo/rustfmt discovery inputs
+#   verdict-shell  the checker index plus every tracked shell gate source
+#   domain-closure the three files that define and enumerate these declarations
+#
+# Unknown is NOT another spelling of empty. Callers must treat it as
+# `all-tracked` and report the missing declaration, because rescuing a verdict
+# through an unknown domain is the false-PASS failure this vocabulary prevents.
+gate_tree_domain_known() {
+  case "$1" in
+    all-tracked | tracked-rust | tracked-shell | rust-format | verdict-shell | domain-closure)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# gate_tree_domain_listing <whole-tree-listing> <domain>
+#
+# Filter a listing already produced by gate_tree_listing. Filtering the retained
+# start listing is load-bearing: re-running `git ls-files` at attribution time
+# would reconstruct both sides from the END tree and make a tracked addition or
+# removal invisible.
+#
+# Read errors and sha256sum-escaped paths are included in EVERY domain. Their
+# path cannot be classified safely from the folded diagnostic, so narrowing one
+# would turn uncertainty into permission to retain a verdict. The conservative
+# answer is to void it.
+gate_tree_domain_listing() {
+  local listing="$1" domain="$2"
+  gate_tree_domain_known "$domain" || return 2
+  printf '%s\n' "$listing" | awk -v domain="$domain" '
+    NR == 1 { next } # HEAD is handled separately by the aggregate caller.
+    function gate_source(path) {
+      return path == "scripts/check.sh" \
+        || path == "scripts/lib/gate_verdict.sh"
+    }
+    function included(path) {
+      if (domain == "all-tracked") return 1
+      # The running gate implementation is an input to every narrowed verdict.
+      if (gate_source(path)) return 1
+      if (domain == "tracked-rust")
+        return path ~ /\.rs$/
+      if (domain == "tracked-shell")
+        return path ~ /\.(sh|bash)$/
+      if (domain == "rust-format")
+        return path ~ /\.rs$/ \
+          || path == "Cargo.toml" \
+          || path ~ /\/Cargo\.toml$/ \
+          || path == "Cargo.lock" \
+          || path == "rust-toolchain.toml" \
+          || path == "rustfmt.toml" \
+          || path ~ /\/rustfmt\.toml$/ \
+          || path == ".rustfmt.toml" \
+          || path ~ /\/\.rustfmt\.toml$/ \
+          || path ~ /^\.cargo\//
+      if (domain == "verdict-shell")
+        return path == "registries/checker_index.toml" \
+          || path ~ /\.(sh|bash)$/
+      if (domain == "domain-closure")
+        return path == "registries/checker_index.toml" \
+          || path == "scripts/check.sh" \
+          || path == "scripts/lib/gate_verdict.sh"
+      return 0
+    }
+    {
+      line = $0
+      # sha256sum prefixes escaped path records with a backslash. Do not guess
+      # their suffix; make the uncertainty affect every domain.
+      if (substr(line, 1, 1) == "\\") {
+        print line
+        next
+      }
+      if (line ~ /^[0-9a-f][0-9a-f]*  /) {
+        split_at = index(line, "  ")
+        path = substr(line, split_at + 2)
+        if (included(path)) print line
+      } else {
+        # A folded read error has no safely recoverable tracked path.
+        print line
+      }
+    }
+  '
+}
+
+# gate_tree_domain_changed <start-listing> <end-listing> <domain>
+#
+# Exit 0 means the declared domain changed, 1 means it stayed byte-identical,
+# and 2 means the declaration could not be evaluated. This intentionally uses
+# predicate-style zero for "changed" so callers can write
+# `if gate_tree_domain_changed ...`; status 2 is distinct and must fail closed.
+gate_tree_domain_changed() {
+  local start_listing="$1" end_listing="$2" domain="$3"
+  local start_domain end_domain start_fp end_fp
+  gate_tree_domain_known "$domain" || return 2
+  start_domain="$(gate_tree_domain_listing "$start_listing" "$domain")" || return 2
+  end_domain="$(gate_tree_domain_listing "$end_listing" "$domain")" || return 2
+  start_fp="$(gate_tree_fp_of "$start_domain")"
+  end_fp="$(gate_tree_fp_of "$end_domain")"
+  [ "$start_fp" != "$end_fp" ]
+}
+
+# gate_tree_diff <start_listing> <end_listing> — the SET DIFFERENCE, on stderr.
+#
+# Four classes, deliberately distinguished:
+#   ~ changed    tracked path present at both ends, different content digest
+#   + added      path git listed at the end but not at the start
+#   - removed    path git listed at the start but not at the end
+#   ! read error a folded stderr line present at one end only — the file could
+#                not be hashed at that instant. This is the class that makes an
+#                atomic write+rename legible AS a transient instead of leaving it
+#                indistinguishable from a real content change.
+#
+# Output is sorted, so two runs over the same movement produce byte-identical
+# diagnostics. Long lists are capped, and THE CAP STATES THE TRUE TOTAL: a silent
+# truncation reads as "that was everything" when it was not.
+gate_tree_diff() {
+  local cap="${FGDB_TREE_DIFF_CAP:-40}"
+  {
+    printf '%s\n' "$1"
+    printf '%s\n' '<<<gate-tree-split>>>'
+    printf '%s\n' "$2"
+  } | awk -v cap="$cap" '
+    BEGIN { side = 1; first = 1 }
+    $0 == "<<<gate-tree-split>>>" { side = 2; first = 1; next }
+    # line 1 of each listing is `git rev-parse HEAD`; HEAD is reported by the
+    # caller in full, so it is not re-derived here.
+    first == 1 { first = 0; next }
+    {
+      line = $0
+      esc = 0
+      # sha256sum prefixes a line with `\` when the path contains a backslash or
+      # a newline, and escapes them in the path. Keep the marker; do not pretend
+      # the raw path was recovered.
+      if (substr(line, 1, 1) == "\\") { esc = 1; line = substr(line, 2) }
+      if (line ~ /^[0-9a-f][0-9a-f]*  /) {
+        sp = index(line, "  ")
+        d = substr(line, 1, sp - 1)
+        p = substr(line, sp + 2)
+        if (esc) p = p " (escaped by sha256sum)"
+        if (side == 1) A[p] = d; else B[p] = d
+      } else {
+        if (side == 1) EA[line] = 1; else EB[line] = 1
+      }
+    }
+    END {
+      n = 0
+      for (p in A) if ((p in B) && A[p] != B[p]) { out[n++] = sprintf("  ~ changed     %s", p) }
+      for (p in B) if (!(p in A))                { out[n++] = sprintf("  + added       %s", p) }
+      for (p in A) if (!(p in B))                { out[n++] = sprintf("  - removed     %s", p) }
+      for (e in EB) if (!(e in EA))              { out[n++] = sprintf("  ! read error  %s", e) }
+      for (e in EA) if (!(e in EB))              { out[n++] = sprintf("  ! read error cleared  %s", e) }
+      if (n == 0) {
+        print "  (no per-file difference: the listings are equal, so the move is"
+        print "   in HEAD alone — see the two shas above)"
+      } else {
+        # sort deterministically without relying on for-in order
+        for (i = 0; i < n; i++) for (j = i + 1; j < n; j++)
+          if (out[j] < out[i]) { t = out[i]; out[i] = out[j]; out[j] = t }
+        shown = (n < cap) ? n : cap
+        for (i = 0; i < shown; i++) print out[i]
+        if (n > shown) printf "  ... %d of %d differences shown; %d NOT LISTED (raise FGDB_TREE_DIFF_CAP)\n", shown, n, n - shown
+        printf "  %d tracked path(s) differ in total\n", n
+      }
+    }
+  ' >&2
+}
+
+# gate_tree_snapshot_into <listing_var> <fingerprint_var> — take BOTH halves of a
+# tree sample through one code path.
+#
+# Both call sites (gate_init and gate_check_tree_stable) go through here so the
+# start and end samples cannot be derived differently. If they ever were, an
+# unchanged tree would produce two different fingerprints and EVERY gate would
+# report UNRUN — a guard that always fires is a guard that gets disabled.
+gate_tree_snapshot_into() {
+  local __gts_list __gts_fp
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    __gts_list="$(gate_tree_listing)"
+    __gts_fp="$(gate_tree_fp_of "$__gts_list")"
+  else
+    # A tree nothing can commit to cannot be raced; both samples agree and the
+    # comparison is a no-op.
+    __gts_list=""
+    __gts_fp="not-a-git-worktree"
+  fi
+  printf -v "$1" '%s' "$__gts_list"
+  printf -v "$2" '%s' "$__gts_fp"
+}
+
+# gate_tree_head — the human-readable half, for the diagnostic.
+gate_tree_head() {
+  git rev-parse HEAD 2>/dev/null || printf 'no-head'
+}
+
+# gate_check_tree_stable — the third state for a run whose premises moved.
+#
+# A gate whose subject changed underneath it DID NOT RUN, in the exact sense the
+# contract already names: its assertions executed, but not against any single
+# tree, so neither their passes nor their failures are claims about anything.
+# Reporting PASS would certify a tree that was never wholly tested. Reporting
+# FAIL would blame whichever pane's code happened to be resident when the
+# assertion fired — the two false attributions this closes. So: UNRUN, carrying
+# both shas so the reader can see exactly what moved, and non-zero either way.
+#
+# The already-emitted PASS/FAIL lines are left standing. AGENTS.md's contract is
+# that UNRUN appears BESIDE a FAIL line, never instead of one, and `gate_unrun`
+# emits the FAIL token itself, so `grep -c '^FAIL '` stays total.
+gate_check_tree_stable() {
+  [ "$GATE_TREE_CHECKED" -eq 1 ] && return 0
+  GATE_TREE_CHECKED=1
+  [ -z "$GATE_TREE_FP_START" ] && return 0
+  local fp_end head_end list_end
+  gate_tree_snapshot_into list_end fp_end
+  [ "$fp_end" = "$GATE_TREE_FP_START" ] && return 0
+  head_end="$(gate_tree_head)"
+  gate_unrun "${GATE_NAME:-gate}: tree changed under the run; verdict is void"
+  gate_diag "  tree moved while this gate was running, so its assertions are not"
+  gate_diag "  claims about any single tree:"
+  gate_diag "    HEAD at start: $GATE_TREE_HEAD_START"
+  gate_diag "    HEAD at end:   $head_end"
+  if [ "$GATE_TREE_HEAD_START" = "$head_end" ]; then
+    gate_diag "  HEAD is unchanged, so this was a working-tree or index edit, not a"
+    gate_diag "  landing. Tracked-file content differs between start and end."
+  fi
+  # WHAT moved, not just THAT it moved (fgdb-g996). Without this the operator is
+  # told the run is void and handed nothing to act on, and a peer edit, a stray
+  # tool write and a gate mutating its own subject read identically.
+  gate_diag "  WHAT MOVED:"
+  gate_tree_diff "$GATE_TREE_LIST_START" "$list_end"
+  gate_diag "  Re-run the gate on a settled tree. Do NOT attribute the FAIL lines"
+  gate_diag "  above to the code they name until a clean run reproduces them."
+  return 1
+}
+
+# gate_init <name> [tally_hook]
+#
+# The optional hook is the gate's own pre-existing tally function (the fail-slow
+# gates each have one, printing "N passed, M failed" from their own EXIT trap).
+# It is called from ours so that installing this contract does not silently
+# replace a gate's existing partial-tally reporting — that reporting exists
+# because a truncated log used to read exactly like a whole one, and dropping it
+# here would reintroduce the defect it was built to close.
+gate_init() {
+  GATE_NAME="$1"
+  GATE_TALLY_HOOK="${2:-}"
+  GATE_PASS=0
+  GATE_FAIL=0
+  GATE_UNRUN=0
+  GATE_CONTRACT_LINE_EMITTED=0
+  GATE_TREE_CHECKED=0
+  GATE_TREE_HEAD_START="$(gate_tree_head)"
+  gate_tree_snapshot_into GATE_TREE_LIST_START GATE_TREE_FP_START
+  gate_landing_acquire
+  trap gate_on_exit EXIT
+}
+
+# gate_landing_acquire / gate_landing_release — the PREVENTION half (fgdb-eesn).
+#
+# The fingerprint above DETECTS a tree that moved under this gate and reports
+# UNRUN. This takes the landing lease so it does not move in the first place: the
+# pre-commit hook refuses a commit on `main` while the lease is held live.
+#
+# DEFAULT OFF, AND THAT IS DELIBERATE. Enabling it makes a gate run block every
+# other pane's landings for its duration, which is a real cost to the swarm and a
+# policy decision for the operator, not a library default. Nothing here executes
+# unless FGDB_LANDING_LEASE=1 is exported.
+#
+# IT MUST TOLERATE landing_lease.sh BEING ABSENT. check.sh's own contract
+# fixtures build scratch roots containing ONLY gate_verdict.sh, so an
+# unconditional source here would break the gate that verifies the contract.
+# Every failure path leaves GATE_LANDING_HELD=0 and the gate runs unprotected —
+# which is exactly right, because a gate that cannot take the lease should still
+# run and let the fingerprint report honestly if it is voided.
+GATE_LANDING_HELD=0
+gate_landing_acquire() {
+  GATE_LANDING_HELD=0
+  [ "${FGDB_LANDING_LEASE:-0}" = "1" ] || return 0
+  local lib
+  lib="${FGDB_LANDING_LIB:-$(dirname "${BASH_SOURCE[0]}")/landing_lease.sh}"
+  if [ ! -r "$lib" ]; then
+    gate_diag "  landing lease SKIPPED: $lib unreadable; the run is UNPROTECTED and the tripwire is the only backstop"
+    return 0
+  fi
+  # shellcheck source=landing_lease.sh
+  if ! . "$lib" 2>/dev/null; then
+    gate_diag "  landing lease SKIPPED: sourcing $lib failed; the run is UNPROTECTED and the tripwire is the only backstop"
+    return 0
+  fi
+  if ! command -v landing_lease_acquire >/dev/null 2>&1; then
+    gate_diag "  landing lease SKIPPED: landing_lease_acquire missing after sourcing; the run is UNPROTECTED and the tripwire is the only backstop"
+    return 0
+  fi
+  if landing_lease_acquire "${FGDB_LANDING_NAME:-gate-${GATE_NAME:-unnamed}}" \
+    "${FGDB_LANDING_TTL:-45}"; then
+    GATE_LANDING_HELD=1
+    gate_diag "  landing lease held for this run; other panes cannot land on main"
+  else
+    gate_diag "  landing lease NOT acquired (another run holds it or the token dir is unwritable); the run is UNPROTECTED and the tripwire is the only backstop"
+  fi
+  return 0
+}
+
+gate_landing_release() {
+  [ "$GATE_LANDING_HELD" -eq 1 ] || return 0
+  GATE_LANDING_HELD=0
+  command -v landing_lease_release >/dev/null 2>&1 || return 0
+  landing_lease_release "${FGDB_LANDING_NAME:-gate-${GATE_NAME:-unnamed}}" || true
+  return 0
+}
+
+# gate_pass <detail> — an assertion that passed. stdout, anchored.
+gate_pass() {
+  GATE_PASS=$((GATE_PASS + 1))
+  printf 'PASS %s\n' "$*"
+}
+
+# gate_fail <detail> — an assertion that failed. stdout, anchored.
+#
+# Fail-slow: recording a failure does not end the run. A gate that stops at its
+# first failure cannot say whether it found one problem or ninety-two, and this
+# repo has measured that cost (g0_identity_e2e.sh once ran 8 of 99 assertions
+# and reported no tally at all).
+gate_fail() {
+  GATE_FAIL=$((GATE_FAIL + 1))
+  printf 'FAIL %s\n' "$*"
+}
+
+# gate_unrun <detail> — the third state: an assertion or artifact that DID NOT
+# EXECUTE. Emits the refinement AND the contract token, because "did not run" is
+# not green and the single `^FAIL ` query must see it. Reach for this whenever a
+# check is skipped — a missing corpus, an absent toolchain, a fixture that could
+# not be built — instead of returning early and letting silence read as success.
+gate_unrun() {
+  GATE_UNRUN=$((GATE_UNRUN + 1))
+  printf 'UNRUN %s\n' "$*"
+  printf 'FAIL %s\n' "$*"
+}
+
+# gate_abort_unrun <detail> — fail-fast third state.
+#
+# Use when continuing would manufacture a verdict: a required corpus vanished,
+# a build artifact disappeared, or another environmental precondition ceased to
+# hold after the gate began. The dedicated exit code lets a conforming parent
+# preserve UNRUN instead of collapsing it into RED; the paired transcript is
+# still required so a bare usage-error exit 2 cannot borrow this state.
+gate_abort_unrun() {
+  gate_unrun "$*"
+  exit "$GATE_EXIT_UNRUN"
+}
+
+# gate_diag <line...> — the WHY. stderr, unconstrained, never a verdict.
+gate_diag() {
+  printf '%s\n' "$*" >&2
+}
+
+# gate_die <detail> [diagnostic...] — fail-fast: one FAIL line, then exit 1.
+#
+# For the structural failures that invalidate every assertion after them (the
+# subject failed to build; a fixture did not fail when it must). Continuing past
+# one of those manufactures failures rather than reporting them.
+gate_die() {
+  local detail="$1"
+  shift
+  gate_fail "$detail"
+  [ "$#" -gt 0 ] && gate_diag "$@"
+  exit 1
+}
+
+# gate_verdict — the three-state tally; nonzero when anything failed OR did not
+# run.
+#
+# THE ZERO IS LICENSED BY ACCOUNTING, not by finding nothing. A gate that
+# reaches its verdict having executed NO assertions has not passed; it has not
+# run, and reporting it green is the identity.rs defect at gate scope. So zero
+# recorded outcomes is itself an UNRUN.
+gate_verdict() {
+  if [ $((GATE_PASS + GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
+    gate_unrun "$GATE_NAME: reached its verdict having executed no assertions"
+  fi
+  # A verdict is a claim about a tree. If the tree moved, there is no tree to
+  # make the claim about, so this must resolve to UNRUN before the tally.
+  gate_check_tree_stable || true
+  printf '%s: %d passed, %d failed, %d unrun\n' \
+    "$GATE_NAME" "$GATE_PASS" "$GATE_FAIL" "$GATE_UNRUN"
+  if [ "$GATE_FAIL" -ne 0 ]; then
+    return 1
+  fi
+  if [ "$GATE_UNRUN" -ne 0 ]; then
+    return "$GATE_EXIT_UNRUN"
+  fi
+  return 0
+}
+
+# gate_on_exit — the EXIT trap. `local rc=$?` MUST be the first statement.
+#
+# The contract line is derived from the exit code, so a gate that never reached
+# an assertion still reports FAIL. Emitting it only when no failure was recorded
+# keeps `grep -c '^FAIL '` an exact count of failures rather than failures plus
+# one.
+gate_on_exit() {
+  local rc=$?
+  # Give the landing lease back FIRST. Every other pane in the swarm is blocked
+  # from landing while this is held, so releasing it must not be downstream of
+  # anything that can fail or be slow. No-op unless this gate took it.
+  gate_landing_release || true
+  if [ -n "$GATE_TALLY_HOOK" ]; then
+    "$GATE_TALLY_HOOK" "$rc" || true
+  fi
+  # A gate that never reaches gate_verdict — gate_die, an unguarded `set -e`
+  # abort — still owes the tree-stability answer, and owes it MOST there: a
+  # fail-fast death under a moving tree is precisely the false attribution this
+  # closes. No-op if gate_verdict already asked. A moving tree makes a green
+  # exit dishonest, so it forces non-zero; an already-failing exit keeps its
+  # own status.
+  # NOTE THE `exit`, NOT `rc=1`. Assigning rc here and falling through to the
+  # trailing `return "$rc"` does NOT change the script's exit status: by the time
+  # an EXIT trap runs the status is already fixed, and `return` from the trap
+  # cannot override it. `exit` can, which is why the zero-assertion branch below
+  # uses it too. Measured, not reasoned: the first cut of this used `rc=1` and a
+  # real gate raced by a real commit emitted `UNRUN` on stdout while exiting 0 —
+  # a gate that says "did not run" and reports success in the same breath, which
+  # is the exact contradiction this bead exists to remove. Caught only by the
+  # real-gate proof, because the synthetic probe moved the tree BEFORE
+  # gate_verdict and so never exercised this window.
+  if ! gate_check_tree_stable; then
+    [ "$rc" -eq 0 ] && exit "$GATE_EXIT_UNRUN"
+  fi
+  # A GREEN EXIT OVER ZERO EXECUTED ASSERTIONS IS THE THIRD STATE, NOT THE
+  # FIRST. This is the path that catches a gate whose body was skipped whole —
+  # a guard clause that returned early, a corpus that was not there — which
+  # otherwise exits 0 in silence and reads as a pass. The trap overrides the
+  # status, so "did not run" cannot be reported green.
+  if [ "$GATE_CONTRACT_LINE_EMITTED" -eq 0 ] && [ "$rc" -eq 0 ] \
+    && [ $((GATE_PASS + GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
+    GATE_CONTRACT_LINE_EMITTED=1
+    gate_unrun "${GATE_NAME:-gate}: exited 0 having executed no assertions"
+    exit "$GATE_EXIT_UNRUN"
+  fi
+  # An UNRUN already carries the FAIL token, so it counts as "reported". Testing
+  # GATE_FAIL alone here emitted a SECOND FAIL line for a gate whose only
+  # not-passing outcome was an UNRUN, which broke `grep -c '^FAIL '` as an exact
+  # count. Found by the gate_unrun control, not by reading.
+  if [ "$GATE_CONTRACT_LINE_EMITTED" -eq 0 ] \
+    && [ "$rc" -ne 0 ] && [ $((GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
+    GATE_CONTRACT_LINE_EMITTED=1
+    printf 'FAIL %s: exited %s without reporting a failure; every assertion after that point did not run\n' \
+      "${GATE_NAME:-gate}" "$rc"
+  fi
+  return "$rc"
+}

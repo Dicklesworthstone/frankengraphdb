@@ -6,14 +6,44 @@
 //! structurally. This crate intentionally defines no durable byte encoding;
 //! generated format code owns that contract.
 //!
-//! Every operation that may allocate a variable number of limbs requires an
+//! Fixed-width scalar constructors allocate at most two limbs. Every operation
+//! that can accept, produce, or reserve a variable number of limbs requires an
 //! explicit [`LimbLimit`]. There is no unlimited arithmetic overload.
+//!
+//! ```
+//! use fgdb_bigint::{BigInt, LimbLimit, Sign};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let limit = LimbLimit::new(4);
+//! let imported =
+//!     BigInt::from_canonical_limbs(Sign::Positive, vec![1].into_boxed_slice(), limit)?;
+//! let one = BigInt::from_u64(1);
+//! let _ = imported.checked_clone(limit)?;
+//! let _ = imported.checked_neg(limit)?;
+//! let _ = imported.checked_add(&one, limit)?;
+//! let _ = imported.checked_sub(&one, limit)?;
+//! let _ = imported.checked_mul(&one, limit)?;
+//! let _ = imported.checked_div_rem(&one, limit)?;
+//! # Ok(())
+//! # }
+//! ```
 
 #![forbid(unsafe_code)]
 
 use std::{cmp::Ordering, fmt};
 
 /// A canonical arbitrary-precision signed integer.
+///
+/// Its variable-size representation cannot be constructed directly.
+///
+/// ```compile_fail,E0451
+/// use fgdb_bigint::BigInt;
+///
+/// let _ = BigInt {
+///     negative: false,
+///     limbs: vec![1],
+/// };
+/// ```
 #[derive(PartialEq, Eq, Hash, Debug)]
 pub struct BigInt {
     negative: bool,
@@ -225,6 +255,15 @@ impl BigInt {
     /// A boxed slice makes the transferred allocation exactly length-shaped.
     /// The codec must enforce its byte-length bound before allocating that
     /// slice; this constructor independently enforces the logical limb limit.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::{BigInt, Sign};
+    ///
+    /// let _ = BigInt::from_canonical_limbs(
+    ///     Sign::Positive,
+    ///     vec![1].into_boxed_slice(),
+    /// );
+    /// ```
     pub fn from_canonical_limbs(
         sign: Sign,
         limbs_le: Box<[u64]>,
@@ -278,18 +317,9 @@ impl BigInt {
     fn allocate_workspace_limbs(
         operation: ArithmeticOperation,
         required_limbs: usize,
+        limit: LimbLimit,
     ) -> Result<Vec<u64>, ArithmeticError> {
-        if required_limbs > (isize::MAX as usize) / std::mem::size_of::<u64>() {
-            return Err(ArithmeticError::CapacityOverflow { operation });
-        }
-        let mut limbs = Vec::new();
-        limbs
-            .try_reserve_exact(required_limbs)
-            .map_err(|_| ArithmeticError::AllocationFailed {
-                operation,
-                requested_limbs: required_limbs,
-            })?;
-        Ok(limbs)
+        Self::allocate_limbs(operation, required_limbs, limit)
     }
 
     fn from_sign_magnitude(negative: bool, mut limbs: Vec<u64>) -> Self {
@@ -347,6 +377,22 @@ impl BigInt {
     }
 
     /// Fallibly copies this value within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = value.checked_clone();
+    /// ```
+    ///
+    /// `BigInt` deliberately does not implement the unbounded `Clone` trait.
+    ///
+    /// ```compile_fail,E0599
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = value.clone();
+    /// ```
     pub fn checked_clone(&self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         let mut limbs = Self::allocate_limbs(ArithmeticOperation::Clone, self.limbs.len(), limit)?;
         limbs.extend_from_slice(&self.limbs);
@@ -637,6 +683,7 @@ impl BigInt {
         magnitude: &[u64],
         shift: u32,
         extra_high_limb: bool,
+        limit: LimbLimit,
     ) -> Result<Vec<u64>, ArithmeticError> {
         let required_limbs = magnitude
             .len()
@@ -645,7 +692,7 @@ impl BigInt {
                 operation: ArithmeticOperation::Divide,
             })?;
         let mut normalized =
-            Self::allocate_workspace_limbs(ArithmeticOperation::Divide, required_limbs)?;
+            Self::allocate_workspace_limbs(ArithmeticOperation::Divide, required_limbs, limit)?;
         if shift == 0 {
             normalized.extend_from_slice(magnitude);
             if extra_high_limb {
@@ -733,8 +780,9 @@ impl BigInt {
             return Err(ArithmeticError::DivisionByZero);
         };
         let shift = divisor_most_significant.leading_zeros();
-        let normalized_divisor = Self::normalized_division_operand(divisor, shift, false)?;
-        let mut normalized_dividend = Self::normalized_division_operand(dividend, shift, true)?;
+        let normalized_divisor = Self::normalized_division_operand(divisor, shift, false, limit)?;
+        let mut normalized_dividend =
+            Self::normalized_division_operand(dividend, shift, true, limit)?;
         let divisor_high = u128::from(normalized_divisor[divisor.len() - 1]);
         let divisor_next = u128::from(normalized_divisor[divisor.len() - 2]);
         let base = 1u128 << 64;
@@ -797,6 +845,24 @@ impl BigInt {
         Ok((quotient, remainder))
     }
 
+    /// Negates this value within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = value.checked_neg();
+    /// ```
+    ///
+    /// The unary negation operator is absent because it has no place to carry
+    /// a [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0600
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = -value;
+    /// ```
     pub fn checked_neg(&self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         let mut limbs = Self::allocate_limbs(ArithmeticOperation::Negate, self.limbs.len(), limit)?;
         limbs.extend_from_slice(&self.limbs);
@@ -806,6 +872,24 @@ impl BigInt {
         })
     }
 
+    /// Adds two values within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let left = BigInt::from_u64(1);
+    /// let right = BigInt::from_u64(2);
+    /// let _ = left.checked_add(&right);
+    /// ```
+    ///
+    /// The `+` operator is absent because it has no place to carry a
+    /// [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(1) + BigInt::from_u64(2);
+    /// ```
     pub fn checked_add(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         if self.negative == other.negative {
             return Ok(Self::from_sign_magnitude(
@@ -826,6 +910,24 @@ impl BigInt {
         }
     }
 
+    /// Subtracts two values within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let left = BigInt::from_u64(1);
+    /// let right = BigInt::from_u64(2);
+    /// let _ = left.checked_sub(&right);
+    /// ```
+    ///
+    /// The `-` operator is absent because it has no place to carry a
+    /// [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(1) - BigInt::from_u64(2);
+    /// ```
     pub fn checked_sub(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         if self.negative != other.negative {
             return Ok(Self::from_sign_magnitude(
@@ -861,9 +963,28 @@ impl BigInt {
         }
     }
 
+    /// Multiplies two values within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let left = BigInt::from_u64(1);
+    /// let right = BigInt::from_u64(2);
+    /// let _ = left.checked_mul(&right);
+    /// ```
+    ///
+    /// The `*` operator is absent because it has no place to carry a
+    /// [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(1) * BigInt::from_u64(2);
+    /// ```
     pub fn checked_mul(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
-        // `LimbLimit` bounds result allocation. CPU work is intentionally a
-        // separate concern for the downstream resource-ledger/Cx wrapper.
+        // `LimbLimit` bounds variable-size allocation. CPU work is
+        // intentionally a separate concern for the downstream
+        // resource-ledger/Cx wrapper.
         Ok(Self::from_sign_magnitude(
             self.negative != other.negative,
             Self::mul_magnitude(&self.limbs, &other.limbs, limit)?,
@@ -879,11 +1000,34 @@ impl BigInt {
     ///
     /// `self == quotient * divisor + remainder`
     ///
-    /// and `abs(remainder) < abs(divisor)`. Both returned magnitudes must fit
-    /// `limit`; a zero divisor is rejected before any resource admission.
-    /// Multi-limb division uses normalized base-2^64 long division with
-    /// quotient-digit correction, never value-proportional repeated
-    /// subtraction.
+    /// and `abs(remainder) < abs(divisor)`. Every result and normalization
+    /// workspace allocation must fit `limit`; a zero divisor is rejected
+    /// before any resource admission. Multi-limb division uses normalized
+    /// base-2^64 long division with quotient-digit correction, never
+    /// value-proportional repeated subtraction.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let dividend = BigInt::from_u64(2);
+    /// let divisor = BigInt::from_u64(1);
+    /// let _ = dividend.checked_div_rem(&divisor);
+    /// ```
+    ///
+    /// Neither `/` nor `%` is implemented because those operators have no
+    /// place to carry a [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(2) / BigInt::from_u64(1);
+    /// ```
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(2) % BigInt::from_u64(1);
+    /// ```
     pub fn checked_div_rem(
         &self,
         divisor: &Self,
@@ -928,7 +1072,170 @@ impl BigInt {
             Self::from_sign_magnitude(self.negative, remainder),
         ))
     }
+
+    /// Canonical byte encoding: exactly one byte string per value.
+    ///
+    /// Zero is the single octet `0x00`. A nonzero value is its sign octet
+    /// (`0x01` positive, `0x02` negative), a little-endian `u64` limb count,
+    /// then that many little-endian `u64` magnitude limbs whose last limb is
+    /// nonzero. Uniqueness holds because the in-memory representation is
+    /// already canonical and the layout adds no degrees of freedom.
+    pub fn encode_canonical_bytes(&self) -> Vec<u8> {
+        if self.is_zero() {
+            return vec![encoding_tag::ZERO];
+        }
+        let mut out = Vec::with_capacity(1 + 8 + self.limbs.len() * 8);
+        out.push(if self.negative {
+            encoding_tag::NEGATIVE
+        } else {
+            encoding_tag::POSITIVE
+        });
+        out.extend_from_slice(&(self.limbs.len() as u64).to_le_bytes());
+        for limb in &self.limbs {
+            out.extend_from_slice(&limb.to_le_bytes());
+        }
+        out
+    }
+
+    /// Decode a canonical byte encoding, failing closed on every
+    /// malformation.
+    ///
+    /// The declared limb count is bounded by `limit` and by the actual byte
+    /// length BEFORE any allocation, so a hostile header cannot make this
+    /// reserve memory it was never sent; the length comparison runs in `u128`
+    /// so no `limit` choice can make it wrap. Canonicality itself is then
+    /// enforced by [`BigInt::from_canonical_limbs`] — one validator, not two.
+    pub fn decode_canonical_bytes(bytes: &[u8], limit: LimbLimit) -> Result<Self, DecodeError> {
+        let (&tag, rest) = bytes.split_first().ok_or(DecodeError::Empty)?;
+        let sign = match tag {
+            encoding_tag::ZERO => {
+                if !rest.is_empty() {
+                    return Err(DecodeError::TrailingBytes {
+                        expected_len: 1,
+                        actual_len: bytes.len(),
+                    });
+                }
+                return Ok(Self::zero());
+            }
+            encoding_tag::POSITIVE => Sign::Positive,
+            encoding_tag::NEGATIVE => Sign::Negative,
+            tag => return Err(DecodeError::UnknownSignTag { tag }),
+        };
+        if rest.len() < 8 {
+            return Err(DecodeError::TruncatedLimbCount {
+                available_bytes: rest.len(),
+            });
+        }
+        let (count_bytes, magnitude) = rest.split_at(8);
+        let mut count_le = [0u8; 8];
+        count_le.copy_from_slice(count_bytes);
+        let declared = u64::from_le_bytes(count_le);
+        if declared > limit.max_limbs() as u64 {
+            return Err(DecodeError::DeclaredLimbsExceedLimit {
+                declared_limbs: declared,
+                limit: limit.max_limbs(),
+            });
+        }
+        if (magnitude.len() as u128) != (declared as u128) * 8 {
+            return Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: declared,
+                actual_bytes: magnitude.len(),
+            });
+        }
+        let requested_limbs = declared as usize;
+        let mut limbs = Vec::new();
+        limbs
+            .try_reserve_exact(requested_limbs)
+            .map_err(|_| DecodeError::AllocationFailed { requested_limbs })?;
+        let (chunks, remainder) = magnitude.as_chunks::<8>();
+        debug_assert!(remainder.is_empty(), "length was validated above");
+        for &limb_le in chunks {
+            limbs.push(u64::from_le_bytes(limb_le));
+        }
+        Self::from_canonical_limbs(sign, limbs.into_boxed_slice(), limit)
+            .map_err(DecodeError::NotCanonical)
+    }
 }
+
+/// Sign octets of the canonical byte encoding. Durable values: assigned once,
+/// never renumbered.
+mod encoding_tag {
+    pub const ZERO: u8 = 0x00;
+    pub const POSITIVE: u8 = 0x01;
+    pub const NEGATIVE: u8 = 0x02;
+}
+
+/// Why a canonical byte decoding was rejected.
+///
+/// Every variant names the exact malformation so a fuzz counterexample is
+/// reproducible from the error alone; `NotCanonical` carries the construction
+/// error because decode routes through [`BigInt::from_canonical_limbs`] rather
+/// than re-stating its laws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeError {
+    Empty,
+    UnknownSignTag {
+        tag: u8,
+    },
+    TruncatedLimbCount {
+        available_bytes: usize,
+    },
+    DeclaredLimbsExceedLimit {
+        declared_limbs: u64,
+        limit: usize,
+    },
+    MagnitudeLengthMismatch {
+        declared_limbs: u64,
+        actual_bytes: usize,
+    },
+    TrailingBytes {
+        expected_len: usize,
+        actual_len: usize,
+    },
+    AllocationFailed {
+        requested_limbs: usize,
+    },
+    NotCanonical(ConstructionError),
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Empty => write!(f, "empty input has no sign octet"),
+            Self::UnknownSignTag { tag } => write!(f, "unknown sign octet 0x{tag:02x}"),
+            Self::TruncatedLimbCount { available_bytes } => {
+                write!(
+                    f,
+                    "limb count needs 8 bytes, only {available_bytes} present"
+                )
+            }
+            Self::DeclaredLimbsExceedLimit {
+                declared_limbs,
+                limit,
+            } => write!(f, "declared {declared_limbs} limbs, limit is {limit}"),
+            Self::MagnitudeLengthMismatch {
+                declared_limbs,
+                actual_bytes,
+            } => write!(
+                f,
+                "declared {declared_limbs} limbs but {actual_bytes} magnitude bytes follow"
+            ),
+            Self::TrailingBytes {
+                expected_len,
+                actual_len,
+            } => write!(
+                f,
+                "encoding is {expected_len} bytes, input carries {actual_len}"
+            ),
+            Self::AllocationFailed { requested_limbs } => {
+                write!(f, "allocation of {requested_limbs} limbs failed")
+            }
+            Self::NotCanonical(ref error) => write!(f, "decoded limbs are not canonical: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
 
 impl PartialOrd for BigInt {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -1372,8 +1679,8 @@ mod tests {
                     continue;
                 }
                 let (quotient, remainder) = dividend_big
-                    .checked_div_rem(&divisor_big, LimbLimit::new(2))
-                    .expect("u128 quotient and remainder occupy at most two limbs");
+                    .checked_div_rem(&divisor_big, LimbLimit::new(3))
+                    .expect("u128 division needs at most three workspace/result limbs");
                 assert_eq!(
                     quotient,
                     BigInt::from_u128(dividend / divisor),
@@ -1598,11 +1905,21 @@ mod tests {
 
     #[test]
     fn division_workspace_capacity_and_allocation_failures_are_typed() {
+        assert_eq!(
+            BigInt::allocate_workspace_limbs(ArithmeticOperation::Divide, 2, LimbLimit::new(1),),
+            Err(ArithmeticError::LimbLimitExceeded {
+                operation: ArithmeticOperation::Divide,
+                required_limbs: 2,
+                limit: 1,
+            })
+        );
+
         let first_impossible_limb_count = (isize::MAX as usize) / std::mem::size_of::<u64>() + 1;
         assert_eq!(
             BigInt::allocate_workspace_limbs(
                 ArithmeticOperation::Divide,
                 first_impossible_limb_count,
+                LimbLimit::new(usize::MAX),
             ),
             Err(ArithmeticError::CapacityOverflow {
                 operation: ArithmeticOperation::Divide,
@@ -1614,12 +1931,35 @@ mod tests {
             BigInt::allocate_workspace_limbs(
                 ArithmeticOperation::Divide,
                 largest_addressable_limb_count,
+                LimbLimit::new(usize::MAX),
             ),
             Err(ArithmeticError::AllocationFailed {
                 operation: ArithmeticOperation::Divide,
                 requested_limbs: largest_addressable_limb_count,
             })
         );
+    }
+
+    #[test]
+    fn public_division_limit_covers_normalization_workspace_not_only_results() {
+        let dividend = BigInt::from_sign_magnitude(false, vec![0, 0, 1]);
+        let divisor = BigInt::from_sign_magnitude(false, vec![0, 1]);
+
+        assert_eq!(
+            dividend.checked_div_rem(&divisor, LimbLimit::new(2)),
+            Err(ArithmeticError::LimbLimitExceeded {
+                operation: ArithmeticOperation::Divide,
+                required_limbs: 4,
+                limit: 2,
+            }),
+            "the dividend normalization workspace is admitted before allocation"
+        );
+
+        let (quotient, remainder) = dividend
+            .checked_div_rem(&divisor, LimbLimit::new(4))
+            .expect("a four-limb workspace budget admits the exact result");
+        assert_eq!(quotient, BigInt::from_sign_magnitude(false, vec![0, 1]));
+        assert_eq!(remainder, BigInt::zero());
     }
 
     #[test]
@@ -1823,5 +2163,378 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Round-trip: the canonical limb export is exactly the import form.
+    /// This is the crate's durable-shape identity -- `magnitude_limbs_le` plus
+    /// `sign()` is the only canonical external rendering of a value, so if the
+    /// pair did not reconstruct the original, any consumer that persisted the
+    /// limbs would read back a different number.
+    #[test]
+    fn canonical_limb_export_round_trips_through_import() {
+        for seed in [3u64, 0x5EED, 0xFEED_FACE, u64::MAX - 1] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let v = rng.bigint(5);
+                let limbs: Box<[u64]> = v.magnitude_limbs_le().to_vec().into_boxed_slice();
+                let back = BigInt::from_canonical_limbs(v.sign(), limbs, TEST_LIMIT)
+                    .expect("canonical export re-imports");
+                assert_eq!(back, v, "seed={seed} round trip changed the value: {v:?}");
+                assert_eq!(back.sign(), v.sign(), "seed={seed} sign drifted: {v:?}");
+                assert_eq!(
+                    back.magnitude_limbs_le(),
+                    v.magnitude_limbs_le(),
+                    "seed={seed} magnitude drifted: {v:?}"
+                );
+                assert!(back.is_canonical(), "seed={seed} re-import not canonical");
+            }
+        }
+    }
+
+    /// Metamorphic: strict order is preserved by adding the same value to both
+    /// sides. Stated for ANY addend, not only positive ones, because addition
+    /// here is over signed integers where translation invariance is total --
+    /// the documented boundary is the limb budget, not the sign of the addend.
+    #[test]
+    fn comparison_is_translation_invariant_under_addition() {
+        for seed in [7u64, 0xB0A710AD] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let a = rng.bigint(4);
+                let b = rng.bigint(4);
+                let c = rng.bigint(4);
+                let ac = a.checked_add(&c, TEST_LIMIT).expect("a + c");
+                let bc = b.checked_add(&c, TEST_LIMIT).expect("b + c");
+                assert_eq!(
+                    a.cmp(&b),
+                    ac.cmp(&bc),
+                    "seed={seed} order changed under +c: a={a:?} b={b:?} c={c:?}"
+                );
+            }
+        }
+    }
+
+    /// Metamorphic inverse pair: subtraction undoes addition exactly.
+    #[test]
+    fn subtraction_inverts_addition_on_random_values() {
+        for seed in [13u64, 0xA11CE] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let a = rng.bigint(4);
+                let b = rng.bigint(4);
+                let sum = a.checked_add(&b, TEST_LIMIT).expect("a + b");
+                let recovered = sum.checked_sub(&b, TEST_LIMIT).expect("(a + b) - b");
+                assert_eq!(recovered, a, "seed={seed} a={a:?} b={b:?}");
+                let recovered_other = sum.checked_sub(&a, TEST_LIMIT).expect("(a + b) - a");
+                assert_eq!(recovered_other, b, "seed={seed} a={a:?} b={b:?}");
+            }
+        }
+    }
+
+    /// Metamorphic inverse pair: dividing a constructed product by one factor
+    /// returns the other exactly, with a zero remainder. The existing division
+    /// test pins q*d+r=n for arbitrary pairs; this pins the exact-inverse
+    /// direction, which is the case a truncating bug would still satisfy.
+    #[test]
+    fn division_inverts_multiplication_with_zero_remainder() {
+        for seed in [17u64, 0xC0FFEE] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let a = rng.bigint(3);
+                let b = rng.bigint(2);
+                if b.is_zero() {
+                    continue;
+                }
+                let product = a.checked_mul(&b, TEST_LIMIT).expect("a * b");
+                let (quotient, remainder) = product
+                    .checked_div_rem(&b, TEST_LIMIT)
+                    .expect("(a * b) / b");
+                assert!(
+                    remainder.is_zero(),
+                    "seed={seed} exact product left a remainder: a={a:?} b={b:?} r={remainder:?}"
+                );
+                assert_eq!(quotient, a, "seed={seed} a={a:?} b={b:?}");
+            }
+        }
+    }
+
+    /// Zero, one and the widest representable edges are ordinary inputs, not
+    /// special cases: the identity and absorbing laws hold on them with the
+    /// same operators and the same budget as any random value.
+    #[test]
+    fn identity_and_absorbing_elements_are_ordinary_inputs() {
+        let one = BigInt::from_u64(1);
+        let edges = [
+            BigInt::zero(),
+            BigInt::from_u64(1),
+            BigInt::from_i64(-1),
+            BigInt::from_u64(u64::MAX),
+            BigInt::from_u128(u128::MAX),
+            BigInt::from_i128(i128::MIN),
+            BigInt::from_i128(i128::MAX),
+        ];
+        for v in &edges {
+            assert_eq!(
+                &v.checked_add(&BigInt::zero(), TEST_LIMIT).expect("v + 0"),
+                v,
+                "additive identity on {v:?}"
+            );
+            assert_eq!(
+                &v.checked_mul(&one, TEST_LIMIT).expect("v * 1"),
+                v,
+                "multiplicative identity on {v:?}"
+            );
+            assert!(
+                v.checked_mul(&BigInt::zero(), TEST_LIMIT)
+                    .expect("v * 0")
+                    .is_zero(),
+                "absorbing zero on {v:?}"
+            );
+            assert!(
+                v.checked_sub(v, TEST_LIMIT).expect("v - v").is_zero(),
+                "self difference on {v:?}"
+            );
+            let (q, r) = v.checked_div_rem(&one, TEST_LIMIT).expect("v / 1");
+            assert_eq!(&q, v, "division by one on {v:?}");
+            assert!(r.is_zero(), "division by one left a remainder on {v:?}");
+            assert_eq!(
+                &v.checked_neg(TEST_LIMIT)
+                    .expect("-v")
+                    .checked_neg(TEST_LIMIT)
+                    .expect("--v"),
+                v,
+                "double negation on {v:?}"
+            );
+        }
+    }
+
+    /// Limb-boundary behaviour at and either side of the exposed limit: a value
+    /// whose magnitude needs exactly n limbs is admitted by LimbLimit(n) and
+    /// refused by LimbLimit(n-1), with the required width reported exactly.
+    #[test]
+    fn limb_limit_admits_the_required_width_and_refuses_one_less() {
+        for width in 1usize..=5 {
+            let mut limbs = vec![0u64; width];
+            limbs[width - 1] = 1;
+            let exact = BigInt::from_canonical_limbs(
+                Sign::Positive,
+                limbs.clone().into_boxed_slice(),
+                LimbLimit::new(width),
+            )
+            .expect("width fits its own limit");
+            assert_eq!(exact.limb_count(), width);
+
+            // Asserted as a VALUE rather than matched-with-panic. ConstructionError
+            // derives PartialEq, so equality pins the reported required_limbs and
+            // limit exactly and states the whole expectation in one place -- and it
+            // avoids introducing an unwinding macro into a file that has none.
+            assert_eq!(
+                BigInt::from_canonical_limbs(
+                    Sign::Positive,
+                    limbs.into_boxed_slice(),
+                    LimbLimit::new(width - 1),
+                ),
+                Err(ConstructionError::LimbLimitExceeded {
+                    required_limbs: width,
+                    limit: width - 1,
+                }),
+                "width {width} must be refused at limit {} with exact widths reported",
+                width - 1
+            );
+
+            // The same boundary on an allocating operation rather than import.
+            let doubled = exact.checked_add(&exact, LimbLimit::new(width + 1));
+            assert!(doubled.is_ok(), "doubling width {width} fits width+1");
+            assert!(
+                exact.checked_clone(LimbLimit::new(width)).is_ok(),
+                "clone of width {width} fits its own limit"
+            );
+            assert!(
+                exact.checked_clone(LimbLimit::new(width - 1)).is_err(),
+                "clone of width {width} must not fit width-1"
+            );
+        }
+    }
+
+    // =====================================================================
+    // The canonical byte codec (tjk residue: byte-level encode/decode
+    // coherence). Round-trip, injectivity, and one exact-variant rejection
+    // per malformation — a rejection asserted only as is_err() could pass on
+    // a DIFFERENT failure kind than the one the mutation constructs.
+    // =====================================================================
+
+    #[test]
+    fn codec_round_trip_randomized_and_adversarial() -> Result<(), String> {
+        let seed = 0x5eed_b16e_c0de_0001u64;
+        let mut rng = SplitMix64(seed);
+        let mut values: Vec<BigInt> = (0..500).map(|_| rng.bigint(8)).collect();
+        values.extend([
+            BigInt::zero(),
+            BigInt::from_i64(-1),
+            BigInt::from_u64(1),
+            BigInt::from_u64(u64::MAX),
+            BigInt::from_u128(u64::MAX as u128 + 1),
+            BigInt::from_u128(u128::MAX),
+            BigInt::from_i128(i128::MIN),
+            BigInt::from_i128(i128::MAX),
+        ]);
+        for value in &values {
+            let bytes = value.encode_canonical_bytes();
+            let decoded = BigInt::decode_canonical_bytes(&bytes, TEST_LIMIT).map_err(|error| {
+                format!("seed {seed:#x}: bytes {bytes:02x?}: round trip failed: {error}")
+            })?;
+            assert_eq!(&decoded, value, "seed {seed:#x}: bytes {bytes:02x?}");
+            assert_eq!(
+                bytes,
+                value.encode_canonical_bytes(),
+                "encoding must be deterministic"
+            );
+        }
+        // Injectivity over the sample: distinct values, distinct encodings —
+        // and order survives the round trip.
+        values.sort();
+        values.dedup();
+        let mut encodings: Vec<Vec<u8>> =
+            values.iter().map(BigInt::encode_canonical_bytes).collect();
+        let before = encodings.len();
+        encodings.sort();
+        encodings.dedup();
+        assert_eq!(before, encodings.len(), "two values shared an encoding");
+        for pair in values.windows(2) {
+            let a = BigInt::decode_canonical_bytes(&pair[0].encode_canonical_bytes(), TEST_LIMIT)
+                .expect("sorted sample re-decodes");
+            let b = BigInt::decode_canonical_bytes(&pair[1].encode_canonical_bytes(), TEST_LIMIT)
+                .expect("sorted sample re-decodes");
+            assert!(a < b, "order must survive the round trip");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn zero_encodes_as_the_single_zero_octet() {
+        assert_eq!(BigInt::zero().encode_canonical_bytes(), vec![0x00]);
+    }
+
+    #[test]
+    fn decode_rejects_each_malformation_with_its_exact_variant() {
+        let two_limbs = BigInt::from_u128(u64::MAX as u128 + 7);
+        let good = two_limbs.encode_canonical_bytes();
+
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[], TEST_LIMIT),
+            Err(DecodeError::Empty)
+        );
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[0x03], TEST_LIMIT),
+            Err(DecodeError::UnknownSignTag { tag: 0x03 })
+        );
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[0x01, 0x01, 0x00], TEST_LIMIT),
+            Err(DecodeError::TruncatedLimbCount { available_bytes: 2 })
+        );
+        // Append control on zero: the single octet plus anything is invalid.
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&[0x00, 0x00], TEST_LIMIT),
+            Err(DecodeError::TrailingBytes {
+                expected_len: 1,
+                actual_len: 2
+            })
+        );
+        // Truncate control: drop the final magnitude byte.
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&good[..good.len() - 1], TEST_LIMIT),
+            Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: 2,
+                actual_bytes: 15
+            })
+        );
+        // Append control: one byte past the declared magnitude.
+        let mut appended = good.clone();
+        appended.push(0x00);
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&appended, TEST_LIMIT),
+            Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: 2,
+                actual_bytes: 17
+            })
+        );
+        // Length-before-allocation: a hostile count with a short buffer must
+        // fail on the LIMIT check, proving the bound runs before any reserve.
+        let mut hostile = vec![0x01];
+        hostile.extend_from_slice(&u64::MAX.to_le_bytes());
+        hostile.extend_from_slice(&[0u8; 8]);
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&hostile, TEST_LIMIT),
+            Err(DecodeError::DeclaredLimbsExceedLimit {
+                declared_limbs: u64::MAX,
+                limit: TEST_LIMIT.max_limbs()
+            })
+        );
+        // The limit binds real decodes too: two limbs against a one-limb cap.
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&good, LimbLimit::new(1)),
+            Err(DecodeError::DeclaredLimbsExceedLimit {
+                declared_limbs: 2,
+                limit: 1
+            })
+        );
+        // High-zero-limb forgery: widen the count and append a zero limb — the
+        // canonicality validator, not the codec, must name it.
+        let mut forged = good.clone();
+        forged[1] = 3;
+        forged.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&forged, TEST_LIMIT),
+            Err(DecodeError::NotCanonical(ConstructionError::HighZeroLimb {
+                sign: Sign::Positive,
+                limb_count: 3
+            }))
+        );
+        // Negative-zero forgery: a sign octet with a zero limb count.
+        let mut negative_zero = vec![0x02];
+        negative_zero.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&negative_zero, TEST_LIMIT),
+            Err(DecodeError::NotCanonical(
+                ConstructionError::NonzeroSignWithoutMagnitude {
+                    sign: Sign::Negative
+                }
+            ))
+        );
+    }
+
+    /// The decode doc claims the length comparison runs in `u128` so no
+    /// `limit` choice can make it wrap. Witness: with the limit wide open, a
+    /// declared count of 2^61 limbs makes `declared * 8` exactly 2^64 — a
+    /// u64 comparison would wrap to zero, match the empty magnitude, and
+    /// reach the allocator asking for a 16 EiB reservation. The u128
+    /// comparison must instead name the mismatch before any allocation.
+    #[test]
+    fn hostile_count_cannot_wrap_the_length_check() {
+        let mut hostile = vec![0x01];
+        hostile.extend_from_slice(&(1u64 << 61).to_le_bytes());
+        assert_eq!(
+            BigInt::decode_canonical_bytes(&hostile, LimbLimit::new(usize::MAX)),
+            Err(DecodeError::MagnitudeLengthMismatch {
+                declared_limbs: 1 << 61,
+                actual_bytes: 0
+            })
+        );
+    }
+
+    /// Every limit rejection above sits strictly past the cap; this witnesses
+    /// the boundary itself, so a `>` → `>=` drift in the declared-limbs check
+    /// cannot survive: a value of exactly `max_limbs` limbs must decode under
+    /// that exact limit.
+    #[test]
+    fn decode_accepts_a_value_at_exactly_the_limit() {
+        let mut limbs = vec![0u64; TEST_LIMIT.max_limbs()];
+        *limbs.last_mut().expect("TEST_LIMIT is nonzero") = 1;
+        let value =
+            BigInt::from_canonical_limbs(Sign::Positive, limbs.into_boxed_slice(), TEST_LIMIT)
+                .expect("a value of exactly max_limbs limbs is canonical");
+        let decoded = BigInt::decode_canonical_bytes(&value.encode_canonical_bytes(), TEST_LIMIT)
+            .expect("a value of exactly max_limbs limbs decodes under that limit");
+        assert_eq!(decoded, value);
     }
 }

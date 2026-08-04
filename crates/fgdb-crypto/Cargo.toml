@@ -1,0 +1,11 @@
+[package]
+name = "fgdb-crypto"
+version = "0.0.1"
+edition = "2024"
+description = "In-house BLAKE3 (hash, keyed_hash, derive_key, XOF) and the domain-separated identity transcripts of plan §5.1 (ObjectId/EncodingId/PlacementId); bead fgdb-w1-crypto-y5o. Closed dependency universe: no external crypto crates, scalar-only kernel with the SIMD variant deferred to the fgdb-unsafe-simd boundary."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

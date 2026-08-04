@@ -25,11 +25,15 @@
 
 #![forbid(unsafe_code)]
 
+mod canonical;
+mod index;
 mod zweight;
 
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, MarkerRef, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
 
+pub use canonical::{CanonicalError, DELTA_FORMAT_V1, canonicalize};
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
+pub use index::{INDEX_FORMAT_V1, IndexError, LocalDeltaBatchIndex};
 pub use zweight::{ZWeight, ZWeightError};
 
 /// Catalog-interned label ordinal (durable pinning: `fgdb-w4-schema-catalog`).
@@ -208,38 +212,108 @@ pub enum DeltaFamily {
     Constraint,
 }
 
-/// The template key: graph / branch / relation / schema epoch /
-/// `IntentSemanticsOid`. Everything a template's rows mean is pinned by this
-/// key; nothing about *when* is.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct DeltaTemplateKey {
+/// One coordinate's slice of a template: the graph/branch/relation it applies
+/// to, the schema state it was validated under, and its delta payload.
+///
+/// This is Appendix A's `coordinate_entries[]` element (plan:1924). It is a
+/// separate level rather than being folded into the template root because one
+/// commit may touch several graphs or branches **atomically**; a template that
+/// can name only one coordinate cannot express such a commit at all, and the
+/// only way to encode it would be to split it into commits that are no longer
+/// atomic. The shape is therefore load-bearing, not organisational.
+///
+/// SUBSET NOTE (doctrine 7). The plan spells the payload as
+/// `delta_payload_ref: ConditionalCoordinateRef` plus a `delta_payload_digest`
+/// that cross-checks it. Neither is spellable today: `LogicalDeltaTemplate`
+/// and the payload kinds are `reserved` rather than `active` in the Appendix A
+/// catalog, and `fgdb-types` const-asserts the active set, so naming them
+/// would not compile. The rows are therefore carried inline — the payload
+/// itself rather than a reference to it, which is a subset of the final
+/// abstraction and not a substitute for it. When those kinds activate, the
+/// rows move behind the ref and the digest becomes a stored field; the
+/// canonical bytes defined here are already exactly what that digest is taken
+/// over, so no part of the format has to be re-derived.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CoordinateEntry {
     pub graph: GraphId,
     pub branch: BranchId,
     pub relation: RelationId,
+    /// Stands in for the plan's `validated_schema_binding`: the schema epoch
+    /// these rows were validated under. The full binding is
+    /// `fgdb-w4-schema-catalog`'s to define.
     pub schema_epoch: SchemaEpoch,
-    pub intent_semantics_oid: ObjectId,
+    /// `schema_transition: None | Some{transition_ref}`, named by object id
+    /// until `SchemaTransition` is an active kind.
+    pub schema_transition: Option<ObjectId>,
+    /// The payload: canonically ordered, duplicate-free delta rows.
+    pub rows: Vec<DeltaRow>,
 }
 
 /// Sequence-neutral logical delta template. By construction this type has no
 /// commit sequence, no marker, and no ordering field of any kind — it cannot
 /// express "when", only "what".
+///
+/// Its identity is the digest of [`canonical_bytes`](Self::canonical_bytes),
+/// which is why there is no constructor that skips canonicalization: a
+/// template built from unordered entries would carry an identity nobody could
+/// reproduce from the same effects, and the capsule, the marker, and every
+/// downstream cross-check compare precisely that digest.
 #[derive(Clone, PartialEq, Debug)]
 pub struct LogicalDeltaTemplate {
-    key: DeltaTemplateKey,
-    rows: Vec<DeltaRow>,
+    format: u16,
+    intent_semantics_oid: ObjectId,
+    source_intent_root_digest: [u8; 32],
+    coordinate_entries: Vec<CoordinateEntry>,
 }
 
 impl LogicalDeltaTemplate {
-    pub fn new(key: DeltaTemplateKey, rows: Vec<DeltaRow>) -> Self {
-        LogicalDeltaTemplate { key, rows }
+    /// Build a template: canonicalize the entries, then validate the result.
+    ///
+    /// Canonicalizing cannot fix a duplicate coordinate or a duplicate row —
+    /// sorting only makes equal things adjacent — so validation after sorting
+    /// is where those are caught. That division is deliberate: merging two
+    /// entries for the same coordinate is `NetEffectNormalForm`'s job, and an
+    /// encoder that quietly did it would be inventing effects.
+    pub fn build(
+        intent_semantics_oid: ObjectId,
+        source_intent_root_digest: [u8; 32],
+        mut coordinate_entries: Vec<CoordinateEntry>,
+    ) -> Result<Self, CanonicalError> {
+        canonicalize(&mut coordinate_entries)?;
+        let template = LogicalDeltaTemplate {
+            format: DELTA_FORMAT_V1,
+            intent_semantics_oid,
+            source_intent_root_digest,
+            coordinate_entries,
+        };
+        template.validate()?;
+        Ok(template)
     }
 
-    pub fn key(&self) -> &DeltaTemplateKey {
-        &self.key
+    pub fn format(&self) -> u16 {
+        self.format
     }
 
-    pub fn rows(&self) -> &[DeltaRow] {
-        &self.rows
+    pub fn intent_semantics_oid(&self) -> ObjectId {
+        self.intent_semantics_oid
+    }
+
+    pub fn source_intent_root_digest(&self) -> &[u8; 32] {
+        &self.source_intent_root_digest
+    }
+
+    pub fn coordinate_entries(&self) -> &[CoordinateEntry] {
+        &self.coordinate_entries
+    }
+
+    /// Every row across every coordinate, in canonical order.
+    pub fn rows(&self) -> impl Iterator<Item = &DeltaRow> {
+        self.coordinate_entries.iter().flat_map(|e| e.rows.iter())
+    }
+
+    /// Total rows across every coordinate.
+    pub fn row_count(&self) -> usize {
+        self.coordinate_entries.iter().map(|e| e.rows.len()).sum()
     }
 }
 
@@ -247,16 +321,54 @@ impl LogicalDeltaTemplate {
 /// complete). This is a distinct type from the bare identity
 /// [`MarkerRef`](fgdb_types::MarkerRef) so the delta layer can demand
 /// committedness in signatures. Production construction sites live in the
-/// W2 commit pipeline (`fgdb-w2-commit-protocol`), after the marker fsync;
-/// once `Cx` capabilities land, attestation will additionally require the
-/// commit capability, making misuse unrepresentable rather than reviewable.
+/// W2 commit pipeline (`fgdb-w2-commit-protocol`), after the marker fsync. The
+/// attestation boundary requires a purpose-typed [`CommitCx`], so a bare marker
+/// identity outside the commit lane cannot be promoted through this API.
+///
+/// The tuple field is private and direct construction is rejected:
+///
+/// ```compile_fail,E0423
+/// use fgdb_delta_types::CommittedMarker;
+/// use fgdb_types::MarkerRef;
+///
+/// fn forge(marker: MarkerRef) -> CommittedMarker {
+///     CommittedMarker(marker)
+/// }
+/// ```
+///
+/// Attestation without the commit-purpose capability is also rejected:
+///
+/// ```compile_fail,E0061
+/// use fgdb_delta_types::CommittedMarker;
+/// use fgdb_types::MarkerRef;
+///
+/// fn forge(marker: MarkerRef) -> CommittedMarker {
+///     CommittedMarker::attest(marker)
+/// }
+/// ```
+///
+/// A different purpose context cannot stand in for commit authority:
+///
+/// ```compile_fail,E0308
+/// use fgdb_delta_types::CommittedMarker;
+/// use fgdb_types::{MarkerRef, QueryCx};
+///
+/// fn forge(marker: MarkerRef, query_cx: &QueryCx) -> CommittedMarker {
+///     CommittedMarker::attest(marker, query_cx)
+/// }
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct CommittedMarker(MarkerRef);
 
 impl CommittedMarker {
-    /// Attests that `marker` is durably committed. See the type docs for who
-    /// may call this.
-    pub const fn attest(marker: MarkerRef) -> Self {
+    /// Attests that `marker` is durably committed. The W2 commit pipeline may
+    /// call this only after its marker-fsync boundary; requiring `commit_cx`
+    /// makes that authority explicit and excludes query/transaction/maintenance
+    /// purpose contexts at compile time. Possession of `CommitCx` is an
+    /// authority witness, not an observation of storage state: the W2
+    /// transition checker remains responsible for proving that this call is
+    /// downstream of the marker fsync.
+    pub const fn attest(marker: MarkerRef, _commit_cx: &CommitCx) -> Self {
         CommittedMarker(marker)
     }
 
@@ -269,46 +381,177 @@ impl CommittedMarker {
 /// marker that gives it its place in history. The only constructor consumes
 /// a [`CommittedMarker`]; there is deliberately no way to build one from a
 /// bare `MarkerRef`.
+///
+/// ```compile_fail,E0308
+/// use fgdb_delta_types::{LogicalDeltaBatch, LogicalDeltaTemplate};
+/// use fgdb_types::MarkerRef;
+///
+/// fn order_with_bare_identity(template: LogicalDeltaTemplate, marker: MarkerRef) {
+///     let _ = LogicalDeltaBatch::order(&template, [0u8; 32], marker);
+/// }
+/// ```
+///
+/// The fields are private, so callers cannot bypass [`LogicalDeltaBatch::order`]
+/// even when they already hold both inputs:
+///
+/// ```compile_fail,E0451
+/// use fgdb_delta_types::{CommittedMarker, LogicalDeltaBatch, LogicalDeltaTemplate};
+///
+/// fn bypass(
+///     template: LogicalDeltaTemplate,
+///     marker: CommittedMarker,
+/// ) -> LogicalDeltaBatch {
+///     LogicalDeltaBatch {
+///         format: 1,
+///         coordinate_entries: template.coordinate_entries().to_vec(),
+///         source_template_digest: [0u8; 32],
+///         commit_marker_identity: marker.marker(),
+///         commit_seq: marker.marker().commit_seq,
+///         frontier: marker.marker().commit_seq,
+///     }
+/// }
+/// ```
 #[derive(Clone, PartialEq, Debug)]
 pub struct LogicalDeltaBatch {
-    template: LogicalDeltaTemplate,
-    marker: CommittedMarker,
+    format: u16,
+    /// The payloads, OWNED. A batch that referenced its template would keep the
+    /// template alive for as long as the batch is retained, which is the
+    /// opposite of the retention direction the plan specifies.
+    coordinate_entries: Vec<CoordinateEntry>,
+    /// Non-retaining provenance: the digest of the template this was derived
+    /// from, not the template.
+    source_template_digest: [u8; 32],
+    /// Non-retaining provenance: the marker's IDENTITY. Ordering still requires
+    /// a [`CommittedMarker`] to construct, so the committedness law is intact —
+    /// but the batch stores only the identity, not the capability.
+    commit_marker_identity: MarkerRef,
+    commit_seq: fgdb_types::CommitSeq,
+    frontier: fgdb_types::CommitSeq,
 }
 
 impl LogicalDeltaBatch {
     /// The one door: order a sequence-neutral template by its committed
     /// marker.
-    pub fn order(template: LogicalDeltaTemplate, marker: CommittedMarker) -> Self {
-        LogicalDeltaBatch { template, marker }
+    pub fn order(
+        template: &LogicalDeltaTemplate,
+        source_template_digest: [u8; 32],
+        marker: CommittedMarker,
+    ) -> Self {
+        let commit_seq = marker.marker().commit_seq;
+        LogicalDeltaBatch {
+            format: DELTA_FORMAT_V1,
+            coordinate_entries: template.coordinate_entries().to_vec(),
+            source_template_digest,
+            commit_marker_identity: marker.marker(),
+            commit_seq,
+            // Local frontier IS this batch's own sequence (plan:1926
+            // `frontier: Local{commit_seq}`): a local batch advances the
+            // frontier to exactly the commit that produced it.
+            frontier: commit_seq,
+        }
     }
 
-    pub fn template(&self) -> &LogicalDeltaTemplate {
-        &self.template
+    /// Build a batch from parts, INCLUDING inconsistent ones.
+    ///
+    /// Test-facing, and it exists because `order` derives `commit_seq` and
+    /// `frontier` from the marker, so a wrong-marker or wrong-frontier batch is
+    /// unconstructible through the safe API. `LocalDeltaBatchIndex` checks for
+    /// both anyway — a batch decoded from durable bytes carries no construction
+    /// guarantee — and a check nothing can reach is a check nothing has tested.
+    /// This is what lets those two laws be witnessed rather than asserted.
+    #[doc(hidden)]
+    pub fn from_parts_for_test(
+        coordinate_entries: Vec<CoordinateEntry>,
+        source_template_digest: [u8; 32],
+        commit_marker_identity: MarkerRef,
+        commit_seq: fgdb_types::CommitSeq,
+        frontier: fgdb_types::CommitSeq,
+    ) -> Self {
+        LogicalDeltaBatch {
+            format: DELTA_FORMAT_V1,
+            coordinate_entries,
+            source_template_digest,
+            commit_marker_identity,
+            commit_seq,
+            frontier,
+        }
     }
 
-    pub fn marker(&self) -> CommittedMarker {
-        self.marker
+    pub fn format(&self) -> u16 {
+        self.format
+    }
+
+    /// The payloads this batch owns.
+    pub fn coordinate_entries(&self) -> &[CoordinateEntry] {
+        &self.coordinate_entries
+    }
+
+    pub fn source_template_digest(&self) -> &[u8; 32] {
+        &self.source_template_digest
+    }
+
+    /// The marker identity, which is provenance rather than a retained edge.
+    pub fn commit_marker_identity(&self) -> MarkerRef {
+        self.commit_marker_identity
+    }
+
+    pub fn frontier(&self) -> fgdb_types::CommitSeq {
+        self.frontier
     }
 
     /// The batch's position in history (from its committed marker).
     pub fn commit_seq(&self) -> fgdb_types::CommitSeq {
-        self.marker.0.commit_seq
+        self.commit_seq
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgdb_types::CommitSeq;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::{CommitSeq, PurposeContexts};
 
-    fn key() -> DeltaTemplateKey {
-        DeltaTemplateKey {
+    fn with_commit_cx<T, F>(seed: u64, run: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(CommitCx) -> T + Send + 'static,
+    {
+        let (output, report) = run_async_under_lab(seed, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            run(contexts.commit())
+        });
+        assert!(report.quiescent, "lab run did not quiesce: {report:?}");
+        assert!(
+            report.oracle_report.total > 0 && report.oracle_report.all_passed(),
+            "lab oracle failed: {report:?}"
+        );
+        assert!(
+            report.invariant_violations.is_empty(),
+            "lab invariant violation: {report:?}"
+        );
+        output
+    }
+
+    const INTENT_SEMANTICS: ObjectId = ObjectId([0x11; 32]);
+
+    fn entry(rows: Vec<DeltaRow>) -> CoordinateEntry {
+        CoordinateEntry {
             graph: GraphId(1),
             branch: BranchId(1),
             relation: RelationId(3),
             schema_epoch: SchemaEpoch(2),
-            intent_semantics_oid: ObjectId([0x11; 32]),
+            schema_transition: None,
+            rows,
         }
+    }
+
+    fn template() -> LogicalDeltaTemplate {
+        LogicalDeltaTemplate::build(
+            INTENT_SEMANTICS,
+            [0x22; 32],
+            vec![entry(one_row_of_each_family())],
+        )
+        .expect("canonical template")
     }
 
     fn one_row_of_each_family() -> Vec<DeltaRow> {
@@ -429,37 +672,116 @@ mod tests {
 
     #[test]
     fn template_is_sequence_neutral_and_batch_is_ordered() {
-        let template = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
-        // The template type carries no order: its full public surface is the
-        // key and rows. (The absence of any marker/seq accessor is the
-        // compile-time half of this test.)
-        assert_eq!(template.key(), &key());
-        assert_eq!(template.rows().len(), 12);
+        with_commit_cx(0x000D_317A, |commit_cx| {
+            let template = template();
+            // The template type carries no order: its full public surface is the
+            // coordinate entries and their rows. (The absence of any marker or
+            // sequence accessor is the compile-time half of this test.)
+            assert_eq!(template.coordinate_entries().len(), 1);
+            assert_eq!(template.row_count(), 12);
+            assert_eq!(template.intent_semantics_oid(), INTENT_SEMANTICS);
 
-        let marker = MarkerRef {
-            marker_oid: ObjectId([0xAA; 32]),
-            commit_seq: CommitSeq(41999),
-        };
-        let batch = LogicalDeltaBatch::order(template.clone(), CommittedMarker::attest(marker));
-        assert_eq!(batch.commit_seq(), CommitSeq(41999));
-        assert_eq!(batch.template(), &template);
-        assert_eq!(batch.marker().marker(), marker);
+            let marker = MarkerRef {
+                marker_oid: ObjectId([0xAA; 32]),
+                commit_seq: CommitSeq(41999),
+            };
+            let committed = CommittedMarker::attest(marker, &commit_cx);
+            let batch = LogicalDeltaBatch::order(&template, [0x33; 32], committed);
+            assert_eq!(batch.commit_seq(), CommitSeq(41999));
+            assert_eq!(
+                batch.frontier(),
+                CommitSeq(41999),
+                "a local batch's frontier is its own sequence"
+            );
+            // The batch OWNS the payloads and RETAINS neither the template nor
+            // the marker capability — only their identities.
+            assert_eq!(batch.coordinate_entries(), template.coordinate_entries());
+            assert_eq!(batch.source_template_digest(), &[0x33; 32]);
+            assert_eq!(batch.commit_marker_identity(), marker);
+        });
+    }
+
+    /// THE RETENTION DIRECTION (plan:1926): "a retained batch owns payloads
+    /// directly but does not retain template/fragment, marker/decision,
+    /// capsule, or predecessor history."
+    ///
+    /// Demonstrated by DROPPING the template and finding the batch whole. A
+    /// batch that referenced its template would keep it alive for as long as
+    /// the batch is retained, which inverts the intended lifetime and is the
+    /// shape this type had before.
+    #[test]
+    fn a_batch_owns_its_payloads_and_retains_neither_template_nor_marker() {
+        with_commit_cx(0x000D_317C, |commit_cx| {
+            let source = template();
+            let entries = source.coordinate_entries().to_vec();
+            let marker = MarkerRef {
+                marker_oid: ObjectId([0xAA; 32]),
+                commit_seq: CommitSeq(7),
+            };
+            let batch = LogicalDeltaBatch::order(
+                &source,
+                [0x33; 32],
+                CommittedMarker::attest(marker, &commit_cx),
+            );
+
+            drop(source);
+
+            assert_eq!(
+                batch.coordinate_entries(),
+                entries,
+                "the payloads outlive the template they came from"
+            );
+            assert_eq!(batch.source_template_digest(), &[0x33; 32]);
+            assert_eq!(batch.commit_marker_identity(), marker);
+            assert_eq!(batch.commit_seq(), CommitSeq(7));
+            assert_eq!(batch.frontier(), CommitSeq(7));
+
+            // Provenance is in the transcript: identical payloads from a
+            // different commit are a different batch.
+            let other = LogicalDeltaBatch::order(
+                &template(),
+                [0x33; 32],
+                CommittedMarker::attest(
+                    MarkerRef {
+                        marker_oid: ObjectId([0xBB; 32]),
+                        commit_seq: CommitSeq(8),
+                    },
+                    &commit_cx,
+                ),
+            );
+            assert_ne!(
+                batch.canonical_bytes().expect("encodes"),
+                other.canonical_bytes().expect("encodes")
+            );
+        });
     }
 
     #[test]
     fn identical_templates_under_different_markers_are_different_batches() {
-        let t = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
-        let m1 = CommittedMarker::attest(MarkerRef {
-            marker_oid: ObjectId([1; 32]),
-            commit_seq: CommitSeq(1),
+        with_commit_cx(0x000D_317B, |commit_cx| {
+            let t = template();
+            let m1 = CommittedMarker::attest(
+                MarkerRef {
+                    marker_oid: ObjectId([1; 32]),
+                    commit_seq: CommitSeq(1),
+                },
+                &commit_cx,
+            );
+            let m2 = CommittedMarker::attest(
+                MarkerRef {
+                    marker_oid: ObjectId([2; 32]),
+                    commit_seq: CommitSeq(2),
+                },
+                &commit_cx,
+            );
+            let b1 = LogicalDeltaBatch::order(&t, [0x33; 32], m1);
+            let b2 = LogicalDeltaBatch::order(&t, [0x33; 32], m2);
+            assert_ne!(b1, b2, "order comes from the marker, not the rows");
+            assert_eq!(
+                b1.coordinate_entries(),
+                b2.coordinate_entries(),
+                "identical payloads under different markers"
+            );
         });
-        let m2 = CommittedMarker::attest(MarkerRef {
-            marker_oid: ObjectId([2; 32]),
-            commit_seq: CommitSeq(2),
-        });
-        let b1 = LogicalDeltaBatch::order(t.clone(), m1);
-        let b2 = LogicalDeltaBatch::order(t, m2);
-        assert_ne!(b1, b2, "order comes from the marker, not the rows");
-        assert_eq!(b1.template(), b2.template());
     }
 }

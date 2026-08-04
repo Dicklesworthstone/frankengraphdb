@@ -7,6 +7,56 @@
 //! fallback, and registered terminal-action identities. The bounded log
 //! accepts a deterministic total record order and enforces strictly ordered,
 //! nonoverlapping batches independently for each monitor family.
+//!
+//! The claim-class sentences above are structural claims, so each is paired
+//! below with a doctest that must fail to compile and a companion that must
+//! compile. A `compile_fail` block on its own would also "pass" when it fails
+//! for an unrelated reason such as a typo or a renamed item; the companion is
+//! what makes the pair evidence, because the two differ only in the step the
+//! law forbids.
+//!
+//! No claim-class field exists to be changed. Reading the class is legal:
+//!
+//! ```
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn read(record: StatisticalLogRecord) -> RegistryClaimClass {
+//!     record.claim_class()
+//! }
+//! ```
+//!
+//! Assigning it is not, because there is no such field to assign:
+//!
+//! ```compile_fail
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn tamper(record: &mut StatisticalLogRecord) {
+//!     record.claim_class = RegistryClaimClass::Invariant;
+//! }
+//! ```
+//!
+//! There is likewise no conversion out of the type into a claim class. The two
+//! functions below have identical signatures and differ only in whether they
+//! reach the class through the accessor or through a conversion. The second
+//! does not compile because no `From<StatisticalLogRecord>` for
+//! `RegistryClaimClass` exists to be reached — at any class, not merely at
+//! `Invariant`:
+//!
+//! ```
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn via_accessor(record: StatisticalLogRecord) -> RegistryClaimClass {
+//!     record.claim_class()
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn via_conversion(record: StatisticalLogRecord) -> RegistryClaimClass {
+//!     record.into()
+//! }
+//! ```
 
 use core::{cmp::Ordering, fmt};
 
@@ -16,7 +66,8 @@ use fgdb_types::ObjectId;
 use crate::{
     ann_recall::{
         AnnRecallAction, AnnRecallActionReason, AnnRecallAssumptions, AnnRecallEvidence,
-        AnnRecallProfile, QuerySampleDesign, RECALL_SCALE,
+        AnnRecallProfile, QuerySampleDesign,
+        confidence_interval as derive_ann_recall_confidence_interval,
     },
     conformal::{
         AssessmentEvidence as ConformalEvidence, MetricThresholdMode,
@@ -426,9 +477,10 @@ pub enum StatisticalStatistic {
         maximum_total_result_ids: u64,
         /// `q` in the interval failure-probability bound `2^-q`.
         confidence_exponent: u8,
-        /// Candidate lower-confidence-bound gate over [`RECALL_SCALE`].
+        /// Candidate lower-confidence-bound gate over
+        /// [`crate::ann_recall::RECALL_SCALE`].
         candidate_recall_threshold_units: u64,
-        /// Rebuild upper-confidence-bound gate over [`RECALL_SCALE`].
+        /// Rebuild upper-confidence-bound gate over [`crate::ann_recall::RECALL_SCALE`].
         rebuild_recall_threshold_units: u64,
         /// Declared query-sampling design.
         sample_design: QuerySampleDesign,
@@ -3387,47 +3439,48 @@ fn validate_ann_recall_statistic(
         );
     }
 
-    let expected_interval = recompute_ann_recall_interval(
+    let expected_interval = derive_ann_recall_confidence_interval(
         intersection_hits,
         exact_baseline_results,
         query_observations,
         confidence_exponent,
-    )?;
+    )
+    .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
     for (field, actual, expected) in [
         (
             StatisticField::AnnIntervalScale,
             interval_scale,
-            expected_interval.scale,
+            expected_interval.scale(),
         ),
         (
             StatisticField::AnnIntervalPointEstimate,
             interval_point_estimate_units,
-            expected_interval.point_estimate_units,
+            expected_interval.point_estimate_units(),
         ),
         (
             StatisticField::AnnIntervalLower,
             interval_lower_units,
-            expected_interval.lower_units,
+            expected_interval.lower_units(),
         ),
         (
             StatisticField::AnnIntervalUpper,
             interval_upper_units,
-            expected_interval.upper_units,
+            expected_interval.upper_units(),
         ),
         (
             StatisticField::AnnIntervalRadius,
             interval_radius_units,
-            expected_interval.radius_units,
+            expected_interval.radius_units(),
         ),
         (
             StatisticField::AnnIntervalConfidenceExponent,
             u64::from(interval_confidence_exponent),
-            u64::from(expected_interval.confidence_exponent),
+            u64::from(expected_interval.failure_probability_power_of_two_exponent()),
         ),
         (
             StatisticField::AnnIntervalQueryObservations,
             interval_query_observations,
-            expected_interval.query_observations,
+            expected_interval.query_observations(),
         ),
     ] {
         validate_ann_derived_field(field, actual, expected)?;
@@ -3487,95 +3540,6 @@ fn validate_ann_derived_field(
         });
     }
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-struct RecomputedAnnRecallInterval {
-    scale: u64,
-    point_estimate_units: u64,
-    lower_units: u64,
-    upper_units: u64,
-    radius_units: u64,
-    confidence_exponent: u8,
-    query_observations: u64,
-}
-
-fn recompute_ann_recall_interval(
-    hits: u64,
-    baseline_results: u64,
-    queries: u64,
-    confidence_exponent: u8,
-) -> Result<RecomputedAnnRecallInterval, StatisticalLogRecordError> {
-    let scaled_hits = u128::from(hits)
-        .checked_mul(u128::from(RECALL_SCALE))
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    let denominator = u128::from(baseline_results);
-    if denominator == 0 || queries == 0 {
-        return Err(StatisticalLogRecordError::EvidenceHasNoObservations {
-            monitor: StatisticalMonitorKind::AnnRecall,
-        });
-    }
-    let point_floor = scaled_hits / denominator;
-    let point_ceil = ann_ceil_div(scaled_hits, denominator)?;
-    let radius_numerator = u128::from(confidence_exponent)
-        .checked_add(1)
-        .and_then(|factor| factor.checked_mul(u128::from(RECALL_SCALE)))
-        .and_then(|value| value.checked_mul(u128::from(RECALL_SCALE)))
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    let radius_denominator = u128::from(queries)
-        .checked_mul(2)
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    let squared_radius_ceiling = ann_ceil_div(radius_numerator, radius_denominator)?;
-    let radius = ann_ceil_sqrt(squared_radius_ceiling).min(u128::from(RECALL_SCALE));
-    let lower = point_floor.saturating_sub(radius);
-    let upper = point_ceil
-        .checked_add(radius)
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?
-        .min(u128::from(RECALL_SCALE));
-
-    Ok(RecomputedAnnRecallInterval {
-        scale: RECALL_SCALE,
-        point_estimate_units: u64::try_from(point_floor)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        lower_units: u64::try_from(lower)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        upper_units: u64::try_from(upper)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        radius_units: u64::try_from(radius)
-            .map_err(|_| StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        confidence_exponent,
-        query_observations: queries,
-    })
-}
-
-fn ann_ceil_div(numerator: u128, denominator: u128) -> Result<u128, StatisticalLogRecordError> {
-    let adjusted = numerator
-        .checked_add(
-            denominator
-                .checked_sub(1)
-                .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?,
-        )
-        .ok_or(StatisticalLogRecordError::AnnRecallArithmeticOverflow)?;
-    Ok(adjusted / denominator)
-}
-
-fn ann_ceil_sqrt(value: u128) -> u128 {
-    if value <= 1 {
-        return value;
-    }
-    let mut low = 1_u128;
-    let mut high = value.min(u128::from(u64::MAX) + 1);
-    while low < high {
-        let midpoint = low + (high - low) / 2;
-        if midpoint > value / midpoint {
-            high = midpoint;
-        } else if midpoint * midpoint == value {
-            return midpoint;
-        } else {
-            low = midpoint + 1;
-        }
-    }
-    low
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4549,6 +4513,348 @@ mod tests {
     }
 
     #[test]
+    fn a_reordered_or_repeated_record_stream_is_rejected() -> TestResult {
+        // `append` enforces canonical order, and `decode_canonical` replays it
+        // by routing every decoded record back through `append`. That is a
+        // structural guarantee rather than an advisory one — but nothing
+        // exercised it from OUTSIDE, against bytes this process did not build.
+        // A decoder that trusted the wire order would happily deserialise a log
+        // whose records are out of canonical order, and "nothing is dropped or
+        // reordered" would then hold only for logs assembled in-process, which
+        // is not the claim a replayable decision log makes.
+        let eprocess = eprocess_record(10, 19)?;
+        let conformal = conformal_record(10, 19)?;
+        let mut log = StatisticalDecisionLog::try_new(4)?;
+        log.append(eprocess)?;
+        log.append(conformal)?;
+        let canonical = log.encode_canonical()?;
+        assert_eq!(read_log(&canonical, 4)?, log);
+
+        // Header is magic, version, reserved, maximum_records, record_count;
+        // then one u32-length-prefixed frame per record.
+        const HEADER: usize = LOG_MAGIC.len() + 2 + 2 + 4 + 4;
+        let frame_len = |at: usize| -> usize {
+            let raw: [u8; 4] = canonical[at..at + 4]
+                .try_into()
+                .expect("four length bytes are present");
+            u32::from_le_bytes(raw) as usize
+        };
+        let first_len = frame_len(HEADER);
+        let second_at = HEADER + 4 + first_len;
+        let second_len = frame_len(second_at);
+        // Confirms the frame walk consumed the whole encoding, so the splices
+        // below are operating on real frame boundaries rather than on offsets
+        // that merely happen to parse.
+        assert_eq!(second_at + 4 + second_len, canonical.len());
+        let first_frame = &canonical[HEADER..second_at];
+        let second_frame = &canonical[second_at..];
+
+        // Same two records, same record_count, reversed on the wire.
+        let mut reordered = Vec::new();
+        reordered.extend_from_slice(&canonical[..HEADER]);
+        reordered.extend_from_slice(second_frame);
+        reordered.extend_from_slice(first_frame);
+        assert_eq!(reordered.len(), canonical.len());
+        assert_ne!(reordered, canonical);
+        assert!(matches!(
+            read_log(&reordered, 4),
+            Err(StatisticalLogCodecError::InvalidAppend(
+                StatisticalLogAppendError::RecordNotInCanonicalOrder { .. }
+            ))
+        ));
+
+        // The same frame twice: a stream that would silently double-count one
+        // monitor observation if the decoder trusted its input.
+        let mut repeated = Vec::new();
+        repeated.extend_from_slice(&canonical[..HEADER]);
+        repeated.extend_from_slice(first_frame);
+        repeated.extend_from_slice(first_frame);
+        assert!(matches!(
+            read_log(&repeated, 4),
+            Err(StatisticalLogCodecError::InvalidAppend(
+                StatisticalLogAppendError::DuplicateRecord { .. }
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn each_float_domain_validator_accepts_exactly_its_declared_domain() {
+        // Every statistic field is validated by one of five domain rules, and
+        // none of the five had a direct test. The accept/reject sets below
+        // were measured against the real predicates rather than assumed,
+        // because several boundaries are counter-intuitive: `finite or
+        // positive infinity` admits NEGATIVE finite values, and `nonnegative
+        // or positive infinity` admits +inf while plain `nonnegative finite`
+        // refuses it.
+        let bits = f64::to_bits;
+
+        // Non-negative finite: zero in, negatives and both infinities out.
+        assert_eq!(
+            validate_nonnegative_finite(StatisticField::OneObservations, bits(0.0)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_nonnegative_finite(StatisticField::OneObservations, bits(f64::MAX)),
+            Ok(())
+        );
+        for rejected in [-1.0_f64, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_nonnegative_finite(StatisticField::OneObservations, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticMustBeNonNegative {
+                    field: StatisticField::OneObservations,
+                    bits: bits(rejected),
+                })
+            );
+        }
+
+        // Positive finite: zero is the whole difference from the rule above.
+        assert_eq!(
+            validate_positive_finite(StatisticField::RejectionThreshold, bits(0.5)),
+            Ok(())
+        );
+        for rejected in [0.0_f64, -1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_positive_finite(StatisticField::RejectionThreshold, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticMustBePositive {
+                    field: StatisticField::RejectionThreshold,
+                    bits: bits(rejected),
+                })
+            );
+        }
+
+        // Non-negative or positive infinity: an unbounded e-value is legal,
+        // a negative one is not.
+        for accepted in [0.0_f64, 1.0, f64::INFINITY, f64::MAX] {
+            assert_eq!(
+                validate_nonnegative_or_positive_infinity(StatisticField::EValue, bits(accepted)),
+                Ok(())
+            );
+        }
+        for rejected in [-1.0_f64, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_nonnegative_or_positive_infinity(StatisticField::EValue, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticMustBeNonNegative {
+                    field: StatisticField::EValue,
+                    bits: bits(rejected),
+                })
+            );
+        }
+
+        // Finite or positive infinity: this one constrains MAGNITUDE, not
+        // sign, so a negative finite threshold is admissible and only negative
+        // infinity is refused. Asserting the negative-finite acceptance is the
+        // point — reading the name alone suggests otherwise.
+        for accepted in [-1.0_f64, 0.0, 1.0, f64::INFINITY, f64::MIN] {
+            assert_eq!(
+                validate_finite_or_positive_infinity(
+                    StatisticField::ConformalThreshold,
+                    bits(accepted)
+                ),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            validate_finite_or_positive_infinity(
+                StatisticField::ConformalThreshold,
+                bits(f64::NEG_INFINITY)
+            ),
+            Err(
+                StatisticalLogRecordError::StatisticMustBeFiniteOrPositiveInfinity {
+                    field: StatisticField::ConformalThreshold,
+                    bits: bits(f64::NEG_INFINITY),
+                }
+            )
+        );
+
+        // Unit interval: closed at both ends.
+        for accepted in [0.0_f64, 0.5, 1.0] {
+            assert_eq!(
+                validate_unit_interval(StatisticField::CoverageTarget, bits(accepted)),
+                Ok(())
+            );
+        }
+        for rejected in [-0.5_f64, 1.5, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_unit_interval(StatisticField::CoverageTarget, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticOutsideUnitInterval {
+                    field: StatisticField::CoverageTarget,
+                    bits: bits(rejected),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn negative_zero_and_nan_are_refused_by_every_domain_rule() {
+        // This is a canonical-encoding law, not a numeric one. -0.0 compares
+        // EQUAL to +0.0 yet has a different bit pattern, so admitting it would
+        // let two distinct byte strings denote one logical value — and a log
+        // whose whole purpose is bit-identical replay cannot allow that. NaN
+        // is refused for the companion reason: it has many bit patterns and
+        // compares equal to none of them, including itself.
+        //
+        // The shared `validate_canonical_float` gate runs before every domain
+        // rule, so the rejection must be uniform across all five. A rule that
+        // checked its own domain first would report the wrong error, and for
+        // -0.0 would wrongly ACCEPT under the non-negative rules.
+        let negative_zero = (-0.0_f64).to_bits();
+        assert_ne!(negative_zero, 0.0_f64.to_bits());
+        assert_eq!(-0.0_f64, 0.0_f64);
+
+        for (field, bits) in [
+            (StatisticField::OneObservations, negative_zero),
+            (StatisticField::OneObservations, f64::NAN.to_bits()),
+        ] {
+            let expected = Err(StatisticalLogRecordError::NonCanonicalFloatBits { field, bits });
+            assert_eq!(validate_nonnegative_finite(field, bits), expected);
+            assert_eq!(validate_positive_finite(field, bits), expected);
+            assert_eq!(
+                validate_nonnegative_or_positive_infinity(field, bits),
+                expected
+            );
+            assert_eq!(validate_finite_or_positive_infinity(field, bits), expected);
+            assert_eq!(validate_unit_interval(field, bits), expected);
+        }
+    }
+
+    #[test]
+    fn every_closed_tag_vocabulary_rejects_everything_outside_it() {
+        // `record_round_trip_covers_every_closed_statistic_variant` proves the
+        // valid values survive a round trip. Nothing proved the complement:
+        // that a byte outside each closed vocabulary is REFUSED rather than
+        // silently mapped. That complement is a canonicity property, not a
+        // politeness one — a decoder that accepted an unknown tag would let two
+        // distinct byte strings denote one logical state, and replay would stop
+        // being bit-identical.
+        //
+        // Tag 0 is called out separately in every case below because it is the
+        // value a zeroed or truncated-then-padded buffer supplies, and it must
+        // never resolve to a live variant.
+
+        assert_eq!(
+            StatisticalConformalMode::try_from_tag(1),
+            Ok(StatisticalConformalMode::Upper)
+        );
+        assert_eq!(
+            StatisticalConformalMode::try_from_tag(2),
+            Ok(StatisticalConformalMode::TwoSided)
+        );
+        for tag in [0_u8, 3, 255] {
+            assert_eq!(
+                StatisticalConformalMode::try_from_tag(tag),
+                Err(StatisticalLogCodecError::UnknownConformalMode { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, StatisticalMonitorKind::EProcess),
+            (2, StatisticalMonitorKind::ConformalThreshold),
+            (3, StatisticalMonitorKind::ExplorationBudget),
+            (4, StatisticalMonitorKind::DrainProgress),
+            (5, StatisticalMonitorKind::RegimeChange),
+            (6, StatisticalMonitorKind::OffPolicyEvaluation),
+            (7, StatisticalMonitorKind::AnnRecall),
+        ] {
+            assert_eq!(StatisticalMonitorKind::try_from_tag(tag), Ok(expected));
+        }
+        for tag in [0_u8, 8, 255] {
+            assert_eq!(
+                StatisticalMonitorKind::try_from_tag(tag),
+                Err(StatisticalLogCodecError::UnknownMonitorKind { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, OpeEstimator::Direct),
+            (2, OpeEstimator::ImportanceWeighted),
+            (3, OpeEstimator::DoublyRobust),
+        ] {
+            assert_eq!(decode_ope_estimator(tag), Ok(expected));
+        }
+        for tag in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_ope_estimator(tag),
+                Err(StatisticalLogCodecError::UnknownOpeEstimator { tag })
+            );
+        }
+
+        // A single-variant vocabulary is the easiest one to get wrong, because
+        // a decoder that ignored the tag entirely would still pass any test
+        // that only ever supplies the one valid value.
+        assert_eq!(
+            decode_ope_failure_behavior(1),
+            Ok(OpeFailureBehavior::SelectPinnedFallback)
+        );
+        for tag in [0_u8, 2, 255] {
+            assert_eq!(
+                decode_ope_failure_behavior(tag),
+                Err(StatisticalLogCodecError::UnknownOpeFailureBehavior { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, OpeSelectionReason::IncompleteWindow),
+            (2, OpeSelectionReason::ZeroSupport),
+            (3, OpeSelectionReason::InsufficientEffectiveSampleSize),
+            (4, OpeSelectionReason::CandidateNotBetter),
+            (5, OpeSelectionReason::CandidateEstimatedBetter),
+        ] {
+            assert_eq!(decode_ope_selection_reason(tag), Ok(expected));
+        }
+        for tag in [0_u8, 6, 255] {
+            assert_eq!(
+                decode_ope_selection_reason(tag),
+                Err(StatisticalLogCodecError::UnknownOpeSelectionReason { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, QuerySampleDesign::KeyedUniformWithoutReplacement),
+            (2, QuerySampleDesign::KeyedIndependentWithReplacement),
+            (3, QuerySampleDesign::UnspecifiedDependence),
+        ] {
+            assert_eq!(decode_ann_sample_design(tag), Ok(expected));
+        }
+        for tag in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_ann_sample_design(tag),
+                Err(StatisticalLogCodecError::UnknownAnnSampleDesign { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, AnnRecallAction::Candidate),
+            (2, AnnRecallAction::PinnedFallback),
+            (3, AnnRecallAction::Rebuild),
+        ] {
+            assert_eq!(decode_ann_action(tag), Ok(expected));
+        }
+        for tag in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_ann_action(tag),
+                Err(StatisticalLogCodecError::UnknownAnnAction { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, AnnRecallActionReason::IncompleteWindow),
+            (2, AnnRecallActionReason::UnsupportedAssumptions),
+            (3, AnnRecallActionReason::StatisticallyInconclusive),
+            (4, AnnRecallActionReason::CandidateRecallSatisfied),
+            (5, AnnRecallActionReason::RecallDriftDetected),
+        ] {
+            assert_eq!(decode_ann_action_reason(tag), Ok(expected));
+        }
+        for tag in [0_u8, 6, 255] {
+            assert_eq!(
+                decode_ann_action_reason(tag),
+                Err(StatisticalLogCodecError::UnknownAnnActionReason { tag })
+            );
+        }
+    }
+
+    #[test]
     fn fixed_width_integer_codec_is_normative_little_endian() -> TestResult {
         let mut bytes = Vec::new();
         push_u16(&mut bytes, 0x1234);
@@ -5431,6 +5737,13 @@ mod tests {
         const ANN_PAYLOAD_OFFSET: usize = RECORD_FIXED_BYTES;
         const COMPLETE_OFFSET: usize = ANN_PAYLOAD_OFFSET + 333;
         const EXACT_RECALL_HITS_OFFSET: usize = ANN_PAYLOAD_OFFSET + 334;
+        const INTERVAL_SCALE_OFFSET: usize = ANN_PAYLOAD_OFFSET + 350;
+        const INTERVAL_POINT_OFFSET: usize = ANN_PAYLOAD_OFFSET + 358;
+        const INTERVAL_LOWER_OFFSET: usize = ANN_PAYLOAD_OFFSET + 366;
+        const INTERVAL_UPPER_OFFSET: usize = ANN_PAYLOAD_OFFSET + 374;
+        const INTERVAL_RADIUS_OFFSET: usize = ANN_PAYLOAD_OFFSET + 382;
+        const INTERVAL_EXPONENT_OFFSET: usize = ANN_PAYLOAD_OFFSET + 390;
+        const INTERVAL_QUERIES_OFFSET: usize = ANN_PAYLOAD_OFFSET + 391;
         const ACTION_OFFSET: usize = ANN_PAYLOAD_OFFSET + 400;
         const CANDIDATE_OID_OFFSET: usize = 216;
         const SELECTED_OID_OFFSET: usize = 280;
@@ -5457,6 +5770,40 @@ mod tests {
                 }
             ))
         ));
+
+        for (offset, field) in [
+            (INTERVAL_SCALE_OFFSET, StatisticField::AnnIntervalScale),
+            (
+                INTERVAL_POINT_OFFSET,
+                StatisticField::AnnIntervalPointEstimate,
+            ),
+            (INTERVAL_LOWER_OFFSET, StatisticField::AnnIntervalLower),
+            (INTERVAL_UPPER_OFFSET, StatisticField::AnnIntervalUpper),
+            (INTERVAL_RADIUS_OFFSET, StatisticField::AnnIntervalRadius),
+            (
+                INTERVAL_EXPONENT_OFFSET,
+                StatisticField::AnnIntervalConfidenceExponent,
+            ),
+            (
+                INTERVAL_QUERIES_OFFSET,
+                StatisticField::AnnIntervalQueryObservations,
+            ),
+        ] {
+            let mut inconsistent_interval = ann_recall_record()?.encode_canonical()?;
+            inconsistent_interval[offset] ^= 1;
+            assert!(matches!(
+                StatisticalLogRecord::decode_canonical(
+                    &inconsistent_interval,
+                    &TEST_IDENTITY_AUTHORITY
+                ),
+                Err(StatisticalLogCodecError::InvalidRecord(
+                    StatisticalLogRecordError::AnnRecallDerivedFieldMismatch {
+                        field: actual_field,
+                        ..
+                    }
+                )) if actual_field == field
+            ));
+        }
 
         let mut unknown_action = encoded;
         unknown_action[ACTION_OFFSET] = 0;
@@ -5532,6 +5879,283 @@ mod tests {
             ),
             Err(StatisticalLogRecordError::MonitorStatisticMismatch { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn ope_evidence_must_agree_with_the_trial_profile_it_claims() -> TestResult {
+        // The fixture sits exactly on several boundaries: identity window
+        // (60,69) has capacity 10, the batch (69,69) is first + observations -
+        // 1, and action_rows 20 is observations * maximum_actions. Each case
+        // below moves ONE field off its boundary.
+        //
+        // Check ORDER is load-bearing here and is why each case is built the
+        // way it is: `statistic.validate()` runs before this cross-check block,
+        // so a perturbation that also breaks an earlier rule would be reported
+        // by that rule instead. Where that applies the companion field is moved
+        // with it, and the comment says so.
+        #[allow(clippy::too_many_arguments)]
+        let ope = |maximum_observations: u64,
+                   observations: u64,
+                   action_rows: u64,
+                   maximum_total_action_rows: u64,
+                   complete: bool,
+                   selection_reason: OpeSelectionReason| {
+            StatisticalStatistic::OffPolicyEvaluation {
+                population_oid: oid(56),
+                strata_oid: oid(57),
+                action_space_oid: oid(58),
+                policy_epoch_oid: oid(59),
+                estimator_oid: oid(51),
+                estimator: OpeEstimator::DoublyRobust,
+                failure_behavior: OpeFailureBehavior::SelectPinnedFallback,
+                clipping_weight_units: 1_000_000,
+                minimum_effective_sample_size: 3,
+                maximum_observations,
+                maximum_actions_per_observation: 2,
+                maximum_total_action_rows,
+                candidate_numerator: 90,
+                fallback_numerator: 70,
+                advantage_numerator: 20,
+                // DERIVED from observations, not fixed. The estimate
+                // denominator must equal observations * PROBABILITY_SCALE *
+                // OUTCOME_SCALE, and that rule is checked BEFORE the ones
+                // below, so a case that moves `observations` while leaving
+                // this at its ten-observation value is reported as a
+                // denominator mismatch and never reaches the rule it meant to
+                // exercise. Holding it consistent is what isolates the others;
+                // the mismatch itself is asserted separately.
+                common_denominator: u128::from(observations) * 1_000_000_000_000_000,
+                candidate_ess_numerator: 400,
+                candidate_ess_denominator: 100,
+                fallback_ess_numerator: 900,
+                fallback_ess_denominator: 100,
+                observations,
+                action_rows,
+                complete,
+                candidate_ess_gate_passed: true,
+                fallback_ess_gate_passed: true,
+                zero_support_exclusions: 0,
+                zero_support_exclusions_digest: empty_ope_support_exclusions_digest(),
+                selection_reason,
+            }
+        };
+        let record = |batch, statistic| {
+            StatisticalLogRecord::try_from_bound_parts(
+                &TEST_IDENTITY_AUTHORITY,
+                StatisticalMonitorKind::OffPolicyEvaluation,
+                oid(51),
+                oid(53),
+                StatisticalBatchRange::try_new(60, 69).expect("ordered window"),
+                batch,
+                9,
+                oid(54),
+                oid(55),
+                oid(54),
+                statistic,
+            )
+        };
+        let batch = StatisticalBatchRange::try_new(69, 69)?;
+        let good = || {
+            ope(
+                10,
+                10,
+                20,
+                20,
+                true,
+                OpeSelectionReason::CandidateEstimatedBetter,
+            )
+        };
+
+        // Control: unperturbed, everything agrees. Without this the rejections
+        // below could be caused by the fixture rather than the perturbation.
+        assert!(record(batch, good()).is_ok());
+
+        // An observation count above the declared profile maximum. This one
+        // also protects an UNCHECKED subtraction: the cross-check computes
+        // `observations - 1`, whose safety rests entirely on the earlier
+        // `observations == 0` rejection in `validate()`. That is a non-local
+        // safety argument, so the bound is worth pinning here.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    10,
+                    11,
+                    20,
+                    20,
+                    true,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(StatisticalLogRecordError::OpeObservationCountOutOfBounds {
+                observations: 11,
+                maximum: 10,
+            })
+        );
+
+        // A profile too small to hold the window it claims. `observations` is
+        // lowered with the maximum so the earlier count rule stays satisfied
+        // and this rule is the one that fires.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    9,
+                    9,
+                    20,
+                    20,
+                    true,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(
+                StatisticalLogRecordError::OpeProfileCannotContainIdentityWindow {
+                    maximum_observations: 9,
+                    window_capacity: 10,
+                }
+            )
+        );
+
+        // The batch must be the single sequence first + observations - 1, so a
+        // record cannot claim evidence for a batch its own observation count
+        // does not reach.
+        let wrong_batch = StatisticalBatchRange::try_new(68, 68)?;
+        assert_eq!(
+            record(wrong_batch, good()),
+            Err(StatisticalLogRecordError::OpeBatchSequenceMismatch {
+                batch: wrong_batch,
+                expected: 69,
+            })
+        );
+
+        // More action rows than observations * maximum_actions_per_observation.
+        // The total-row ceiling is raised so the earlier row-count rule passes
+        // and the per-observation rule is isolated.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    10,
+                    10,
+                    21,
+                    30,
+                    true,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(
+                StatisticalLogRecordError::OpeActionRowsExceedPerObservationProfile {
+                    action_rows: 21,
+                    maximum: 20,
+                }
+            )
+        );
+
+        // Completeness is DERIVED, not asserted: it must equal
+        // observations == window_capacity, so a record cannot under-claim
+        // completeness to dodge the stricter selection rules that follow.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    10,
+                    10,
+                    20,
+                    20,
+                    false,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(StatisticalLogRecordError::OpeCompletenessMismatch {
+                complete: false,
+                observations: 10,
+                window_capacity: 10,
+            })
+        );
+
+        // The selection reason is likewise derived from the gates, so a record
+        // cannot claim a reason its own evidence does not produce.
+        assert_eq!(
+            record(
+                batch,
+                ope(10, 10, 20, 20, true, OpeSelectionReason::ZeroSupport)
+            ),
+            Err(StatisticalLogRecordError::OpeSelectionReasonMismatch {
+                expected: OpeSelectionReason::CandidateEstimatedBetter,
+                actual: OpeSelectionReason::ZeroSupport,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn conformal_alpha_is_half_open_and_calibration_bounds_are_ordered() -> TestResult {
+        let statistic =
+            |alpha_bits: u64, minimum: u64, maximum: u64| StatisticalStatistic::ConformalCoverage {
+                profile_oid: oid(16),
+                population_oid: oid(17),
+                selection_oid: oid(18),
+                alpha_bits,
+                mode: StatisticalConformalMode::Upper,
+                minimum_calibration_samples: minimum,
+                maximum_calibration_samples: maximum,
+                threshold_bits: 2.0_f64.to_bits(),
+                nonconformity_score_bits: 1.0_f64.to_bits(),
+                coverage_target_bits: 0.8_f64.to_bits(),
+                assessments: 10,
+                covered: 8,
+            };
+        let record = |statistic| {
+            StatisticalLogRecord::try_from_parts(
+                &TEST_IDENTITY_AUTHORITY,
+                StatisticalMonitorKind::ConformalThreshold,
+                oid(11),
+                oid(13),
+                StatisticalBatchRange::try_new(10, 19).expect("ordered batch"),
+                7,
+                oid(14),
+                oid(15),
+                oid(15),
+                statistic,
+            )
+        };
+
+        // Control: the unperturbed fixture must construct, or every rejection
+        // below could be caused by something other than the field perturbed.
+        assert!(record(statistic(0.2_f64.to_bits(), 5, 10)).is_ok());
+
+        // Alpha is HALF-OPEN [0.0, 1.0). Zero is a legal target miscoverage;
+        // one is not, because an alpha of one asks for zero coverage. Both
+        // ends are pinned because the openness at exactly one end is the whole
+        // rule, and a `..=` slipped in here would admit it silently.
+        assert!(record(statistic(0.0_f64.to_bits(), 5, 10)).is_ok());
+        for rejected in [1.0_f64, 1.5, -0.1, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                record(statistic(rejected.to_bits(), 5, 10)),
+                Err(StatisticalLogRecordError::InvalidConformalAlpha {
+                    bits: rejected.to_bits(),
+                }),
+                "alpha {rejected} must be refused as outside [0, 1)"
+            );
+        }
+
+        // Calibration bounds: a minimum of zero is refused because a coverage
+        // claim over no calibration samples is not a claim, and the maximum
+        // may not fall below the minimum. Equality IS legal — a fixed-size
+        // calibration set is a valid configuration, not a degenerate one.
+        assert!(record(statistic(0.2_f64.to_bits(), 7, 7)).is_ok());
+        for (minimum, maximum) in [(0_u64, 10_u64), (0, 0), (6, 5)] {
+            assert_eq!(
+                record(statistic(0.2_f64.to_bits(), minimum, maximum)),
+                Err(
+                    StatisticalLogRecordError::InvalidConformalCalibrationBounds {
+                        minimum,
+                        maximum,
+                    }
+                )
+            );
+        }
         Ok(())
     }
 
@@ -5851,6 +6475,60 @@ mod tests {
                 StatisticalLogRecordError::OpeSelectionReasonMismatch { .. }
             ))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_batch_range_is_ordered_and_must_lie_within_its_identity_window() -> TestResult {
+        // The range is INCLUSIVE, so `first == last` is a legal
+        // single-sequence batch rather than an empty one, and only
+        // `first > last` is reversed. That distinction is the entire rule, so
+        // both sides are pinned: a `>=` here would silently outlaw every
+        // one-observation batch.
+        let single = StatisticalBatchRange::try_new(5, 5)?;
+        assert_eq!(single.first(), 5);
+        assert_eq!(single.last(), 5);
+        assert!(StatisticalBatchRange::try_new(0, u64::MAX).is_ok());
+        for (first, last) in [(5_u64, 4_u64), (1, 0), (u64::MAX, 0)] {
+            assert_eq!(
+                StatisticalBatchRange::try_new(first, last),
+                Err(StatisticalLogRecordError::ReversedBatchRange { first, last })
+            );
+        }
+
+        // A record's batch must lie inside the identity window it claims, at
+        // both ends. This is the containment half of the log's ordering
+        // guarantee: batches are ordered and nonoverlapping WITHIN a declared
+        // window, so a batch that escapes the window would be ordered against
+        // a range the identity never covered.
+        let window = StatisticalBatchRange::try_new(10, 19)?;
+
+        // Equality is legal at both ends — a batch may span the whole window.
+        let spanning = eprocess_record_in_window(window, window)?;
+        assert_eq!(spanning.batch(), window);
+        assert_eq!(spanning.identity_window(), window);
+        let interior = StatisticalBatchRange::try_new(12, 15)?;
+        assert_eq!(
+            eprocess_record_in_window(window, interior)?.batch(),
+            interior
+        );
+
+        // Escaping by exactly one at either end is refused. One past each
+        // boundary is the case that separates a correct `<`/`>` pair from an
+        // off-by-one that would admit a batch straddling the window edge.
+        for escaping in [
+            StatisticalBatchRange::try_new(9, 19)?,
+            StatisticalBatchRange::try_new(10, 20)?,
+            StatisticalBatchRange::try_new(0, u64::MAX)?,
+        ] {
+            assert_eq!(
+                eprocess_record_in_window(window, escaping),
+                Err(StatisticalLogRecordError::BatchOutsideIdentityWindow {
+                    batch: escaping,
+                    identity_window: window,
+                })
+            );
+        }
         Ok(())
     }
 

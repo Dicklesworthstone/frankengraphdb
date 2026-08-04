@@ -1,0 +1,631 @@
+#!/usr/bin/env bash
+# =============================================================================
+# g0_negative_evidence_e2e.sh — the doctrine memorial, enforced
+# =============================================================================
+# Owner bead: fgdb-negative-evidence-ledger-does-not-exist-m172.
+#
+# AGENTS.md, immediately above the eight doctrine items:
+#
+#   "These are the constitutional, non-negotiable rules from §1 of the plan.
+#    Violating any of them is a revert, memorialized in
+#    `docs/NEGATIVE_EVIDENCE.md`."
+#
+# That file did not exist. Nothing referenced it but the sentence above, so the
+# enforcement clause of the doctrine was decorative: the project could violate a
+# constitutional rule, repair it, and memorialize nothing, and no gate could tell.
+# This script is what makes the sentence load-bearing.
+#
+# WHY THIS IS NOT FAIL-FAST. `set -e` is deliberately NOT set. fgdb-d1d4 measured
+# the cost of the alternative in this exact directory: one stale assertion aborted
+# g0_identity_e2e.sh and hid 92 others, so the reported failure set was the
+# harness's evaluation order rather than the tree's state. An auditing tool that
+# stops at its first red reports less than it knows. Every law below runs, every
+# failure is recorded, and the tally is printed from an EXIT trap so that even an
+# unexpected abort cannot produce a silent green (fgdb-gate-tallies: a tally at
+# the bottom of a file is skipped by any abort above it).
+#
+# WHY EVERY ZERO IS CONTROLLED. fgdb-fginv-spine-zero-live-checkers-v05b and
+# fgdb-regcheck-closure-vacuous-no-control-hp0f are both in the ledger this gate
+# guards: a universally-quantified law is green when its domain is empty, and
+# "nothing to check" is indistinguishable from "the reader is broken". Each law
+# below therefore fails when its own population is empty.
+# =============================================================================
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LEDGER="$ROOT/docs/NEGATIVE_EVIDENCE.md"
+AGENTS="$ROOT/AGENTS.md"
+CONSTITUTION="$ROOT/registries/constitution.toml"
+BEADS="$ROOT/.beads/issues.jsonl"
+
+# The ledger may only grow. A monotone floor never goes stale upward, so it costs
+# no re-freeze when an entry is added, while deleting entries turns this red.
+# (fgdb-lzol / NE-0032: an equality pin over a growing artifact makes every
+# writer a false positive; floors are the repair.)
+LEDGER_ENTRY_FLOOR=44
+
+TALLY_PRINTED=0
+
+# The shared verdict contract (fgdb-udco). This gate was the worst of the ten:
+# its failure line was BOTH indented ("    FAIL  ...", so off column 0) AND on
+# stderr, so `bash scripts/g0_negative_evidence_e2e.sh > log` produced a log with
+# every ok line and no trace of the failure. MEASURED 2026-07-27 on a genuinely
+# red run: `grep -c '^FAIL' ` returned 0 even with BOTH streams merged.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
+
+pass() { gate_pass "$1"; }
+fail() { gate_fail "$1"; }
+
+# Laws 3 and 4 assert facts about repository HISTORY, not only the checked-out
+# files. A settled-root copy made with tar + `git init` has the right bytes and
+# one synthetic commit, so every real repair SHA is absent and the old gate
+# reported roughly thirty false failures. These anchors span the population the
+# current gate depends on:
+#   46e654e — the known-ancient revert law 4 requires;
+#   37c28c0 — the ledger/gate introduction;
+#   6a9be0e — the later law-4 repair lineage.
+# If any is absent, this checkout cannot adjudicate missing history. It is
+# UNRUN, not RED. Individual bad citations still fail normally once the anchors
+# prove this is a history-bearing repository.
+HISTORY_ANCHORS=(46e654e 37c28c0 6a9be0e)
+
+missing_history_anchors() { # repository-root
+  local repository="$1"
+  local anchor
+
+  for anchor in "${HISTORY_ANCHORS[@]}"; do
+    git -C "$repository" cat-file -e "${anchor}^{commit}" 2>/dev/null \
+      || printf '%s\n' "$anchor"
+  done
+}
+
+canonical_revert_target() { # repository-root commit
+  local repository="$1"
+  local commit="$2"
+
+  # Git's own revert message is an exact, target-bearing declaration — and it
+  # is the FINAL paragraph: subject `Revert "..."`, blank line, then
+  # `This reverts commit <sha>.` Requiring the final-paragraph position keeps
+  # a commit that merely QUOTES the line in its body out of the operation
+  # population: quoting is not reverting, and the inverse check would red a
+  # quote as a malformed revert (fresh-eyes M9).
+  git -C "$repository" show -s --format=%B "$commit" \
+    | awk '
+        /^This reverts commit [0-9a-f]{40}\.$/ { found = $4; last = NR }
+        NF { last_text = NR }
+        END {
+          if (found != "" && last == last_text) { sub(/\.$/, "", found); print found }
+          else exit 1
+        }
+      '
+}
+
+exact_inverse_revert() { # repository-root revert-commit target-commit
+  local repository="$1"
+  local revert_commit="$2"
+  local target_commit="$3"
+  local revert_parent reverse_patch target_parents target_parent target_patch
+
+  revert_parent="$(git -C "$repository" show -s --format=%P "$revert_commit")"
+  [ "$(printf '%s\n' "$revert_parent" | wc -w)" -eq 1 ] || return 1
+  git -C "$repository" merge-base --is-ancestor \
+    "$target_commit" "$revert_parent" || return 1
+
+  # Reverse the candidate commit, then compare that delta with each possible
+  # parent-relative target delta. This admits an ordinary or merge-mainline
+  # revert only when the committed bytes actually undo the declared target.
+  reverse_patch="$(
+    git -C "$repository" diff --no-ext-diff --binary \
+      "$revert_commit" "$revert_parent" \
+      | git patch-id --stable \
+      | awk 'NR == 1 { print $1 }'
+  )"
+  [ -n "$reverse_patch" ] || return 1
+
+  target_parents="$(git -C "$repository" show -s --format=%P "$target_commit")"
+  if [ -z "$target_parents" ]; then
+    target_parents="$(git -C "$repository" hash-object -t tree /dev/null)"
+  fi
+  for target_parent in $target_parents; do
+    target_patch="$(
+      git -C "$repository" diff --no-ext-diff --binary \
+        "$target_parent" "$target_commit" \
+        | git patch-id --stable \
+        | awk 'NR == 1 { print $1 }'
+    )"
+    if [ -n "$target_patch" ] && [ "$target_patch" = "$reverse_patch" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+dispositions_contain_commit() { # newline-delimited-dispositions full-commit
+  local dispositions="$1"
+  local commit="$2"
+  local disposition resolved
+
+  while IFS= read -r disposition; do
+    [ -n "$disposition" ] || continue
+    resolved="$(git -C "$ROOT" rev-parse --verify "${disposition}^{commit}" 2>/dev/null)" \
+      || continue
+    [ "$resolved" = "$commit" ] && return 0
+  done <<<"$dispositions"
+  return 1
+}
+
+run_revert_classifier_self_test() {
+  local failures_before="$GATE_FAIL"
+  local target=""
+  local mention
+  local known_target="7f3670291c76190761d33119019ced636980af37"
+  local mention_only=(4d20077 649cbf7 3a7248f 1994b8e)
+
+  if ! target="$(canonical_revert_target "$ROOT" 46e654e)"; then
+    fail "revert classifier rejected known canonical revert 46e654e"
+  elif [ "$target" != "$known_target" ]; then
+    fail "revert classifier resolved 46e654e to $target, expected $known_target"
+  elif ! exact_inverse_revert "$ROOT" 46e654e "$target"; then
+    fail "revert classifier did not verify 46e654e as the exact inverse of $target"
+  fi
+
+  # The wrong-target control proves the patch comparison is load-bearing rather
+  # than a message-only check.
+  if exact_inverse_revert \
+      "$ROOT" 46e654e 684ae2b7921ecc32888d7817fa547686b0696b6c; then
+    fail "revert classifier accepted the wrong-target mutant for 46e654e"
+  fi
+
+  # Every one of these subjects contains revert vocabulary. None committed a
+  # rollback: three describe withdrawn working changes and one documents them.
+  for mention in "${mention_only[@]}"; do
+    if canonical_revert_target "$ROOT" "$mention" >/dev/null; then
+      fail "revert classifier misclassified mention-only commit $mention"
+    fi
+  done
+
+  if ! dispositions_contain_commit \
+      $'3a7248f\n46e654e\n1994b8e' \
+      46e654e5f4cf36b6cbe7fe3e28e1b7c4935fb603; then
+    fail "revert disposition resolver rejected the known 46e654e row"
+  fi
+  if dispositions_contain_commit \
+      $'3a7248f\n1994b8e\n649cbf7' \
+      46e654e5f4cf36b6cbe7fe3e28e1b7c4935fb603; then
+    fail "revert disposition resolver accepted a population missing 46e654e"
+  fi
+
+  if [ "$GATE_FAIL" -eq "$failures_before" ]; then
+    pass "revert classifier and disposition resolver pass positive, wrong-target, mention-only, and missing-row controls"
+  fi
+}
+
+run_history_precondition_self_test() {
+  local work scratch stdout_log stderr_log missing rc
+
+  work="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-negative-history.XXXXXX")"
+  scratch="$work/one-commit-root"
+  stdout_log="$work/one-commit.out"
+  stderr_log="$work/one-commit.err"
+
+  # The conformant half: a guard hard-wired to "history absent" must not pass.
+  missing="$(missing_history_anchors "$ROOT")"
+  if [ -n "$missing" ]; then
+    fail "full-history control is missing required anchor(s): $(echo "$missing" | tr '\n' ' ')"
+  fi
+
+  # The behavioural half: reproduce the exact settled-root trap with the
+  # minimum files the gate opens and one synthetic commit. The evidence is
+  # retained; repository policy forbids automated deletion.
+  mkdir -p "$scratch/scripts/lib" "$scratch/docs" \
+    "$scratch/registries" "$scratch/.beads" || {
+      fail "could not create one-commit history fixture at $scratch"
+      return
+    }
+  if ! cp "$ROOT/scripts/g0_negative_evidence_e2e.sh" \
+      "$scratch/scripts/g0_negative_evidence_e2e.sh" \
+    || ! cp "$ROOT/scripts/lib/gate_verdict.sh" \
+      "$scratch/scripts/lib/gate_verdict.sh" \
+    || ! cp "$AGENTS" "$scratch/AGENTS.md" \
+    || ! cp "$LEDGER" "$scratch/docs/NEGATIVE_EVIDENCE.md" \
+    || ! cp "$CONSTITUTION" "$scratch/registries/constitution.toml" \
+    || ! cp "$BEADS" "$scratch/.beads/issues.jsonl"; then
+    fail "could not populate one-commit history fixture at $scratch"
+    return
+  fi
+  if ! git -C "$scratch" init -q \
+    || ! git -C "$scratch" add . \
+    || ! git -C "$scratch" \
+      -c user.name=fgdb-history-control \
+      -c user.email=history-control@invalid \
+      -c commit.gpgsign=false \
+      commit -q -m "one-commit settled-root control"; then
+    fail "could not initialize one-commit history fixture at $scratch"
+    return
+  fi
+
+  if (cd "$scratch" && bash scripts/g0_negative_evidence_e2e.sh) \
+      >"$stdout_log" 2>"$stderr_log"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne "$GATE_EXIT_UNRUN" ]; then
+    fail "one-commit root exited $rc, expected UNRUN exit $GATE_EXIT_UNRUN"
+  elif [ "$(grep -c '^UNRUN repository history prerequisite missing;' \
+      "$stdout_log")" -ne 1 ] \
+    || [ "$(grep -c '^FAIL repository history prerequisite missing;' \
+      "$stdout_log")" -ne 1 ]; then
+    fail "one-commit root did not emit exactly paired UNRUN + FAIL history verdicts"
+  elif grep -q '^FAIL repair commit is not reachable' "$stdout_log"; then
+    fail "one-commit root still mislabeled absent history as broken repair citations"
+  elif grep -q '^  \[law [1-4]\]' "$stdout_log"; then
+    fail "one-commit root entered history-dependent laws after its precondition failed"
+  else
+    pass "full-history control resolves all anchors; one-commit root exits 2 with one paired UNRUN"
+  fi
+  echo "  retained history-precondition self-test evidence: $work"
+}
+
+print_tally() {
+  [ "$TALLY_PRINTED" -eq 1 ] && return 0
+  TALLY_PRINTED=1
+  echo
+  echo "  negative-evidence gate: $GATE_PASS passed, $GATE_FAIL failed, $GATE_UNRUN unrun"
+  if [ "$GATE_FAIL" -ne 0 ]; then
+    gate_diag "  docs/NEGATIVE_EVIDENCE.md is the memorial AGENTS.md designates;"
+    gate_diag "  a failure here means the doctrine's enforcement clause is unbacked again."
+  elif [ "$GATE_UNRUN" -ne 0 ]; then
+    gate_diag "  an UNRUN means a required input domain was absent; no doctrine"
+    gate_diag "  verdict was reached and no ledger defect should be inferred."
+  fi
+}
+gate_init "g0_negative_evidence_e2e" print_tally
+
+case "${1:-}" in
+  "")
+    ;;
+  --self-test)
+    echo "== g0 negative-evidence history-precondition self-test =="
+    run_history_precondition_self_test
+    run_revert_classifier_self_test
+    print_tally
+    if [ "$GATE_FAIL" -ne 0 ]; then
+      exit 1
+    fi
+    if [ "$GATE_UNRUN" -ne 0 ]; then
+      exit "$GATE_EXIT_UNRUN"
+    fi
+    exit 0
+    ;;
+  *)
+    gate_die "usage: scripts/g0_negative_evidence_e2e.sh [--self-test]"
+    ;;
+esac
+
+echo "== g0 negative-evidence gate =="
+
+# -----------------------------------------------------------------------------
+# LAW 0 — the artifact AGENTS.md names exists at all.
+# -----------------------------------------------------------------------------
+echo "  [law 0] the designated memorial exists"
+if [ -f "$LEDGER" ]; then
+  pass "docs/NEGATIVE_EVIDENCE.md exists"
+else
+  fail "docs/NEGATIVE_EVIDENCE.md does not exist — AGENTS.md names it as the memorial for every doctrine violation"
+  print_tally
+  exit 1
+fi
+for f in "$AGENTS" "$CONSTITUTION" "$BEADS"; do
+  [ -f "$f" ] || { fail "required input missing: ${f#"$ROOT"/}"; print_tally; exit 1; }
+done
+
+# The overall gate includes Laws 3 and 4, which make claims over real repository
+# history. Establish that prerequisite before entering the remaining suite, so
+# no partial result can look like a complete gate and no missing commit can be
+# mislabeled as a ledger defect.
+missing_history="$(missing_history_anchors "$ROOT")"
+if [ -n "$missing_history" ]; then
+  gate_diag "  repository history is incomplete; missing required anchor(s):"
+  while IFS= read -r anchor; do
+    [ -n "$anchor" ] && gate_diag "    $anchor"
+  done <<<"$missing_history"
+  gate_diag "  Use a history-preserving root such as git clone --local."
+  gate_abort_unrun "repository history prerequisite missing; history-dependent laws did not run"
+fi
+
+# -----------------------------------------------------------------------------
+# LAW 1 — AGENTS.md self-containment.
+#
+# Every repository path AGENTS.md names must resolve. This is the law that closes
+# the CLASS rather than this one instance: the ledger went missing because nothing
+# checked that the paths the doctrine cites exist.
+#
+# The naive form of this law is WRONG and would invert the doctrine. AGENTS.md
+# names `plannerV2.rs`, `strata_improved.rs` and `exec_enhanced.rs` under "NEVER
+# create" — requiring those to resolve would mandate the files the doctrine
+# forbids. Every extracted token is therefore classified, and an unclassified one
+# is a failure rather than a default.
+# -----------------------------------------------------------------------------
+echo "  [law 1] every repository path AGENTS.md names resolves"
+
+# Prohibitions: named by AGENTS.md as files that must NOT exist. Hardcoding the
+# set would rot silently if the prose changed, so the classification is guarded:
+# the line naming each one must still carry "NEVER".
+PROHIBITED="plannerV2.rs strata_improved.rs exec_enhanced.rs"
+for p in $PROHIBITED; do
+  if ! grep -F -- "$p" "$AGENTS" | grep -Fq "NEVER"; then
+    fail "prohibition classification is stale: AGENTS.md no longer says NEVER about $p"
+  fi
+done
+
+l1_checked=0
+l1_unclassified=0
+while IFS= read -r tok; do
+  case "$tok" in
+    "") continue ;;
+  esac
+  l1_checked=$((l1_checked + 1))
+  case "$tok" in
+    # A bare extension used as a file-type word ("a .sh, .jsonl or .md file"),
+    # not a path.
+    .[a-z0-9]*) [ "${tok#*/}" = "$tok" ] && { continue; } ;;
+  esac
+  case "$tok" in
+    /*)
+      # Absolute path outside the repository (the three foundation checkouts).
+      # Not a repository-relative claim; recorded, not enforced.
+      continue
+      ;;
+  esac
+  is_prohibited=0
+  for p in $PROHIBITED; do
+    [ "$tok" = "$p" ] && is_prohibited=1
+  done
+  if [ "$is_prohibited" -eq 1 ]; then
+    if [ -e "$ROOT/$tok" ]; then
+      fail "AGENTS.md forbids creating $tok, but it exists"
+    fi
+    continue
+  fi
+  if [ -e "$ROOT/$tok" ]; then
+    continue
+  fi
+  # A bare basename may name a file that lives in a subdirectory
+  # (AGENTS.md: "Appendix F / `invariants.toml`"). The candidate must exist ON
+  # DISK, not merely in the index: `git ls-files` reports a tracked file that has
+  # been deleted from the working tree, and accepting that would make this law
+  # green over a path nobody can open — the same shape as NE-0008, where the
+  # existence of a registration stood in for the artifact doing its job.
+  if [ "${tok#*/}" = "$tok" ]; then
+    esc="$(printf '%s' "$tok" | sed 's/[.[\*^$]/\\&/g')"
+    found=0
+    while IFS= read -r cand; do
+      [ -e "$ROOT/$cand" ] && { found=1; break; }
+    done < <(git -C "$ROOT" ls-files | grep -E "(^|/)$esc\$")
+    [ "$found" -eq 1 ] && continue
+  fi
+  fail "AGENTS.md names a repository path that does not resolve: $tok"
+  l1_unclassified=$((l1_unclassified + 1))
+done < <(grep -oE '`[A-Za-z0-9_./-]+`' "$AGENTS" | tr -d '`' \
+           | grep -E '/|\.(md|toml|rs|sh|lock|yaml|jsonl)$' | sort -u)
+
+# CONTROL. If the extractor returns nothing, "no paths named" and "the extractor
+# is broken" are indistinguishable, and every verdict above is quantified over
+# nothing. AGENTS.md names scripts/check.sh, so zero is never correct.
+if [ "$l1_checked" -eq 0 ]; then
+  fail "extracted ZERO path tokens from AGENTS.md — a zero here cannot be distinguished from a broken extractor"
+else
+  [ "$l1_unclassified" -eq 0 ] && pass "all $l1_checked path tokens in AGENTS.md resolve or are declared prohibitions"
+fi
+
+# -----------------------------------------------------------------------------
+# LAW 2 — the ledger is structurally well formed.
+#
+# Parsed as structure, never by substring. NE-0001..0004 in this very ledger are
+# four instances of a substring or prefix test standing in for structural parsing
+# inside a checker whose job is to be unfoolable; repeating that here would be
+# the most embarrassing possible defect in this file.
+# -----------------------------------------------------------------------------
+echo "  [law 2] every ledger entry carries a complete record"
+
+entries="$(grep -cE '^### NE-[0-9]{4} — .+$' "$LEDGER")"
+if [ "$entries" -eq 0 ]; then
+  fail "ledger contains ZERO entries — an empty memorial satisfies nothing"
+elif [ "$entries" -lt "$LEDGER_ENTRY_FLOOR" ]; then
+  fail "ledger has $entries entries, below the declared floor of $LEDGER_ENTRY_FLOOR (entries were deleted)"
+else
+  pass "ledger carries $entries entries (floor $LEDGER_ENTRY_FLOOR)"
+fi
+
+dupes="$(grep -oE '^### (NE-[0-9]{4})' "$LEDGER" | sort | uniq -d)"
+if [ -n "$dupes" ]; then
+  fail "duplicate entry ids: $(echo "$dupes" | tr '\n' ' ')"
+else
+  pass "entry ids are unique"
+fi
+
+# Field completeness, per entry, structurally.
+incomplete="$(awk '
+  /^### NE-[0-9][0-9][0-9][0-9] / {
+    if (id != "") check()
+    id = $2; d=b=r=c=a=g=s=0; next
+  }
+  /^## / { if (id != "") { check(); id="" } next }
+  /^- \*\*doctrine\*\*: *[^ ]/   { d=1 }
+  /^- \*\*bead\*\*: *[^ ]/       { b=1 }
+  /^- \*\*repair\*\*: *[^ ]/     { r=1 }
+  /^- \*\*claimed\*\*: *[^ ]/    { c=1 }
+  /^- \*\*actual\*\*: *[^ ]/     { a=1 }
+  /^- \*\*caught_by\*\*: *[^ ]/  { g=1 }
+  /^- \*\*signature\*\*: *[^ ]/  { s=1 }
+  END { if (id != "") check() }
+  function check() {
+    miss=""
+    if (!d) miss=miss" doctrine"; if (!b) miss=miss" bead"; if (!r) miss=miss" repair"
+    if (!c) miss=miss" claimed"; if (!a) miss=miss" actual"; if (!g) miss=miss" caught_by"
+    if (!s) miss=miss" signature"
+    if (miss != "") print id " missing:" miss
+  }
+' "$LEDGER")"
+if [ -n "$incomplete" ]; then
+  while IFS= read -r line; do fail "incomplete entry: $line"; done <<< "$incomplete"
+else
+  pass "every entry carries all seven fields"
+fi
+
+# -----------------------------------------------------------------------------
+# LAW 3 — referential integrity. Every citation resolves.
+#
+# fgdb-checker-index-live-is-only-file-existence-tl0o (NE-0008) is the reason this
+# law reads the referent rather than the syntax: a well-formed citation to nothing
+# is exactly the shape of a check that passes without checking.
+# -----------------------------------------------------------------------------
+echo "  [law 3] every doctrine id, bead and repair commit resolves"
+
+bad_doctrine=0
+bad_bead=0
+bad_commit=0
+n_doctrine=0
+n_bead=0
+n_commit=0
+
+while IFS= read -r id; do
+  n_doctrine=$((n_doctrine + 1))
+  grep -qE "^id = \"$id\"" "$CONSTITUTION" || {
+    fail "doctrine id does not resolve in registries/constitution.toml: $id"
+    bad_doctrine=$((bad_doctrine + 1))
+  }
+done < <(grep -oE '^- \*\*doctrine\*\*: *[A-Z0-9-]+' "$LEDGER" | awk '{print $NF}' | sort -u)
+
+while IFS= read -r bead; do
+  n_bead=$((n_bead + 1))
+  grep -Fq "\"id\":\"$bead\"" "$BEADS" || {
+    fail "bead does not resolve in .beads/issues.jsonl: $bead"
+    bad_bead=$((bad_bead + 1))
+  }
+done < <(grep -oE '^- \*\*bead\*\*: *[A-Za-z0-9._-]+' "$LEDGER" | awk '{print $NF}' | sort -u)
+
+while IFS= read -r sha; do
+  n_commit=$((n_commit + 1))
+  if ! git -C "$ROOT" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    fail "repair commit is not reachable in this repository: $sha"
+    bad_commit=$((bad_commit + 1))
+  fi
+done < <(grep -oE '^- \*\*repair\*\*: *[0-9a-f]{7,40}' "$LEDGER" | awk '{print $NF}' | sort -u)
+
+if [ "$n_doctrine" -eq 0 ] || [ "$n_bead" -eq 0 ] || [ "$n_commit" -eq 0 ]; then
+  fail "citation extraction returned an empty set (doctrine=$n_doctrine bead=$n_bead commit=$n_commit) — refusing to report referential integrity as checked"
+else
+  [ "$bad_doctrine" -eq 0 ] && pass "$n_doctrine distinct doctrine ids resolve in constitution.toml"
+  [ "$bad_bead" -eq 0 ] && pass "$n_bead distinct beads resolve in .beads/issues.jsonl"
+  [ "$bad_commit" -eq 0 ] && pass "$n_commit distinct repair commits are reachable"
+fi
+
+# -----------------------------------------------------------------------------
+# LAW 4 — the literal AGENTS.md clause: every committed revert is memorialized.
+#
+# The original gate searched subjects for a revert-shaped word. That is not an
+# operation classifier: "write reverted" can truthfully say that a working-tree
+# experiment was withdrawn before this commit, while the commit itself changes
+# only a Beads note. A committed revert now needs all three structural facts:
+# one canonical target line, a reachable target, and a reverse patch-id equal to
+# one parent-relative target patch-id. A subject that only names a revert is
+# reported but is not promoted into the operation population.
+# -----------------------------------------------------------------------------
+echo "  [law 4] every structurally verified revert commit has a disposition"
+
+# Dispositions are read STRUCTURALLY, from the § Reverts section only.
+#
+# This started as `grep -Fq "$sha" "$LEDGER"` over the whole file, and the
+# red-proof harness caught it: deleting 46e654e's disposition left the gate GREEN,
+# because that sha also appears in the preamble's prose. A substring test standing
+# in for structural parsing — NE-0001 through NE-0004 exactly — committed inside
+# the gate whose whole purpose is to memorialize that class. Review did not find
+# it; mutating the input did.
+disposed="$(awk '/^## Reverts$/ {r=1; next} /^## / {r=0} r' "$LEDGER" \
+              | sed -nE 's/^- `([0-9a-f]+)`.*/\1/p')"
+
+run_revert_classifier_self_test
+
+# Preserve the old subject population as an explicit measurement. It is useful
+# for proving the classifier moved for the intended reason, but it carries no
+# authority: four of today's five matches did not commit a reversal.
+subject_mentions=0
+subject_only_mentions=0
+while IFS= read -r sha; do
+  [ -n "$sha" ] || continue
+  subject_mentions=$((subject_mentions + 1))
+  if ! canonical_revert_target "$ROOT" "$sha" >/dev/null; then
+    subject_only_mentions=$((subject_only_mentions + 1))
+  fi
+done < <(git -C "$ROOT" log --all --pretty=format:'%H|%s' \
+           | grep -iE '\brevert(s|ed|ing)?\b' \
+           | cut -d'|' -f1)
+echo "    [law 4] $subject_only_mentions of $subject_mentions revert-word subject(s) are mention-only"
+
+n_candidates=0
+n_reverts=0
+missing_reverts=0
+invalid_reverts=0
+while IFS= read -r sha || [ -n "$sha" ]; do
+  [ -z "$sha" ] && continue
+  n_candidates=$((n_candidates + 1))
+  subject="$(git -C "$ROOT" log -1 --pretty=format:%s "$sha")"
+  target=""
+  if ! target="$(canonical_revert_target "$ROOT" "$sha")"; then
+    fail "revert-shaped commit lacks exactly one canonical target line: $sha — $subject"
+    invalid_reverts=$((invalid_reverts + 1))
+    continue
+  fi
+  if ! git -C "$ROOT" cat-file -e "${target}^{commit}" 2>/dev/null; then
+    fail "revert commit names an unreachable target: $sha -> $target"
+    invalid_reverts=$((invalid_reverts + 1))
+    continue
+  fi
+  if ! exact_inverse_revert "$ROOT" "$sha" "$target"; then
+    fail "revert commit is not the exact inverse of its reachable target: $sha -> $target"
+    invalid_reverts=$((invalid_reverts + 1))
+    continue
+  fi
+  n_reverts=$((n_reverts + 1))
+  dispositions_contain_commit "$disposed" "$sha" || {
+    fail "revert commit has no disposition in the ledger: $sha — $subject"
+    missing_reverts=$((missing_reverts + 1))
+  }
+done < <(git -C "$ROOT" log --all --pretty=format:'%H|%s' --extended-regexp \
+           --grep='^Revert "' \
+           | cut -d'|' -f1)
+
+if [ "$n_candidates" -eq 0 ] || [ "$n_reverts" -eq 0 ]; then
+  fail "found ZERO structurally verified reverts — this repository contains exact inverse 46e654e, so the scan is broken"
+elif [ "$invalid_reverts" -eq 0 ] && [ "$missing_reverts" -eq 0 ]; then
+  pass "$n_reverts exact target-and-inverse revert commit(s) all dispositioned"
+fi
+
+# -----------------------------------------------------------------------------
+# LAW 5 (report, not law) — the unclassified closed-bead residue.
+#
+# Stated so that what this gate does NOT enforce cannot be mistaken for coverage.
+# A doctrine violation that is found, repaired and closed without an entry here is
+# invisible to every law above. Making it visible requires total accounting over
+# every closed bead, which in a multi-pane swarm reds main every few minutes and
+# makes this file a contended write for every agent. The count is reported so the
+# gap is measured rather than assumed.
+# -----------------------------------------------------------------------------
+echo "  [report] closed-bead residue (advisory, not enforced)"
+closed_total="$(grep -c '"status":"closed"' "$BEADS")"
+ledgered="$(grep -oE '^- \*\*bead\*\*: *[A-Za-z0-9._-]+' "$LEDGER" | awk '{print $NF}' | sort -u | wc -l)"
+echo "    $closed_total closed beads; $ledgered are ledgered here; residue is unclassified by construction"
+
+print_tally
+# Three states, not two: an UNRUN law is not a passing law (fgdb-udco).
+if [ "$GATE_FAIL" -ne 0 ]; then
+  exit 1
+fi
+if [ "$GATE_UNRUN" -ne 0 ]; then
+  exit "$GATE_EXIT_UNRUN"
+fi
+exit 0

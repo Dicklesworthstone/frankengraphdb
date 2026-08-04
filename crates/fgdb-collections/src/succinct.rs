@@ -27,6 +27,9 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::mem::size_of;
 
+use fgdb_types::QueryCx;
+use fgdb_unsafe_arena::{RegionScope, RegionVec, RegionVecError};
+
 const WORD_BITS: usize = u64::BITS as usize;
 const SUPERBLOCK_WORDS: usize = 8;
 const SUPERBLOCK_BITS: usize = SUPERBLOCK_WORDS * WORD_BITS;
@@ -86,12 +89,12 @@ pub enum BitVectorError {
         /// Component whose element count could not be represented.
         target: AllocationTarget,
     },
-    /// Reserving one representation component failed before publication.
-    AllocationFailed {
-        /// Component that could not be reserved.
+    /// Task-local region storage refused one representation component.
+    Region {
+        /// Component whose storage operation was refused.
         target: AllocationTarget,
-        /// Exact number of elements requested for that component.
-        requested: usize,
+        /// Exact region-vector refusal.
+        source: RegionVecError,
     },
 }
 
@@ -132,17 +135,23 @@ impl fmt::Display for BitVectorError {
             Self::SizeOverflow { target } => {
                 write!(formatter, "{target:?} representation size overflowed")
             }
-            Self::AllocationFailed { target, requested } => write!(
-                formatter,
-                "could not reserve {requested} elements for {target:?}"
-            ),
+            Self::Region { target, source } => {
+                write!(formatter, "{target:?} region storage refused: {source}")
+            }
         }
     }
 }
 
-impl std::error::Error for BitVectorError {}
+impl std::error::Error for BitVectorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Region { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
-/// Exact byte accounting for the vector's three heap-owned arrays.
+/// Exact byte accounting for the vector's three region-owned arrays.
 ///
 /// Values use logical element widths and exact array lengths. They exclude the
 /// inline `SuccinctBitVector` fields and allocator bookkeeping/rounding, neither
@@ -177,7 +186,7 @@ impl StorageBreakdown {
         self.rank_subblock_bytes
     }
 
-    /// Exact sum of all heap-owned representation arrays.
+    /// Exact sum of all region-owned representation arrays.
     #[must_use]
     pub const fn total_bytes(self) -> usize {
         self.total_bytes
@@ -221,17 +230,17 @@ impl StorageBreakdown {
 
 /// Immutable canonical bitvector with scalar rank/select support.
 #[derive(Debug)]
-pub struct SuccinctBitVector {
+pub struct SuccinctBitVector<'region> {
     bit_len: usize,
-    words: Vec<u64>,
-    rank_superblocks: Vec<usize>,
-    rank_subblocks: Vec<u16>,
+    words: RegionVec<'region, u64>,
+    rank_superblocks: RegionVec<'region, usize>,
+    rank_subblocks: RegionVec<'region, u16>,
     one_count: usize,
     logical_storage: StorageBreakdown,
     retained_storage: StorageBreakdown,
 }
 
-impl PartialEq for SuccinctBitVector {
+impl PartialEq for SuccinctBitVector<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.bit_len == other.bit_len
             && self.words == other.words
@@ -241,15 +250,54 @@ impl PartialEq for SuccinctBitVector {
     }
 }
 
-impl Eq for SuccinctBitVector {}
+impl Eq for SuccinctBitVector<'_> {}
 
-impl SuccinctBitVector {
+impl<'region> SuccinctBitVector<'region> {
     /// Constructs a vector from canonical little-bit-endian words.
     ///
     /// `words.len()` must equal `ceil(bit_len / 64)`. When the final word is
     /// partial, every bit at an index greater than or equal to `bit_len` must
     /// be zero. Validation completes before directory allocation begins.
-    pub fn try_from_words(bit_len: usize, words: Vec<u64>) -> Result<Self, BitVectorError> {
+    pub fn try_from_words(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
+        bit_len: usize,
+        words: &[u64],
+    ) -> Result<Self, BitVectorError> {
+        let expected_words = word_count(bit_len);
+        if words.len() != expected_words {
+            return Err(BitVectorError::WordCountMismatch {
+                bit_len,
+                expected_words,
+                actual_words: words.len(),
+            });
+        }
+        validate_padding(bit_len, words)?;
+
+        let mut regional_words =
+            RegionVec::with_capacity_in(scope, cx, words.len()).map_err(|source| {
+                BitVectorError::Region {
+                    target: AllocationTarget::Words,
+                    source,
+                }
+            })?;
+        for &word in words {
+            regional_words
+                .try_push(cx, word)
+                .map_err(|source| BitVectorError::Region {
+                    target: AllocationTarget::Words,
+                    source,
+                })?;
+        }
+        Self::try_from_region_words(scope, cx, bit_len, regional_words)
+    }
+
+    fn try_from_region_words(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
+        bit_len: usize,
+        words: RegionVec<'region, u64>,
+    ) -> Result<Self, BitVectorError> {
         let expected_words = word_count(bit_len);
         if words.len() != expected_words {
             return Err(BitVectorError::WordCountMismatch {
@@ -259,7 +307,7 @@ impl SuccinctBitVector {
             });
         }
 
-        validate_padding(bit_len, &words)?;
+        validate_padding(bit_len, words.as_slice())?;
 
         let superblock_count = words.len().div_ceil(SUPERBLOCK_WORDS);
         let superblock_entries =
@@ -269,28 +317,38 @@ impl SuccinctBitVector {
                     target: AllocationTarget::RankSuperblocks,
                 })?;
 
-        let mut rank_superblocks = Vec::new();
-        reserve_exact(
-            &mut rank_superblocks,
-            superblock_entries,
-            AllocationTarget::RankSuperblocks,
-        )?;
+        let mut rank_superblocks = RegionVec::with_capacity_in(scope, cx, superblock_entries)
+            .map_err(|source| BitVectorError::Region {
+                target: AllocationTarget::RankSuperblocks,
+                source,
+            })?;
 
-        let mut rank_subblocks = Vec::new();
-        reserve_exact(
-            &mut rank_subblocks,
-            words.len(),
-            AllocationTarget::RankSubblocks,
-        )?;
+        let mut rank_subblocks =
+            RegionVec::with_capacity_in(scope, cx, words.len()).map_err(|source| {
+                BitVectorError::Region {
+                    target: AllocationTarget::RankSubblocks,
+                    source,
+                }
+            })?;
 
         let mut total = 0_usize;
         let mut within_superblock = 0_u16;
         for (word_index, &word) in words.iter().enumerate() {
             if word_index % SUPERBLOCK_WORDS == 0 {
-                rank_superblocks.push(total);
+                rank_superblocks
+                    .try_push(cx, total)
+                    .map_err(|source| BitVectorError::Region {
+                        target: AllocationTarget::RankSuperblocks,
+                        source,
+                    })?;
                 within_superblock = 0;
             }
-            rank_subblocks.push(within_superblock);
+            rank_subblocks
+                .try_push(cx, within_superblock)
+                .map_err(|source| BitVectorError::Region {
+                    target: AllocationTarget::RankSubblocks,
+                    source,
+                })?;
             let word_ones = word.count_ones() as u16;
             within_superblock =
                 within_superblock
@@ -305,7 +363,12 @@ impl SuccinctBitVector {
                         target: AllocationTarget::RankSuperblocks,
                     })?;
         }
-        rank_superblocks.push(total);
+        rank_superblocks
+            .try_push(cx, total)
+            .map_err(|source| BitVectorError::Region {
+                target: AllocationTarget::RankSuperblocks,
+                source,
+            })?;
 
         debug_assert_eq!(rank_superblocks.len(), superblock_entries);
         debug_assert_eq!(rank_subblocks.len(), words.len());
@@ -336,10 +399,15 @@ impl SuccinctBitVector {
     ///
     /// Word storage and both rank-directory allocations are fallible. The
     /// resulting final-word padding is zero by construction.
-    pub fn try_from_bits(bits: &[bool]) -> Result<Self, BitVectorError> {
-        let mut builder = SuccinctBitVectorBuilder::try_with_capacity(bits.len(), bits.len())?;
-        builder.extend(bits)?;
-        builder.finish()
+    pub fn try_from_bits(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
+        bits: &[bool],
+    ) -> Result<Self, BitVectorError> {
+        let mut builder =
+            SuccinctBitVectorBuilder::try_with_capacity_in(scope, cx, bits.len(), bits.len())?;
+        builder.extend(cx, bits)?;
+        builder.finish(cx)
     }
 
     /// Explicit logical length in bits.
@@ -359,7 +427,7 @@ impl SuccinctBitVector {
     /// The last word has zero bits outside [`Self::len`].
     #[must_use]
     pub fn as_words(&self) -> &[u64] {
-        &self.words
+        self.words.as_slice()
     }
 
     /// Returns the bit at `index`, or `None` when `index >= len`.
@@ -368,7 +436,7 @@ impl SuccinctBitVector {
         if index >= self.bit_len {
             return None;
         }
-        let word = self.words[index / WORD_BITS];
+        let word = self.words.as_slice()[index / WORD_BITS];
         Some(word & (1_u64 << (index % WORD_BITS)) != 0)
     }
 
@@ -399,9 +467,9 @@ impl SuccinctBitVector {
         let word_index = end / WORD_BITS;
         let bit_in_word = end % WORD_BITS;
         let superblock_index = word_index / SUPERBLOCK_WORDS;
-        let preceding =
-            self.rank_superblocks[superblock_index] + usize::from(self.rank_subblocks[word_index]);
-        let word_prefix = self.words[word_index] & low_mask(bit_in_word);
+        let preceding = self.rank_superblocks.as_slice()[superblock_index]
+            + usize::from(self.rank_subblocks.as_slice()[word_index]);
+        let word_prefix = self.words.as_slice()[word_index] & low_mask(bit_in_word);
         Some(preceding + word_prefix.count_ones() as usize)
     }
 
@@ -426,14 +494,15 @@ impl SuccinctBitVector {
 
         let superblock_index = self
             .rank_superblocks
+            .as_slice()
             .partition_point(|&prefix| prefix <= ordinal)
             - 1;
-        let mut within = ordinal - self.rank_superblocks[superblock_index];
+        let mut within = ordinal - self.rank_superblocks.as_slice()[superblock_index];
         let word_start = superblock_index * SUPERBLOCK_WORDS;
         let word_end = (word_start + SUPERBLOCK_WORDS).min(self.words.len());
 
         for word_index in word_start..word_end {
-            let word = self.words[word_index];
+            let word = self.words.as_slice()[word_index];
             let count = word.count_ones() as usize;
             if within < count {
                 let bit = select_set_bit(word, within);
@@ -477,7 +546,7 @@ impl SuccinctBitVector {
 
         for word_index in word_start..word_end {
             let valid_bits = self.valid_bits_in_word(word_index);
-            let zero_word = !self.words[word_index] & low_mask(valid_bits);
+            let zero_word = !self.words.as_slice()[word_index] & low_mask(valid_bits);
             let count = zero_word.count_ones() as usize;
             if within < count {
                 let bit = select_set_bit(zero_word, within);
@@ -496,7 +565,7 @@ impl SuccinctBitVector {
     #[must_use]
     pub fn iter_ones(&self) -> Ones<'_> {
         Ones {
-            words: &self.words,
+            words: self.words.as_slice(),
             next_word_index: 0,
             current_word_index: 0,
             remaining_word: 0,
@@ -504,13 +573,13 @@ impl SuccinctBitVector {
         }
     }
 
-    /// Exact byte accounting for heap-owned representation arrays.
+    /// Exact byte accounting for region-owned representation arrays.
     #[must_use]
     pub fn storage_breakdown(&self) -> StorageBreakdown {
         self.logical_storage
     }
 
-    /// Exact total bytes in the heap-owned representation arrays.
+    /// Exact total bytes in the region-owned representation arrays.
     ///
     /// This is the sum returned by [`StorageBreakdown::total_bytes`].
     #[must_use]
@@ -520,7 +589,7 @@ impl SuccinctBitVector {
 
     /// Exact byte accounting from the three backing-vector capacities.
     ///
-    /// This includes spare elements retained by `Vec`, but still excludes
+    /// This includes spare elements retained by `RegionVec`, but still excludes
     /// allocator bookkeeping and allocation-size-class rounding. It may exceed
     /// [`Self::logical_storage_bytes`] when a caller-supplied word vector or a
     /// builder retained spare capacity.
@@ -540,7 +609,7 @@ impl SuccinctBitVector {
             .checked_mul(SUPERBLOCK_BITS)
             .unwrap_or(self.bit_len)
             .min(self.bit_len);
-        bit_start - self.rank_superblocks[superblock_index]
+        bit_start - self.rank_superblocks.as_slice()[superblock_index]
     }
 
     fn valid_bits_in_word(&self, word_index: usize) -> usize {
@@ -555,22 +624,36 @@ impl SuccinctBitVector {
 /// extension is transactional with respect to limit and allocation failures:
 /// either every bit is appended or the builder remains unchanged. At every
 /// observable state, unused bits in the final word are zero.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SuccinctBitVectorBuilder {
+#[derive(Debug)]
+pub struct SuccinctBitVectorBuilder<'region> {
+    scope: &'region RegionScope,
     max_bits: usize,
     bit_len: usize,
-    words: Vec<u64>,
+    words: RegionVec<'region, u64>,
 }
 
-impl SuccinctBitVectorBuilder {
+impl PartialEq for SuccinctBitVectorBuilder<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_bits == other.max_bits
+            && self.bit_len == other.bit_len
+            && self.words == other.words
+    }
+}
+
+impl Eq for SuccinctBitVectorBuilder<'_> {}
+
+impl<'region> SuccinctBitVectorBuilder<'region> {
     /// Creates an empty builder without allocating.
-    #[must_use]
-    pub const fn new(max_bits: usize) -> Self {
-        Self {
+    pub fn new_in(scope: &'region RegionScope, max_bits: usize) -> Result<Self, BitVectorError> {
+        Ok(Self {
+            scope,
             max_bits,
             bit_len: 0,
-            words: Vec::new(),
-        }
+            words: RegionVec::new_in(scope).map_err(|source| BitVectorError::Region {
+                target: AllocationTarget::Words,
+                source,
+            })?,
+        })
     }
 
     /// Creates an empty builder and fallibly reserves for `capacity_bits`.
@@ -579,7 +662,9 @@ impl SuccinctBitVectorBuilder {
     /// not exceed `max_bits`. The allocator may retain more whole-word capacity
     /// than requested; [`Self::capacity_bits`] reports the exact usable result,
     /// capped by the explicit maximum.
-    pub fn try_with_capacity(
+    pub fn try_with_capacity_in(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
         max_bits: usize,
         capacity_bits: usize,
     ) -> Result<Self, BitVectorError> {
@@ -590,13 +675,14 @@ impl SuccinctBitVectorBuilder {
             });
         }
 
-        let mut words = Vec::new();
-        reserve_exact(
-            &mut words,
-            word_count(capacity_bits),
-            AllocationTarget::Words,
+        let words = RegionVec::with_capacity_in(scope, cx, word_count(capacity_bits)).map_err(
+            |source| BitVectorError::Region {
+                target: AllocationTarget::Words,
+                source,
+            },
         )?;
         Ok(Self {
+            scope,
             max_bits,
             bit_len: 0,
             words,
@@ -680,14 +766,14 @@ impl SuccinctBitVectorBuilder {
     /// Unused bits in the final word are always zero.
     #[must_use]
     pub fn as_words(&self) -> &[u64] {
-        &self.words
+        self.words.as_slice()
     }
 
     /// Fallibly appends one bit.
     ///
     /// A limit or allocation failure leaves the builder unchanged.
-    pub fn push(&mut self, bit: bool) -> Result<(), BitVectorError> {
-        self.extend(core::slice::from_ref(&bit))
+    pub fn push(&mut self, cx: &QueryCx, bit: bool) -> Result<(), BitVectorError> {
+        self.extend(cx, core::slice::from_ref(&bit))
     }
 
     /// Fallibly appends a complete bit slice.
@@ -695,25 +781,28 @@ impl SuccinctBitVectorBuilder {
     /// Length overflow, the explicit maximum, and any necessary allocation are
     /// checked before the first word is changed. Chunking therefore cannot
     /// change the canonical finished representation.
-    pub fn extend(&mut self, bits: &[bool]) -> Result<(), BitVectorError> {
+    pub fn extend(&mut self, cx: &QueryCx, bits: &[bool]) -> Result<(), BitVectorError> {
         let target_len = checked_appended_len(self.bit_len, bits.len(), self.max_bits)?;
+        cx.checkpoint().map_err(|_| BitVectorError::Region {
+            target: AllocationTarget::Words,
+            source: RegionVecError::CheckpointRefused,
+        })?;
 
         let target_words = word_count(target_len);
         if target_words > self.words.len() {
-            let additional_words = target_words - self.words.len();
             self.words
-                .try_reserve_exact(additional_words)
-                .map_err(|_| BitVectorError::AllocationFailed {
+                .try_resize(cx, target_words, 0)
+                .map_err(|source| BitVectorError::Region {
                     target: AllocationTarget::Words,
-                    requested: additional_words,
+                    source,
                 })?;
-            self.words.resize(target_words, 0);
         }
 
         for (offset, &bit) in bits.iter().enumerate() {
             if bit {
                 let bit_index = self.bit_len + offset;
-                self.words[bit_index / WORD_BITS] |= 1_u64 << (bit_index % WORD_BITS);
+                let word = &mut self.words.as_mut_slice()[bit_index / WORD_BITS];
+                *word |= 1_u64 << (bit_index % WORD_BITS);
             }
         }
         self.bit_len = target_len;
@@ -722,16 +811,17 @@ impl SuccinctBitVectorBuilder {
 
     /// Finishes the vector and fallibly constructs its rank directories.
     ///
-    /// The packed word `Vec` is moved directly into the immutable vector: this
+    /// The packed-word `RegionVec` is moved directly into the immutable vector:
+    /// this
     /// performs no clone, copy, shrink, or replacement allocation. Its exact
     /// retained capacity remains visible through
     /// [`SuccinctBitVector::retained_storage_breakdown`].
-    pub fn finish(self) -> Result<SuccinctBitVector, BitVectorError> {
-        SuccinctBitVector::try_from_words(self.bit_len, self.words)
+    pub fn finish(self, cx: &QueryCx) -> Result<SuccinctBitVector<'region>, BitVectorError> {
+        SuccinctBitVector::try_from_region_words(self.scope, cx, self.bit_len, self.words)
     }
 }
 
-impl<'a> IntoIterator for &'a SuccinctBitVector {
+impl<'a, 'region> IntoIterator for &'a SuccinctBitVector<'region> {
     type Item = usize;
     type IntoIter = Ones<'a>;
 
@@ -840,24 +930,45 @@ fn select_set_bit(mut word: u64, ordinal: usize) -> usize {
     word.trailing_zeros() as usize
 }
 
-fn reserve_exact<T>(
-    values: &mut Vec<T>,
-    requested: usize,
-    target: AllocationTarget,
-) -> Result<(), BitVectorError> {
-    values
-        .try_reserve_exact(requested)
-        .map_err(|_| BitVectorError::AllocationFailed { target, requested })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(miri)]
+    use asupersync::Cx;
+    #[cfg(miri)]
+    use asupersync::cx::cap;
+    #[cfg(not(miri))]
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::PurposeContexts;
+
+    #[cfg(not(miri))]
+    fn query_cx() -> QueryCx {
+        let (query, report) = run_async_under_lab(0x5acc_1acc, |root| async move {
+            PurposeContexts::narrow_runtime_root(&root).query()
+        });
+        assert!(
+            report.invariant_violations.is_empty(),
+            "lab invariant violation: {report:?}"
+        );
+        query
+    }
+
+    #[cfg(miri)]
+    fn query_cx() -> QueryCx {
+        let root = Cx::<cap::All>::for_testing();
+        PurposeContexts::narrow_runtime_root(&root).query()
+    }
+
+    fn test_scope() -> RegionScope {
+        RegionScope::with_capacity(1 << 20, 1 << 28, 1 << 30)
+    }
 
     #[test]
     fn construction_rejects_noncanonical_shapes_and_padding() {
+        let scope = test_scope();
+        let cx = query_cx();
         assert_eq!(
-            SuccinctBitVector::try_from_words(0, vec![0]),
+            SuccinctBitVector::try_from_words(&scope, &cx, 0, &[0]),
             Err(BitVectorError::WordCountMismatch {
                 bit_len: 0,
                 expected_words: 0,
@@ -865,7 +976,7 @@ mod tests {
             })
         );
         assert_eq!(
-            SuccinctBitVector::try_from_words(65, vec![0]),
+            SuccinctBitVector::try_from_words(&scope, &cx, 65, &[0]),
             Err(BitVectorError::WordCountMismatch {
                 bit_len: 65,
                 expected_words: 2,
@@ -873,7 +984,7 @@ mod tests {
             })
         );
         assert_eq!(
-            SuccinctBitVector::try_from_words(65, vec![0, 2]),
+            SuccinctBitVector::try_from_words(&scope, &cx, 65, &[0, 2]),
             Err(BitVectorError::NonZeroPadding {
                 bit_len: 65,
                 word_index: 1,
@@ -882,7 +993,7 @@ mod tests {
             })
         );
 
-        let exact = SuccinctBitVector::try_from_words(65, vec![u64::MAX, 1])
+        let exact = SuccinctBitVector::try_from_words(&scope, &cx, 65, &[u64::MAX, 1])
             .expect("canonical words construct");
         assert_eq!(exact.as_words(), &[u64::MAX, 1]);
         assert_eq!(exact.len(), 65);
@@ -891,11 +1002,13 @@ mod tests {
 
     #[test]
     fn empty_vector_has_defined_boundaries_and_storage() {
-        let vector =
-            SuccinctBitVector::try_from_words(0, Vec::new()).expect("empty vector constructs");
+        let scope = test_scope();
+        let cx = query_cx();
+        let vector = SuccinctBitVector::try_from_words(&scope, &cx, 0, &[])
+            .expect("empty vector constructs");
         assert!(vector.is_empty());
         assert_eq!(vector.len(), 0);
-        assert_eq!(vector.as_words(), &[]);
+        assert_eq!(vector.as_words(), &[] as &[u64]);
         assert_eq!(vector.get(0), None);
         assert_eq!(vector.rank1(0), Some(0));
         assert_eq!(vector.rank0(0), Some(0));
@@ -931,7 +1044,8 @@ mod tests {
     #[test]
     fn word_and_superblock_boundaries_match_naive_queries() {
         for len in [
-            1_usize, 2, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025,
+            0_usize, 1, 2, 63, 64, 65, 127, 128, 129, 510, 511, 512, 513, 514, 1023, 1024, 1025,
+            1535, 1536, 1537, 2047, 2048, 2049,
         ] {
             let patterns = [
                 make_bits(len, |_: usize| false),
@@ -950,16 +1064,18 @@ mod tests {
 
     #[test]
     fn select_directory_skips_repeated_superblock_prefixes() {
+        let scope = test_scope();
+        let cx = query_cx();
         let sparse_ones = make_bits(2_049, |index| matches!(index, 0 | 1_024 | 2_048));
-        let ones_vector =
-            SuccinctBitVector::try_from_bits(&sparse_ones).expect("sparse ones construct");
+        let ones_vector = SuccinctBitVector::try_from_bits(&scope, &cx, &sparse_ones)
+            .expect("sparse ones construct");
         assert_eq!(ones_vector.select1(0), Some(0));
         assert_eq!(ones_vector.select1(1), Some(1_024));
         assert_eq!(ones_vector.select1(2), Some(2_048));
 
         let sparse_zeros = make_bits(2_049, |index| !matches!(index, 0 | 1_024 | 2_048));
-        let zeros_vector =
-            SuccinctBitVector::try_from_bits(&sparse_zeros).expect("sparse zeros construct");
+        let zeros_vector = SuccinctBitVector::try_from_bits(&scope, &cx, &sparse_zeros)
+            .expect("sparse zeros construct");
         assert_eq!(zeros_vector.select0(0), Some(0));
         assert_eq!(zeros_vector.select0(1), Some(1_024));
         assert_eq!(zeros_vector.select0(2), Some(2_048));
@@ -986,8 +1102,10 @@ mod tests {
 
     #[test]
     fn final_padding_never_appears_as_a_zero_or_one() {
-        let vector =
-            SuccinctBitVector::try_from_words(65, vec![0, 1]).expect("canonical partial word");
+        let scope = test_scope();
+        let cx = query_cx();
+        let vector = SuccinctBitVector::try_from_words(&scope, &cx, 65, &[0, 1])
+            .expect("canonical partial word");
         assert_eq!(vector.count_ones(), 1);
         assert_eq!(vector.count_zeros(), 64);
         assert_eq!(vector.select1(0), Some(64));
@@ -999,7 +1117,10 @@ mod tests {
 
     #[test]
     fn storage_accounting_uses_exact_array_lengths() {
-        let vector = SuccinctBitVector::try_from_words(513, vec![0; 9]).expect("canonical vector");
+        let scope = test_scope();
+        let cx = query_cx();
+        let vector =
+            SuccinctBitVector::try_from_words(&scope, &cx, 513, &[0; 9]).expect("canonical vector");
         let expected = StorageBreakdown {
             word_bytes: 9 * size_of::<u64>(),
             rank_superblock_bytes: 3 * size_of::<usize>(),
@@ -1028,8 +1149,10 @@ mod tests {
 
     #[test]
     fn builder_enforces_limit_atomically_at_bit_boundaries() {
-        let mut builder =
-            SuccinctBitVectorBuilder::try_with_capacity(65, 65).expect("builder reserves");
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut builder = SuccinctBitVectorBuilder::try_with_capacity_in(&scope, &cx, 65, 65)
+            .expect("builder reserves");
         assert_eq!(builder.len(), 0);
         assert!(builder.is_empty());
         assert_eq!(builder.max_bits(), 65);
@@ -1045,50 +1168,58 @@ mod tests {
         );
 
         let first_word = make_bits(64, |index| index % 3 == 0);
-        builder.extend(&first_word).expect("first word extends");
-        builder.push(true).expect("boundary bit appends");
+        builder
+            .extend(&cx, &first_word)
+            .expect("first word extends");
+        builder.push(&cx, true).expect("boundary bit appends");
         assert_eq!(builder.len(), 65);
         assert_eq!(builder.remaining_bits(), 0);
         assert_eq!(builder.word_len(), 2);
         assert_eq!(builder.logical_word_bytes(), 2 * size_of::<u64>());
         assert_eq!(builder.as_words()[1], 1);
 
-        let before = builder.clone();
+        let before_words = builder.as_words().to_vec();
+        let before_len = builder.len();
         assert_eq!(
-            builder.push(false),
+            builder.push(&cx, false),
             Err(BitVectorError::BitLimitExceeded {
                 attempted_bits: 66,
                 max_bits: 65,
             })
         );
-        assert_eq!(builder, before);
+        assert_eq!(builder.len(), before_len);
+        assert_eq!(builder.as_words(), before_words);
 
-        let vector = builder.finish().expect("builder finishes");
+        let vector = builder.finish(&cx).expect("builder finishes");
         let mut expected = first_word;
         expected.push(true);
         assert_eq!(
             vector,
-            SuccinctBitVector::try_from_bits(&expected).expect("reference constructs")
+            SuccinctBitVector::try_from_bits(&scope, &cx, &expected).expect("reference constructs")
         );
     }
 
     #[test]
     fn builder_rejected_extend_does_not_partially_mutate() {
-        let mut builder = SuccinctBitVectorBuilder::new(5);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut builder = SuccinctBitVectorBuilder::new_in(&scope, 5).expect("builder opens");
         builder
-            .extend(&[true, false, true])
+            .extend(&cx, &[true, false, true])
             .expect("prefix extends");
-        let before = builder.clone();
+        let before_words = builder.as_words().to_vec();
+        let before_len = builder.len();
         assert_eq!(
-            builder.extend(&[false, true, false]),
+            builder.extend(&cx, &[false, true, false]),
             Err(BitVectorError::BitLimitExceeded {
                 attempted_bits: 6,
                 max_bits: 5,
             })
         );
-        assert_eq!(builder, before);
+        assert_eq!(builder.len(), before_len);
+        assert_eq!(builder.as_words(), before_words);
         assert_eq!(
-            SuccinctBitVectorBuilder::try_with_capacity(4, 5),
+            SuccinctBitVectorBuilder::try_with_capacity_in(&scope, &cx, 4, 5),
             Err(BitVectorError::BitLimitExceeded {
                 attempted_bits: 5,
                 max_bits: 4,
@@ -1105,20 +1236,24 @@ mod tests {
 
     #[test]
     fn builder_chunking_is_canonically_equivalent() {
+        let scope = test_scope();
+        let cx = query_cx();
         for len in [0_usize, 1, 63, 64, 65, 511, 512, 513, 2_049] {
             let bits = make_bits(len, |index| {
                 index == 0 || index + 1 == len || index % 7 == 2 || index % 127 == 64
             });
-            let reference = SuccinctBitVector::try_from_bits(&bits).expect("reference constructs");
+            let reference =
+                SuccinctBitVector::try_from_bits(&scope, &cx, &bits).expect("reference constructs");
 
-            let mut pushed = SuccinctBitVectorBuilder::new(len);
+            let mut pushed = SuccinctBitVectorBuilder::new_in(&scope, len).expect("builder opens");
             for &bit in &bits {
-                pushed.push(bit).expect("single bit appends");
+                pushed.push(&cx, bit).expect("single bit appends");
             }
-            let pushed = pushed.finish().expect("pushed builder finishes");
+            let pushed = pushed.finish(&cx).expect("pushed builder finishes");
 
-            let mut chunked = SuccinctBitVectorBuilder::try_with_capacity(len, len.min(65))
-                .expect("chunked builder reserves");
+            let mut chunked =
+                SuccinctBitVectorBuilder::try_with_capacity_in(&scope, &cx, len, len.min(65))
+                    .expect("chunked builder reserves");
             let chunk_sizes = [2_usize, 1, 63, 7, 129, 3, 64];
             let mut start = 0_usize;
             let mut chunk_index = 0_usize;
@@ -1126,7 +1261,9 @@ mod tests {
                 let end = start
                     .saturating_add(chunk_sizes[chunk_index % chunk_sizes.len()])
                     .min(bits.len());
-                chunked.extend(&bits[start..end]).expect("chunk appends");
+                chunked
+                    .extend(&cx, &bits[start..end])
+                    .expect("chunk appends");
                 let final_bits = chunked.len() % WORD_BITS;
                 if final_bits != 0 {
                     let padding =
@@ -1136,7 +1273,7 @@ mod tests {
                 start = end;
                 chunk_index += 1;
             }
-            let chunked = chunked.finish().expect("chunked builder finishes");
+            let chunked = chunked.finish(&cx).expect("chunked builder finishes");
 
             assert_eq!(pushed, reference, "push mismatch at length {len}");
             assert_eq!(chunked, reference, "chunk mismatch at length {len}");
@@ -1145,28 +1282,34 @@ mod tests {
 
     #[test]
     fn builder_finish_reuses_word_allocation_and_capacity() {
+        let scope = test_scope();
+        let cx = query_cx();
         let bits = make_bits(513, |index| index % 11 == 4);
-        let mut builder = SuccinctBitVectorBuilder::try_with_capacity(bits.len(), bits.len())
-            .expect("builder reserves");
-        builder.extend(&bits).expect("bits append");
-        let words_pointer = builder.words.as_ptr();
+        let mut builder =
+            SuccinctBitVectorBuilder::try_with_capacity_in(&scope, &cx, bits.len(), bits.len())
+                .expect("builder reserves");
+        builder.extend(&cx, &bits).expect("bits append");
+        let words_pointer = builder.words.as_slice().as_ptr();
         let words_capacity = builder.words.capacity();
 
-        let vector = builder.finish().expect("builder finishes");
-        assert_eq!(vector.words.as_ptr(), words_pointer);
+        let vector = builder.finish(&cx).expect("builder finishes");
+        assert_eq!(vector.words.as_slice().as_ptr(), words_pointer);
         assert_eq!(vector.words.capacity(), words_capacity);
         assert_eq!(
             vector.retained_storage_breakdown().word_bytes,
             words_capacity * size_of::<u64>()
         );
-        let reference = SuccinctBitVector::try_from_bits(&bits).expect("reference constructs");
+        let reference =
+            SuccinctBitVector::try_from_bits(&scope, &cx, &bits).expect("reference constructs");
         assert_eq!(vector, reference);
     }
 
     #[test]
     fn one_iterator_is_exact_sized_and_fused() {
+        let scope = test_scope();
+        let cx = query_cx();
         let bits = make_bits(200, |index| matches!(index, 0 | 63 | 64 | 199));
-        let vector = SuccinctBitVector::try_from_bits(&bits).expect("bits construct");
+        let vector = SuccinctBitVector::try_from_bits(&scope, &cx, &bits).expect("bits construct");
         let mut ones = vector.iter_ones();
         assert_eq!(ones.len(), 4);
         assert_eq!(ones.next(), Some(0));
@@ -1193,7 +1336,9 @@ mod tests {
     }
 
     fn assert_matches_naive(bits: &[bool]) {
-        let vector = SuccinctBitVector::try_from_bits(bits).expect("bits construct");
+        let scope = test_scope();
+        let cx = query_cx();
+        let vector = SuccinctBitVector::try_from_bits(&scope, &cx, bits).expect("bits construct");
         assert_eq!(vector.len(), bits.len());
         assert_eq!(vector.is_empty(), bits.is_empty());
 
@@ -1237,8 +1382,14 @@ mod tests {
                 bits.len()
             );
         }
-        assert_eq!(vector.rank1(bits.len().saturating_add(1)), None);
-        assert_eq!(vector.rank0(bits.len().saturating_add(1)), None);
+        for invalid_end in [
+            bits.len().saturating_add(1),
+            bits.len().saturating_add(SUPERBLOCK_BITS + 1),
+            usize::MAX,
+        ] {
+            assert_eq!(vector.rank1(invalid_end), None);
+            assert_eq!(vector.rank0(invalid_end), None);
+        }
 
         for (ordinal, &position) in expected_ones.iter().enumerate() {
             assert_eq!(
@@ -1248,7 +1399,14 @@ mod tests {
                 bits.len()
             );
         }
-        assert_eq!(vector.select1(expected_ones.len()), None);
+        for invalid_ordinal in [
+            expected_ones.len(),
+            expected_ones.len().saturating_add(1),
+            expected_ones.len().saturating_add(SUPERBLOCK_BITS + 1),
+            usize::MAX,
+        ] {
+            assert_eq!(vector.select1(invalid_ordinal), None);
+        }
 
         for (ordinal, &position) in expected_zeros.iter().enumerate() {
             assert_eq!(
@@ -1258,6 +1416,13 @@ mod tests {
                 bits.len()
             );
         }
-        assert_eq!(vector.select0(expected_zeros.len()), None);
+        for invalid_ordinal in [
+            expected_zeros.len(),
+            expected_zeros.len().saturating_add(1),
+            expected_zeros.len().saturating_add(SUPERBLOCK_BITS + 1),
+            usize::MAX,
+        ] {
+            assert_eq!(vector.select0(invalid_ordinal), None);
+        }
     }
 }

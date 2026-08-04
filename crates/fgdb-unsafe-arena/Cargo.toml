@@ -1,0 +1,26 @@
+[package]
+name = "fgdb-unsafe-arena"
+version = "0.0.1"
+edition = "2024"
+description = "Region arena with generational handles, disjoint byte views, and a sealed typed-vector allocator."
+publish = false
+
+# NO `[lints] workspace = true`, and the omission is the whole point.
+#
+# The workspace default is `unsafe_code = "forbid"`, and Rust's `forbid` cannot
+# be lowered by any inner attribute — which is exactly why raw-pointer work
+# cannot be sprinkled through ordinary crates. An island opts out of the
+# inherited lint table here and re-imposes `#![deny(unsafe_code)]` at its root
+# instead, so every relaxation must be written down, one narrowly scoped site at
+# a time, each with a row in `registries/unsafe_boundary_ledger.toml`.
+#
+# `unsafe-ledger-check` exempts exactly the rostered islands from the
+# inheritance rule; any other crate that omits this table fails with
+# `member_does_not_inherit_forbid`, and an island that grows one fails
+# `island_inherits_forbid` in `topology-check`.
+
+[dependencies]
+fgdb-types = { path = "../fgdb-types" }
+
+[dev-dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "8ccae2fa8d15d780a9ab774aaf255a4ec7731a71", default-features = false, features = ["test-internals"] }

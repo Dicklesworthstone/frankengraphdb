@@ -18,6 +18,8 @@
 //!   range_status_mismatch   status/code-range coherence violation
 //!   disjointness_dual_class one schema name in two identity classes
 //!   field_unresolved_schema containing_schema resolves nowhere
+//!   arm_payload_shape_field_row  a StrongRef-only union-arm payload shape left
+//!                           the wire path or grew a field row
 //!   field_unresolved_wire_type  exact_wire_type resolves nowhere
 //!   bare_strong_ref         polymorphic strong ref without a generated union
 //!   ref_target_not_logical  strong/conditional target outside class 1
@@ -31,7 +33,10 @@
 //!   reference_union_name_collision reference union shadows another wire type
 //!   ordinary_union_unresolved_schema containing schema has no unique identity class
 //!   ordinary_union_wire_contract_mismatch top-level union/wire cross-index drift
+//!   ordinary_union_logical_contract_mismatch whole-schema union/logical kind or consumer drift
 //!   ordinary_union_container_contract_mismatch open or inconsistent consumer closure
+//!   allowed_containing_schema_unresolved a concrete consumer names no confirmed
+//!                           top-level candidate or stronger catalog/identity row
 //!   ordinary_union_arm_duplicate_tag duplicate ordinary-union arm tag
 //!   ordinary_union_arm_metadata_mismatch arm does not match its union owner
 //!   ordinary_union_arm_lifecycle_mismatch arm outlives its ordinary union
@@ -44,6 +49,44 @@
 //!   bodydigest_self_included      the digest's own tag is not excluded
 //!   bodydigest_pin_mismatch       recipe drift against the FNV pin
 //!   unregistered_field      encodability check: field not in the table
+//!   refinement_claim_unparseable  arm-refinement prose outside the grammar
+//!   refinement_conjunction_invalid  conjunctive refinement is malformed or duplicates a location
+//!   refinement_union_unresolved   refined union is not a registered union
+//!   refinement_arm_unresolved     refined arm name is not an arm of that union
+//!   refinement_arm_tag_mismatch   arm resolves but under a different arm_tag
+//!   refinement_tag_only_payload_unaccounted  a tag-only discriminant refines
+//!                           a payload-bearing arm without accounting for the
+//!                           payload in its claim
+//!   role_projection_claim_unparseable  concrete role projection metadata is
+//!                           outside its closed machine-readable grammar
+//!   role_projection_source_unapproved  role projection names no released
+//!                           generic-source contract
+//!   role_projection_contract_mismatch  formal, role class, wire shape, or
+//!                           serialized-role policy disagrees with its source
+//!   role_projection_role_out_of_bound  concrete role is not in the source's
+//!                           exact closed role set
+//!   role_projection_role_missing / role_projection_role_duplicate  source
+//!                           role expansion is not a bijection
+//!   role_projection_branch_mismatch  concrete wire row, containing-schema
+//!                           closure, validators, or guards drifted
+//!   role_projection_refinement_syntax_forbidden  role dispatch was encoded
+//!                           through singleton/conjunction refinement prose
+//!   arm_value_claim_missing  a payload-preserving arm value carries no
+//!                           refinement claim at all
+//!   arm_value_conjunction_invalid  an arm value claims a two-location
+//!                           conjunction, which is a precondition shape
+//!   arm_value_on_unit_payload  an arm value refines a unit-payload arm,
+//!                           where the tag-only discriminant is the complete
+//!                           and smaller instrument
+//!   arm_value_payload_pin_missing  an arm value carries no parseable
+//!                           complete-payload pin
+//!   arm_value_payload_pin_malformed  an arm value advertises the pin but
+//!                           breaks its closed spelling
+//!   arm_value_payload_pin_mismatch  the pinned arm name or payload digest
+//!                           disagrees with the resolved registered arm
+//!   restore_service_promotion_manifest_coherence  manifest posture, BODY, and
+//!                           authority-profile tag domains are not bound to
+//!                           their one legal cross-field truth table
 //!   bad_field               enum/shape violation
 
 use crate::hash::fnv1a64;
@@ -73,14 +116,931 @@ pub const BUILTIN_WIRE_TYPES: [&str; 11] = [
     "oid256",
 ];
 
-/// Historical assignment witness before the reviewed A10 `CommandRef`
-/// namespace erratum (fgdb-a01-reference-roots-2k0q.1).
+/// The sole typed refinement that can cut a co-phased schema edge.
 ///
-/// That pin named both A01's bare wire identity and A10's generated strong
-/// reference union `CommandRef`. No codec or user data existed; the erratum
-/// renamed only the generated union to `LogicalCommandInputRef`, without
-/// changing tags, targets, reachability, lifecycle, or encoded representation.
-pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:bdbcdc27ccd92518";
+/// Keep this vocabulary in one reader: the loader, validator, DAG builder, and
+/// robot output all consume `FieldRow::construction_relation`; no second
+/// allowlist is permitted to decide which edges are instance-prior.
+pub const PRIOR_OBJECT_CONSTRUCTION_RELATION: &str = "prior_object";
+
+/// The `reference_semantics` a field row MUST carry, given its `exact_wire_type`.
+///
+/// LAW: **the wire tag declares the reference strength.** Appendix A: "Every
+/// ObjectId-bearing edge declares a wire tag: `StrongRef{oid}` (always
+/// followed); `StrongMarkerRef`/`StrongCommandRef` (retain the named history
+/// object); `ConditionalCoordinateRef` ...; `ConditionalMarkerRef`/
+/// `ConditionalCommandRef` (followed until an authenticated matching
+/// checkpoint/cut); `WeakMarkerIdentity` (provenance/identity only);
+/// ... or `WeakDigest{digest}` (comparison only)", and for the W12 wrappers
+/// "Strong variants retain, conditional variants stop only at a verified
+/// matching meta/shard checkpoint cut, and weak variants compare only."
+///
+/// The declaration was already enforced on Appendix A catalog ANNOTATIONS
+/// (`catalog_annotation_reference_semantics_mismatch`) and on nothing else, so a
+/// `[[field]]` row typed `StrongRef` could declare `reference_semantics =
+/// "none"`, keep its target, and pass every gate — silently switching off
+/// `dag_future_result`, `bare_strong_ref`, and every generated reachability /
+/// GC / checkpoint-vector walker for that member, then freezing behind the
+/// append-only field pin (fgdb-refsem-not-forced-by-wire-type-gls4).
+///
+/// Delegates to the one table rather than restating it. Two spelling
+/// adjustments, both forced by the same prose:
+///   * catalog `"identity"` (bare `MarkerRef`/`CommandRef`, which Appendix A
+///     calls "identities, **not reachability by themselves**") has no field
+///     spelling; a member that creates no edge carries `"none"`.
+///   * the three W12 weak-identity tags are wire tags, not catalog *definition*
+///     families, so the catalog table does not name them. "weak variants
+///     compare only" — and both landed rows carry `"none"` with an explicit
+///     "creates no reachability edge" retention rule.
+///
+/// `None` means the type declares nothing; such a row is constrained instead by
+/// `reference_semantics_without_reference_type` plus the target/union guards.
+fn declared_field_reference_semantics(exact_wire_type: &str) -> Option<&'static str> {
+    match crate::appendix_a::registered_reference_definition_semantics(exact_wire_type) {
+        Some("identity") => Some("none"),
+        Some(other) => Some(other),
+        None => match exact_wire_type {
+            "WeakGlobalCommandIdentity" | "WeakMarkerIdentity" | "WeakShardCommandIdentity" => {
+                Some("none")
+            }
+            _ => None,
+        },
+    }
+}
+
+/// The marker that opens an arm-refinement claim in a wire tag's
+/// `encoding_context`. A tag-refined wrapper is a wire type that admits a
+/// STRICT SUBSET of its union's arms — Appendix A a20:2593 mints two of them
+/// and states the rule they exist to serve: "variant syntax is never used as a
+/// reference target."
+pub const REFINEMENT_CLAIM_MARKER: &str = "admits only the ";
+
+/// The marker for one atomic two-location refinement. Exactly two is
+/// deliberate: this is the minimum language needed for source spellings such
+/// as `OperationalPendingIndependentReopen::Sealed`, without growing a general
+/// Boolean-expression language inside registry prose.
+pub const REFINEMENT_CONJUNCTION_MARKER: &str = "admits only when both the ";
+
+/// Marker for a concrete, role-erased projection of one generic source
+/// contract (fgdb-ap4t).
+///
+/// This is deliberately separate from the singleton/conjunction refinement
+/// grammar above.  A generic source can select a DIFFERENT union and arm for
+/// each concrete role; treating those alternatives as a conjunction would
+/// require one encoded value to inhabit every role at once.  Each projection
+/// therefore declares one source role, a structured validator list, and
+/// `role_discriminator=none`.  The released contract below independently pins
+/// the complete role set and every branch.
+pub const ROLE_PROJECTION_CLAIM_MARKER: &str = "role projection [";
+
+/// Why a refinement claim that advertises itself as machine-readable could not
+/// be parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefinementClaimParseError {
+    Single,
+    Conjunction,
+}
+
+type RefinementClause<'a> = (&'a str, i64, &'a str);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoleProjectionClaim<'a> {
+    source_key: &'a str,
+    formal: &'a str,
+    formal_class: &'a str,
+    role: &'a str,
+    role_discriminator: &'a str,
+    validators: Vec<RefinementClause<'a>>,
+    guards: Vec<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoleProjectionParseError {
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoleProjectionBranchPin {
+    role: &'static str,
+    wire_type: &'static str,
+    allowed_containing_schemas: &'static [&'static str],
+    validators: &'static [RefinementClause<'static>],
+    guards: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoleProjectionFamilyPin {
+    source_key: &'static str,
+    formal: &'static str,
+    formal_class: &'static str,
+    wire_kind: &'static str,
+    max_size_bytes: i64,
+    branches: &'static [RoleProjectionBranchPin],
+}
+
+const AWAITING_SOURCE_RELEASE_LOCAL_VALIDATORS: [RefinementClause<'static>; 1] =
+    [("AwaitingSourceRelease", 0x0007, "LocalRestorePhase")];
+const AWAITING_SOURCE_RELEASE_META_VALIDATORS: [RefinementClause<'static>; 1] =
+    [("AwaitingSourceRelease", 0x0006, "MetaRestorePhase")];
+const INITIAL_RESTORE_REGISTRY_LOCAL_VALIDATORS: [RefinementClause<'static>; 3] = [
+    ("Nonterminal", 0x0001, "LocalRestoreRegistryValue"),
+    ("ActiveHidden", 0x0001, "LocalRestorePhase"),
+    (
+        "Current",
+        0x0001,
+        "RestoreLeaseState<Role:AuthorityOwningRole>",
+    ),
+];
+const INITIAL_RESTORE_REGISTRY_META_VALIDATORS: [RefinementClause<'static>; 3] = [
+    ("Nonterminal", 0x0001, "MetaRestoreRegistryValue"),
+    ("ActiveHidden", 0x0001, "MetaRestorePhase"),
+    (
+        "Current",
+        0x0001,
+        "RestoreLeaseState<Role:AuthorityOwningRole>",
+    ),
+];
+const INITIAL_RESTORE_REGISTRY_SHARD_VALIDATORS: [RefinementClause<'static>; 1] =
+    [("ActiveHidden", 0x0001, "ShardRestoreRegistryValue")];
+
+const AWAITING_SOURCE_RELEASE_BRANCHES: [RoleProjectionBranchPin; 2] = [
+    RoleProjectionBranchPin {
+        role: "Local",
+        wire_type: "AwaitingSourceReleaseLocalRestorePhase",
+        allowed_containing_schemas: &["RestoreSourceLeaseReleaseSpec<Local>"],
+        validators: &AWAITING_SOURCE_RELEASE_LOCAL_VALIDATORS,
+        guards: &["tag_only_no_arm_payload"],
+    },
+    RoleProjectionBranchPin {
+        role: "Meta",
+        wire_type: "AwaitingSourceReleaseMetaRestorePhase",
+        allowed_containing_schemas: &["RestoreSourceLeaseReleaseSpec<Meta>"],
+        validators: &AWAITING_SOURCE_RELEASE_META_VALIDATORS,
+        guards: &["tag_only_no_arm_payload"],
+    },
+];
+
+const INITIAL_RESTORE_REGISTRY_BRANCHES: [RoleProjectionBranchPin; 3] = [
+    RoleProjectionBranchPin {
+        role: "Local",
+        wire_type: "LocalInitialRestoreRegistryRef",
+        allowed_containing_schemas: &["RecoveryBridgeSpec<Local>"],
+        validators: &INITIAL_RESTORE_REGISTRY_LOCAL_VALIDATORS,
+        guards: &[
+            "complete_role_valid_common_identity",
+            "exact_initial_restore_state_ref",
+            "latest_matching_source_lease_record",
+            "no_future_applied_phase",
+        ],
+    },
+    RoleProjectionBranchPin {
+        role: "Meta",
+        wire_type: "MetaInitialRestoreRegistryRef",
+        allowed_containing_schemas: &["RecoveryBridgeSpec<Meta>"],
+        validators: &INITIAL_RESTORE_REGISTRY_META_VALIDATORS,
+        guards: &[
+            "complete_role_valid_common_identity",
+            "exact_initial_restore_state_ref",
+            "latest_matching_source_lease_record",
+            "no_future_applied_phase",
+        ],
+    },
+    RoleProjectionBranchPin {
+        role: "Shard",
+        wire_type: "ShardInitialRestoreRegistryRef",
+        allowed_containing_schemas: &["RecoveryBridgeSpec<Shard>"],
+        validators: &INITIAL_RESTORE_REGISTRY_SHARD_VALIDATORS,
+        guards: &[
+            "exact_initial_restore_state_ref",
+            "certified_source_lease_projection",
+            "exact_transform_projection",
+            "exact_meta_prefix_configuration",
+            "no_terminal_or_pin_state",
+        ],
+    },
+];
+
+const ROLE_PROJECTION_FAMILIES: [RoleProjectionFamilyPin; 2] = [
+    RoleProjectionFamilyPin {
+        source_key: "field|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>|RestoreSourceLeaseReleaseSpec<Role:AuthorityOwningRole>.expected_registry_basis_and_phase|expected_registry_basis_and_phase",
+        formal: "Role",
+        formal_class: "AuthorityOwningRole",
+        wire_kind: "discriminant",
+        max_size_bytes: 1,
+        branches: &AWAITING_SOURCE_RELEASE_BRANCHES,
+    },
+    RoleProjectionFamilyPin {
+        source_key: "top|InitialRestoreRegistryRef<Role>",
+        formal: "Role",
+        formal_class: "Role",
+        wire_kind: "reference_wrapper",
+        max_size_bytes: 40,
+        branches: &INITIAL_RESTORE_REGISTRY_BRANCHES,
+    },
+];
+
+fn role_projection_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+fn parse_role_projection_validator(value: &str) -> Option<RefinementClause<'_>> {
+    let (union, rest) = value.split_once("::")?;
+    let (arm, tag_hex) = rest.split_once("@0x")?;
+    if union.is_empty()
+        || union.contains(char::is_whitespace)
+        || !role_projection_token(arm)
+        || tag_hex.len() != 4
+    {
+        return None;
+    }
+    let tag = i64::from_str_radix(tag_hex, 16).ok()?;
+    Some((arm, tag, union))
+}
+
+/// Parse the closed role-projection spelling embedded in a wire row:
+///
+/// `role projection [source=...; formal=...; formal_class=...; role=...;`
+/// ` role_discriminator=none; validators=Union::Arm@0x0001,...; guards=...]`
+///
+/// The fields are ordered and total.  Unknown, repeated, empty, or malformed
+/// fields fail closed instead of becoming ignored prose.
+fn parse_role_projection_claim(
+    encoding_context: &str,
+) -> Option<Result<RoleProjectionClaim<'_>, RoleProjectionParseError>> {
+    let count = encoding_context
+        .matches(ROLE_PROJECTION_CLAIM_MARKER)
+        .count();
+    if count == 0 {
+        return None;
+    }
+    if count != 1 {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    let (_, rest) = encoding_context.split_once(ROLE_PROJECTION_CLAIM_MARKER)?;
+    let Some((body, _tail)) = rest.split_once(']') else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    let parts: Vec<&str> = body.split("; ").collect();
+    let [
+        source,
+        formal,
+        formal_class,
+        role,
+        role_discriminator,
+        validators,
+        guards,
+    ] = parts.as_slice()
+    else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    let values = (
+        source.strip_prefix("source="),
+        formal.strip_prefix("formal="),
+        formal_class.strip_prefix("formal_class="),
+        role.strip_prefix("role="),
+        role_discriminator.strip_prefix("role_discriminator="),
+        validators.strip_prefix("validators="),
+        guards.strip_prefix("guards="),
+    );
+    let (
+        Some(source_key),
+        Some(formal),
+        Some(formal_class),
+        Some(role),
+        Some(role_discriminator),
+        Some(validators),
+        Some(guards),
+    ) = values
+    else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    if source_key.is_empty()
+        || !role_projection_token(formal)
+        || !role_projection_token(formal_class)
+        || !role_projection_token(role)
+        || !role_projection_token(role_discriminator)
+    {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    let validators: Option<Vec<_>> = validators
+        .split(',')
+        .map(parse_role_projection_validator)
+        .collect();
+    let Some(validators) = validators.filter(|values| !values.is_empty()) else {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    };
+    let guards: Vec<_> = guards.split(',').collect();
+    if guards.is_empty() || guards.iter().any(|guard| !role_projection_token(guard)) {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    let validator_set: BTreeSet<_> = validators.iter().copied().collect();
+    let guard_set: BTreeSet<_> = guards.iter().copied().collect();
+    if validator_set.len() != validators.len() || guard_set.len() != guards.len() {
+        return Some(Err(RoleProjectionParseError::Malformed));
+    }
+    Some(Ok(RoleProjectionClaim {
+        source_key,
+        formal,
+        formal_class,
+        role,
+        role_discriminator,
+        validators,
+        guards,
+    }))
+}
+
+/// Parse one `<Arm> arm (arm_tag 0x<hex>) of the <Union> union` clause and
+/// return the unconsumed suffix.
+fn parse_refinement_clause(input: &str) -> Option<(RefinementClause<'_>, &str)> {
+    let (arm, rest) = input.split_once(" arm (arm_tag 0x")?;
+    let (tag_hex, rest) = rest.split_once(") of the ")?;
+    let (union, tail) = rest.split_once(" union")?;
+    if arm.is_empty() || union.is_empty() {
+        return None;
+    }
+    // Each name is one identifier. A multi-word phrase ("Sharded/ExternalCas
+    // RestoreServicePromotionManifest") is the prose dialect, not this grammar.
+    if arm.contains(' ') || union.contains(' ') {
+        return None;
+    }
+    let tag = i64::from_str_radix(tag_hex, 16).ok()?;
+    Some(((arm, tag, union), tail))
+}
+
+/// The canonical, machine-readable spellings of an arm-refinement claim:
+///
+/// ```text
+/// admits only the <SourceArmName> arm (arm_tag 0x<hex>) of the <Union> union
+/// admits only when both the <Arm1> arm (arm_tag 0x<hex>) of the <Union1> union
+///     and the <Arm2> arm (arm_tag 0x<hex>) of the <Union2> union
+/// ```
+///
+/// A conjunction is one claim with exactly two DISTINCT locations. It is not
+/// two independent claims: every returned clause must resolve or the row
+/// fails. Repeated markers, a third clause, mixing the two dialects, and a
+/// duplicate clause all fail closed.
+///
+/// `None` means the row makes no refinement claim. `Some(Err(_))` means it
+/// advertises one but is outside its grammar; callers MUST report that rather
+/// than skip it. Union generic suffixes remain intact here and are stripped at
+/// lookup.
+fn parse_refinement_claim(
+    encoding_context: &str,
+) -> Option<Result<Vec<RefinementClause<'_>>, RefinementClaimParseError>> {
+    let single_count = encoding_context.matches(REFINEMENT_CLAIM_MARKER).count();
+    let conjunction_count = encoding_context
+        .matches(REFINEMENT_CONJUNCTION_MARKER)
+        .count();
+
+    match (single_count, conjunction_count) {
+        (0, 0) => None,
+        (1, 0) => {
+            let Some((_, rest)) = encoding_context.split_once(REFINEMENT_CLAIM_MARKER) else {
+                return Some(Err(RefinementClaimParseError::Single));
+            };
+            let parsed = parse_refinement_clause(rest)
+                .ok_or(RefinementClaimParseError::Single)
+                .and_then(|(clause, tail)| {
+                    if tail.trim_start().starts_with("and the ") {
+                        Err(RefinementClaimParseError::Single)
+                    } else {
+                        Ok(vec![clause])
+                    }
+                });
+            Some(parsed)
+        }
+        (0, 1) => {
+            let Some((_, rest)) = encoding_context.split_once(REFINEMENT_CONJUNCTION_MARKER) else {
+                return Some(Err(RefinementClaimParseError::Conjunction));
+            };
+            let parsed = parse_refinement_clause(rest)
+                .ok_or(RefinementClaimParseError::Conjunction)
+                .and_then(|(first, rest)| {
+                    let rest = rest
+                        .strip_prefix(" and the ")
+                        .ok_or(RefinementClaimParseError::Conjunction)?;
+                    let (second, tail) = parse_refinement_clause(rest)
+                        .ok_or(RefinementClaimParseError::Conjunction)?;
+                    if first == second || tail.trim_start().starts_with("and the ") {
+                        return Err(RefinementClaimParseError::Conjunction);
+                    }
+                    Ok(vec![first, second])
+                });
+            Some(parsed)
+        }
+        (0, _) => Some(Err(RefinementClaimParseError::Conjunction)),
+        (_, 0) => Some(Err(RefinementClaimParseError::Single)),
+        _ => Some(Err(RefinementClaimParseError::Conjunction)),
+    }
+}
+
+/// The registered `union_name` for a prose union spelling: generics are dropped
+/// at the first `<`. `RestoreTerminalPinBasis<Role>` and the registered
+/// `RestoreTerminalPinBasis` are one union; so are the `<Role:Bound>` spellings.
+fn refinement_union_base(name: &str) -> &str {
+    match name.split_once('<') {
+        Some((base, _)) => base,
+        None => name,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Value-position refinement classes (fgdb-payload-bearing-arm-values-5u56).
+//
+// The fgdb-gpms ruling minted the tag-refined discriminant for PRECONDITION
+// fields: the field gates on which arm the state is in, so it carries the
+// refined union's tag and never the arm payload. That instrument is complete
+// only while the payload is accounted for. Every value-position refinement
+// therefore lands in exactly one of two classes:
+//
+//   TAG-ONLY PRECONDITION (`kind = "discriminant"`). The field is a gate,
+//   not a carrier. Its claim must contain the accounting clause
+//   `carries the refined union's u8 tag and never the arm payload` whenever
+//   the refined arm is payload-bearing (`payload_kind != "unit"`): either
+//   the full stop (the precondition's semantics are tag-level, as on the
+//   PromotedAwaitingReopen landing) or a `, while ... bind ...` continuation
+//   naming the sibling fields that carry the payload independently (the
+//   LocalAbort landing). A payload-bearing arm refined by a discriminant
+//   whose claim is silent about the payload is an erasure, not a refinement.
+//
+//   PAYLOAD-BEARING ARM VALUE (`kind = "arm_value"`). The field IS the arm
+//   value — `AuditTicketClaimRecord.owner : AuditTicketOwner::Operation`,
+//   where the Operation payload {global_txn_id, registration_generation,
+//   operation_request_basis_commitment} is the record's owner identity and
+//   no sibling field carries it. The representation carries the refined
+//   union's tag AND the complete selected-arm payload, and the claim pins
+//   that payload by the digest the census registered for the arm:
+//
+//     carries the refined union's u8 tag and the complete <SourceArmName>
+//     arm payload (payload_sha256 <64 lowercase hex>)
+//
+//   The pin makes "complete" mechanical: dropping it, corrupting the digest,
+//   or naming a different arm all fail closed. An `arm_value` on a
+//   unit-payload arm is an obfuscated discriminant; an `arm_value` with a
+//   two-location conjunction is a precondition shape wearing the wrong kind.
+//
+// ---------------------------------------------------------------------------
+
+/// The accounting clause a tag-only discriminant must carry when it refines a
+/// payload-bearing arm. Both spellings in the landed corpus contain it
+/// verbatim: the full-stop form and the `, while ... bind ...` form.
+pub const TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER: &str =
+    "carries the refined union's u8 tag and never the arm payload";
+
+/// The prefix of the complete-payload pin an `arm_value` claim must carry.
+pub const ARM_VALUE_PAYLOAD_PIN_PREFIX: &str =
+    "carries the refined union's u8 tag and the complete ";
+
+/// The infix separating the pinned arm name from its registered digest.
+pub const ARM_VALUE_PAYLOAD_PIN_INFIX: &str = " arm payload (payload_sha256 ";
+
+/// One parsed complete-payload pin: the named arm and its claimed digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArmValuePayloadPin<'a> {
+    arm: &'a str,
+    sha256: &'a str,
+}
+
+/// Parse the complete-payload pin out of an `arm_value` `encoding_context`.
+///
+/// `None` means the row advertises nothing — no pin prefix and no digest
+/// infix (the `arm_value_payload_pin_missing` case). `Some(Err(()))` means
+/// the row advertises the pin but breaks its closed spelling — truncated
+/// name, missing infix, wrong digest length, non-hex, an unterminated `)`,
+/// an infix with no prefix at all, or a repetition at either level of the
+/// spelling — which must fail closed rather than be skipped the way a prose
+/// claim would be. `Some(Ok(pin))` is one well-formed pin; agreement with
+/// the resolved registered arm is the caller's check.
+fn parse_arm_value_payload_pin(
+    encoding_context: &str,
+) -> Option<Result<ArmValuePayloadPin<'_>, ()>> {
+    let pin_count = encoding_context
+        .matches(ARM_VALUE_PAYLOAD_PIN_PREFIX)
+        .count();
+    let infix_count = encoding_context
+        .matches(ARM_VALUE_PAYLOAD_PIN_INFIX)
+        .count();
+    // Totality at BOTH levels of the closed spelling: exactly one pin prefix
+    // and exactly one digest infix. A repeated prefix is the reviewed
+    // fail-open; a repeated digest infix is the same hole one level down — a
+    // row could pin one arm correctly and smuggle a contradictory second
+    // digest past the ignored tail. Neither is a prose mention to skip.
+    match (pin_count, infix_count) {
+        (0, 0) => return None,
+        (1, 1) => {}
+        _ => return Some(Err(())),
+    }
+    let (_, rest) = encoding_context.split_once(ARM_VALUE_PAYLOAD_PIN_PREFIX)?;
+    Some((|| {
+        let (arm, rest) = rest.split_once(ARM_VALUE_PAYLOAD_PIN_INFIX).ok_or(())?;
+        if arm.is_empty() || arm.contains(' ') {
+            return Err(());
+        }
+        let (sha256, tail) = rest.split_once(')').ok_or(())?;
+        if !is_lowercase_sha256(sha256) {
+            return Err(());
+        }
+        let _ = tail;
+        Ok(ArmValuePayloadPin { arm, sha256 })
+    })())
+}
+
+/// Resolve one parsed refinement clause through the ordinary-union catalog.
+///
+/// Keeping this outside the caller's bounded one-or-two-clause loop also keeps
+/// diagnostic construction out of the loop itself.
+fn validate_refinement_clause(
+    ordinary_unions_by_base: &BTreeMap<&str, Vec<&OrdinaryUnion>>,
+    wire_name: &str,
+    (arm, tag, union): RefinementClause<'_>,
+    out: &mut Vec<Violation>,
+) {
+    let base = refinement_union_base(union);
+    match ordinary_unions_by_base.get(base) {
+        None => out.push(v(
+            "refinement_union_unresolved",
+            "wire_types",
+            wire_name,
+            format!(
+                "refinement names union {union:?}, which has no [[union]] row \
+                 under base name {base:?}; a wrapper may not refine a union that \
+                 is not registered"
+            ),
+        )),
+        Some(unions) => {
+            let named: Vec<&OrdinaryUnionArm> = unions
+                .iter()
+                .flat_map(|u| u.arms.iter())
+                .filter(|a| a.source_arm_name == arm)
+                .collect();
+            if named.is_empty() {
+                out.push(v(
+                    "refinement_arm_unresolved",
+                    "wire_types",
+                    wire_name,
+                    format!(
+                        "refinement names arm {arm:?} of union {base:?}, which \
+                         has no [[union_arm]] row with that source_arm_name"
+                    ),
+                ));
+            } else if !named.iter().any(|a| a.arm_tag == tag) {
+                let actual: Vec<String> = named
+                    .iter()
+                    .map(|a| format!("{:#06x}", a.arm_tag))
+                    .collect();
+                out.push(v(
+                    "refinement_arm_tag_mismatch",
+                    "wire_types",
+                    wire_name,
+                    format!(
+                        "refinement claims arm {arm:?} of union {base:?} at \
+                         arm_tag {tag:#06x}; the registered arm carries {}",
+                        actual.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// Resolve one parsed refinement clause to the registered arm rows it names.
+///
+/// Returns `None` on any resolution failure — unknown union, unknown arm, or
+/// tag mismatch — because `validate_refinement_clause` has already emitted
+/// the precise violation for that failure, and a payload law must never
+/// double-report on an unresolved claim. The `any`-on-tag rule matches the
+/// validator: several role instantiations of one generic union may register
+/// the arm under different tags, and the claim names the union, not the
+/// instantiation, so every instantiation whose arm matches the claimed tag is
+/// a resolution.
+fn resolve_refinement_clause<'a>(
+    ordinary_unions_by_base: &BTreeMap<&str, Vec<&'a OrdinaryUnion>>,
+    (arm, tag, union): RefinementClause<'_>,
+) -> Option<Vec<&'a OrdinaryUnionArm>> {
+    let unions = ordinary_unions_by_base.get(refinement_union_base(union))?;
+    let resolved: Vec<&OrdinaryUnionArm> = unions
+        .iter()
+        .flat_map(|u| u.arms.iter())
+        .filter(|a| a.source_arm_name == arm && a.arm_tag == tag)
+        .collect();
+    if resolved.is_empty() {
+        // Either the arm name is unregistered (refinement_arm_unresolved) or
+        // every registered instance carries a different tag
+        // (refinement_arm_tag_mismatch); both are already reported.
+        None
+    } else {
+        Some(resolved)
+    }
+}
+
+/// Enforce the two released role-projection families as exact bijections.
+///
+/// The catalog rows are the mutable description; `ROLE_PROJECTION_FAMILIES`
+/// is the independent, review-updated contract.  In particular, the generic
+/// a18 precondition expands to Local|Meta (never Shard), while the a19
+/// generated reference wrapper expands to Local|Meta|Shard.  A branch selects
+/// one concrete validator set; branches are alternatives, not a conjunction.
+fn validate_role_projection_contracts(
+    r: &IdentityRegistries,
+    ordinary_unions_by_base: &BTreeMap<&str, Vec<&OrdinaryUnion>>,
+    out: &mut Vec<Violation>,
+) {
+    let mut counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+
+    for wire in &r.wire {
+        let Some(claim) = parse_role_projection_claim(&wire.encoding_context) else {
+            continue;
+        };
+        let claim = match claim {
+            Ok(claim) => claim,
+            Err(RoleProjectionParseError::Malformed) => {
+                out.push(v(
+                    "role_projection_claim_unparseable",
+                    "wire_types",
+                    &wire.name,
+                    format!(
+                        "role projection must use the closed grammar \"{}source=...; formal=...; \
+                         formal_class=...; role=...; role_discriminator=none; \
+                         validators=Union::Arm@0x0001,...; guards=...]\"",
+                        ROLE_PROJECTION_CLAIM_MARKER
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        if wire.encoding_context.contains(REFINEMENT_CLAIM_MARKER)
+            || wire
+                .encoding_context
+                .contains(REFINEMENT_CONJUNCTION_MARKER)
+        {
+            out.push(v(
+                "role_projection_refinement_syntax_forbidden",
+                "wire_types",
+                &wire.name,
+                "a concrete role projection carries structured validators; singleton or \
+                 conjunctive refinement prose would either duplicate one branch or require \
+                 mutually exclusive roles to hold simultaneously",
+            ));
+        }
+
+        let Some(family) = ROLE_PROJECTION_FAMILIES
+            .iter()
+            .find(|family| family.source_key == claim.source_key)
+        else {
+            out.push(v(
+                "role_projection_source_unapproved",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "role projection names source {:?}, which has no released exact-role contract",
+                    claim.source_key
+                ),
+            ));
+            continue;
+        };
+
+        if claim.formal != family.formal
+            || claim.formal_class != family.formal_class
+            || claim.role_discriminator != "none"
+            || wire.kind != family.wire_kind
+            || wire.max_size_bytes != family.max_size_bytes
+            || wire.containing_union.is_some()
+            || wire.wire_tag.is_some()
+        {
+            out.push(v(
+                "role_projection_contract_mismatch",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "source {:?} requires formal {:?}, formal_class {:?}, kind {:?}, \
+                     max_size_bytes {}, no containing-union tag, and role_discriminator=none",
+                    family.source_key,
+                    family.formal,
+                    family.formal_class,
+                    family.wire_kind,
+                    family.max_size_bytes
+                ),
+            ));
+        }
+
+        let Some(branch) = family
+            .branches
+            .iter()
+            .find(|branch| branch.role == claim.role)
+        else {
+            out.push(v(
+                "role_projection_role_out_of_bound",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "role {:?} is outside source {:?}'s exact role set {:?}",
+                    claim.role,
+                    family.source_key,
+                    family
+                        .branches
+                        .iter()
+                        .map(|branch| branch.role)
+                        .collect::<Vec<_>>()
+                ),
+            ));
+            continue;
+        };
+        *counts.entry((family.source_key, branch.role)).or_default() += 1;
+
+        let containers_match = wire
+            .allowed_containing_schemas
+            .iter()
+            .map(String::as_str)
+            .eq(branch.allowed_containing_schemas.iter().copied());
+        let validators_match = claim
+            .validators
+            .iter()
+            .copied()
+            .eq(branch.validators.iter().copied());
+        let guards_match = claim
+            .guards
+            .iter()
+            .copied()
+            .eq(branch.guards.iter().copied());
+        if wire.name != branch.wire_type || !containers_match || !validators_match || !guards_match
+        {
+            out.push(v(
+                "role_projection_branch_mismatch",
+                "wire_types",
+                &wire.name,
+                format!(
+                    "source {:?} role {:?} must use wire type {:?}, containing schemas {:?}, \
+                     validators {:?}, and guards {:?}",
+                    family.source_key,
+                    branch.role,
+                    branch.wire_type,
+                    branch.allowed_containing_schemas,
+                    branch.validators,
+                    branch.guards
+                ),
+            ));
+        }
+
+        for validator in &claim.validators {
+            validate_refinement_clause(ordinary_unions_by_base, &wire.name, *validator, out);
+        }
+    }
+
+    for family in ROLE_PROJECTION_FAMILIES {
+        for branch in family.branches {
+            match counts
+                .get(&(family.source_key, branch.role))
+                .copied()
+                .unwrap_or(0)
+            {
+                0 => out.push(v(
+                    "role_projection_role_missing",
+                    "wire_types",
+                    family.source_key,
+                    format!(
+                        "generic source has no concrete {:?} projection; exact role coverage is {:?}",
+                        branch.role,
+                        family
+                            .branches
+                            .iter()
+                            .map(|candidate| candidate.role)
+                            .collect::<Vec<_>>()
+                    ),
+                )),
+                1 => {}
+                count => out.push(v(
+                    "role_projection_role_duplicate",
+                    "wire_types",
+                    family.source_key,
+                    format!(
+                        "generic source has {count} concrete {:?} projections; exactly one is required",
+                        branch.role
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+/// FORWARD DRIFT DETECTOR FROM A STATED BASELINE. **Not** proof that the
+/// pre-erratum namespace is reconstructible — fgdb-7yo9 proved it is not.
+///
+/// What this pin does: the witness rebuilds a historical namespace by removing
+/// every post-erratum cohort from the PRESENT registries, hashes it, and
+/// compares against this baseline. A change that moves the hash without a
+/// matching filter/undo extension is caught. That is a real and useful gate.
+///
+/// What it does NOT do, and previously claimed to: reconstruct the namespace as
+/// it stood before the A10 `CommandRef` erratum. The floor it compared against
+/// was computed over 8a704c2's RECONSTRUCTION, while the only surviving
+/// artifact of that commit is its RAW FILE. Those are different objects, and
+/// requiring equality between them demands something meaningless — a gate that
+/// demands the impossible is not stronger, it is permanently red.
+///
+/// SUPERSEDED HISTORICAL VALUES, recorded and not deleted:
+///   `fnv1a64:bdbcdc27ccd92518`  the value 8a704c2 overwrote. Unrecoverable:
+///     fgdb-7yo9 proved that filtering exactly the 26 rows 8a704c2 registered
+///     yields 71729c11125d59d1, not this.
+///   `fnv1a64:236efa5babe190fe`  the floor 8a704c2 re-pinned to, in order to
+///     CONCEAL an unexplained mismatch. Unreachable: fgdb-e55p accounted both
+///     halves of the transcript with zero remainder — fields 225 = 218 identical
+///     + 2 undo-expected + 5 content drift; non-field 37 = 25 identical + 3
+///     rename-expected + 9 membership drift — applied both repairs, and the walk
+///     a86e33d4020143ef -> 69f3b79b0a6221c0 -> e0245f1bf4c183fd still lands one
+///     hash short. The residual is an artifact-class mismatch, not drift.
+///
+/// This baseline is re-computed THE SAME WAY the witness computes the value it
+/// compares, so the assert compares like with like. Extend the filter/undo set
+/// when it drifts; re-baselining is an OWNER ruling and must ship its full
+/// accounting in the same commit, as this one did (fgdb-e55p).
+pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:e0245f1bf4c183fd";
+
+/// One NAMED union-arm payload shape governed by the StrongRef-only
+/// arm-payload law (`STRONGREF_ONLY_ARM_PAYLOAD_SHAPES`).
+#[derive(Debug, Clone, Copy)]
+pub struct ArmPayloadShape {
+    /// Generic-free family name, spelled as the source spells it.
+    pub name: &'static str,
+    /// `slice:line` of the source sentence that defines the shape.
+    pub source: &'static str,
+    /// The generated union field whose arms carry the shape.
+    pub carried_by: &'static str,
+    /// Every member of the shape's body. The law admits the shape only while
+    /// EVERY member is a retaining reference: one non-reference member and the
+    /// shape owes a real field body on a field-owning host instead.
+    pub members: &'static [&'static str],
+    /// The bead whose ruling placed the shape on the wire path.
+    pub ruling: &'static str,
+}
+
+/// LAW: **a union-arm payload shape — NAMED OR ANONYMOUS — whose body carries
+/// only retaining references takes the WIRE path, and owns NO `[[field]]`
+/// row.**
+///
+/// Stated because it was twice re-derived from the corpus and once decided the
+/// wrong way. The corpus reading is unanimous: of 72 landed self-owned ordinary
+/// unions registered as a wire type, the number of `[[field]]` rows naming any
+/// of them as `containing_schema` is ZERO, and `CommittedDeltaSourceRef.batch_ref`
+/// (`Local{batch_ref:StrongRef<LogicalDeltaBatch>,commit_seq}`) is the same edge
+/// shape already accepted on that path. The two laws below admit nothing else
+/// for an ANONYMOUS interior: `field_unresolved_schema` resolves a
+/// `containing_schema` only in {logical, bootstrap, physical, prebootstrap} —
+/// wire is not among them — and `ordinary_union_unresolved_schema` forbids the
+/// dual class that registering the owner as a logical kind would need.
+///
+/// The NAMED case is the one that had to be ruled rather than measured: a shape
+/// with its own name, reused by several arms, reads like a schema, and the
+/// checker accepts BOTH a logical kind with a field row and a wire record with
+/// none. `fgdb-a11-residue-unresolved-schema-ref-laws-54sd` ruled that the
+/// name changes nothing — a named shape and an anonymous interior take the same
+/// path — because a per-union exception moves the contradiction one hop and
+/// creates a named-vs-anonymous distinction that NOTHING in the checker encodes.
+///
+/// WHAT THIS COSTS, stated because it is a real cost and not a free win: the
+/// retaining references inside a wire-path shape get no row anywhere, so their
+/// edges are invisible to `dag_future_result`, to GC, and to the
+/// checkpoint-vector walkers. That is the `fgdb-owlp` latency class, accepted
+/// knowingly and CENSUSED there — not hand-waved.
+///
+/// WHAT THE CHECKER CAN AND CANNOT DO. It cannot choose the path for you: the
+/// source census records an arm payload as a digest, not as a parsed member
+/// list, so "carries only StrongRefs" is not derivable here. What it CAN do,
+/// and what `arm_payload_shape_field_row` below does, is hold every shape the
+/// ruling has already governed to that path: no field row may name one, and
+/// none may reappear in a field-owning identity class. The table is the
+/// enumeration of governed shapes; ADD A ROW HERE when a ruling puts another
+/// named shape on the wire path.
+///
+/// The third guard — that a governed shape is still ON the wire path at all,
+/// without which the other two pass vacuously on a deleted row — is a claim
+/// about the RELEASED registries rather than about any `IdentityRegistries`,
+/// so it lives in the test that loads them
+/// (`idr_strongref_only_arm_payload_shapes_stay_on_the_wire_path`). Asserting
+/// it inside `validate_identity` fired it on every synthetic fixture in the
+/// suite, which is a checker validating rows its input never claimed to have.
+pub const STRONGREF_ONLY_ARM_PAYLOAD_SHAPES: [ArmPayloadShape; 2] = [
+    ArmPayloadShape {
+        name: "DirectResumeCapability",
+        source: "a11:1936",
+        carried_by: "SubscriptionDeliveryTransitionSpec<Role>.client_action_authority",
+        members: &["validation_ref:StrongRef<DurableCapabilityValidationEvidence>"],
+        ruling: "fgdb-a11-residue-unresolved-schema-ref-laws-54sd",
+    },
+    ArmPayloadShape {
+        name: "DispositionReceipt",
+        source: "a11:1936",
+        carried_by: "SubscriptionDeliveryTransitionSpec<Role>.client_action_authority",
+        members: &[
+            "receipt_ref:StrongRef<AuthenticatedClientSubscriptionDispositionReceipt<Role>>",
+        ],
+        ruling: "fgdb-a11-residue-unresolved-schema-ref-laws-54sd",
+    },
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalKind {
@@ -153,6 +1113,13 @@ pub struct FieldRow {
     pub reference_semantics: String,
     pub target_schema_id: Option<String>,
     pub construction_order: i64,
+    /// Optional instance-order refinement for a co-phased schema edge.
+    ///
+    /// `prior_object` preserves the field's declared reference strength while
+    /// asserting that every encoded target instance already exists before the
+    /// referrer encoder runs. It may discharge a schema-level cycle only when
+    /// the source contract and retention rule say so explicitly.
+    pub construction_relation: Option<String>,
     pub role_predicate: String,
     pub retention_and_cut_rule: String,
     pub version_status: String,
@@ -584,6 +1551,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
                 "reference_semantics",
                 "target_schema_id",
                 "construction_order",
+                "construction_relation",
                 "role_predicate",
                 "retention_and_cut_rule",
                 "version_status",
@@ -608,6 +1576,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
             reference_semantics: get_str(t, "reference_semantics", &ctx)?,
             target_schema_id: get_opt_str(t, "target_schema_id", &ctx)?,
             construction_order: get_int(t, "construction_order", &ctx)?,
+            construction_relation: get_opt_str(t, "construction_relation", &ctx)?,
             role_predicate: get_str(t, "role_predicate", &ctx)?,
             retention_and_cut_rule: get_str(t, "retention_and_cut_rule", &ctx)?,
             version_status: get_str(t, "version_status", &ctx)?,
@@ -834,6 +1803,226 @@ fn v(code: &str, registry: &str, row_id: &str, msg: impl Into<String>) -> Violat
     }
 }
 
+const RESTORE_MANIFEST_LOCAL_TAG: u8 = 0x01;
+const RESTORE_MANIFEST_SHARDED_TAG: u8 = 0x02;
+const RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG: u8 = 0x01;
+const RESTORE_AUTHORITY_DIRECTORY_BOUND_CATALOGED_TAG: u8 = 0x02;
+const RESTORE_AUTHORITY_DIRECTORY_BOUND_EMBEDDED_NO_CATALOG_TAG: u8 = 0x03;
+
+/// Admission law for the three tags that jointly describe one
+/// `RestoreServicePromotionManifest` (Appendix A a20:2575).
+///
+/// The common `target_posture` and exactly-one BODY discriminants must agree.
+/// A Local body admits all three authority profiles; a Sharded body admits
+/// only `ExternalCasCataloged`. Unknown tags fail closed. This is deliberately
+/// expressed over the durable bytes so a format decoder can call the same
+/// predicate before publishing a decoded manifest.
+pub fn restore_service_promotion_manifest_tags_are_coherent(
+    target_posture_tag: u8,
+    body_tag: u8,
+    authority_profile_tag: u8,
+) -> bool {
+    matches!(
+        (target_posture_tag, body_tag, authority_profile_tag),
+        (
+            RESTORE_MANIFEST_LOCAL_TAG,
+            RESTORE_MANIFEST_LOCAL_TAG,
+            RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG
+                | RESTORE_AUTHORITY_DIRECTORY_BOUND_CATALOGED_TAG
+                | RESTORE_AUTHORITY_DIRECTORY_BOUND_EMBEDDED_NO_CATALOG_TAG,
+        ) | (
+            RESTORE_MANIFEST_SHARDED_TAG,
+            RESTORE_MANIFEST_SHARDED_TAG,
+            RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG,
+        )
+    )
+}
+
+fn unique_ordinary_union<'a>(
+    r: &'a IdentityRegistries,
+    union_name: &str,
+) -> Option<&'a OrdinaryUnion> {
+    let mut matches = r
+        .ordinary_unions
+        .iter()
+        .filter(|union| union.union_name == union_name);
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
+}
+
+fn ordinary_union_has_exact_arms(
+    union: &OrdinaryUnion,
+    expected: &[(&str, u8, &str, &str)],
+) -> bool {
+    union.arms.len() == expected.len()
+        && expected
+            .iter()
+            .all(|(source_arm_name, arm_tag, payload_kind, role_predicate)| {
+                union.arms.iter().any(|arm| {
+                    arm.source_arm_name == *source_arm_name
+                        && arm.stable_name == *source_arm_name
+                        && arm.arm_tag == i64::from(*arm_tag)
+                        && arm.payload_kind == *payload_kind
+                        && arm.role_predicate == *role_predicate
+                })
+            })
+}
+
+/// Bind the runtime truth table above to the released durable tag meanings.
+///
+/// Independent union validation proves that each closed union is internally
+/// well formed, but cannot prove that three tags in one manifest agree. This
+/// check activates when any part of the manifest family is present and then
+/// fails closed unless the fields, all three union domains, and the
+/// ExternalCas-refined wrapper agree on the tags consumed by the admission
+/// predicate.
+fn check_restore_service_promotion_manifest_coherence(
+    r: &IdentityRegistries,
+    out: &mut Vec<Violation>,
+) {
+    const MANIFEST: &str = "RestoreServicePromotionManifest";
+    const POSTURE: &str = "RestoreServicePromotionManifestTargetPosture";
+    const AUTHORITY: &str = "RestorePromotionAuthorityProfile";
+    const EXTERNAL_REF: &str = "ExternalCasRestoreServicePromotionManifestRef";
+
+    let domain_present = r.logical.iter().any(|row| row.name == MANIFEST)
+        || r.fields.iter().any(|row| row.containing_schema == MANIFEST)
+        || r.ordinary_unions
+            .iter()
+            .any(|row| matches!(row.union_name.as_str(), MANIFEST | POSTURE | AUTHORITY))
+        || r.wire.iter().any(|row| row.name == EXTERNAL_REF);
+    if !domain_present {
+        return;
+    }
+
+    let field_has_exact_contract = |stable_name: &str, field_tag: i64, wire_type: &str| {
+        let mut rows = r
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema == MANIFEST && row.stable_name == stable_name);
+        matches!(
+            (rows.next(), rows.next()),
+            (Some(row), None)
+                if row.field_tag == field_tag
+                    && row.exact_wire_type == wire_type
+                    && row.cardinality == "one"
+                    && row.identity_class == "inline"
+                    && row.reference_semantics == "none"
+                    && row.target_schema_id.is_none()
+                    && row.role_predicate == "true"
+        )
+    };
+
+    let body = unique_ordinary_union(r, MANIFEST);
+    let body_is_bound = body.is_some_and(|union| {
+        union.containing_schema == MANIFEST
+            && union.union_path == MANIFEST
+            && union.field_tag.is_none()
+            && union.tag_wire_type == "u8"
+            && union.allowed_containing_schemas == [MANIFEST]
+            && union.role_predicate == "true"
+            && ordinary_union_has_exact_arms(
+                union,
+                &[
+                    ("Local", RESTORE_MANIFEST_LOCAL_TAG, "inline-record", "true"),
+                    (
+                        "Sharded",
+                        RESTORE_MANIFEST_SHARDED_TAG,
+                        "inline-record",
+                        "true",
+                    ),
+                ],
+            )
+    });
+
+    let posture = unique_ordinary_union(r, POSTURE);
+    let posture_is_bound = posture.is_some_and(|union| {
+        union.containing_schema == MANIFEST
+            && union.union_path == "RestoreServicePromotionManifest.target_posture"
+            && union.field_tag == Some(0x0005)
+            && union.tag_wire_type == "u8"
+            && union.allowed_containing_schemas == [MANIFEST]
+            && union.role_predicate == "true"
+            && ordinary_union_has_exact_arms(
+                union,
+                &[
+                    ("Local", RESTORE_MANIFEST_LOCAL_TAG, "unit", "true"),
+                    ("Sharded", RESTORE_MANIFEST_SHARDED_TAG, "unit", "true"),
+                ],
+            )
+    });
+
+    let authority = unique_ordinary_union(r, AUTHORITY);
+    let authority_is_bound = authority.is_some_and(|union| {
+        union.containing_schema == AUTHORITY
+            && union.union_path == AUTHORITY
+            && union.field_tag.is_none()
+            && union.tag_wire_type == "u8"
+            && union.allowed_containing_schemas == [MANIFEST]
+            && union.role_predicate == "true"
+            && ordinary_union_has_exact_arms(
+                union,
+                &[
+                    (
+                        "ExternalCasCataloged",
+                        RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG,
+                        "inline-record",
+                        "true",
+                    ),
+                    (
+                        "DirectoryBoundCataloged",
+                        RESTORE_AUTHORITY_DIRECTORY_BOUND_CATALOGED_TAG,
+                        "inline-record",
+                        "role-local",
+                    ),
+                    (
+                        "DirectoryBoundEmbeddedNoCatalog",
+                        RESTORE_AUTHORITY_DIRECTORY_BOUND_EMBEDDED_NO_CATALOG_TAG,
+                        "inline-record",
+                        "role-local",
+                    ),
+                ],
+            )
+    });
+
+    let mut external_refs = r.wire.iter().filter(|row| row.name == EXTERNAL_REF);
+    let external_ref_is_bound = matches!(
+        (external_refs.next(), external_refs.next()),
+        (Some(row), None)
+            if row.kind == "reference_wrapper"
+                && matches!(
+                    parse_refinement_claim(&row.encoding_context),
+                    Some(Ok(claims))
+                        if matches!(
+                            claims.as_slice(),
+                            [claim]
+                                if claim.0 == "Sharded"
+                                    && claim.1
+                                        == i64::from(RESTORE_MANIFEST_SHARDED_TAG)
+                                    && claim.2 == POSTURE
+                        )
+                )
+    );
+
+    if !field_has_exact_contract("target_posture", 0x0005, POSTURE)
+        || !field_has_exact_contract("authority_profile", 0x0007, AUTHORITY)
+        || !body_is_bound
+        || !posture_is_bound
+        || !authority_is_bound
+        || !external_ref_is_bound
+    {
+        out.push(v(
+            "restore_service_promotion_manifest_coherence",
+            "durable_fields",
+            MANIFEST,
+            "Appendix A a20:2575 requires target_posture to equal the BODY arm, Local to admit \
+             ExternalCasCataloged or either DirectoryBound profile, and Sharded to admit only \
+             ExternalCasCataloged; the two fields, BODY/posture/profile tag domains, and \
+             ExternalCas-refined wrapper must stay exactly bound to the runtime admission table",
+        ));
+    }
+}
+
 /// The shared code-space law for every class registry.
 fn check_code_space(
     registry: &str,
@@ -1045,6 +2234,118 @@ pub fn ordinary_union_has_top_level_shape(union: &OrdinaryUnion) -> bool {
         && union.union_path == union.union_name
 }
 
+/// The generic-free family symbol of a possibly generic-signed schema name.
+/// One registered kind row commits every expansion of its family (the same
+/// precedent as wire-family census coverage), so ordinary-union schema
+/// resolution matches `RoleTimeIssuanceReservationClosure<Role>` to the
+/// registered `RoleTimeIssuanceReservationClosure` row.
+pub fn generic_free_family(name: &str) -> &str {
+    name.split('<').next().unwrap_or(name)
+}
+
+/// Validate every concrete `allowed_containing_schemas` citation against the
+/// identity registries plus catalog-owned candidate-or-stronger backings.
+///
+/// The identity projections alone are intentionally insufficient: a source-
+/// confirmed top-level schema may legally contain an inline wire type before
+/// that schema receives a projection row, and a permanent reservation is a
+/// stronger backing even when the source census remains structurally
+/// ambiguous.  Appendix A owns those two supplemental classes and passes them
+/// here.  Wildcard `"*"` remains the explicit open-domain spelling and is not a
+/// schema citation.
+pub fn validate_allowed_containing_schema_resolution<'a>(
+    registries: &'a IdentityRegistries,
+    supplemental_backings: impl IntoIterator<Item = &'a str>,
+) -> Vec<Violation> {
+    let mut backed = BTreeSet::new();
+    backed.extend(
+        registries
+            .logical
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .physical
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .bootstrap
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .prebootstrap
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .wire
+            .iter()
+            .map(|row| generic_free_family(row.name.as_str())),
+    );
+    backed.extend(
+        registries
+            .fields
+            .iter()
+            .map(|row| generic_free_family(row.containing_schema.as_str())),
+    );
+    backed.extend(
+        registries
+            .ordinary_unions
+            .iter()
+            .map(|row| generic_free_family(row.union_name.as_str())),
+    );
+    backed.extend(
+        registries
+            .unions
+            .iter()
+            .map(|row| generic_free_family(row.union_name.as_str())),
+    );
+    backed.extend(supplemental_backings.into_iter().map(generic_free_family));
+
+    let mut out = Vec::new();
+    for wire in &registries.wire {
+        for schema in wire
+            .allowed_containing_schemas
+            .iter()
+            .filter(|schema| schema.as_str() != "*")
+        {
+            let family = generic_free_family(schema.trim());
+            if !backed.contains(family) {
+                out.push(v(
+                    "allowed_containing_schema_unresolved",
+                    "wire_types",
+                    &wire.name,
+                    format!(
+                        "allowed containing schema {schema:?} resolves to family {family:?}, which has no confirmed top-level candidate or stronger catalog/identity row"
+                    ),
+                ));
+            }
+        }
+    }
+    for union in &registries.ordinary_unions {
+        for schema in &union.allowed_containing_schemas {
+            let family = generic_free_family(schema.trim());
+            if !backed.contains(family) {
+                out.push(v(
+                    "allowed_containing_schema_unresolved",
+                    "durable_fields",
+                    &union.union_name,
+                    format!(
+                        "allowed containing schema {schema:?} resolves to family {family:?}, which has no confirmed top-level candidate or stronger catalog/identity row"
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Independent, review-updated pins for the released identity assignments.
 ///
 /// Registry rows are the canonical descriptions; these constants are compact
@@ -1053,12 +2354,12 @@ pub fn ordinary_union_has_top_level_shape(union: &OrdinaryUnion) -> bool {
 /// row, reassigning its code/tag, or silently changing a union arm therefore
 /// fails even when the resulting current snapshot is internally consistent.
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
-    const LOGICAL: &str = "fnv1a64:44afb0196e95f5e4";
+    const LOGICAL: &str = "fnv1a64:ebca430285355b80";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:0f02a754916d418a";
-    const FIELDS: &str = "fnv1a64:dd8bfbde5a5b5c3e";
+    const WIRE: &str = "fnv1a64:a81a9ff599a2c660";
+    const FIELDS: &str = "fnv1a64:0433d1cf84e9883c";
 
     let logical = rows_pin(
         r.logical
@@ -1180,7 +2481,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     vec![
         AssignmentPin {
             registry: "logical_object_kinds",
-            expected_epoch: 2,
+            expected_epoch: 62,
             actual_epoch: r.logical_epoch,
             expected_pin: LOGICAL,
             actual_pin: logical,
@@ -1208,14 +2509,14 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 8,
+            expected_epoch: 46,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 9,
+            expected_epoch: 80,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -1371,16 +2672,49 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
     let wire_names: BTreeSet<&str> = r.wire.iter().map(|w| w.name.as_str()).collect();
     let wire_by_name: BTreeMap<&str, &WireType> =
         r.wire.iter().map(|w| (w.name.as_str(), w)).collect();
+    // Ordinary unions keyed by their generic-stripped name, for refinement
+    // resolution below. Two rows may share a base name (one union declared per
+    // role); an arm found under ANY of them satisfies the claim, because the
+    // claim names the union, not the instantiation.
+    let mut ordinary_unions_by_base: BTreeMap<&str, Vec<&OrdinaryUnion>> = BTreeMap::new();
+    for u in &r.ordinary_unions {
+        ordinary_unions_by_base
+            .entry(refinement_union_base(u.union_name.as_str()))
+            .or_default()
+            .push(u);
+    }
+    validate_role_projection_contracts(r, &ordinary_unions_by_base, &mut out);
     for w in &r.wire {
         if !matches!(
             w.kind.as_str(),
-            "record" | "union" | "union_variant" | "reference_wrapper" | "discriminant" | "framing"
+            "record"
+                | "union"
+                | "union_variant"
+                | "reference_wrapper"
+                | "discriminant"
+                | "arm_value"
+                | "framing"
         ) {
             out.push(v(
                 "bad_field",
                 "wire_types",
                 &w.name,
                 format!("unknown kind {:?}", w.kind),
+            ));
+        }
+        // LAW: a reference wrapper's strength must be declared, so a newly
+        // minted wrapper cannot escape the wire-tag law by being unknown to it.
+        // Without this the field law below fails OPEN on exactly the rows it
+        // was written for: an unclassified wrapper resolves to `None` and its
+        // fields are then free to pick any semantics.
+        if w.kind == "reference_wrapper" && declared_field_reference_semantics(&w.name).is_none() {
+            out.push(v(
+                "unclassified_reference_wrapper",
+                "wire_types",
+                &w.name,
+                "a kind=\"reference_wrapper\" wire tag must declare its reference strength in \
+                 appendix_a::registered_reference_definition_semantics (Appendix A \"Reference \
+                 semantics\"); an unclassified wrapper leaves its field rows unconstrained",
             ));
         }
         if w.encoding_context.trim().is_empty()
@@ -1393,6 +2727,219 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 &w.name,
                 "encoding context, containing-schema closure, and positive resource bound are required",
             ));
+        }
+        // LAW: an arm-refinement claim must RESOLVE.
+        //
+        // A tag-refined wrapper is a wire tag that admits a strict subset of a
+        // union's arms — Appendix A a20:2593 mints two and states the rule they
+        // serve: "variant syntax is never used as a reference target." The
+        // refinement IS the durable constraint: `OperationalRestoreTerminalPin
+        // BasisRef` is the difference between "a pin basis" and "an Operational
+        // pin basis", and a decoder that admits the Abandoned arm through it
+        // accepts a state the source rejects.
+        //
+        // That constraint lived entirely in `encoding_context` prose. MEASURED
+        // 2026-07-27 at dbaab71: 6 claims across the corpus, checked by nothing
+        // — `encoding_context` was read only for non-emptiness (above). A claim
+        // naming an arm that does not exist, or the right arm under the wrong
+        // `arm_tag`, read exactly like a correct one.
+        //
+        // Both halves are load-bearing. Resolution alone would fail open on the
+        // 2 of 6 rows written in a prose dialect ("the Sharded/ExternalCas
+        // RestoreServicePromotionManifest arm" — no tag, no union clause), which
+        // parse to `None` and would simply be skipped. One construct in two
+        // dialects at n=6 is the same defect fgdb-gpms forecasts at n=190, so
+        // the unparseable case is a violation, not a pass.
+        //
+        // A source spelling such as `X::Sealed` can constrain TWO registered
+        // locations. Those clauses form one atomic claim: validating either
+        // one alone would overstate coverage. The conjunction grammar is
+        // therefore closed at exactly two distinct clauses, and this loop
+        // resolves every returned clause through the same laws as a singleton.
+        // Role-dispatch projections own a separate structured validator list.
+        // Do not reinterpret that list through the singleton/conjunction
+        // grammar; the role-projection law above rejects either refinement
+        // marker explicitly.
+        let refinement_claim = if w.encoding_context.contains(ROLE_PROJECTION_CLAIM_MARKER) {
+            None
+        } else {
+            parse_refinement_claim(&w.encoding_context)
+        };
+        match refinement_claim.as_ref() {
+            None => {}
+            Some(Err(RefinementClaimParseError::Single)) => out.push(v(
+                "refinement_claim_unparseable",
+                "wire_types",
+                &w.name,
+                format!(
+                    "encoding_context claims an arm refinement but is outside the grammar \
+                     \"{REFINEMENT_CLAIM_MARKER}<SourceArmName> arm (arm_tag 0x<hex>) of the \
+                     <Union> union\"; a refinement stated only in prose is unresolvable and \
+                     therefore unenforced"
+                ),
+            )),
+            Some(Err(RefinementClaimParseError::Conjunction)) => out.push(v(
+                "refinement_conjunction_invalid",
+                "wire_types",
+                &w.name,
+                format!(
+                    "encoding_context claims a conjunctive arm refinement but is outside the \
+                     exactly-two-distinct-clause grammar \
+                     \"{REFINEMENT_CONJUNCTION_MARKER}<Arm1> arm (arm_tag 0x<hex>) of the \
+                     <Union1> union and the <Arm2> arm (arm_tag 0x<hex>) of the <Union2> \
+                     union\"; repeated, mixed, missing, third, or duplicate clauses are \
+                     unenforced"
+                ),
+            )),
+            Some(Ok(clauses)) => {
+                for clause in clauses {
+                    validate_refinement_clause(
+                        &ordinary_unions_by_base,
+                        &w.name,
+                        *clause,
+                        &mut out,
+                    );
+                }
+            }
+        }
+        // LAW: the two value-position refinement classes are disjoint and
+        // each carries its own payload contract
+        // (fgdb-payload-bearing-arm-values-5u56). The fgdb-gpms discriminant
+        // is the tag-only PRECONDITION instrument; it is sound on a
+        // payload-bearing arm only while the claim accounts for the payload
+        // (`never the arm payload`, optionally with a `, while ... bind ...`
+        // continuation naming the siblings that carry it). A value field —
+        // `AuditTicketClaimRecord.owner : AuditTicketOwner::Operation`, whose
+        // payload IS the owner identity and has no sibling carrier — takes
+        // the `arm_value` instrument instead: the refined tag PLUS the
+        // complete selected-arm payload, pinned by the arm's
+        // census-registered digest so "complete" is a comparison, not an
+        // adjective. The laws run only over claims that resolved; an
+        // unresolved claim is already reported by the refinement law above
+        // and must not double-report.
+        if w.kind == "arm_value" && refinement_claim.is_none() {
+            out.push(v(
+                "arm_value_claim_missing",
+                "wire_types",
+                &w.name,
+                "a kind=\"arm_value\" wire tag is defined by its arm refinement but its \
+                 encoding_context carries no refinement claim; the value it preserves is \
+                 unknowable and the row is unenforced",
+            ));
+        }
+        if let Some(Ok(clauses)) = refinement_claim.as_ref() {
+            let resolutions: Vec<Option<Vec<&OrdinaryUnionArm>>> = clauses
+                .iter()
+                .map(|clause| resolve_refinement_clause(&ordinary_unions_by_base, *clause))
+                .collect();
+            if resolutions.iter().all(Option::is_some) {
+                let resolved: Vec<&OrdinaryUnionArm> = resolutions
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .flatten()
+                    .copied()
+                    .collect();
+                match w.kind.as_str() {
+                    "discriminant" => {
+                        if resolved.iter().any(|arm| arm.payload_kind != "unit")
+                            && !w
+                                .encoding_context
+                                .contains(TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER)
+                        {
+                            out.push(v(
+                                "refinement_tag_only_payload_unaccounted",
+                                "wire_types",
+                                &w.name,
+                                format!(
+                                    "a tag-only discriminant refines a payload-bearing arm but \
+                                     its claim never accounts for the payload; it must carry \
+                                     \"{TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER}\" (optionally with \
+                                     a `, while ... bind ...` continuation naming the sibling \
+                                     fields that carry the payload), or the field erases the \
+                                     selected arm's payload"
+                                ),
+                            ));
+                        }
+                    }
+                    "arm_value" => {
+                        if clauses.len() != 1 {
+                            out.push(v(
+                                "arm_value_conjunction_invalid",
+                                "wire_types",
+                                &w.name,
+                                "an arm value preserves exactly one selected arm's payload; a \
+                                 two-location conjunction is a precondition shape and belongs \
+                                 to kind=\"discriminant\"",
+                            ));
+                        } else {
+                            if resolved.iter().all(|arm| arm.payload_kind == "unit") {
+                                out.push(v(
+                                    "arm_value_on_unit_payload",
+                                    "wire_types",
+                                    &w.name,
+                                    "every resolved arm has a unit payload; the tag-only \
+                                     discriminant is the complete and smaller instrument for \
+                                     a payload-free refinement",
+                                ));
+                            }
+                            match parse_arm_value_payload_pin(&w.encoding_context) {
+                                None => out.push(v(
+                                    "arm_value_payload_pin_missing",
+                                    "wire_types",
+                                    &w.name,
+                                    format!(
+                                        "an arm value must pin its complete payload as \
+                                         \"{ARM_VALUE_PAYLOAD_PIN_PREFIX}<SourceArmName>\
+                                         {ARM_VALUE_PAYLOAD_PIN_INFIX}<64 lowercase hex>)\"; \
+                                         without the pin there is no evidence the complete \
+                                         payload is carried"
+                                    ),
+                                )),
+                                Some(Err(())) => out.push(v(
+                                    "arm_value_payload_pin_malformed",
+                                    "wire_types",
+                                    &w.name,
+                                    "the complete-payload pin is advertised but breaks its \
+                                     closed spelling (empty or multi-word arm name, missing \
+                                     infix, non-64-lowercase-hex digest, unterminated `)`, or \
+                                     repeated pin marker)",
+                                )),
+                                Some(Ok(pin)) => {
+                                    let agrees = resolved.iter().any(|arm| {
+                                        arm.source_arm_name == pin.arm
+                                            && arm.payload_sha256.as_deref() == Some(pin.sha256)
+                                    });
+                                    if !agrees {
+                                        let registered: Vec<String> = resolved
+                                            .iter()
+                                            .map(|arm| {
+                                                format!(
+                                                    "{} (payload_sha256 {})",
+                                                    arm.source_arm_name,
+                                                    arm.payload_sha256.as_deref().unwrap_or("none")
+                                                )
+                                            })
+                                            .collect();
+                                        out.push(v(
+                                            "arm_value_payload_pin_mismatch",
+                                            "wire_types",
+                                            &w.name,
+                                            format!(
+                                                "the pin names {} with digest {}, but the \
+                                                 resolved claim registers {}",
+                                                pin.arm,
+                                                pin.sha256,
+                                                registered.join(", ")
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
         match (w.kind.as_str(), &w.containing_union, w.wire_tag) {
             ("union_variant", Some(union), Some(tag)) => {
@@ -1533,23 +3080,104 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         m
     };
 
+    // LAW: the StrongRef-only arm-payload shapes take the wire path and own no
+    // field row (see STRONGREF_ONLY_ARM_PAYLOAD_SHAPES for the rule, the
+    // corpus that measured it, and the cost it accepts).
+    for shape in &STRONGREF_ONLY_ARM_PAYLOAD_SHAPES {
+        // NOTE the completeness guard — "a governed shape must still BE a
+        // registered wire type" — is NOT here. It is a claim about the RELEASED
+        // tree, not about an arbitrary `IdentityRegistries`, and asserting it
+        // here made every synthetic fixture in the suite fire it (measured: 4
+        // satisfiability witnesses went red on rows they never mention). It
+        // lives in `idr_strongref_only_arm_payload_shapes_stay_on_the_wire_path`,
+        // which runs against the real registries under `cargo test`. Without it
+        // the two guards below pass VACUOUSLY on a deleted row.
+        //
+        // The wrong path taken outright. `disjointness_dual_class` catches the
+        // shape registered in BOTH classes; this catches it moved wholesale
+        // into a field-owning one, which that law cannot see.
+        let field_owning: Vec<&str> = [
+            logical_by_name.get(shape.name).map(|_| "logical"),
+            bootstrap_names.contains(shape.name).then_some("bootstrap"),
+            physical_names.contains(shape.name).then_some("physical"),
+            prebootstrap_names
+                .contains(shape.name)
+                .then_some("prebootstrap"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !field_owning.is_empty() {
+            out.push(v(
+                "arm_payload_shape_field_row",
+                "identity",
+                shape.name,
+                format!(
+                    "{} ({}) is an arm payload shape of {} carrying only {:?}; it takes the wire \
+                     path with no field row under {}, but is registered in {field_owning:?}",
+                    shape.name, shape.source, shape.carried_by, shape.members, shape.ruling
+                ),
+            ));
+        }
+        for f in &r.fields {
+            if generic_free_family(f.containing_schema.as_str()) == shape.name {
+                out.push(v(
+                    "arm_payload_shape_field_row",
+                    "durable_fields",
+                    &format!("{}#{}", f.containing_schema, f.stable_name),
+                    format!(
+                        "{} ({}) is an arm payload shape of {}; a shape whose body carries only \
+                         retaining references takes the wire path and owns NO field row ({}). Its \
+                         members are committed byte-exactly by the covering arm payload digest",
+                        shape.name, shape.source, shape.carried_by, shape.ruling
+                    ),
+                ));
+            }
+        }
+    }
+
     for f in &r.fields {
         let row_id = format!("{}#{}", f.containing_schema, f.stable_name);
-        // Containing schema must resolve in one identity class.
-        let containing_logical = logical_by_name.get(f.containing_schema.as_str());
+        // Containing schema must resolve in one identity class.  Resolution is
+        // by generic-free family, the same law ordinary-union hosts already
+        // use: one registered kind row commits every expansion of its family,
+        // so a member of `RestoreSourceLeaseRecord<Role:AuthorityOwningRole>`
+        // resolves through the registered `RestoreSourceLeaseRecord` row.  The
+        // family is only a *lookup*; every downstream contract (tag
+        // uniqueness, anchor matching, BodyDigest recipes) still keys on the
+        // exact signed `containing_schema`, so two expansions never merge.
+        let containing_family = generic_free_family(f.containing_schema.as_str());
+        let containing_logical = logical_by_name.get(containing_family);
         let resolves = containing_logical.is_some()
-            || bootstrap_names.contains(f.containing_schema.as_str())
-            || physical_names.contains(f.containing_schema.as_str())
-            || prebootstrap_names.contains(f.containing_schema.as_str());
+            || bootstrap_names.contains(containing_family)
+            || physical_names.contains(containing_family)
+            || prebootstrap_names.contains(containing_family);
         if !resolves {
+            // A wire owner is the interesting sub-case and the message used to
+            // hide it: the family DOES resolve, in the one class that can never
+            // own a field row, and "resolves in no identity class" reads as a
+            // missing mint. It is not — it is the arm-payload law
+            // (STRONGREF_ONLY_ARM_PAYLOAD_SHAPES) refusing the row, and an
+            // author who mis-reads it re-mints the owner as a logical kind.
+            let detail = if wire_names.contains(containing_family) {
+                format!(
+                    "containing_schema {:?} resolves as a WIRE type, which can never own a field \
+                     row; its members are committed byte-exactly by the covering wire envelope. \
+                     Do not re-mint the owner as a logical kind to make this row land — see the \
+                     arm-payload law in identity::STRONGREF_ONLY_ARM_PAYLOAD_SHAPES",
+                    f.containing_schema
+                )
+            } else {
+                format!(
+                    "containing_schema {:?} resolves in no identity class",
+                    f.containing_schema
+                )
+            };
             out.push(v(
                 "field_unresolved_schema",
                 "durable_fields",
                 &row_id,
-                format!(
-                    "containing_schema {:?} resolves in no identity class",
-                    f.containing_schema
-                ),
+                detail,
             ));
         }
         // Tag uniqueness + validity.
@@ -1579,12 +3207,39 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             f.identity_class.as_str(),
             "scalar" | "inline" | "logical" | "physical" | "bootstrap_local"
         ) {
-            out.push(v(
-                "bad_field",
-                "durable_fields",
-                &row_id,
-                "bad identity_class",
-            ));
+            // LAW: the FIELD identity_class vocabulary is narrower than the
+            // top_level_candidate one. A candidate row legitimately carries
+            // `wire` or `prebootstrap` because it names what a symbol IS; a
+            // field row names what its value contributes to durable identity,
+            // and a field can never contribute wire or prebootstrap identity.
+            // The admitted set is unchanged - narrowing it to
+            // logical|physical|inline would reject 124 landed rows.
+            let msg = format!(
+                "identity_class {:?} is not a field identity class; a field admits \
+                 scalar|inline|logical|physical|bootstrap_local (a top_level_candidate \
+                 row does take wire and prebootstrap)",
+                f.identity_class
+            );
+            // Both codes are spelled as LITERALS in the code argument. The
+            // satisfiability ratchet extracts the code set from this source
+            // text; a code passed as a variable is invisible to it, and it
+            // silently read the next literal ("durable_fields") instead --
+            // hiding both of these codes from coverage since 722ff22.
+            if matches!(f.identity_class.as_str(), "wire" | "prebootstrap") {
+                out.push(v(
+                    "field_identity_class_not_a_field_class",
+                    "durable_fields",
+                    &row_id,
+                    msg,
+                ));
+            } else {
+                out.push(v(
+                    "field_identity_class_invalid",
+                    "durable_fields",
+                    &row_id,
+                    msg,
+                ));
+            }
         }
         if !matches!(
             f.reference_semantics.as_str(),
@@ -1632,6 +3287,25 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 "role_predicate and retention_and_cut_rule must be nonblank",
             ));
         }
+        if let Some(relation) = f.construction_relation.as_deref()
+            && (relation != PRIOR_OBJECT_CONSTRUCTION_RELATION
+                || !matches!(
+                    f.reference_semantics.as_str(),
+                    "strong" | "conditional" | "weak_digest"
+                )
+                || f.target_schema_id.is_none()
+                || !f.retention_and_cut_rule.contains("PriorObject")
+                || !f.retention_and_cut_rule.contains("already-known"))
+        {
+            out.push(v(
+                "bad_field",
+                "durable_fields",
+                &row_id,
+                "construction_relation is either absent or prior_object; prior_object requires \
+                 one direct strong/conditional/weak_digest target and an explicit PriorObject \
+                 already-known instance contract in retention_and_cut_rule",
+            ));
+        }
         // Wire-type resolution: builtin -> wire_types -> ordinary union ->
         // generated reference union.
         let is_builtin = BUILTIN_WIRE_TYPES.contains(&f.exact_wire_type.as_str());
@@ -1666,19 +3340,112 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 ),
             ));
         }
-        // Construction-order consistency with the containing logical kind.
-        if let Some(kind) = containing_logical
-            && f.construction_order != kind.construction_order
+        // LAW: a registered non-reference wire member contributes inline
+        // identity.  The foundation's raw-byte consumers cannot distinguish
+        // another field class, so accepting scalar/logical/physical here would
+        // silently change durable identity semantics.
+        if let Some(wire_type) = wire_by_name.get(f.exact_wire_type.as_str())
+            && wire_type.kind != "reference_wrapper"
+            && f.reference_semantics == "none"
+            && f.identity_class != "inline"
         {
             out.push(v(
-                "bad_field",
+                "non_reference_wire_identity_class_mismatch",
                 "durable_fields",
                 &row_id,
                 format!(
-                    "construction_order {} != containing kind's {}",
-                    f.construction_order, kind.construction_order
+                    "registered wire type {:?} of kind {:?} with reference_semantics=none must use identity_class=inline",
+                    f.exact_wire_type, wire_type.kind
                 ),
             ));
+        }
+        // Completeness guard for laws over registered wire members: a field
+        // that names a registered wire type must resolve to one of the closed
+        // wire-kind vocabulary, never an unclassified future kind.
+        if let Some(wire_type) = wire_by_name.get(f.exact_wire_type.as_str())
+            && !matches!(
+                wire_type.kind.as_str(),
+                "record"
+                    | "union"
+                    | "union_variant"
+                    | "reference_wrapper"
+                    | "discriminant"
+                    | "arm_value"
+                    | "framing"
+            )
+        {
+            out.push(v(
+                "field_wire_kind_unclassified",
+                "durable_fields",
+                &row_id,
+                format!(
+                    "exact_wire_type {:?} resolves to unclassified wire kind {:?}",
+                    f.exact_wire_type, wire_type.kind
+                ),
+            ));
+        }
+        // LAW: reference_semantics is FORCED by exact_wire_type.
+        //
+        // Direction 1 — a type that declares a strength admits exactly that
+        // value. Direction 2 — a type that declares none may not be promoted
+        // to a retaining edge; `external_root` is excluded because it is the
+        // bootstrap slot's raw-oid external GC root (Appendix A ~1435), which
+        // `external_root_outside_frame` guards separately.
+        //
+        // The generated-reference-union spelling (target_schema_id = None, type
+        // = the union anchored to this row) is already exact via
+        // `union_field_mismatch`, so it is passed through here rather than
+        // double-reported.
+        match declared_field_reference_semantics(&f.exact_wire_type) {
+            Some(declared) if f.reference_semantics != declared => {
+                out.push(v(
+                    "wire_type_reference_semantics_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    format!(
+                        "exact_wire_type {:?} declares reference_semantics {declared:?}, row \
+                         carries {:?}; the wire tag declares the strength and a member may not \
+                         weaken or strengthen it",
+                        f.exact_wire_type, f.reference_semantics
+                    ),
+                ));
+            }
+            None if matches!(f.reference_semantics.as_str(), "strong" | "conditional")
+                && !union_by_name.contains_key(f.exact_wire_type.as_str()) =>
+            {
+                out.push(v(
+                    "reference_semantics_without_reference_type",
+                    "durable_fields",
+                    &row_id,
+                    format!(
+                        "reference_semantics {:?} on exact_wire_type {:?}, which is not a \
+                         reference wrapper and not this row's generated reference union; a \
+                         retaining edge must be carried by a wire tag that declares one",
+                        f.reference_semantics, f.exact_wire_type
+                    ),
+                ));
+            }
+            _ => {}
+        }
+        // Construction-order consistency with the containing logical kind.
+        // LAW: a field's construction_order must EQUAL its containing kind's.
+        // Vacuity: the previous `if let Some(kind) = ... &&` skipped silently
+        // when the containing kind was absent. A schema that resolves to no
+        // kind is reported by field_unresolved_schema above, so the input is
+        // never evaluated-and-passed; it fails closed under that law.
+        match containing_logical {
+            Some(kind) if f.construction_order != kind.construction_order => {
+                out.push(v(
+                    "field_construction_order_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    format!(
+                        "construction_order {} != containing kind {} order {}",
+                        f.construction_order, kind.name, kind.construction_order
+                    ),
+                ));
+            }
+            _ => {}
         }
         // Reference discipline. `external_root` is the distinct traversal
         // class for the bootstrap-slot root identity (Appendix A ~1435):
@@ -1690,7 +3457,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             "strong" | "conditional" | "external_root"
         );
         if is_retaining {
-            let in_frame = bootstrap_names.contains(f.containing_schema.as_str());
+            let in_frame = bootstrap_names.contains(containing_family);
             if f.reference_semantics == "external_root" {
                 if !in_frame {
                     out.push(v(
@@ -1781,6 +3548,19 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             )),
             None => {}
             Some(class) => {
+                if !digest_typed
+                    && !(class == "transcript" && f.exact_wire_type == "u64")
+                {
+                    out.push(v(
+                        "digest_class_wire_type_mismatch",
+                        "durable_fields",
+                        &row_id,
+                        format!(
+                            "digest_class {:?} is not permitted for exact_wire_type {:?}",
+                            class, f.exact_wire_type
+                        ),
+                    ));
+                }
                 match class.as_str() {
                     "target" | "weak_identity" => {
                         if !digest_typed {
@@ -1973,12 +3753,49 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             .flatten();
         let top_level_wire_backed = top_level_wire_parent
             .is_some_and(|parent| matches!(parent.kind.as_str(), "union" | "discriminant"));
+        // A whole-schema role union of a logical kind (fgdb-a01): the object
+        // body IS the union, so the parent contract is the logical kind row
+        // rather than a same-name wire row, which disjointness forbids.  Arms
+        // are committed by their source-verified payload digests; there is no
+        // wire-variant bijection because the union has no independent wire
+        // encoding surface.
+        let top_level_logical_parent = (top_level_shape && top_level_wire_parent.is_none())
+            .then(|| {
+                logical_by_name
+                    .get(generic_free_family(u.union_name.as_str()))
+                    .copied()
+            })
+            .flatten();
+        let top_level_logical_backed = top_level_logical_parent.is_some();
+        // A logical-backed whole-schema union owns its object body's tagged
+        // encoding, but the plan may also name that exact union as an inline
+        // field type in another schema. Keep the containing object first,
+        // then require the complete sorted set of actual inline consumers.
+        // This is an exact closure, not an open allowlist: an unrelated name
+        // without a matching field is rejected, and a field omitted from the
+        // closure is rejected below.
+        let mut top_level_logical_consumer_closure = vec![u.containing_schema.as_str()];
+        top_level_logical_consumer_closure.extend(
+            r.fields
+                .iter()
+                .filter(|field| {
+                    field.exact_wire_type == u.union_name
+                        && field.containing_schema != u.containing_schema
+                })
+                .map(|field| field.containing_schema.as_str()),
+        );
+        top_level_logical_consumer_closure[1..].sort_unstable();
+        top_level_logical_consumer_closure.dedup();
+        // Resolution is by generic-free family: a generic-signed whole-schema
+        // union or a union embedded in a generic-signed schema resolves
+        // through the registered family row, which commits every expansion.
+        let containing_family = generic_free_family(u.containing_schema.as_str());
         let containing_schema_classes =
-            usize::from(logical_by_name.contains_key(u.containing_schema.as_str()))
-                + usize::from(physical_names.contains(u.containing_schema.as_str()))
-                + usize::from(bootstrap_names.contains(u.containing_schema.as_str()))
-                + usize::from(prebootstrap_names.contains(u.containing_schema.as_str()))
-                + usize::from(wire_names.contains(u.containing_schema.as_str()));
+            usize::from(logical_by_name.contains_key(containing_family))
+                + usize::from(physical_names.contains(containing_family))
+                + usize::from(bootstrap_names.contains(containing_family))
+                + usize::from(prebootstrap_names.contains(containing_family))
+                + usize::from(wire_names.contains(containing_family));
         if containing_schema_classes != 1 {
             out.push(v(
                 "ordinary_union_unresolved_schema",
@@ -1990,7 +3807,21 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 ),
             ));
         }
-        if top_level_shape {
+        if top_level_shape && top_level_logical_backed {
+            let parent = top_level_logical_parent.expect("logical-backed union has a parent");
+            if parent.status != u.version_status
+                || u.max_size_bytes > parent.max_size_bytes
+                || !role_predicate_implies(&u.role_predicate, &parent.role_predicate)
+                || u.allowed_containing_schemas != top_level_logical_consumer_closure
+            {
+                out.push(v(
+                    "ordinary_union_logical_contract_mismatch",
+                    "durable_fields",
+                    row_id,
+                    "a whole-schema union requires a same-name logical kind parent with identical lifecycle, a bound within the object bound, no broader role scope, and an exact self-rooted closure over every inline consumer",
+                ));
+            }
+        } else if top_level_shape {
             match top_level_wire_parent {
                 Some(parent)
                     if top_level_wire_backed
@@ -2213,7 +4044,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     ),
                 )),
             }
-        } else if top_level_wire_backed {
+        } else if top_level_wire_backed || top_level_logical_backed {
             for field in anchor_fields {
                 if field.identity_class != "inline"
                     || field.reference_semantics != "none"
@@ -2627,7 +4458,14 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         ) {
             continue;
         }
-        let Some(containing) = logical_by_name.get(f.containing_schema.as_str()) else {
+        // Resolve the owner through its generic-free family, exactly as the
+        // field-resolution law above does. A row whose containing_schema
+        // carries a generic signature (`Foo<Role>`) is registered under the
+        // bare family, so an exact-name lookup would skip it and drop its
+        // edges out of the DAG entirely -- self-edges and future results
+        // included.
+        let containing_family = generic_free_family(f.containing_schema.as_str());
+        let Some(containing) = logical_by_name.get(containing_family) else {
             continue;
         };
         let mut targets: Vec<&str> = Vec::new();
@@ -2641,12 +4479,14 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 continue;
             };
             let row_id = format!("{}#{}", f.containing_schema, f.stable_name);
-            if target == f.containing_schema {
+            if target == containing_family {
                 out.push(v(
                     "dag_self_edge",
                     "durable_fields",
                     &row_id,
-                    "a schema may not strongly reference itself",
+                    "a schema may not reference itself: strong, conditional and weak_digest \
+                     alike require an already-constructed target, so a lineage \
+                     predecessor is compared, never traversed",
                 ));
                 continue;
             }
@@ -2663,6 +4503,26 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     ),
                 ));
             }
+            // A typed PriorObject relation is an instance-order assertion, not
+            // a weakening of reference strength: GC/checkpoint/backup walkers
+            // still follow the edge exactly as its wire tag declares. It may
+            // cut only a co-phased, non-self schema edge whose row carries the
+            // explicit source-backed contract checked above. Invalid uses stay
+            // in the schema graph and therefore fail closed.
+            let valid_prior_object = f.construction_relation.as_deref()
+                == Some(PRIOR_OBJECT_CONSTRUCTION_RELATION)
+                && target_kind.construction_order == containing.construction_order
+                && target != containing_family
+                && matches!(
+                    f.reference_semantics.as_str(),
+                    "strong" | "conditional" | "weak_digest"
+                )
+                && f.target_schema_id.is_some()
+                && f.retention_and_cut_rule.contains("PriorObject")
+                && f.retention_and_cut_rule.contains("already-known");
+            if valid_prior_object {
+                continue;
+            }
             edges
                 .entry(containing.name.as_str())
                 .or_default()
@@ -2678,7 +4538,22 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         ));
     }
 
+    check_restore_service_promotion_manifest_coherence(r, &mut out);
+
     out
+}
+
+/// The construction-DAG cycle law, shared by both artifacts that enforce it.
+///
+/// `appendix_a`'s census-level DAG calls this rather than carrying its own
+/// traversal: `dag_cycle` is a law SEPARATE from `dag_future_result` — a graph
+/// can be free of strict future edges and still cycle among equal-order kinds —
+/// so a second implementation would be free to disagree with this one about what
+/// a cycle even is.
+pub(crate) fn find_construction_cycle<'a>(
+    edges: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+) -> Option<Vec<&'a str>> {
+    find_cycle_str(edges)
 }
 
 /// Iterative three-color DFS over string-keyed edges.

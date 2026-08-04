@@ -19,7 +19,8 @@ mod toml;
 
 use architecture::{
     ArchitectureRegistry, BeadProvenanceEntry, Violation, bead_provenance_index,
-    check_source_blocks, effective_claim_classes, load_architecture, load_from_repo,
+    check_source_blocks, document_drift_violation, document_generation_violation,
+    effective_claim_classes, generate_document, load_architecture, load_from_repo,
     provenance_index, validate_architecture,
 };
 use jsonl::{arr, event, n, s};
@@ -28,18 +29,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: architecture-check [--root <repo-root>] [--registry <registry-path>]".into()
+    "usage: architecture-check [--root <repo-root>] [--registry <registry-path>] [--write]".into()
 }
 
 struct Args {
     root: PathBuf,
     registry: Option<PathBuf>,
+    write: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut arguments = std::env::args().skip(1);
     let mut root = None;
     let mut registry = None;
+    let mut write = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--root" => {
@@ -58,6 +61,7 @@ fn parse_args() -> Result<Args, String> {
                     arguments.next().ok_or("--registry requires a value")?,
                 ));
             }
+            "--write" => write = true,
             "-h" | "--help" => return Err(usage()),
             other => return Err(format!("unknown argument {other:?}\n{}", usage())),
         }
@@ -65,6 +69,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         root: root.unwrap_or_else(|| PathBuf::from(".")),
         registry,
+        write,
     })
 }
 
@@ -300,14 +305,39 @@ fn emit_violation(violation: &Violation) {
     );
 }
 
-fn run(root: &std::path::Path, registry_path: Option<&std::path::Path>) -> Result<usize, String> {
+fn run(
+    root: &std::path::Path,
+    registry_path: Option<&std::path::Path>,
+    write: bool,
+) -> Result<usize, String> {
     let registry = match registry_path {
         Some(path) if path.is_absolute() => load_architecture(path),
         Some(path) => load_architecture(&root.join(path)),
         None => load_from_repo(root),
     }
     .map_err(|error| error.to_string())?;
-    let violations = validate_architecture(&registry, root);
+    let mut violations = validate_architecture(&registry, root);
+
+    // The document is a projection of the registry, so it is regenerated on
+    // every run and only WRITTEN when asked.  Reading back what was just
+    // written is deliberate: it keeps the drift comparison a property of the
+    // bytes on disk rather than of the string in hand.
+    let document_path = root.join(architecture::DOCUMENT_PATH);
+    match generate_document(&registry, root) {
+        Ok(generated) => {
+            if write {
+                std::fs::write(&document_path, generated.as_bytes())
+                    .map_err(|error| format!("{}: {error}", document_path.display()))?;
+                eprintln!("wrote {}", document_path.display());
+            }
+            let committed = std::fs::read_to_string(&document_path).unwrap_or_default();
+            if committed != generated {
+                violations.push(document_drift_violation());
+            }
+        }
+        Err(error) => violations.push(document_generation_violation(&error)),
+    }
+
     let claim_classes = claim_class_map(&registry, root);
     let bead_entries = bead_provenance_index(&registry, root).unwrap_or_default();
     println!(
@@ -334,6 +364,10 @@ fn run(root: &std::path::Path, registry_path: Option<&std::path::Path>) -> Resul
             (
                 "semantic_contract_hash",
                 s(architecture::recompute_semantic_contract_hash(&registry)),
+            ),
+            (
+                "bead_rule_binding_hash",
+                s(architecture::recompute_rule_binding_hash(&registry)),
             ),
             (
                 "bead_binding_hash",
@@ -368,7 +402,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&args.root, args.registry.as_deref()) {
+    match run(&args.root, args.registry.as_deref(), args.write) {
         Ok(0) => ExitCode::SUCCESS,
         Ok(_) => ExitCode::from(1),
         Err(error) => {

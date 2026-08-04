@@ -83,7 +83,7 @@ Implementation follows the plan, not ad-hoc invention. Read in this order:
 
 ## The FrankenGraphDB Engineering Doctrine (READ THIS BEFORE WRITING CODE)
 
-These are the constitutional, non-negotiable rules from §1 of the plan. Violating any of them is a revert, memorialized in `docs/NEGATIVE_EVIDENCE.md`.
+These are the constitutional, non-negotiable rules from §1 of the plan. Violating any of them is memorialized in `docs/NEGATIVE_EVIDENCE.md` — whether the repair is a revert or, as the Backwards Compatibility rule requires, a fix in place.
 
 1. **The dependency universe is closed.** Allowed: `core`/`alloc`/`std`, the pinned Rust nightly, and the three foundations (`asupersync`, the `fnx-*` crates, design-level reuse of `frankensqlite`). Everything else — compression codecs, sketches, ANN indexes, inverted indexes, radix trees, wire protocols, columnar readers — is built in-house (§18 is the complete inventory). **No serde, no tokio, no rocksdb, no arrow, no tantivy, no hnswlib. Ever.** This constraint is the moat, not an albatross: the entire dependency surface is auditable, deterministic under lab, and owned.
 
@@ -141,6 +141,12 @@ We are in early development with **no users**. Do things the **RIGHT** way with 
 ## Mandatory Checks After Substantive Changes
 
 ```bash
+bash scripts/check.sh                   # the whole chain, including the non-Rust gates
+```
+
+or, run piecemeal:
+
+```bash
 cargo fmt --check
 cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
@@ -149,6 +155,86 @@ ubs $(git diff --name-only)
 ```
 
 If any check fails, fix root causes before handing off.
+
+**The piecemeal list above does not cover a change that is not Rust.** Every
+`cargo` step is a no-op on anything but `.rs`, and `ubs` is worse than a no-op:
+on a `.sh`, `.jsonl`, `.toml` or `.md` file it prints `no supported languages
+detected ... UBS did not run any scanner: nothing was checked (this is NOT a
+pass)` and then **exits 0**. A shell script or a `.beads/` export that no tool
+has ever opened therefore reports exactly like one that passed everything.
+
+`scripts/check.sh` is the gate that closes this. It runs, before any cargo step:
+
+- **file-coverage closure** — every tracked file must be claimed by one of its
+  gates or declared exempt with a stated reason, and an unclaimed file fails the
+  run. The tracked set comes from `git ls-files` at run time, so a newly added
+  file of an unhandled type cannot slip through by not being listed.
+- **shell lint** — `bash -n` plus `shellcheck --severity=warning` over every
+  tracked shell deliverable.
+
+So: if you touched anything that is not `.rs`, run `scripts/check.sh` rather
+than the piecemeal list.
+
+### Reading a gate — use the exit code, never a grep
+
+**The exit code is the verdict.** Every gate script here exits `0` only when
+every expected check executed and passed. Read `$?`. Do not decide a gate is
+green by grepping its output:
+
+```bash
+bash scripts/check.sh > gate.log 2>&1; rc=$?      # rc is the answer
+```
+
+`grep '^FAIL' gate.log` is the habit to unlearn, and it is why this section
+exists. MEASURED 2026-07-27 across `scripts/check.sh` plus the nine live
+`kind = "script"` gates in `registries/checker_index.toml`: **no gate emitted a
+line beginning with `FAIL` at column 0**, so that grep returned `0` on a red run
+of all ten. Three different failure tokens are in use (`RED`, `FAIL`, `ERROR`),
+under two indentation conventions, and **seven of the ten wrote the failure to
+stderr only** — so `gate.sh > log` and then reading `log` yields a plausible,
+complete-looking, all-green transcript of a red run. A pane read
+`scripts/check.sh` that way and landed a commit on it.
+
+All ten now report under one shared contract (`fgdb-udco`), defined once in
+[`scripts/lib/gate_verdict.sh`](scripts/lib/gate_verdict.sh) and sourced by
+every gate:
+
+- **One stream.** The verdict transcript is **stdout**. stderr carries only the
+  diagnostics explaining *why*, and is unconstrained.
+- **One token.** Every failure emits an anchored `FAIL ` line at column 0.
+  `grep -c '^FAIL ' <stdout>` is the query, and it is total over all ten gates.
+  `PASS ` is its counterpart. `scripts/check.sh` additionally emits `RED ` and
+  `UNRUN ` as refinements — always *beside* a `FAIL` line, never instead of one.
+  The vocabulary is closed: `PASS`, `FAIL`, `RED`, `UNRUN`.
+- **Three states, not two.** *ran and passed*, *ran and failed*, and **did not
+  run** — and only the first is green. A check that did not execute its
+  assertions must not emit the passing token. `gate_unrun` emits `UNRUN ` plus
+  the `FAIL ` token, and both `gate_verdict` and the `EXIT` trap refuse to
+  report green over **zero executed assertions**, so a gate whose body was
+  skipped whole reports `UNRUN` instead of falling through silent.
+- **One exit discipline.** Exit `0` iff zero `FAIL` and zero `UNRUN` lines were
+  emitted and the gate reached its verdict. The library's `EXIT` trap derives
+  the `FAIL` line from the exit code, so a gate that dies on an unguarded
+  `set -e` abort still reports one.
+
+> **Running a suite that reads `.beads/`** — do it **locally, not through
+> `rch`.** Remote workers do not sync `.beads/`, and
+> `tools/registry-check/tests/identity.rs` returns early and reports
+> `ok. 1 passed` when `.beads/issues.jsonl` is absent: 6 of its 7 assertions and
+> the only witness for ten violation codes are skipped. Mutation-proven
+> 2026-07-27 — two quiet roots differing only by `--exclude='.beads/*'`, 5.23s
+> with the corpus and 1.06s without. A test that skips invisibly and a gate that
+> fails invisibly are the same defect; the third state above is the contract's
+> answer to it.
+
+The **verdict-contract closure** core gate in `scripts/check.sh` enforces this:
+it enumerates the gate set from `registries/checker_index.toml` at run time, so
+a newly registered gate is in scope the moment it is registered, and it fails
+closed. A new gate that invents an eleventh token, writes a verdict to stderr,
+or never sources the library turns that gate red.
+
+**None of this makes grepping the right way to read a gate.** The tokens exist
+so a reader who greps anyway gets a true answer. `$?` is still the verdict.
 
 ### The `cargo test` gate (green-bar requirement)
 
@@ -187,7 +273,9 @@ Before finishing a work session you MUST:
 1. File beads issues for remaining work (anything needing follow-up).
 2. Run quality gates (if code changed) — tests, clippy, fmt, `ubs`.
 3. Update issue status — close finished work, update in-progress.
-4. `br sync --flush-only` to export beads to JSONL, then `git add .beads/`.
+4. `bash scripts/br_sync.sh <id> [<id>...]` with the exact Bead record IDs
+   intended for this landing, then stage the JSONL only after the helper reports
+   that exact set.
 5. Hand off — summarize what changed, gates run + results, remaining risks/gaps, concrete next steps.
 
 ---
@@ -206,7 +294,11 @@ A mail-like layer for agents to coordinate via MCP tools/resources: identities, 
 
 ## Beads (br) — Dependency-Aware Issue Tracking
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`). Issues live in `.beads/` and are tracked in git. **`br` is non-invasive — it NEVER runs git.** After `br sync --flush-only`, manually `git add .beads/ && git commit`.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`). Issues live in `.beads/` and are tracked in git. **`br` is non-invasive — it NEVER runs git.** Project configuration disables automatic JSONL export, so routine `br` mutations update the shared database without moving the tracked `.beads/issues.jsonl` under a gate. At session completion, use `bash scripts/br_sync.sh <id> [<id>...]` — never a raw `br sync --flush-only` — then stage the JSONL only after its changed record IDs exactly match the declared set.
+
+`scripts/br_sync.sh` is the tracked-export enforcement point. It requires every record ID intended for the landing, rejects an already-dirty JSONL containing undeclared IDs, refuses an impossible dirty-record count before writing, and verifies exact record-ID set equality after export. No arguments means no export. Multiple IDs are an explicit co-landing and every ID must appear in the commit message; a nonzero result never authorizes staging the JSONL.
+
+The helper also atomically takes the same landing token for its brief export, without process-name matching, so a gate start and a JSONL write cannot race between a state probe and the write. A live gate returns exit 75 and leaves the JSONL byte-identical; wait for that gate to finish and retry the same ID set. A free lease exports immediately. An unreadable or provably dead lease fails open **loudly** with respect to the lease, matching the landing-lease policy, while record attribution still fails closed; the tree-stability tripwire remains the detection backstop. Deferred records remain live in the shared database until an explicit, attributable session-completion export converges them to JSONL.
 
 ```bash
 br ready                 # issues ready to work (no blockers)
@@ -216,7 +308,7 @@ br create --title="..." --type=task|bug|feature|epic --priority=2   # 0=critical
 br update <id> --status=in_progress
 br close <id> [<id2> ...] [--reason "..."]
 br dep add <issue> <depends-on>
-br sync --flush-only     # export to JSONL (NO git ops)
+bash scripts/br_sync.sh <id> [<id>...]  # exact-ID, lease-aware JSONL export
 ```
 
 Conventions: use the bead ID (e.g. `br-123`) as the Agent-Mail `thread_id` and prefix subjects with `[br-123]`; put the issue ID in the file-reservation `reason`; include `br-###` in commit messages. Map beads to workstreams (W1 Bedrock … W8 Fabric+Warden+Aegis) and gates (G1–G4) from §19.
@@ -225,7 +317,7 @@ Conventions: use the bead ID (e.g. `br-123`) as the Agent-Mail `thread_id` and p
 
 ## bv — Graph-Aware Triage
 
-`bv` computes PageRank/betweenness/critical-path/cycles over `.beads/beads.jsonl`. **Use ONLY `--robot-*` flags — bare `bv` launches a blocking TUI.** Start with `bv --robot-triage` (counts + top picks + quick wins + blockers). `bv --robot-plan` for parallel tracks; `bv --robot-insights` for full metrics (check `.Cycles` — must be empty).
+`bv` computes PageRank/betweenness/critical-path/cycles over `.beads/`. **Use ONLY `--robot-*` flags — bare `bv` launches a blocking TUI.** Start with `bv --robot-triage` (counts + top picks + quick wins + blockers). `bv --robot-plan` for parallel tracks; `bv --robot-insights` for full metrics (check `.Cycles` — must be empty).
 
 ---
 

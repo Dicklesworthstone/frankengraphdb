@@ -100,6 +100,7 @@ impl Cardinality {
 pub enum AmbiguityKind {
     AliasExpressionUnparsed,
     AmbiguousSchemaOwner,
+    CompressedMemberToken,
     ConflictingCandidateEvidence,
     DefinitionWithoutStructuralBody,
     FieldTypeAmbiguous,
@@ -119,6 +120,7 @@ impl AmbiguityKind {
         match self {
             Self::AliasExpressionUnparsed => "alias-expression-unparsed",
             Self::AmbiguousSchemaOwner => "ambiguous-schema-owner",
+            Self::CompressedMemberToken => "compressed-member-token",
             Self::ConflictingCandidateEvidence => "conflicting-candidate-evidence",
             Self::DefinitionWithoutStructuralBody => "definition-without-structural-body",
             Self::FieldTypeAmbiguous => "field-type-ambiguous",
@@ -297,6 +299,11 @@ pub struct ArmCandidate {
     pub key: ArmCandidateKey,
     pub payload_sha256s: Vec<String>,
     pub payload_conflict: bool,
+    /// Zero-based alternative positions observed for this arm in its source
+    /// union. A singleton is required before a durable one-based arm tag can
+    /// be derived; multiple values mean repeated source evidence disagrees on
+    /// order even when the arm set itself is unchanged.
+    pub source_ordinals: Vec<usize>,
     pub locations: Vec<SourceSpan>,
 }
 
@@ -448,8 +455,10 @@ struct SchemaOccurrence {
     display_name: String,
     owner_status: SchemaOwnerStatus,
     definition_kind: DefinitionKind,
+    complete_top_level_map_definition: bool,
     declaration_range: Range<usize>,
     expression: Option<MappedText>,
+    supplemental_unions: Vec<MappedText>,
     expression_sha256: String,
 }
 
@@ -477,6 +486,7 @@ struct ArmOccurrence {
     key: ArmCandidateKey,
     payload: Option<String>,
     raw: String,
+    source_ordinal: usize,
     source_range: Range<usize>,
 }
 
@@ -728,6 +738,30 @@ fn parse_identifier(bytes: &[u8], start: usize) -> Option<usize> {
     Some(end)
 }
 
+/// A record member name may contain `-` only BETWEEN identifier-continue
+/// bytes (fgdb-u27g): the source spells hyphenated compounds —
+/// `complete_member_target_family_and_no-start_bijection` (a14:2055) — and
+/// splitting on the hyphen mints a bogus member plus a bogus `-start_*`
+/// exact_type whose `noncanonical field separator` ambiguity reads like a
+/// source defect rather than a reader one. A dash not followed by an
+/// identifier-continue byte ends the name exactly as before, so a trailing
+/// dash still reports against the source.
+fn parse_member_name(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut end = parse_identifier(bytes, start)?;
+    while bytes.get(end).copied() == Some(b'-')
+        && bytes
+            .get(end + 1)
+            .copied()
+            .is_some_and(is_identifier_continue)
+    {
+        end += 1;
+        while bytes.get(end).copied().is_some_and(is_identifier_continue) {
+            end += 1;
+        }
+    }
+    Some(end)
+}
+
 fn parse_upper_identifier(bytes: &[u8], start: usize) -> Option<usize> {
     if !bytes
         .get(start)
@@ -766,6 +800,212 @@ fn is_generic_angle_open(text: &str, index: usize) -> bool {
         && (is_identifier_start(next) || matches!(next, b'?' | b'[' | b'{'))
 }
 
+/// The four delimiters the Appendix A source grammar nests, and their closers
+/// at the same index. Spelled ONCE: a second copy of this set is how the two
+/// readers below drifted apart in the first place.
+const OPENING_DELIMITERS: [u8; 4] = *b"{[(<";
+const CLOSING_DELIMITERS: [u8; 4] = *b"}])>";
+
+fn opening_delimiter_for(closer: u8) -> Option<u8> {
+    CLOSING_DELIMITERS
+        .iter()
+        .position(|candidate| *candidate == closer)
+        .map(|at| OPENING_DELIMITERS[at])
+}
+
+/// What one byte was, structurally, to [`DelimiterScan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelimiterStep {
+    /// Consumed by the quote machine, or an angle that is not generic syntax,
+    /// or a `>` that closes nothing. NEVER a candidate separator — this is the
+    /// distinction a caller cannot re-derive from the byte alone, and the one
+    /// a second reader gets wrong.
+    Skipped,
+    /// An opening delimiter; the depth grew.
+    Opened,
+    /// A closing delimiter that matched its opener; the depth shrank.
+    Closed,
+    /// Structurally inert at the current depth. The only kind of byte a caller
+    /// may treat as a separator.
+    Plain,
+}
+
+/// THE delimiter reader for Appendix A source text: one stack, one quote
+/// machine, one generic-angle rule.
+///
+/// There used to be TWO. `matching_delimiter` and `split_top_level` each
+/// carried a private stack, private quote/escape handling, a private
+/// `is_generic_angle_open` special case, and a private copy of the push/close
+/// sets — the same balance test written out twice. That is the defect
+/// fgdb-8kzt actually names, and it is why three separate repairs to
+/// `matching_delimiter` alone (V1/V2/V3 on that bead) recovered NOTHING: the
+/// twin still rejected the text. Where two pieces of code answer one question
+/// they drift, and the weaker one wins by being the one that happens to run.
+///
+/// Both entry points below are now thin drivers over this scanner. They differ
+/// only in where they start and what they do with the events — never in what
+/// counts as balanced. A future grammar change (the half-open interval
+/// `(a,b]` of fgdb-8kzt, say) is therefore ONE edit, and it cannot land in
+/// half the readers.
+///
+/// The structural guard that keeps it that way is
+/// `exactly_one_delimiter_reader_exists` in this file's test module: behaviour
+/// tests can only exercise a reader they know the name of, so a third stack
+/// would be invisible to every other test here.
+struct DelimiterScan {
+    stack: Vec<u8>,
+    quote: Option<u8>,
+    escaped: bool,
+    /// Offset of the `]` that terminates a half-open interval literal opened at
+    /// an earlier `(`. See [`half_open_interval_end`]: the pair is one TOKEN, so
+    /// neither byte reaches the stack.
+    interval_close: Option<usize>,
+}
+
+impl DelimiterScan {
+    /// A scan that starts outside every delimiter.
+    fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            quote: None,
+            escaped: false,
+            interval_close: None,
+        }
+    }
+
+    /// A scan that starts having already consumed `opener`.
+    fn inside(opener: u8) -> Self {
+        Self {
+            stack: vec![opener],
+            quote: None,
+            escaped: false,
+            interval_close: None,
+        }
+    }
+
+    fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn in_quote(&self) -> bool {
+        self.quote.is_some()
+    }
+
+    /// Feed the byte at `index`. `text` is needed whole because the
+    /// generic-angle rule looks both ways around a `<`.
+    fn step(
+        &mut self,
+        text: &str,
+        index: usize,
+        byte: u8,
+    ) -> Result<DelimiterStep, DelimiterIssue> {
+        if let Some(active_quote) = self.quote {
+            if self.escaped {
+                self.escaped = false;
+            } else if byte == b'\\' {
+                self.escaped = true;
+            } else if byte == active_quote {
+                self.quote = None;
+            }
+            return Ok(DelimiterStep::Skipped);
+        }
+        if matches!(byte, b'\'' | b'"') {
+            self.quote = Some(byte);
+            return Ok(DelimiterStep::Skipped);
+        }
+        // A half-open interval literal is ONE token, recognised at its `(` and
+        // released at its `]`. Both bytes are inert, exactly as a quoted string's
+        // contents are: the pair never enters the stack, so it can neither open a
+        // depth nor close somebody else's. Placed after the quote machine so an
+        // interval spelled inside a quoted string stays quoted text.
+        if self.interval_close == Some(index) {
+            self.interval_close = None;
+            return Ok(DelimiterStep::Skipped);
+        }
+        if matches!(byte, b'(' | b'[')
+            && let Some(end) = half_open_interval_end(text, index)
+        {
+            self.interval_close = Some(end);
+            return Ok(DelimiterStep::Skipped);
+        }
+        if byte == b'<' && !is_generic_angle_open(text, index) {
+            return Ok(DelimiterStep::Skipped);
+        }
+        if OPENING_DELIMITERS.contains(&byte) {
+            self.stack.push(byte);
+            return Ok(DelimiterStep::Opened);
+        }
+        if byte == b'>' && self.stack.last() != Some(&b'<') {
+            return Ok(DelimiterStep::Skipped);
+        }
+        // Pop-and-compare, not peek-and-compare, and the lookup IS the
+        // membership test — a byte with no opener is simply not a closer. Both
+        // old readers instead tested membership and then re-derived the pair,
+        // which needed an `unreachable!()` arm to convince the compiler the two
+        // agreed. There is no unreachable arm here: this is total.
+        //
+        // The peek form the old `matching_delimiter` used is genuinely PARTIAL —
+        // it reaches `unreachable!()` on an empty stack, and only its own
+        // driver's invariant kept that safe. `split_top_level` reaches depth 0
+        // routinely, and an unmatched closer there IS the mismatch. The two
+        // forms agree wherever both were defined: `closer_of(top) != byte` and
+        // `top != opener_of(byte)` are one test over a four-element bijection.
+        let Some(expected_opener) = opening_delimiter_for(byte) else {
+            return Ok(DelimiterStep::Plain);
+        };
+        if self.stack.pop() != Some(expected_opener) {
+            return Err(DelimiterIssue {
+                offset: index,
+                mismatched: true,
+            });
+        }
+        Ok(DelimiterStep::Closed)
+    }
+}
+
+/// If the `(` at `open_index` begins a half-open interval literal — `(term,term]`,
+/// the standard mathematical spelling Appendix A uses for a retained window —
+/// return the offset of the `]` that ends it.
+///
+/// This is a TOKEN recognizer and deliberately NOT a relaxed balance rule. The
+/// alternative measured on fgdb-8kzt (V4) let any `(` be closed by any `]`
+/// anywhere, which makes a genuine mismatched-delimiter typo parse silently — a
+/// fail-open reader inside a checker whose whole job is to be unfoolable. The
+/// shape required here is two nonempty identifier terms and exactly one comma, so
+/// `entries[foo)`, `(a,b)`, `(a]`, `(a,b,c]` and `(a b,c]` all stay mismatched.
+///
+/// Both orientations are recognised, because the census region spells both:
+/// measured over plan lines 1388-2728, `(term,term]` appears twice (a10:1928, the
+/// two delta indexes) and `[term,term)` once (line 1728, `[0,byte_count)`). Each
+/// is closed by the bracket the interval's own openness demands, so the closer is
+/// part of the token and never a structural closer.
+fn half_open_interval_end(text: &str, open_index: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let terminator = match bytes.get(open_index).copied() {
+        Some(b'(') => b']',
+        Some(b'[') => b')',
+        _ => return None,
+    };
+    let mut index = open_index + 1;
+    let mut terms = 0usize;
+    loop {
+        let term_start = index;
+        while matches!(bytes.get(index), Some(&byte) if byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            index += 1;
+        }
+        if index == term_start {
+            return None;
+        }
+        terms += 1;
+        match bytes.get(index).copied() {
+            Some(b',') if terms == 1 => index += 1,
+            Some(byte) if byte == terminator && terms == 2 => return Some(index),
+            _ => return None,
+        }
+    }
+}
+
 fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterIssue> {
     let bytes = text.as_bytes();
     let Some(opener) = bytes.get(open_index).copied() else {
@@ -774,58 +1014,21 @@ fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterI
             mismatched: false,
         });
     };
-    if !matches!(opener, b'{' | b'[' | b'(' | b'<') {
+    // The interval token is inert HERE TOO. `inside` seeds the stack with the
+    // opener without routing it through `step`, so without this the same bracket
+    // would be an inert token mid-scan and a structural opener at the entry point
+    // — one rule spelled two ways, which is the defect fgdb-8kzt is about. A
+    // caller that points at an interval's bracket is not pointing at a body, and
+    // gets exactly what it gets for any other non-opener byte.
+    if !OPENING_DELIMITERS.contains(&opener) || half_open_interval_end(text, open_index).is_some() {
         return Err(DelimiterIssue {
             offset: open_index,
             mismatched: true,
         });
     }
-    let mut stack = vec![opener];
-    let mut quote = None;
-    let mut escaped = false;
+    let mut scan = DelimiterScan::inside(opener);
     for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-            continue;
-        }
-        if byte == b'<' && !is_generic_angle_open(text, index) {
-            continue;
-        }
-        if matches!(byte, b'{' | b'[' | b'(' | b'<') {
-            stack.push(byte);
-            continue;
-        }
-        if !matches!(byte, b'}' | b']' | b')' | b'>') {
-            continue;
-        }
-        if byte == b'>' && stack.last() != Some(&b'<') {
-            continue;
-        }
-        let expected = match stack.last().copied() {
-            Some(b'{') => b'}',
-            Some(b'[') => b']',
-            Some(b'(') => b')',
-            Some(b'<') => b'>',
-            _ => unreachable!("the delimiter stack only contains opening delimiters"),
-        };
-        if byte != expected {
-            return Err(DelimiterIssue {
-                offset: index,
-                mismatched: true,
-            });
-        }
-        stack.pop();
-        if stack.is_empty() {
+        if scan.step(text, index, byte)? == DelimiterStep::Closed && scan.depth() == 0 {
             return Ok(index);
         }
     }
@@ -836,59 +1039,22 @@ fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterI
 }
 
 fn split_top_level(text: &str, delimiters: &[u8]) -> Result<Vec<SplitSpan>, DelimiterIssue> {
-    let bytes = text.as_bytes();
     let mut spans = Vec::new();
-    let mut stack = Vec::new();
-    let mut quote = None;
-    let mut escaped = false;
+    let mut scan = DelimiterScan::new();
     let mut start = 0;
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-            continue;
-        }
-        if byte == b'<' && !is_generic_angle_open(text, index) {
-            continue;
-        }
-        if matches!(byte, b'{' | b'[' | b'(' | b'<') {
-            stack.push(byte);
-            continue;
-        }
-        if matches!(byte, b'}' | b']' | b')' | b'>') {
-            if byte == b'>' && stack.last() != Some(&b'<') {
-                continue;
-            }
-            let expected_opener = match byte {
-                b'}' => b'{',
-                b']' => b'[',
-                b')' => b'(',
-                b'>' => b'<',
-                _ => unreachable!(),
-            };
-            if stack.pop() != Some(expected_opener) {
-                return Err(DelimiterIssue {
-                    offset: index,
-                    mismatched: true,
-                });
-            }
-            continue;
-        }
-        if stack.is_empty() && delimiters.contains(&byte) {
+    for (index, byte) in text.as_bytes().iter().copied().enumerate() {
+        // Only a Plain byte may separate: a quoted comma, a nested comma, and
+        // a closing delimiter must all fail this test, and only the scanner
+        // knows which is which.
+        if scan.step(text, index, byte)? == DelimiterStep::Plain
+            && scan.depth() == 0
+            && delimiters.contains(&byte)
+        {
             spans.push(SplitSpan { start, end: index });
             start = index + 1;
         }
     }
-    if !stack.is_empty() || quote.is_some() {
+    if scan.depth() != 0 || scan.in_quote() {
         return Err(DelimiterIssue {
             offset: text.len(),
             mismatched: false,
@@ -899,6 +1065,73 @@ fn split_top_level(text: &str, delimiters: &[u8]) -> Result<Vec<SplitSpan>, Deli
         end: text.len(),
     });
     Ok(spans)
+}
+
+fn top_level_arrow(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if matches!(byte, b'\'' | b'"') {
+            let quote = byte;
+            let mut escaped = false;
+            cursor += 1;
+            while cursor < bytes.len() {
+                let quoted = bytes[cursor];
+                cursor += 1;
+                if escaped {
+                    escaped = false;
+                } else if quoted == b'\\' {
+                    escaped = true;
+                } else if quoted == quote {
+                    break;
+                }
+            }
+            continue;
+        }
+        if matches!(byte, b'{' | b'[' | b'(')
+            || (byte == b'<' && is_generic_angle_open(text, cursor))
+        {
+            cursor = matching_delimiter(text, cursor).ok()? + 1;
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"->") {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn indexed_map_value(mapped: &MappedText) -> Option<MappedText> {
+    let trimmed = trim_range(&mapped.text, 0..mapped.text.len());
+    let open = trimmed.start;
+    if mapped.text.as_bytes().get(open) != Some(&b'[') {
+        return None;
+    }
+    let close = matching_delimiter(&mapped.text, open).ok()?;
+    if close + 1 != trimmed.end {
+        return None;
+    }
+    let interior_start = open + 1;
+    let arrow = interior_start + top_level_arrow(&mapped.text[interior_start..close])?;
+    let key = trim_range(&mapped.text, interior_start..arrow);
+    let value = trim_range(&mapped.text, arrow + 2..close);
+    if key.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some(mapped.subrange(value))
+}
+
+fn top_level_map_value(mapped: &MappedText) -> Option<MappedText> {
+    let trimmed = trim_range(&mapped.text, 0..mapped.text.len());
+    let arrow = trimmed.start + top_level_arrow(&mapped.text[trimmed.clone()])?;
+    let key = trim_range(&mapped.text, trimmed.start..arrow);
+    let value = trim_range(&mapped.text, arrow + 2..trimmed.end);
+    if key.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some(mapped.subrange(value))
 }
 
 fn parse_type_display(text: &str) -> Option<(String, usize)> {
@@ -962,11 +1195,18 @@ fn starts_with_word(value: &str, word: &str) -> bool {
             .is_none_or(|byte| !is_identifier_continue(*byte))
 }
 
+/// The one connector across which a prose definition distributes to an earlier
+/// conjunct.  Deliberately exact: measured over all 13 conjunction definition
+/// sites in Appendix A, the trailing text of the first conjunct is " and " in
+/// 13 of 13.  A looser predicate would start claiming list separators.
+const CONJUNCTION_CONNECTOR: &str = "and";
+
 fn has_definition_cue(value: &str) -> bool {
-    const CUES: [&str; 21] = [
+    const CUES: [&str; 22] = [
         "is",
         "are",
         "has",
+        "exactly",
         "contains",
         "maps",
         "uses",
@@ -990,10 +1230,22 @@ fn has_definition_cue(value: &str) -> bool {
 }
 
 fn cue_names_union(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    ["union", "tag", "arm", "one of"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    const UNION_WORDS: [&str; 6] = ["union", "unions", "tag", "tags", "arm", "arms"];
+    let mut previous_was_one = false;
+    for word in value
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|word| !word.is_empty())
+    {
+        if UNION_WORDS
+            .iter()
+            .any(|candidate| word.eq_ignore_ascii_case(candidate))
+            || (previous_was_one && word.eq_ignore_ascii_case("of"))
+        {
+            return true;
+        }
+        previous_was_one = word.eq_ignore_ascii_case("one");
+    }
+    false
 }
 
 fn contains_continuation_separator(value: &str) -> bool {
@@ -1016,6 +1268,43 @@ fn prose_body_candidate(owner: &str, text: &str) -> bool {
 
 fn union_continuation_candidate(text: &str) -> bool {
     leading_assignment(text).is_none() && matches!(has_top_level_pipe(text), Ok(true))
+}
+
+fn complete_record_fragment(text: &str) -> bool {
+    let trimmed = trim_range(text, 0..text.len());
+    if !matches!(text.as_bytes().get(trimmed.start), Some(b'{')) {
+        return false;
+    }
+    matching_delimiter(text, trimmed.start).is_ok_and(|close| (close + 1).eq(&trimmed.end))
+}
+
+fn complete_union_arm_fragment(text: &str) -> bool {
+    let trimmed = trim_range(text, 0..text.len());
+    if trimmed.is_empty() || matches!(has_top_level_pipe(&text[trimmed.clone()]), Ok(true)) {
+        return false;
+    }
+    let candidate = &text[trimmed];
+    let Some(token) = first_arm_token(candidate) else {
+        return false;
+    };
+    let Some(open) = candidate.find('{') else {
+        return token.end.eq(&candidate.len());
+    };
+    trim_range(candidate, token.end..open).is_empty()
+        && matching_delimiter(candidate, open).is_ok_and(|close| (close + 1).eq(&candidate.len()))
+}
+
+fn introduces_supplemental_union(value: &str) -> bool {
+    let normalized = normalize_whitespace(value).to_ascii_lowercase();
+    normalized.starts_with("and exactly one ")
+        && normalized.ends_with(':')
+        && normalized
+            .split_ascii_whitespace()
+            .any(|word| word.trim_end_matches(':').eq("body"))
+}
+
+fn is_exact_or_connector(value: &str) -> bool {
+    normalize_whitespace(value).eq_ignore_ascii_case("or")
 }
 
 fn reference_wrapper_owner(family: &str) -> bool {
@@ -1179,6 +1468,7 @@ struct ProseLink {
     display_name: String,
     owner_fragment: usize,
     rhs_fragments: Vec<usize>,
+    supplemental_union_fragments: Vec<usize>,
     cue: String,
 }
 
@@ -1194,6 +1484,24 @@ fn simple_type_display(text: &str) -> Option<String> {
     let trimmed = text.trim();
     let (display, consumed) = parse_type_display(trimmed)?;
     (consumed == trimmed.len()).then_some(display)
+}
+
+/// The one reader for a backticked prose definition head.
+///
+/// Keep both discovery and continuation termination delegated here. A second
+/// spelling of this predicate inside either scan is how one owner can consume
+/// the next owner's structural body.
+fn prose_definition_head(fragment: &MarkdownFragment) -> Option<String> {
+    if fragment.kind != FragmentKind::Inline {
+        return None;
+    }
+    let display_name = simple_type_display(&fragment.text)?;
+    // `embeds` is deliberately prose-head-only. The pinned Appendix contains
+    // three bare `Name` embeds heads and zero `Name{...}` embeds heads; adding
+    // it to the shared direct-record cue set would expand source authority
+    // beyond the measured defect population.
+    (has_definition_cue(&fragment.after) || starts_with_word(&fragment.after, "embeds"))
+        .then_some(display_name)
 }
 
 fn prose_schema_links(
@@ -1214,12 +1522,9 @@ fn prose_schema_links(
         indexes.sort_by_key(|index| fragments[*index].source_range.start);
         for (position, fragment_index) in indexes.iter().copied().enumerate() {
             let fragment = &fragments[fragment_index];
-            let Some(display_name) = simple_type_display(&fragment.text) else {
+            let Some(display_name) = prose_definition_head(fragment) else {
                 continue;
             };
-            if !has_definition_cue(&fragment.after) {
-                continue;
-            }
             let mut cue = normalize_whitespace(&fragment.after);
             let mut rhs_fragments = Vec::new();
             let mut scan = position;
@@ -1230,9 +1535,7 @@ fn prose_schema_links(
                     break;
                 };
                 let candidate = &fragments[candidate_index];
-                if simple_type_display(&candidate.text).is_some()
-                    && has_definition_cue(&candidate.after)
-                {
+                if prose_definition_head(candidate).is_some() {
                     break;
                 }
                 if prose_body_candidate(&display_name, &candidate.text) {
@@ -1257,31 +1560,170 @@ fn prose_schema_links(
             }) {
                 continue;
             }
+            let mut supplemental_union_fragments = Vec::new();
             if !rhs_fragments.is_empty() && cue_names_union(&cue) {
-                let mut separator_seen = false;
-                while let Some(candidate_index) = indexes.get(scan + 1).copied() {
-                    let previous = &fragments[indexes[scan]];
-                    if sentence_ends(&previous.after) {
-                        break;
-                    }
-                    separator_seen |= contains_continuation_separator(&previous.after);
+                let primary_is_record = complete_record_fragment(&fragments[rhs_fragments[0]].text);
+                if primary_is_record
+                    && introduces_supplemental_union(&fragments[indexes[scan]].after)
+                    && let Some(candidate_index) = indexes.get(scan + 1).copied()
+                {
                     let candidate = &fragments[candidate_index];
-                    if separator_seen && union_continuation_candidate(&candidate.text) {
-                        rhs_fragments.push(candidate_index);
-                        separator_seen = false;
+                    if prose_definition_head(candidate).is_none() {
+                        if union_continuation_candidate(&candidate.text) {
+                            supplemental_union_fragments.push(candidate_index);
+                        } else if complete_union_arm_fragment(&candidate.text) {
+                            let mut arms = vec![candidate_index];
+                            let mut arm_scan = scan + 1;
+                            while let Some(next_index) = indexes.get(arm_scan + 1).copied() {
+                                let previous = &fragments[indexes[arm_scan]];
+                                if sentence_ends(&previous.after)
+                                    || !is_exact_or_connector(&previous.after)
+                                {
+                                    break;
+                                }
+                                let next = &fragments[next_index];
+                                if prose_definition_head(next).is_some()
+                                    || !complete_union_arm_fragment(&next.text)
+                                {
+                                    break;
+                                }
+                                arms.push(next_index);
+                                arm_scan += 1;
+                            }
+                            if arms.len() >= 2 {
+                                supplemental_union_fragments = arms;
+                            }
+                        }
                     }
-                    scan += 1;
+                } else if !primary_is_record {
+                    let mut separator_seen = false;
+                    while let Some(candidate_index) = indexes.get(scan + 1).copied() {
+                        let previous = &fragments[indexes[scan]];
+                        if sentence_ends(&previous.after) {
+                            break;
+                        }
+                        separator_seen |= contains_continuation_separator(&previous.after);
+                        let candidate = &fragments[candidate_index];
+                        if prose_definition_head(candidate).is_some() {
+                            break;
+                        }
+                        if separator_seen && union_continuation_candidate(&candidate.text) {
+                            rhs_fragments.push(candidate_index);
+                            separator_seen = false;
+                        }
+                        scan += 1;
+                    }
                 }
+            }
+            // A conjunction distributes the definition.  In "`A` and `B` are
+            // <definition>" only B's trailing text carries the cue, so
+            // `prose_definition_head` never sees A as a head and A is dropped
+            // from the census entirely (measured 13 of 13 such sites).  Walk
+            // back from a CONFIRMED head across pure " and " connectors and give
+            // every co-named conjunct the same right-hand side.
+            //
+            // Fail-closed by construction: this pass is anchored to a head that
+            // was already confirmed by the unchanged reader above, so it can only
+            // ATTACH names to an existing definition and can never invent one.
+            // It stops at the first fragment that is not a bare type display, is
+            // already a head in its own right, or is joined by anything other
+            // than the bare conjunction.
+            let mut co_heads = Vec::new();
+            let mut back = position;
+            while back > 0 {
+                let previous_index = indexes[back - 1];
+                let previous = &fragments[previous_index];
+                if normalize_whitespace(&previous.after) != CONJUNCTION_CONNECTOR {
+                    break;
+                }
+                if prose_definition_head(previous).is_some() {
+                    break;
+                }
+                let Some(co_name) = simple_type_display(&previous.text) else {
+                    break;
+                };
+                co_heads.push((co_name, previous_index));
+                back -= 1;
+            }
+            for (co_name, co_index) in co_heads.into_iter().rev() {
+                links.push(ProseLink {
+                    display_name: co_name,
+                    owner_fragment: co_index,
+                    rhs_fragments: rhs_fragments.clone(),
+                    supplemental_union_fragments: supplemental_union_fragments.clone(),
+                    cue: cue.clone(),
+                });
             }
             links.push(ProseLink {
                 display_name,
                 owner_fragment: fragment_index,
                 rhs_fragments,
+                supplemental_union_fragments,
                 cue,
             });
         }
     }
     links
+}
+
+/// The range, within `before`, of the bold owner name that owns the structural
+/// fragment `before` precedes. Two spellings, one reader.
+///
+/// A. `**Name**: {…}` — a bold owner immediately colon-introducing its body.
+/// B. `**Name / Other / Third.** A <phrase> is {…}` — a bold heading listing the
+///    types the paragraph defines, whose FIRST body is introduced by an anonymous
+///    noun phrase instead of a backticked name. The phrase is a paraphrase of the
+///    heading's first name, so the heading is the attribution.
+///
+/// B cannot collide with `prose_schema_links`, which binds a backticked intro
+/// (`` `ControlCommand` is {…} ``). A backticked name is its own inline fragment,
+/// so for a backtick-introduced body `before` is just " is " and never begins with
+/// `**`. That is why B needs no explicit "reject a backticked phrase" guard —
+/// one was measured and could not fire on any input. `bold_owner_name_range_b_
+/// cannot_claim_a_backticked_intro` pins that rather than leaving it to comment.
+///
+/// B reads ONLY the appendix. The plan also spells a named `CommitCommand` body at
+/// plan line 393, whose 21 members match 1912's in name and order but leave two
+/// array element types unelaborated. That line is outside `[source_manifest]`
+/// (1388-2728), so this reader never sees it, never compares the two spellings and
+/// never normalises one to the other: it records exactly what the appendix spells,
+/// element types included. Choosing between the spellings would be a durable-format
+/// ruling, and it is not this reader's to make.
+fn bold_owner_name_range(before: &str) -> Option<Range<usize>> {
+    let before_range = trim_range(before, 0..before.len());
+    let colon_index = before_range.end.checked_sub(1)?;
+    if before.as_bytes().get(colon_index) == Some(&b':') {
+        // Shape A.
+        let prefix_range = trim_range(before, before_range.start..colon_index);
+        if !before[prefix_range.clone()].ends_with("**") {
+            return None;
+        }
+        let close_start = prefix_range.end - 2;
+        let open = before[..close_start].rfind("**")?;
+        return Some(trim_range(before, open + 2..close_start));
+    }
+    // Shape B. Anchor to the current source line: `before` reaches back to the
+    // previous inline fragment, which is usually in an earlier paragraph.
+    let line_start = before[..before_range.end]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_range = trim_range(before, line_start..before_range.end);
+    let line = &before[line_range.clone()];
+    if !line.starts_with("**") || !line.ends_with(" is") {
+        return None;
+    }
+    let close = line[2..].find("**")? + 2;
+    // The heading's FIRST name owns the first body. A heading lists the types its
+    // paragraph defines in the order it defines them, so any later name is a
+    // different type's; `heading_led_binding_takes_the_first_name_not_a_later_one`
+    // is the control that keeps this honest.
+    let first = line[2..close].split('/').next()?;
+    let lead = first.len() - first.trim_start().len();
+    let trimmed = first.trim();
+    let name = trimmed.strip_suffix('.').unwrap_or(trimmed).trim_end();
+    let start = line_range.start + 2 + lead;
+    let end = start + name.len();
+    (start < end).then_some(start..end)
 }
 
 fn bold_schema_links(fragments: &[MarkdownFragment]) -> Vec<BoldLink> {
@@ -1291,22 +1733,9 @@ fn bold_schema_links(fragments: &[MarkdownFragment]) -> Vec<BoldLink> {
             continue;
         }
         let before = &fragment.before;
-        let before_range = trim_range(before, 0..before.len());
-        let Some(colon_index) = before_range.end.checked_sub(1) else {
+        let Some(candidate_range) = bold_owner_name_range(before) else {
             continue;
         };
-        if before.as_bytes().get(colon_index) != Some(&b':') {
-            continue;
-        }
-        let prefix_range = trim_range(before, before_range.start..colon_index);
-        if !before[prefix_range.clone()].ends_with("**") {
-            continue;
-        }
-        let close_start = prefix_range.end - 2;
-        let Some(open) = before[..close_start].rfind("**") else {
-            continue;
-        };
-        let candidate_range = trim_range(before, open + 2..close_start);
         let Some(display_name) = simple_type_display(&before[candidate_range.clone()]) else {
             continue;
         };
@@ -1344,19 +1773,43 @@ fn make_schema_occurrence(
     expression: Option<MappedText>,
 ) -> Option<SchemaOccurrence> {
     let key = family_and_generic(&display_name)?;
-    let expression_sha256 = expression
-        .as_ref()
-        .map(|value| sha256_hex(normalize_whitespace(&value.text).as_bytes()))
-        .unwrap_or_else(|| sha256_hex(b""));
+    let supplemental_unions = Vec::new();
+    let expression_sha256 = schema_expression_sha256(&expression, &supplemental_unions);
     Some(SchemaOccurrence {
         key,
         display_name,
         owner_status,
         definition_kind,
+        complete_top_level_map_definition: matches!(
+            definition_kind,
+            DefinitionKind::InlineAlias | DefinitionKind::BoldOwnerStructural
+        ),
         declaration_range,
         expression,
+        supplemental_unions,
         expression_sha256,
     })
+}
+
+fn schema_expression_sha256(
+    expression: &Option<MappedText>,
+    supplemental_unions: &[MappedText],
+) -> String {
+    if supplemental_unions.is_empty() {
+        return expression
+            .as_ref()
+            .map(|value| sha256_hex(normalize_whitespace(&value.text).as_bytes()))
+            .unwrap_or_else(|| sha256_hex(b""));
+    }
+    let mut transcript = b"fgdb:appendix-source-schema-with-supplemental-unions:v1".to_vec();
+    for part in expression.iter().chain(supplemental_unions) {
+        let normalized = normalize_whitespace(&part.text);
+        let length = normalized.len().to_string();
+        transcript.extend_from_slice(length.as_bytes());
+        transcript.push(b':');
+        transcript.extend_from_slice(normalized.as_bytes());
+    }
+    sha256_hex(&transcript)
 }
 
 fn affected_source_key(key: StructuralCandidateKey) -> BTreeSet<StructuralCandidateKey> {
@@ -1415,6 +1868,65 @@ fn leading_record(text: &str) -> Option<(String, usize)> {
         cursor = skip_ascii_whitespace(bytes, cursor + 2);
     }
     (bytes.get(cursor) == Some(&b'{')).then_some((display, cursor))
+}
+
+/// The anonymous bodies the Appendix defines by phrase rather than by name.
+/// Each phrase is the definition cue and encodes its owner; every other
+/// anonymous brace body stays an unowned structural fragment, never a durable
+/// schema. The population is closed: a new entry needs a measured unique
+/// source phrase and a census test, not a hunch.
+///
+///   * fgdb-ckb9 — a03:1468: "The generated common header of every
+///     Local/Meta/Shard payload also contains `{...}`". The owner is the
+///     census's own generated-family spelling (`GeneratedResultDelivery
+///     Owner`, `GeneratedMetadataTreeBootstrapSet`), not a role token, so no
+///     false top-level `Local`/`Meta`/`Shard` schema is minted.
+///   * fgdb-gpzz — a14:2035: "A receipt binds `{...}`". The paragraph's bold
+///     heading is `PayloadReceipt / ...` and the receipt body is the only
+///     consumer of RemotePreparedIdentity; the noun IS the heading's first
+///     name, and no role token or wrapper is invented.
+///
+/// Matching is full-phrase-or-trailing-phrase with a whitespace boundary, so
+/// the cue can introduce the body from inside a paragraph tail without ever
+/// matching as a substring of a longer word.
+const PHRASE_DEFINED_OWNERS: &[(&str, &str)] = &[
+    (
+        "The generated common header of every Local/Meta/Shard payload also contains",
+        "GeneratedPayloadCommonHeader",
+    ),
+    ("A receipt binds", "PayloadReceipt"),
+];
+
+/// The owner a phrase-defined anonymous body encodes, if it is one. A match
+/// is the whole `before`, or its tail at a whitespace boundary — never a
+/// substring of a longer word, and never a slice through a multi-byte char.
+fn phrase_defined_owner(before: &str) -> Option<&'static str> {
+    let normalized = normalize_whitespace(before);
+    PHRASE_DEFINED_OWNERS
+        .iter()
+        .find(|(phrase, _)| {
+            if normalized.eq_ignore_ascii_case(phrase) {
+                return true;
+            }
+            if normalized.len() <= phrase.len() {
+                return false;
+            }
+            normalized
+                .get(normalized.len() - phrase.len()..)
+                .is_some_and(|tail| {
+                    let head = &normalized[..normalized.len() - phrase.len()];
+                    head.ends_with(char::is_whitespace) && tail.eq_ignore_ascii_case(phrase)
+                })
+        })
+        .map(|(_, owner)| *owner)
+}
+
+/// The opening brace of a fragment that IS one anonymous brace body and
+/// nothing else. A leading-name body is [`leading_record`]'s case; anything
+/// with prose around the braces stays unowned.
+fn anonymous_brace_body_open(text: &str) -> Option<usize> {
+    let start = text.len() - text.trim_start().len();
+    (text.as_bytes().get(start) == Some(&b'{')).then_some(start)
 }
 
 fn direct_schemas_from_inline(
@@ -1534,6 +2046,40 @@ fn direct_schemas_from_inline(
             continue;
         }
         let Some((display, open_index)) = leading_record(text) else {
+            // fgdb-ckb9 / fgdb-gpzz: the anonymous bodies the Appendix defines
+            // by phrase. `Local{...}`/`Meta{...}`/`Shard{...}` heads are role
+            // metavariables, not schema names (is_schema_metavariable), and
+            // prose-introduced bodies have no name of their own, so these
+            // occurrences are the only route that censuses them without
+            // minting false top-level schemas. A malformed body is left to
+            // the unclaimed-range pass, which records it exactly as before.
+            let Some(owner) = phrase_defined_owner(&fragment.before) else {
+                continue;
+            };
+            let Some(open_index) = anonymous_brace_body_open(text) else {
+                continue;
+            };
+            let Ok(close) = matching_delimiter(text, open_index) else {
+                continue;
+            };
+            // The phrase cue owns ONE anonymous body and nothing else
+            // (fresh-eyes review on fgdb-ckb9): a fragment with anything
+            // after the balanced closer is not that body — claiming it
+            // whole would fold trailing prose into a confirmed schema, so
+            // it is left to the unclaimed-range pass exactly as before.
+            if !text[close + 1..].trim().is_empty() {
+                continue;
+            }
+            if let Some(occurrence) = make_schema_occurrence(
+                owner.to_owned(),
+                SchemaOwnerStatus::ConfirmedTopLevel,
+                DefinitionKind::InlineRecord,
+                mapped.source_range(0..0),
+                Some(mapped.clone()),
+            ) {
+                occurrences.push(occurrence);
+                claimed_ranges.push(mapped.source_range(0..mapped.text.len()));
+            }
             continue;
         };
         let display_length = parse_type_display(text)
@@ -1689,6 +2235,11 @@ fn extract_schema_occurrences(
     let mut linked_rhs = BTreeSet::new();
     for link in &prose_links {
         linked_rhs.extend(link.rhs_fragments.iter().map(|index| fragments[*index].id));
+        linked_rhs.extend(
+            link.supplemental_union_fragments
+                .iter()
+                .map(|index| fragments[*index].id),
+        );
     }
     linked_rhs.extend(
         bold_links
@@ -1767,13 +2318,30 @@ fn extract_schema_occurrences(
             .map(|index| fragments[*index].source_range.clone())
             .collect();
         let expression = MappedText::joined(source_map.source, &ranges);
-        if let Some(occurrence) = make_schema_occurrence(
+        if let Some(mut occurrence) = make_schema_occurrence(
             link.display_name,
             SchemaOwnerStatus::ConfirmedTopLevel,
             DefinitionKind::ProseLinkedStructural,
             owner.source_range.clone(),
             Some(expression),
         ) {
+            occurrence.complete_top_level_map_definition =
+                starts_with_word(&link.cue, "is") || starts_with_word(&link.cue, "are");
+            if !link.supplemental_union_fragments.is_empty() {
+                let supplemental_ranges: Vec<_> = link
+                    .supplemental_union_fragments
+                    .iter()
+                    .map(|index| fragments[*index].source_range.clone())
+                    .collect();
+                occurrence
+                    .supplemental_unions
+                    .push(MappedText::joined(source_map.source, &supplemental_ranges));
+                occurrence.expression_sha256 = schema_expression_sha256(
+                    &occurrence.expression,
+                    &occurrence.supplemental_unions,
+                );
+                claimed_ranges.extend(supplemental_ranges);
+            }
             occurrences.push(occurrence);
             claimed_ranges.extend(ranges);
         }
@@ -2014,6 +2582,7 @@ fn parse_union(
     owner_key: &StructuralCandidateKey,
     rows: &mut StructuralOccurrences,
     depth: usize,
+    allow_typed_scalar_payload: bool,
 ) -> bool {
     if depth > MAX_STRUCTURAL_NESTING {
         push_nesting_ambiguity(schema, union_path, mapped, owner_key, &mut rows.ambiguities);
@@ -2051,7 +2620,7 @@ fn parse_union(
         unparsed_arm_count: 0,
     });
     let mut parsed = 0;
-    for alternative in alternatives {
+    for (source_ordinal, alternative) in alternatives.into_iter().enumerate() {
         let trimmed = trim_range(&mapped.text, alternative.start..alternative.end);
         if trimmed.is_empty() {
             let source_range = mapped.source_range(alternative.start..alternative.end);
@@ -2176,26 +2745,43 @@ fn parse_union(
                 token.end..alternative_mapped.text.len(),
             );
             if !trailing.is_empty() {
-                let trailing = alternative_mapped.subrange(trailing);
-                rows.ambiguities.push(AmbiguityOccurrence {
-                    kind: AmbiguityKind::UnparsedTrailingTokens,
-                    schema_family: Some(schema.key.family.clone()),
-                    path: Some(format!("{union_path}.{arm_name}")),
-                    raw: normalize_whitespace(&trailing.text),
-                    reason:
-                        "tokens after a union arm name are not part of the closed source grammar"
-                            .to_owned(),
-                    affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
-                        arm_key.clone(),
-                    )),
-                    source_range: trailing.source_range(0..trailing.text.len()),
-                });
+                let typed_payload = allow_typed_scalar_payload
+                    && alternative_mapped.text.as_bytes().get(trailing.start) == Some(&b':')
+                    && {
+                        let payload_range =
+                            trim_range(&alternative_mapped.text, trailing.start + 1..trailing.end);
+                        if payload_range.is_empty() {
+                            false
+                        } else {
+                            payload = Some(normalize_whitespace(
+                                &alternative_mapped.text[payload_range],
+                            ));
+                            true
+                        }
+                    };
+                if !typed_payload {
+                    let trailing = alternative_mapped.subrange(trailing);
+                    rows.ambiguities.push(AmbiguityOccurrence {
+                        kind: AmbiguityKind::UnparsedTrailingTokens,
+                        schema_family: Some(schema.key.family.clone()),
+                        path: Some(format!("{union_path}.{arm_name}")),
+                        raw: normalize_whitespace(&trailing.text),
+                        reason:
+                            "tokens after a union arm name are not part of the closed source grammar"
+                                .to_owned(),
+                        affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
+                            arm_key.clone(),
+                        )),
+                        source_range: trailing.source_range(0..trailing.text.len()),
+                    });
+                }
             }
         }
         rows.arms.push(ArmOccurrence {
             key: arm_key.clone(),
             payload,
             raw: normalize_whitespace(&alternative_mapped.text),
+            source_ordinal,
             source_range: alternative_mapped.source_range(0..alternative_mapped.text.len()),
         });
         parsed += 1;
@@ -2278,13 +2864,32 @@ fn parse_record_fields(
             });
             continue;
         }
-        let Some(name_end) = parse_identifier(bytes, start) else {
+        let Some(name_end) = parse_member_name(bytes, start) else {
             continue;
         };
         let name = field_mapped.text[start..name_end].to_owned();
         let optional_marker = bytes.get(name_end) == Some(&b'?');
         let remainder_start = skip_ascii_whitespace(bytes, name_end + usize::from(optional_marker));
         let remainder = &field_mapped.text[remainder_start..];
+        // A member-position slash token (`a/b/c_suffix`) compresses several
+        // member names into one. Splitting at the first slash would name the
+        // member `a` and call the rest its type, which is what this parser used
+        // to do and is wrong in both halves; expanding it would invent names the
+        // source does not spell, and the compression rule is demonstrably not
+        // uniform (a10:1920 against its uncompressed sibling at a08:1804).
+        // Refuse the member and record the raw token for per-token adjudication.
+        if bytes.get(name_end + usize::from(optional_marker)) == Some(&b'/') {
+            rows.ambiguities.push(AmbiguityOccurrence {
+                kind: AmbiguityKind::CompressedMemberToken,
+                schema_family: Some(schema.key.family.clone()),
+                path: Some(path.to_owned()),
+                raw: normalize_whitespace(&field_mapped.text),
+                reason: "member position compresses several names with '/' and the source does not spell them".to_owned(),
+                affected_source_keys: affected_source_key(owner_key.clone()),
+                source_range: field_mapped.source_range(0..field_mapped.text.len()),
+            });
+            continue;
+        }
         let mut ambiguity = None;
         let exact_range = if matches!(bytes.get(remainder_start), Some(b':') | Some(b'=')) {
             let range = trim_range(
@@ -2378,6 +2983,19 @@ fn parse_record_fields(
             continue;
         };
         let exact_mapped = field_mapped.subrange(exact_range);
+        if let Some(value_mapped) = indexed_map_value(&exact_mapped)
+            && parse_union(
+                schema,
+                &value_mapped,
+                &field_path,
+                &structural_field_key,
+                rows,
+                depth + 1,
+                true,
+            )
+        {
+            continue;
+        }
         if parse_union(
             schema,
             &exact_mapped,
@@ -2385,6 +3003,7 @@ fn parse_record_fields(
             &structural_field_key,
             rows,
             depth + 1,
+            false,
         ) {
             continue;
         }
@@ -2475,6 +3094,20 @@ fn extract_fields_and_arms(
             });
         }
         if shape == ExpressionShape::Alias {
+            if schema.complete_top_level_map_definition
+                && let Some(value_mapped) = top_level_map_value(&mapped)
+                && parse_union(
+                    schema,
+                    &value_mapped,
+                    &schema.display_name,
+                    &structural_schema_key,
+                    &mut rows,
+                    0,
+                    false,
+                )
+            {
+                continue;
+            }
             if parse_union(
                 schema,
                 &mapped,
@@ -2482,6 +3115,7 @@ fn extract_fields_and_arms(
                 &structural_schema_key,
                 &mut rows,
                 0,
+                false,
             ) {
                 continue;
             }
@@ -2510,6 +3144,29 @@ fn extract_fields_and_arms(
             &mut rows,
             0,
         );
+        for supplemental in &schema.supplemental_unions {
+            if !parse_union(
+                schema,
+                supplemental,
+                &schema.display_name,
+                &structural_schema_key,
+                &mut rows,
+                0,
+                false,
+            ) {
+                rows.ambiguities.push(AmbiguityOccurrence {
+                    kind: AmbiguityKind::AliasExpressionUnparsed,
+                    schema_family: Some(schema.key.family.clone()),
+                    path: Some(schema.display_name.clone()),
+                    raw: normalize_whitespace(&supplemental.text),
+                    reason:
+                        "supplemental union body is not a top-level pipe union under its confirmed owner"
+                            .to_owned(),
+                    affected_source_keys: affected_source_key(structural_schema_key.clone()),
+                    source_range: supplemental.source_range(0..supplemental.text.len()),
+                });
+            }
+        }
     }
     rows.fields.sort_by(|left, right| {
         (
@@ -2800,6 +3457,7 @@ fn canonical_arms(rows: &[&ArmOccurrence], source_map: &SourceMap<'_>) -> Vec<Ar
                 key,
                 payload_conflict: payload_forms.len() > 1,
                 payload_sha256s,
+                source_ordinals: sorted_unique(rows.iter().map(|row| row.source_ordinal)),
                 locations: sorted_unique(rows.iter().map(|row| source_map.span(&row.source_range))),
             }
         })
@@ -2851,16 +3509,16 @@ fn ambiguity_affinity_is_valid(row: &AmbiguityOccurrence) -> bool {
             )
         }),
         AmbiguityKind::ConflictingCandidateEvidence => exact_key(|_| true),
-        AmbiguityKind::NestingLimitExceeded | AmbiguityKind::UnparsedRecordItem => {
-            exact_key(|key| {
-                matches!(
-                    key,
-                    StructuralCandidateKey::Schema(_)
-                        | StructuralCandidateKey::Field(_)
-                        | StructuralCandidateKey::Arm(_)
-                )
-            })
-        }
+        AmbiguityKind::CompressedMemberToken
+        | AmbiguityKind::NestingLimitExceeded
+        | AmbiguityKind::UnparsedRecordItem => exact_key(|key| {
+            matches!(
+                key,
+                StructuralCandidateKey::Schema(_)
+                    | StructuralCandidateKey::Field(_)
+                    | StructuralCandidateKey::Arm(_)
+            )
+        }),
         AmbiguityKind::MismatchedDelimiter | AmbiguityKind::UnbalancedDefinition => {
             if row.schema_family.is_none() && row.path.is_none() {
                 row.affected_source_keys.is_empty()
@@ -3409,11 +4067,959 @@ pub fn census_appendix_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, FieldCandidateKey,
-        SchemaCandidateKey, SourceMap, SourceSliceSpec, StructuralCandidateKey,
-        affected_source_key, canonical_ambiguities, census_appendix_source, matching_delimiter,
-        normalize_whitespace, source_key_transcript, split_top_level,
+        AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, AppendixSourceCensus,
+        CensusErrorKind, DefinitionKind, DelimiterIssue, FieldCandidateKey, OPENING_DELIMITERS,
+        SchemaCandidateKey, SchemaOwnerStatus, SourceMap, SourceSliceSpec, SplitSpan,
+        StructuralCandidateKey, affected_source_key, bold_owner_name_range, canonical_ambiguities,
+        census_appendix_source, cue_names_union, half_open_interval_end, is_generic_angle_open,
+        matching_delimiter, normalize_whitespace, opening_delimiter_for, sha256_hex,
+        source_key_transcript, split_top_level, top_level_arrow,
     };
+
+    // ===================================================================
+    // fgdb-8kzt — the one-reader collapse, mutation-proved.
+    //
+    // `matching_delimiter` and `split_top_level` used to carry one delimiter
+    // stack each. The two bodies below are those PRE-COLLAPSE bodies, copied
+    // VERBATIM and frozen. They are the oracle: the collapse is a refactor
+    // only if the surviving reader answers exactly as they did, on every input
+    // either of them could see.
+    //
+    // DO NOT "FIX" THESE COPIES. If a grammar change (the half-open interval
+    // `(a,b]` this bead reports, say) is ever ruled in, it goes into
+    // `DelimiterScan` and these copies are RETIRED with the tests that use
+    // them — not edited to agree. An edited oracle proves nothing.
+    // ===================================================================
+
+    /// `matching_delimiter` exactly as it stood at b7bfd44, before the collapse.
+    fn legacy_matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let Some(opener) = bytes.get(open_index).copied() else {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: false,
+            });
+        };
+        if !matches!(opener, b'{' | b'[' | b'(' | b'<') {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: true,
+            });
+        }
+        let mut stack = vec![opener];
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            if byte == b'<' && !is_generic_angle_open(text, index) {
+                continue;
+            }
+            if matches!(byte, b'{' | b'[' | b'(' | b'<') {
+                stack.push(byte);
+                continue;
+            }
+            if !matches!(byte, b'}' | b']' | b')' | b'>') {
+                continue;
+            }
+            if byte == b'>' && stack.last() != Some(&b'<') {
+                continue;
+            }
+            let expected = match stack.last().copied() {
+                Some(b'{') => b'}',
+                Some(b'[') => b']',
+                Some(b'(') => b')',
+                Some(b'<') => b'>',
+                _ => unreachable!("the delimiter stack only contains opening delimiters"),
+            };
+            if byte != expected {
+                return Err(DelimiterIssue {
+                    offset: index,
+                    mismatched: true,
+                });
+            }
+            stack.pop();
+            if stack.is_empty() {
+                return Ok(index);
+            }
+        }
+        Err(DelimiterIssue {
+            offset: text.len(),
+            mismatched: false,
+        })
+    }
+
+    /// `split_top_level` exactly as it stood at b7bfd44 — the twin, with its
+    /// own stack, its own quote machine, and its own copy of the push/close
+    /// sets.
+    fn legacy_split_top_level(
+        text: &str,
+        delimiters: &[u8],
+    ) -> Result<Vec<SplitSpan>, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let mut spans = Vec::new();
+        let mut stack = Vec::new();
+        let mut quote = None;
+        let mut escaped = false;
+        let mut start = 0;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            if byte == b'<' && !is_generic_angle_open(text, index) {
+                continue;
+            }
+            if matches!(byte, b'{' | b'[' | b'(' | b'<') {
+                stack.push(byte);
+                continue;
+            }
+            if matches!(byte, b'}' | b']' | b')' | b'>') {
+                if byte == b'>' && stack.last() != Some(&b'<') {
+                    continue;
+                }
+                let expected_opener = match byte {
+                    b'}' => b'{',
+                    b']' => b'[',
+                    b')' => b'(',
+                    b'>' => b'<',
+                    _ => unreachable!(),
+                };
+                if stack.pop() != Some(expected_opener) {
+                    return Err(DelimiterIssue {
+                        offset: index,
+                        mismatched: true,
+                    });
+                }
+                continue;
+            }
+            if stack.is_empty() && delimiters.contains(&byte) {
+                spans.push(SplitSpan { start, end: index });
+                start = index + 1;
+            }
+        }
+        if !stack.is_empty() || quote.is_some() {
+            return Err(DelimiterIssue {
+                offset: text.len(),
+                mismatched: false,
+            });
+        }
+        spans.push(SplitSpan {
+            start,
+            end: text.len(),
+        });
+        Ok(spans)
+    }
+
+    /// Seeds shaped like real Appendix A bodies, including the exact a10:1928
+    /// interval that fgdb-8kzt is about and the sibling on the same line that
+    /// parses fine — the control that proves the `Name {...}` form is not the
+    /// cause.
+    const DELIMITER_SEEDS: &[&str] = &[
+        "{a:u8,b:u16}",
+        "{left:Vec<A,B>,literal:\"}])>\",arrow:A->B,compare:x>=y}",
+        "Outer<Inner<A|B>,[C,D]>",
+        "{value:[u8;4)}",
+        "entries[every commit_seq in (after,frontier] -> StrongRef<T>]",
+        // The mirror orientation, which the census region also spells (plan line
+        // 1728, `[0,byte_count)`), and the near-miss that the interval SHAPE does
+        // accept — `[u8,4)` — so the widening-surface measurement below has to
+        // account for it rather than never meeting it.
+        "{descriptors cover [0,byte_count) exactly}",
+        "{value:[u8,4)}",
+        "{fragments[shard_id -> StrongRef<Frag>],count:u32}",
+        "Left{x:u8}|Middle<Vec<A|B>>|Right{y:u16}",
+        "{s:'a\\'b',t:\"c\\\"d\"}",
+        "{unterminated:\"abc}",
+        "{nested:{deep:{deeper:[1,2,(3)]}}}",
+        "a<b,c>d",
+        "{}",
+        "",
+        ")",
+        "{a}}",
+    ];
+
+    /// The alphabet a mutant may substitute or insert. Every delimiter, both
+    /// quotes, the escape, and the three separator bytes the real callers pass.
+    const MUTATION_ALPHABET: &[u8] = b"{}[]()<>\"'\\,|=; aA";
+
+    /// The separator sets `split_top_level` is actually called with, plus one
+    /// it is not, so the differential is not accidentally scoped to the
+    /// separators that happen to appear in the seeds.
+    const SEPARATOR_SETS: &[&[u8]] = &[b",", b"|", b"=", b";", b">"];
+
+    /// Every mutant: each seed, each position, each substitution, plus each
+    /// insertion and each deletion. Order is deterministic.
+    fn delimiter_mutants() -> Vec<String> {
+        let mut mutants: Vec<String> = DELIMITER_SEEDS.iter().map(|s| (*s).to_owned()).collect();
+        for seed in DELIMITER_SEEDS {
+            let bytes = seed.as_bytes();
+            for position in 0..=bytes.len() {
+                for replacement in MUTATION_ALPHABET {
+                    let mut inserted = bytes.to_vec();
+                    inserted.insert(position, *replacement);
+                    mutants.push(String::from_utf8(inserted).expect("ascii"));
+                    if position < bytes.len() {
+                        let mut substituted = bytes.to_vec();
+                        substituted[position] = *replacement;
+                        mutants.push(String::from_utf8(substituted).expect("ascii"));
+                    }
+                }
+                if position < bytes.len() {
+                    let mut deleted = bytes.to_vec();
+                    deleted.remove(position);
+                    mutants.push(String::from_utf8(deleted).expect("ascii"));
+                }
+            }
+        }
+        mutants.sort();
+        mutants.dedup();
+        mutants
+    }
+
+    /// Does this text contain a half-open interval literal anywhere? This is the
+    /// FOOTPRINT of the interval rule, computed by the production recogniser
+    /// itself rather than by a hand list, and it is what partitions the
+    /// differential below.
+    ///
+    /// A text transformation was tried first and is NOT sound: there is no
+    /// length-preserving substitution for the two bracket bytes that leaves the
+    /// pre-collapse oracles' answers alone, because `is_generic_angle_open` reads
+    /// the raw byte before a `<` and accepts `]` and identifier bytes while
+    /// rejecting `)`. Any filler is therefore observable, and the resulting
+    /// "drift" would be an artifact of the model, not of the reader. Hence a
+    /// partition, whose predicate is exact, instead of a rewrite.
+    fn carries_interval_token(text: &str) -> bool {
+        text.as_bytes().iter().enumerate().any(|(index, byte)| {
+            matches!(byte, b'(' | b'[') && half_open_interval_end(text, index).is_some()
+        })
+    }
+
+    /// THE MUTATION PROOF. For every mutant and every entry point, the one
+    /// reader answers exactly what the two frozen pre-collapse readers answered
+    /// on the same text with its interval literals erased. Stated the other way,
+    /// which is the point: the one reader IS the pre-collapse reader plus the
+    /// single rule "a half-open interval is an inert token", and nothing else
+    /// about it moved.
+    ///
+    /// The oracles are deliberately NOT re-frozen for the grammar change. A
+    /// re-frozen oracle proves only that the new code agrees with itself. Keeping
+    /// them pre-interval and quantifying the difference through `interval_erased`
+    /// keeps the differential TOTAL — there is no carve-out in which a second,
+    /// unrelated drift could hide.
+    ///
+    /// The vacuity controls are not decoration. "Every mutant agrees" is
+    /// worthless if the corpus never produces disagreement-capable inputs, so
+    /// this test proves its corpus reaches all three outcome classes, proves the
+    /// erasure is load-bearing on it, and proves a deliberately wrong reader IS
+    /// caught by it.
+    #[test]
+    fn one_delimiter_reader_answers_exactly_as_the_two_it_replaced() {
+        let mutants = delimiter_mutants();
+        assert!(
+            mutants.len() > 2_000,
+            "corpus collapsed to {} mutants; the differential below would be \
+             a weak claim on a small corpus",
+            mutants.len()
+        );
+
+        let mut balanced = 0usize;
+        let mut mismatched = 0usize;
+        let mut unclosed = 0usize;
+        let mut split_ok = 0usize;
+        let mut split_err = 0usize;
+        let mut multi_span = 0usize;
+        let mut carrying_interval = 0usize;
+        let mut erasure_load_bearing = 0usize;
+
+        for mutant in &mutants {
+            // OUTSIDE the interval rule's own footprint the agreement is total.
+            // INSIDE it the oracles are pre-interval by construction, so they are
+            // the wrong yardstick; those mutants are counted, their divergence is
+            // measured as the vacuity control, and their behaviour is pinned
+            // case-by-case in `half_open_interval_is_a_token_not_a_relaxed_closer`
+            // and at corpus scale by the a10 census count.
+            if carries_interval_token(mutant) {
+                carrying_interval += 1;
+                for open_index in 0..=mutant.len() {
+                    if matching_delimiter(mutant, open_index)
+                        != legacy_matching_delimiter(mutant, open_index)
+                    {
+                        erasure_load_bearing += 1;
+                    }
+                }
+                continue;
+            }
+            for open_index in 0..=mutant.len() {
+                let expected = legacy_matching_delimiter(mutant, open_index);
+                let actual = matching_delimiter(mutant, open_index);
+                assert_eq!(
+                    actual, expected,
+                    "matching_delimiter drifted from its pre-collapse oracle at \
+                     open_index {open_index} of {mutant:?}, which carries no \
+                     interval literal and so must be untouched by that rule"
+                );
+                match expected {
+                    Ok(_) => balanced += 1,
+                    Err(issue) if issue.mismatched => mismatched += 1,
+                    Err(_) => unclosed += 1,
+                }
+            }
+            for separators in SEPARATOR_SETS {
+                let expected = legacy_split_top_level(mutant, separators);
+                let actual = split_top_level(mutant, separators);
+                assert_eq!(
+                    actual, expected,
+                    "split_top_level drifted from its pre-collapse oracle on \
+                     separators {separators:?} of {mutant:?}, which carries no \
+                     interval literal"
+                );
+                match &expected {
+                    Ok(spans) => {
+                        split_ok += 1;
+                        if spans.len() > 1 {
+                            multi_span += 1;
+                        }
+                    }
+                    Err(_) => split_err += 1,
+                }
+            }
+        }
+
+        // VACUITY CONTROL 1 — the corpus reaches every outcome class. A run
+        // that never produced a mismatch, or never produced a successful
+        // split, would report "no drift" without having asked the question.
+        assert!(
+            balanced > 0 && mismatched > 0 && unclosed > 0,
+            "corpus did not reach all three matching outcomes: \
+             balanced={balanced} mismatched={mismatched} unclosed={unclosed}"
+        );
+        assert!(
+            split_ok > 0 && split_err > 0 && multi_span > 0,
+            "corpus did not reach all three split outcomes: \
+             ok={split_ok} err={split_err} multi_span={multi_span}"
+        );
+
+        // VACUITY CONTROL 2 — the corpus can SEE a wrong reader. Drop the
+        // generic-angle rule, which is the subtlest thing the two old readers
+        // shared, and the corpus must catch it. If this control ever stops
+        // firing, the differential above has stopped proving anything.
+        let mut caught = 0usize;
+        for mutant in &mutants {
+            for open_index in 0..=mutant.len() {
+                if broken_matching_delimiter(mutant, open_index)
+                    != legacy_matching_delimiter(mutant, open_index)
+                {
+                    caught += 1;
+                }
+            }
+        }
+        assert!(
+            caught > 0,
+            "the wrong-reader control was not caught by any of {} mutants; \
+             the differential above is vacuous",
+            mutants.len()
+        );
+
+        // VACUITY CONTROL 3 — the partition is LOAD-BEARING IN BOTH DIRECTIONS.
+        //
+        // If no mutant carried an interval, the differential above would be the
+        // pre-interval one and would prove nothing about the rule this increment
+        // landed. If interval-bearing mutants existed but the new reader answered
+        // exactly as the pre-collapse oracle on all of them, then the rule would
+        // be inert and the twelve recovered a10 field candidates could not have
+        // come from it. Both halves must be non-zero.
+        assert!(
+            carrying_interval > 0,
+            "no mutant carried an interval literal; the partition below is empty \
+             and the interval rule is untested"
+        );
+        assert!(
+            erasure_load_bearing > 0,
+            "{carrying_interval} mutants carried an interval literal but the new \
+             reader agreed with the pre-collapse oracle on every one of them; the \
+             interval rule is inert"
+        );
+        // And the footprint must stay a MINORITY. The differential's strength is
+        // the size of the set on which agreement is total; if the footprint ever
+        // swallowed the corpus, "total agreement outside it" would be a claim
+        // about almost nothing.
+        assert!(
+            carrying_interval * 4 < mutants.len(),
+            "the interval footprint grew to {carrying_interval} of {} mutants; \
+             the total-agreement claim now covers too little to be evidence",
+            mutants.len()
+        );
+
+        // Printed so `--nocapture` reports the size of the claim rather than
+        // just its verdict: "no drift" over 9 inputs and over 9000 are very
+        // different sentences.
+        println!(
+            "one-reader differential: {} mutants; matching balanced={balanced} \
+             mismatched={mismatched} unclosed={unclosed}; split ok={split_ok} \
+             err={split_err} multi_span={multi_span}; wrong-reader control \
+             caught on {caught} probes; interval footprint {carrying_interval} \
+             mutants, on which the rule changed {erasure_load_bearing} oracle \
+             answers",
+            mutants.len()
+        );
+    }
+
+    /// THE RULING fgdb-8kzt was parked on, as a measurement rather than a
+    /// preference: the half-open interval is a TOKEN, not a relaxed closer.
+    ///
+    /// Two candidate grammars recover the same twelve a10 field candidates and
+    /// produce a byte-identical census (11705 fields, 8433 ambiguities, all five
+    /// transcript digests equal, measured):
+    ///
+    ///   TOKEN    — `(term,term]` / `[term,term)` is one inert token. Landed.
+    ///   RELAXED  — any `(` may be closed by any `]` and any `[` by any `)`
+    ///              ("V4" on the bead).
+    ///
+    /// They are indistinguishable on the real appendix and distinguishable on
+    /// typos, which is the only place it matters for a checker whose job is to be
+    /// unfoolable. This test pins that difference so nobody can quietly swap one
+    /// for the other: the relaxed form must be CAUGHT by the same corpus that the
+    /// landed form passes.
+    #[test]
+    fn half_open_interval_is_a_token_not_a_relaxed_closer() {
+        // Every interval spelling the census region actually contains is
+        // recognised AT ITS OPENING BRACKET, and consumes through its closer.
+        for (text, opener, close) in [
+            ("(retained_after_commit_seq,frontier]", 0usize, 35usize),
+            ("(retained_after_global_commit_seq,frontier]", 0, 42),
+            ("[0,byte_count)", 0, 13),
+        ] {
+            assert_eq!(
+                half_open_interval_end(text, opener),
+                Some(close),
+                "{text:?} is an interval literal spelled by the plan"
+            );
+        }
+
+        // The two real a10:1928 bodies, entered at the `[` of `entries[`: the
+        // interval inside no longer breaks the enclosing map, which IS the twelve
+        // recovered field candidates.
+        for body in [
+            "entries[every commit_seq in (retained_after_commit_seq,frontier] -> StrongRef<B>]",
+            "entries[every global_commit_seq in (retained_after_global_commit_seq,frontier] -> StrongRef<G>]",
+        ] {
+            let open = body.find('[').expect("seed has a map bracket");
+            assert_eq!(
+                matching_delimiter(body, open),
+                Ok(body.len() - 1),
+                "{body:?}: an interior interval must not break the enclosing map"
+            );
+        }
+
+        // A whole record carrying the mirror orientation is balanced too.
+        let mirror = "{descriptors cover [0,byte_count) exactly}";
+        assert_eq!(
+            matching_delimiter(mirror, 0),
+            Ok(mirror.len() - 1),
+            "the mirror interval must not break its enclosing record"
+        );
+
+        // An interval bracket is NOT a body opener. `matching_delimiter` seeds its
+        // stack directly from the byte at `open_index`, so the token has to be
+        // inert there as well or the rule exists twice.
+        let issue = matching_delimiter("[0,byte_count)", 0)
+            .expect_err("an interval bracket does not open a record body");
+        assert!(issue.mismatched);
+        assert_eq!(issue.offset, 0);
+
+        // Genuine mismatched-delimiter typos that must STAY mismatched. Each one
+        // fails the token shape for a different, stated reason.
+        const TYPOS: &[(&str, &str)] = &[
+            ("{value:[u8;4)}", "separator is `;`, not the interval comma"),
+            ("{entries[foo)}", "one term, no comma"),
+            ("{x:(a]}", "one term, no comma"),
+            ("{x:(a,b,c]}", "three terms"),
+            ("{x:(a b,c]}", "a term contains a space"),
+            ("{x:(a,]}", "second term is empty"),
+            ("{x:([a],b]}", "a term is itself bracketed"),
+        ];
+        let mut relaxed_would_accept = 0usize;
+        for (typo, why) in TYPOS {
+            let issue = matching_delimiter(typo, 0)
+                .expect_err(&format!("{typo:?} must stay mismatched ({why})"));
+            assert!(
+                issue.mismatched,
+                "{typo:?} must be mismatched, not unclosed"
+            );
+            // INJECTED FAULT / VACUITY CONTROL: the relaxed grammar. If this
+            // corpus stopped being able to see the difference, the ruling above
+            // would be unenforced and this test would be decoration.
+            if relaxed_closer_matching_delimiter(typo, 0).is_ok() {
+                relaxed_would_accept += 1;
+            }
+        }
+        assert!(
+            relaxed_would_accept > 0,
+            "the relaxed-closer control was accepted by none of the {} typos; \
+             this test can no longer tell the two grammars apart",
+            TYPOS.len()
+        );
+        println!(
+            "interval-token ruling: {} typos stay mismatched under the token \
+             grammar; the relaxed grammar would silently accept {relaxed_would_accept} \
+             of them",
+            TYPOS.len()
+        );
+    }
+
+    /// fgdb-ihtt — the heading-led attribution, and the two ways it could be wrong.
+    ///
+    /// The appendix spells four bodies as `**A / B / C.** <anonymous phrase> is
+    /// {…}`: CommitCommand@1912, LogicalDeltaTemplate@1924, RecoveryCheckpoint@1964
+    /// and BranchManifest@2000. Before this rule all four bound nothing. The rule
+    /// is that the heading's FIRST name owns that first body, and the whole-corpus
+    /// numbers it moves are pinned in the catalog (a10 150->180, a12 197->213,
+    /// a13 228->241; whole corpus 11712->11771 fields, the other 18 slices
+    /// byte-identical). This test pins the RULE itself, where those pins cannot:
+    /// a reader that attributed all four for the wrong reason would satisfy every
+    /// count above and still be wrong.
+    #[test]
+    fn heading_led_body_binds_the_headings_first_name() {
+        // One paragraph carrying both spellings at once: an anonymous first body,
+        // then a backticked one — exactly the shape of plan line 1912.
+        let source = concat!(
+            "**Alpha / Beta / Gamma.** A transaction order unit is ",
+            "`{id:u64,tag:u8}`. A `Beta` is `{other:u16}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "heading",
+            start_line: 80,
+            end_line: 80,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 80, &slices)
+            .expect("a heading-led paragraph must census");
+        let paths = |family: &str| {
+            let mut found = census
+                .fields
+                .iter()
+                .filter(|field| field.key.schema_family == family)
+                .map(|field| field.key.path.clone())
+                .collect::<Vec<_>>();
+            found.sort();
+            found
+        };
+
+        // POSITIVE. The anonymous body belongs to the heading's first name.
+        assert_eq!(
+            paths("Alpha"),
+            ["Alpha.id", "Alpha.tag"],
+            "the anonymous body must bind to the heading's FIRST name"
+        );
+
+        // CONTROL 1 — WRONG NAME, and it FIRES. Measured: mutating `.next()` to
+        // `.nth(1)` turns exactly these two tests red and leaves the module's other
+        // 19 green.
+        //
+        // Why OWNERSHIP is asserted here and not a count. The catalog's census pins
+        // lock how MANY candidates a slice has (a10 180, a12 213, a13 241); they
+        // never lock WHICH schema owns them. Binding all four appendix bodies to
+        // the wrong name of the right heading is precisely the defect those pins
+        // cannot see, so it has to be caught here. `Beta` is a real type name that
+        // owns a body of its own, which makes it the specific wrong answer this
+        // fixture exists to rule out.
+        assert_eq!(
+            paths("Beta"),
+            ["Beta.other"],
+            "a later heading name owns only its own backticked body, never the \
+             anonymous one; if this holds Beta.id the reader picked the wrong name"
+        );
+        assert_eq!(
+            census.counts.field_candidates, 3,
+            "fixture shape: the anonymous body's two members plus Beta's own"
+        );
+        assert!(
+            paths("Gamma").is_empty(),
+            "a heading name with no body of its own must bind nothing"
+        );
+
+        // CONTROL 2 — B CANNOT CLAIM A BACKTICKED INTRO, which is why shape B
+        // needs no explicit guard against one. `Beta`'s body is introduced by a
+        // backticked name, so it is `prose_schema_links`' to bind; B never sees it
+        // because a backtick opens its own fragment and `before` is then " is ".
+        // A guard rejecting a backtick inside the phrase was written and MEASURED
+        // VACUOUS on the whole corpus (identical census with it disabled), so it
+        // was dropped rather than shipped as if it earned its place.
+        assert_eq!(
+            bold_owner_name_range(" is "),
+            None,
+            "a backtick-introduced body leaves `before` as \" is \", which shape B \
+             must not match — this is the guard, structurally"
+        );
+
+        // And shape A, the spelling that already worked, is untouched.
+        assert_eq!(bold_owner_name_range("**Alpha**: "), Some(2..7));
+    }
+
+    /// fgdb-ihtt — the reader records the APPENDIX spelling, and does not reconcile
+    /// it with the plan's prose copy.
+    ///
+    /// Plan line 393 spells a NAMED `CommitCommand` body with the same 21 members
+    /// in the same order as the appendix body at 1912, but leaves two array element
+    /// types bare. 393 sits outside `[source_manifest]` (1388-2728), so this reader
+    /// never sees it, never compares the spellings and never normalises one to the
+    /// other. That is deliberate: the appendix is the normative contract, and
+    /// choosing between two spellings of a durable field is a format ruling, not a
+    /// reader's call.
+    ///
+    /// The difference is LOAD-BEARING, not cosmetic, which is why silently
+    /// normalising would be a defect rather than a tidy-up: the elaborated spelling
+    /// yields a concrete element type, a `Many` cardinality, and four additional
+    /// interior field candidates. On the real appendix that is the difference
+    /// between CommitCommand's 25 recovered fields and the 21 the bare prose copy
+    /// would give.
+    #[test]
+    fn heading_led_binding_records_the_appendix_spelling_verbatim() {
+        let elaborated = concat!(
+            "**Alpha / Beta.** A unit is `{expected_branch_heads[WeakMarkerIdentity],",
+            "expected_branch_key_epochs[{graph,branch}]}`.\n",
+        );
+        let bare =
+            "**Alpha / Beta.** A unit is `{expected_branch_heads,expected_branch_key_epochs}`.\n";
+        let slices = [SourceSliceSpec {
+            id: "spelling",
+            start_line: 90,
+            end_line: 90,
+        }];
+        let census =
+            |text: &str| census_appendix_source(text.as_bytes(), 90, &slices).expect("must census");
+
+        let rich = census(elaborated);
+        let heads = rich
+            .fields
+            .iter()
+            .find(|field| field.key.path == "Alpha.expected_branch_heads")
+            .expect("the elaborated array member is a field candidate");
+        assert_eq!(
+            heads.exact_types,
+            ["[WeakMarkerIdentity]"],
+            "the element type must be recorded exactly as the appendix spells it"
+        );
+        assert_eq!(heads.cardinalities, [super::Cardinality::Many]);
+
+        // The inline record's interior members are candidates in their own right.
+        let interior = rich
+            .fields
+            .iter()
+            .filter(|field| {
+                field
+                    .key
+                    .path
+                    .starts_with("Alpha.expected_branch_key_epochs.")
+            })
+            .count();
+        assert_eq!(
+            interior, 2,
+            "an elaborated inline element type contributes its interior members"
+        );
+
+        // THE COUNTERFACTUAL, measured rather than asserted: the bare prose
+        // spelling of the same two members yields strictly less. If the reader ever
+        // normalised the elaborated form to this one it would silently discard
+        // durable field rows.
+        let plain = census(bare);
+        assert_eq!(rich.counts.field_candidates, 4);
+        assert_eq!(plain.counts.field_candidates, 2);
+        let plain_heads = plain
+            .fields
+            .iter()
+            .find(|field| field.key.path == "Alpha.expected_branch_heads")
+            .expect("the bare member is still a field candidate");
+        assert!(
+            plain_heads.exact_types.is_empty()
+                && plain_heads.cardinalities == [super::Cardinality::One],
+            "the bare spelling carries no element type and no Many cardinality, \
+             which is exactly what normalising the two would throw away"
+        );
+    }
+
+    /// The REJECTED grammar from fgdb-8kzt ("V4"), kept only so
+    /// `half_open_interval_is_a_token_not_a_relaxed_closer` can prove the corpus
+    /// discriminates against it. Identical to the one reader except that the
+    /// closer test is relaxed instead of the interval being tokenised.
+    fn relaxed_closer_matching_delimiter(
+        text: &str,
+        open_index: usize,
+    ) -> Result<usize, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let Some(opener) = bytes.get(open_index).copied() else {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: false,
+            });
+        };
+        if !OPENING_DELIMITERS.contains(&opener) {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: true,
+            });
+        }
+        let mut stack = vec![opener];
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            if byte == b'<' && !is_generic_angle_open(text, index) {
+                continue;
+            }
+            if OPENING_DELIMITERS.contains(&byte) {
+                stack.push(byte);
+                continue;
+            }
+            if byte == b'>' && stack.last() != Some(&b'<') {
+                continue;
+            }
+            let Some(expected_opener) = opening_delimiter_for(byte) else {
+                continue;
+            };
+            let popped = stack.pop();
+            // THE REJECTED RELAXATION: any `(`/`]` or `[`/`)` pair passes.
+            let interval = matches!((popped, byte), (Some(b'('), b']') | (Some(b'['), b')'));
+            if popped != Some(expected_opener) && !interval {
+                return Err(DelimiterIssue {
+                    offset: index,
+                    mismatched: true,
+                });
+            }
+            if stack.is_empty() {
+                return Ok(index);
+            }
+        }
+        Err(DelimiterIssue {
+            offset: text.len(),
+            mismatched: false,
+        })
+    }
+
+    /// A deliberately WRONG reader: identical to the real one except that it
+    /// treats every `<` as an opening delimiter. Exists only so
+    /// `one_delimiter_reader_answers_exactly_as_the_two_it_replaced` can prove
+    /// its corpus is capable of catching a difference.
+    fn broken_matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let Some(opener) = bytes.get(open_index).copied() else {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: false,
+            });
+        };
+        if !matches!(opener, b'{' | b'[' | b'(' | b'<') {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: true,
+            });
+        }
+        let mut stack = vec![opener];
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            // THE INJECTED FAULT: no is_generic_angle_open test.
+            if matches!(byte, b'{' | b'[' | b'(' | b'<') {
+                stack.push(byte);
+                continue;
+            }
+            if !matches!(byte, b'}' | b']' | b')' | b'>') {
+                continue;
+            }
+            if byte == b'>' && stack.last() != Some(&b'<') {
+                continue;
+            }
+            let expected = match stack.last().copied() {
+                Some(b'{') => b'}',
+                Some(b'[') => b']',
+                Some(b'(') => b')',
+                Some(b'<') => b'>',
+                _ => unreachable!(),
+            };
+            if byte != expected {
+                return Err(DelimiterIssue {
+                    offset: index,
+                    mismatched: true,
+                });
+            }
+            stack.pop();
+            if stack.is_empty() {
+                return Ok(index);
+            }
+        }
+        Err(DelimiterIssue {
+            offset: text.len(),
+            mismatched: false,
+        })
+    }
+
+    /// COMPLETENESS GUARD for the collapse.
+    ///
+    /// Every other test in this file can only exercise a reader it knows the
+    /// name of, so a THIRD delimiter stack would be invisible to all of them —
+    /// the law would fail open in exactly the way fgdb-8kzt describes, where a
+    /// fix lands in whichever reader the fixer happens to open. This guard is
+    /// therefore over the SOURCE: one stack, one push, one pop, one copy of
+    /// each delimiter set.
+    ///
+    /// It reads only the production half of the file. The frozen pre-collapse
+    /// oracles above are second and third stacks BY DESIGN, and must not count.
+    #[test]
+    fn exactly_one_delimiter_reader_exists() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/appendix_source.rs"
+        ));
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        assert_eq!(
+            source.matches(marker).count(),
+            1,
+            "the production/test split marker must occur exactly once, or this \
+             guard is reading the wrong half of the file"
+        );
+        let production = &source[..source.find(marker).expect("split marker")];
+
+        // Controls: the extractor must see something real and must not see
+        // something fabricated. Without these a typo'd needle reports 0 and
+        // every assertion below passes for the wrong reason.
+        assert!(
+            production.contains("struct DelimiterScan"),
+            "known-present control missing: the extractor is not reading the \
+             production source"
+        );
+        assert!(
+            !production.contains("struct DefinitelyFabricatedScanner"),
+            "fabricated control found: the extractor matches anything"
+        );
+
+        for (needle, expected, why) in [
+            (
+                "stack: Vec<u8>",
+                1usize,
+                "exactly one type carries a delimiter stack",
+            ),
+            (
+                "self.stack.push(",
+                1,
+                "exactly one site decides that a byte opens a nesting level",
+            ),
+            (
+                "self.stack.pop(",
+                1,
+                "exactly one site decides that a byte closes one",
+            ),
+            (
+                "let mut stack",
+                0,
+                "a local delimiter stack is how the twin was spelled; there \
+                 must be none left outside DelimiterScan",
+            ),
+            (
+                "const OPENING_DELIMITERS",
+                1,
+                "the opening set is spelled once",
+            ),
+            (
+                "const CLOSING_DELIMITERS",
+                1,
+                "the closing set is spelled once",
+            ),
+        ] {
+            assert_eq!(
+                production.matches(needle).count(),
+                expected,
+                "{needle:?} appears {} times in the production source, expected \
+                 {expected} — {why}",
+                production.matches(needle).count()
+            );
+        }
+
+        // The residual, pinned rather than hidden. `top_level_arrow` and
+        // `outermost_record_ranges` each still run their own quote/escape
+        // machine before delegating the nesting to `matching_delimiter`. They
+        // are NOT foldable into DelimiterScan: both deliberately tolerate a
+        // stray top-level closer that the strict reader rejects — see
+        // `partial_scanners_tolerate_a_stray_closer_the_one_reader_rejects`.
+        // Pinning the count is what stops a third one appearing unnoticed.
+        assert_eq!(
+            production.matches("escaped = true").count(),
+            4,
+            "expected exactly four escape machines in production: \
+             DelimiterScan (the one reader), normalize_whitespace (a text \
+             emitter, not a structural reader), and the two partial scanners \
+             top_level_arrow and outermost_record_ranges. A fifth is a new \
+             duplicate and needs its own justification."
+        );
+    }
+
+    /// Why the two partial scanners were left alone, stated as a test rather
+    /// than a claim: folding them into the one reader would CHANGE BEHAVIOUR,
+    /// because they ignore a stray top-level closer that `DelimiterScan`
+    /// treats as a mismatch. Recording the divergence keeps a future collapse
+    /// honest about what it would be changing.
+    #[test]
+    fn partial_scanners_tolerate_a_stray_closer_the_one_reader_rejects() {
+        let stray = "a}b->c";
+        assert_eq!(
+            top_level_arrow(stray),
+            Some(3),
+            "top_level_arrow walks past a stray top-level closer"
+        );
+        let strict = split_top_level(stray, b",").expect_err("the one reader rejects it");
+        assert!(
+            strict.mismatched,
+            "the one reader must call a stray top-level closer a mismatch"
+        );
+    }
 
     fn assert_ambiguity_relation_digest(candidate: &AmbiguityCandidate) {
         let expected =
@@ -3550,6 +5156,153 @@ mod tests {
     }
 
     #[test]
+    fn union_arm_candidates_retain_zero_based_source_ordinals() {
+        let source = "`Choice = Zebra | Alpha{x:u8} | Middle`.\n";
+        let slices = [SourceSliceSpec {
+            id: "source-order",
+            start_line: 50,
+            end_line: 50,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 50, &slices)
+            .expect("source-ordered union must census");
+        let arms = census
+            .arms
+            .iter()
+            .map(|arm| (arm.key.arm_name.as_str(), arm.source_ordinals.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arms,
+            vec![("Alpha", vec![1]), ("Middle", vec![2]), ("Zebra", vec![0]),],
+            "canonical arm-key order must not erase each arm's source position"
+        );
+    }
+
+    #[test]
+    fn indexed_map_value_unions_are_first_class_without_reclassifying_plain_maps() {
+        let source = concat!(
+            "`Indexed = {entries:[u16 -> Empty|Record{value:u8}|",
+            "typed_ref:StrongRef<T>],plain:[u8 -> u16],",
+            "nested:[u8 -> Wrapper{state:Open|Closed}]}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "indexed",
+            start_line: 60,
+            end_line: 60,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 60, &slices)
+            .expect("indexed map value unions must census");
+
+        let entries = census
+            .unions
+            .iter()
+            .find(|union| union.key.union_path == "Indexed.entries")
+            .expect("the indexed-map value is a first-class union");
+        assert_eq!(
+            entries.arm_names,
+            [
+                "Empty".to_owned(),
+                "Record".to_owned(),
+                "typed_ref".to_owned()
+            ]
+        );
+        assert!(
+            census
+                .fields
+                .iter()
+                .any(|field| field.key.path == "Indexed.entries.Record.value"),
+            "record-arm field paths remain unchanged"
+        );
+
+        let typed = census
+            .arms
+            .iter()
+            .find(|arm| arm.key.arm_name == "typed_ref")
+            .expect("a typed scalar value arm remains source-visible");
+        assert_eq!(
+            typed.payload_sha256s,
+            [sha256_hex(b"StrongRef<T>")],
+            "the exact type is committed as the arm payload"
+        );
+
+        assert!(
+            census
+                .unions
+                .iter()
+                .all(|union| union.key.union_path != "Indexed.plain"),
+            "a plain indexed map is not a union"
+        );
+        assert!(
+            census
+                .unions
+                .iter()
+                .all(|union| union.key.union_path != "Indexed.nested"),
+            "a map-to-record with a nested union is not a map-value union"
+        );
+        assert!(
+            census
+                .unions
+                .iter()
+                .any(|union| union.key.union_path == "Indexed.nested.Wrapper.state"),
+            "the nested record union remains visible at its existing path"
+        );
+        assert_eq!(census.counts.field_candidates, 5);
+        assert_eq!(census.counts.union_candidates, 2);
+        assert_eq!(census.counts.arm_candidates, 5);
+        assert_eq!(census.counts.ambiguities, 0);
+    }
+
+    #[test]
+    fn top_level_map_value_unions_exclude_the_map_key_from_the_arm_census() {
+        let source = concat!(
+            "`TrustRoot` is the trust map `authority_domain:ConsensusDomain -> ",
+            "CurrentEvidence{evidence_ref:StrongRef<Evidence>}|",
+            "ValidatedAnchor{anchor_ref:StrongRef<Anchor>}`.\n",
+            "`RetentionRoot` is the retention map `(authority_domain,grant_id) -> ",
+            "Active{record_ref:StrongRef<Record>}|",
+            "ReleaseApplied{tombstone_ref:StrongRef<Tombstone>}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "top-level-map",
+            start_line: 70,
+            end_line: 71,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 70, &slices)
+            .expect("top-level map-value unions must census");
+
+        for (union_path, expected_arms) in [
+            (
+                "TrustRoot",
+                ["CurrentEvidence", "ValidatedAnchor"].as_slice(),
+            ),
+            ("RetentionRoot", ["Active", "ReleaseApplied"].as_slice()),
+        ] {
+            let union = census
+                .unions
+                .iter()
+                .find(|union| union.key.union_path == union_path)
+                .expect("map value is a first-class union");
+            assert_eq!(
+                union.arm_names,
+                expected_arms
+                    .iter()
+                    .map(|arm| (*arm).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(union.unparsed_arm_count, 0);
+        }
+        assert!(
+            census
+                .arms
+                .iter()
+                .all(|arm| arm.key.arm_name != "authority_domain"),
+            "the typed map key must never be substituted for the first value arm"
+        );
+        assert_eq!(census.counts.union_candidates, 2);
+        assert_eq!(census.counts.arm_candidates, 4);
+        assert_eq!(census.counts.ambiguities, 0);
+    }
+
+    #[test]
     fn union_candidate_survives_when_every_arm_is_unparseable() {
         let source = "`Odd = ? | !`.\n";
         let slices = [SourceSliceSpec {
@@ -3609,6 +5362,705 @@ mod tests {
             ]
         );
         assert_eq!(census.counts.ambiguities, 0);
+    }
+
+    #[test]
+    fn supplemental_body_union_is_owned_for_joined_and_split_arm_spellings() {
+        for (label, source) in [
+            (
+                "joined",
+                concat!(
+                    "`Manifest` is the closed union with common `{id:u64}` ",
+                    "and exactly one posture body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+            (
+                "split",
+                concat!(
+                    "`Manifest` is the closed union with common `{id:u64}` ",
+                    "and exactly one body: `Local{local_value:u8}` or ",
+                    "`Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+        ] {
+            let slices = [SourceSliceSpec {
+                id: label,
+                start_line: 20,
+                end_line: 20,
+            }];
+            let census = census_appendix_source(source.as_bytes(), 20, &slices)
+                .expect("a confirmed owner must retain its supplemental union");
+
+            for path in [
+                "Manifest.id",
+                "Manifest.Local.local_value",
+                "Manifest.Sharded.sharded_value",
+            ] {
+                assert!(
+                    census
+                        .fields
+                        .iter()
+                        .any(|candidate| candidate.key.path.eq(path)),
+                    "{label}: missing {path}"
+                );
+            }
+            let union = census
+                .unions
+                .iter()
+                .find(|candidate| {
+                    candidate.key.schema_family.eq("Manifest")
+                        && candidate.key.union_path.eq("Manifest")
+                })
+                .expect("the posture body must be a union owned by Manifest");
+            assert_eq!(union.arm_names, ["Local".to_owned(), "Sharded".to_owned()]);
+            assert!(
+                census
+                    .schemas
+                    .iter()
+                    .all(|candidate| !matches!(candidate.key.family.as_str(), "Local" | "Sharded")),
+                "{label}: an arm was misclassified as a top-level schema"
+            );
+            assert!(
+                census.ambiguities.iter().all(|candidate| {
+                    !candidate
+                        .key
+                        .kind
+                        .eq(&AmbiguityKind::UnparsedTrailingTokens)
+                }),
+                "{label}: the supplemental union was left as trailing tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn supplemental_union_cues_require_whole_words_or_an_exact_phrase() {
+        for cue in [
+            "is a closed union with",
+            "defines two unions with",
+            "uses a tag for",
+            "records the tags for",
+            "has one arm with",
+            "owns both arms with",
+            "selects one of",
+            "selects one-of",
+        ] {
+            assert!(cue_names_union(cue), "missed union cue: {cue}");
+        }
+        for non_cue in [
+            "is staged with",
+            "is a reunion with",
+            "is a farm with",
+            "uses union_state with",
+            "selects one_offer with",
+        ] {
+            assert!(
+                !cue_names_union(non_cue),
+                "identifier substring became a union cue: {non_cue}"
+            );
+        }
+    }
+
+    #[test]
+    fn incidental_union_substrings_do_not_license_a_supplemental_body() {
+        for (label, source) in [
+            (
+                "staged",
+                concat!(
+                    "`Manifest` is staged with common `{id:u64}` ",
+                    "and exactly one body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+            (
+                "reunion",
+                concat!(
+                    "`Manifest` is a reunion with common `{id:u64}` ",
+                    "and exactly one body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+            (
+                "farm",
+                concat!(
+                    "`Manifest` is a farm with common `{id:u64}` ",
+                    "and exactly one body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+        ] {
+            let slices = [SourceSliceSpec {
+                id: label,
+                start_line: 30,
+                end_line: 30,
+            }];
+            let census = census_appendix_source(source.as_bytes(), 30, &slices)
+                .expect("the primary record remains independently censusable");
+
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq("Manifest.id")),
+                "{label}: the control record was not linked to Manifest"
+            );
+            assert!(
+                census
+                    .unions
+                    .iter()
+                    .all(|candidate| !candidate.key.schema_family.eq("Manifest")),
+                "{label}: an incidental substring licensed a Manifest union"
+            );
+            for path in [
+                "Manifest.Local.local_value",
+                "Manifest.Sharded.sharded_value",
+            ] {
+                assert!(
+                    census
+                        .fields
+                        .iter()
+                        .all(|candidate| !candidate.key.path.eq(path)),
+                    "{label}: an incidental substring licensed {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_braced_fragment_does_not_invent_a_supplemental_union() {
+        let source = concat!(
+            "`Manifest` is the closed union with common `{id:u64}` ",
+            "and exactly one body: `Local{local_value:u8}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "one-arm",
+            start_line: 30,
+            end_line: 30,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 30, &slices)
+            .expect("an incomplete body union must remain explicit");
+        assert!(
+            census
+                .unions
+                .iter()
+                .all(|candidate| !candidate.key.schema_family.eq("Manifest")),
+            "one braced fragment is not evidence for a closed union"
+        );
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.path.eq("Manifest.Local.local_value")),
+            "the unlicensed arm was silently attached to Manifest"
+        );
+    }
+
+    #[test]
+    fn appendix_supplemental_body_unions_recover_a18_and_a20_members() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        for path in [
+            "RestoreServicePromotionManifest.Local.local_prepare_evidence",
+            "RestoreServicePromotionManifest.Local.local_configuration_and_endpoint_commitment",
+            "RestoreAbandonmentManifest.Local.target_tombstone_skeleton_recipe",
+            "RestoreAbandonmentManifest.Local.no_target_observation_proof_public_commitment",
+            "RestoreAbandonmentManifest.Local.local_pending_owner_public_commitment",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq(path)),
+                "the real-source control {path} is still invisible"
+            );
+        }
+        for owner in [
+            "RestoreAbandonmentManifest",
+            "RestoreServicePromotionManifest",
+        ] {
+            let union = census
+                .unions
+                .iter()
+                .find(|candidate| {
+                    candidate.key.schema_family.eq(owner) && candidate.key.union_path.eq(owner)
+                })
+                .expect("the real Appendix owner must retain its posture body union");
+            assert_eq!(union.arm_names, ["Local".to_owned(), "Sharded".to_owned()]);
+        }
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|candidate| !candidate.key.family.eq("Sharded")),
+            "the a20 body arm remains misclassified as a top-level schema"
+        );
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_qh3r_control")),
+            "fabricated-absent control unexpectedly matched"
+        );
+    }
+
+    /// fgdb-ckb9: the generated payload common header at a03:1468 is the one
+    /// anonymous body the Appendix defines by phrase. Its
+    /// `time_authority_binding:Local{registry_ref}|Meta{registry_ref}|Shard{
+    /// active_projection_ref,...}` union was invisible — the fragment had no
+    /// source-derived owner, and `Local`/`Meta`/`Shard` heads are role
+    /// metavariables, never schema names. The phrase-encoded owner
+    /// `GeneratedPayloadCommonHeader` must census the union, all three arms,
+    /// and all six source-spelled arm members, while every unrelated
+    /// anonymous illustrative record stays unowned.
+    #[test]
+    fn appendix_generated_payload_common_header_recovers_all_six_arm_members() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        // The owner: confirmed, top-level, and NOT a role token.
+        let owner = census
+            .schemas
+            .iter()
+            .find(|candidate| candidate.key.family.eq("GeneratedPayloadCommonHeader"))
+            .expect("the phrase-defined common header must have a source-derived owner");
+        assert!(
+            owner
+                .owner_statuses
+                .contains(&SchemaOwnerStatus::ConfirmedTopLevel),
+            "the phrase is the definition cue; the owner is confirmed, not ambiguous"
+        );
+        for role_token in ["Local", "Meta", "Shard"] {
+            assert!(
+                census
+                    .schemas
+                    .iter()
+                    .all(|candidate| !candidate.key.family.eq(role_token)),
+                "role metavariable {role_token} was minted as a top-level schema"
+            );
+        }
+
+        // The union and all three arms at source-derived paths.
+        let union = census
+            .unions
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .key
+                    .union_path
+                    .eq("GeneratedPayloadCommonHeader.time_authority_binding")
+            })
+            .expect("the common header's time_authority_binding union must be censused");
+        assert_eq!(
+            union.arm_names,
+            ["Local".to_owned(), "Meta".to_owned(), "Shard".to_owned()]
+        );
+
+        // All six source-spelled arm members. `active_projection_ref` is the
+        // real-Appendix control: it occurs nowhere else in the Appendix, so
+        // its presence cannot be credited to another site.
+        for path in [
+            "GeneratedPayloadCommonHeader.time_authority_binding.Local.registry_ref",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Meta.registry_ref",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.active_projection_ref",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.projected_registry_digest",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.projected_selected_profile_oid",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.projection_meta_prefix",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq(path)),
+                "the real-source control {path} is still invisible"
+            );
+        }
+
+        // The header's own record fields ride the same owner.
+        for path in [
+            "GeneratedPayloadCommonHeader.incarnation_continuity_profile_id",
+            "GeneratedPayloadCommonHeader.cluster_incarnation_continuity_record_ref",
+            "GeneratedPayloadCommonHeader.cluster_incarnation_continuity_digest",
+            "GeneratedPayloadCommonHeader.continuity_cas_version",
+            "GeneratedPayloadCommonHeader.service_visibility_epoch",
+            "GeneratedPayloadCommonHeader.restore_registry_root",
+            "GeneratedPayloadCommonHeader.terminal_audit_freeze_index_root",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq(path)),
+                "the common-header member {path} is not censused"
+            );
+        }
+
+        // The claimed body no longer reads as an unowned fragment.
+        assert!(
+            census.ambiguities.iter().all(|candidate| !candidate
+                .raw
+                .starts_with("{incarnation_continuity_profile_id")),
+            "the owned common header is still reported as an unowned structural fragment"
+        );
+
+        // Unrelated anonymous illustrative records remain unowned. The
+        // RootManifest common header at a04:1544 is introduced by a
+        // possessive pronoun, not by the generated-payload phrase, and must
+        // keep its unowned reading: no broadening of every brace body into a
+        // durable schema.
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                matches!(candidate.key.kind, AmbiguityKind::UnownedStructuralFragment)
+                    && candidate.raw.starts_with("{generation,database_id")
+            }),
+            "the unrelated a04:1544 anonymous header lost its unowned reading"
+        );
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|candidate| !candidate.key.family.eq("RootManifestCommonHeader")),
+            "an unrelated anonymous header was broadened into a durable schema"
+        );
+
+        // Fabricated-absent control.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_ckb9_control")),
+            "fabricated-absent control unexpectedly matched"
+        );
+    }
+
+    /// Fresh-eyes corrective (fgdb-ckb9 review): the phrase cue owns ONE
+    /// anonymous body and nothing else. A fragment with anything after the
+    /// balanced closer is not that body — claiming it whole would fold
+    /// trailing prose into a confirmed schema. The discriminator: an exact
+    /// cue with a balanced body plus trailing prose mints NO owner; the
+    /// positive real-source control above keeps passing.
+    #[test]
+    fn phrase_cue_with_trailing_prose_mints_no_owner() {
+        let source = "The generated common header of every Local/Meta/Shard payload also contains `{member:u8} trailing prose`.\n";
+        let slices = [SourceSliceSpec {
+            id: "t",
+            start_line: 1,
+            end_line: 1,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1, &slices)
+            .expect("trailing-prose source must census");
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|candidate| !candidate.key.family.eq("GeneratedPayloadCommonHeader")),
+            "a balanced body with trailing prose was claimed as a confirmed schema"
+        );
+        // The unclaimed-range pass records it exactly as any other
+        // unowned structural fragment — fail-closed, not ambiguous-owned.
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                matches!(candidate.key.kind, AmbiguityKind::UnownedStructuralFragment)
+            }),
+            "the trailing-prose fragment lost its unowned reading"
+        );
+
+        // DISCRIMINATOR CONTROL: the same cue with NOTHING after the closer
+        // mints the owner — proving the law accepts exactly the one-body
+        // shape rather than rejecting the cue outright.
+        let clean = "The generated common header of every Local/Meta/Shard payload also contains `{member:u8}`.\n";
+        let clean_census =
+            census_appendix_source(clean.as_bytes(), 1, &slices).expect("clean source must census");
+        assert!(
+            clean_census
+                .schemas
+                .iter()
+                .any(|candidate| candidate.key.family.eq("GeneratedPayloadCommonHeader")),
+            "the one-body shape must still mint the owner"
+        );
+    }
+
+    /// fgdb-u27g: a hyphenated member name is ONE member. Splitting on the
+    /// hyphen mints a bogus member plus a bogus `-tail` exact_type whose
+    /// `noncanonical field separator` ambiguity reads like a source defect
+    /// rather than a reader one. The dash is name-continuation only BETWEEN
+    /// identifier-continue bytes; a trailing dash reports against the source
+    /// exactly as before.
+    #[test]
+    fn hyphenated_member_names_stay_whole() {
+        let source = "`Spec` is `{complete_member_target_family_and_no-start_bijection,multi-segment-hyphenated_name:u8,trailing-dash-:u16,plain_member}`.\n";
+        let slices = [SourceSliceSpec {
+            id: "t",
+            start_line: 1,
+            end_line: 1,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1, &slices)
+            .expect("hyphenated-member source must census");
+        let field = |stable_name: &str| {
+            census
+                .fields
+                .iter()
+                .find(|candidate| candidate.key.stable_name == stable_name) // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
+        };
+
+        // The whole hyphenated name is one typeless shorthand member.
+        let hyphenated = field("complete_member_target_family_and_no-start_bijection")
+            .expect("the hyphenated member must census whole");
+        assert!(
+            hyphenated.exact_types.is_empty(),
+            "a shorthand member carries no exact type"
+        );
+        // Multiple segments and a typed hyphenated name both stay whole.
+        let typed = field("multi-segment-hyphenated_name").expect("multi-segment member");
+        assert_eq!(typed.exact_types, ["u8".to_owned()]);
+        // No bogus split products anywhere: no truncated member, and the
+        // ONLY dash-leading exact type in the fixture belongs to the
+        // genuinely malformed trailing-dash member below — the split happens
+        // exactly where the source is actually broken, never on a
+        // well-formed hyphenated name.
+        assert!(
+            field("complete_member_target_family_and_no").is_none(),
+            "the truncated split member must not exist"
+        );
+        let dash_leading: Vec<&str> = census
+            .fields
+            .iter()
+            .filter(|candidate| candidate.exact_types.iter().any(|t| t.starts_with('-')))
+            .map(|candidate| candidate.key.stable_name.as_str())
+            .collect();
+        assert_eq!(
+            dash_leading,
+            ["trailing-dash"],
+            "a dash-leading exact type is only the genuinely malformed source's own report"
+        );
+        // The trailing dash is NOT swallowed: `trailing-dash-:u16` still
+        // reports against the source exactly as before the fix — one
+        // FieldTypeAmbiguous at the member's path, carrying the source text.
+        let trailing = field("trailing-dash").expect("the dash ends the name");
+        assert_eq!(trailing.exact_types, ["-:u16".to_owned()]);
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                matches!(candidate.key.kind, AmbiguityKind::FieldTypeAmbiguous)
+                    && candidate.key.path.as_deref() == Some("Spec.trailing-dash")  // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
+                    && candidate.raw.eq("trailing-dash-:u16")
+            }),
+            "a trailing dash must still report against the source"
+        );
+        // The plain member is untouched.
+        assert!(field("plain_member").is_some());
+    }
+
+    /// The real-Appendix witness (fgdb-u27g): a14:2055's
+    /// `complete_member_target_family_and_no-start_bijection` and every
+    /// sibling hyphenated member census whole, and no field in the Appendix
+    /// carries the bogus dash-leading exact_type the reader used to mint.
+    #[test]
+    fn appendix_hyphenated_members_census_whole() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        // The filed witness and the sibling hyphenated members the same
+        // defect hid or mangled.
+        for path in [
+            "LocalGcCancellationAuthorizeSpec.complete_member_target_family_and_no-start_bijection",
+            "GlobalGcCancellationCompletionSpec.complete_participant_family_target_and_no-start_bijection_proof_ref",
+            "NoStartFenced.dispatch-never-sent_and_cancellation_receipt_refs",
+            "RestoreKeyProviderReceiptRef.ArchiveEscrow.grant_and_share-release_proof",
+            "RestoreKeyProviderReceiptRef.Hsm.nonexportability_and_key-origin_attestation",
+            "RoleTransitionReadyCertificate.old-Local",
+            "RaftRoleTransitionCertificate.frozen-visible",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq(path)),
+                "the hyphenated member {path} is still not whole"
+            );
+        }
+        // The defect shape is gone appendix-wide.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.exact_types.iter().any(|t| t.starts_with('-'))),
+            "a dash-leading exact type survived"
+        );
+        assert!(
+            census.fields.iter().all(|candidate| !candidate
+                .key
+                .stable_name
+                .eq("complete_member_target_family_and_no")),
+            "the truncated split member survived"
+        );
+        // Fabricated-absent control.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_u27g_control")),
+            "fabricated-absent control unexpectedly matched"
+        );
+    }
+
+    /// fgdb-gpzz: "A receipt binds `{...}`" (a14:2035) is the phrase-defined
+    /// PayloadReceipt body — the only consumer of RemotePreparedIdentity.
+    /// The phrase-encoded owner censuses the record and its prepared_owner:
+    /// RemotePreparedIdentity member without minting a false top-level
+    /// schema; every unrelated anonymous illustrative record stays unowned.
+    #[test]
+    fn appendix_payload_receipt_recovers_the_remote_prepared_identity_consumer() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        let owner = census
+            .schemas
+            .iter()
+            .find(|candidate| candidate.key.family.eq("PayloadReceipt"))
+            .expect("the phrase-defined receipt must have a source-derived owner");
+        assert!(
+            owner
+                .owner_statuses
+                .contains(&SchemaOwnerStatus::ConfirmedTopLevel),
+            "the phrase is the definition cue; the owner is confirmed, not ambiguous"
+        );
+
+        // Every source-spelled member, and the consumer member that makes
+        // RemotePreparedIdentity wire-mintable.
+        for (name, exact_type) in [
+            ("database_id", None),
+            ("database_security_namespace_id", None),
+            ("cluster_incarnation", None),
+            (
+                "configuration_state_ref",
+                Some("StrongRef<ConfigurationState>"),
+            ),
+            ("payload_predicate_digest", None),
+            ("storage_member", None),
+            ("failure_domain", None),
+            ("local_writer_fence_epoch", None),
+            ("prepared_owner", Some("RemotePreparedIdentity")),
+            ("fsync_generation", None),
+            (
+                "proposal_freshness_basis_ref",
+                Some("StrongRef<PayloadReceiptProposalFreshnessBasis>"),
+            ),
+            (
+                "proposal_freshness_evidence_ref",
+                Some("StrongRef<TimeValidationEvidence>"),
+            ),
+            ("nonce", None),
+        ] {
+            let field = census
+                .fields
+                .iter()
+                .find(|candidate| candidate.key.path.eq(&format!("PayloadReceipt.{name}")));
+            assert!(field.is_some(), "the receipt member {name} is not censused");
+            let field = field.expect("asserted present above");
+            match exact_type {
+                Some(ty) => assert_eq!(
+                    field.exact_types,
+                    [ty.to_owned()],
+                    "PayloadReceipt.{name} exact type"
+                ),
+                None => assert!(
+                    field.exact_types.is_empty(),
+                    "PayloadReceipt.{name} is a shorthand member"
+                ),
+            }
+        }
+
+        // The claimed body no longer reads as an unowned fragment.
+        assert!(
+            census
+                .ambiguities
+                .iter()
+                .all(|candidate| !candidate.raw.starts_with("{database_id,database_security_namespace_id,cluster_incarnation,configuration_state_ref")),
+            "the owned receipt is still reported as an unowned structural fragment"
+        );
+
+        // Unrelated anonymous illustrative records remain unowned (a04:1544
+        // keeps its reading; no broadening of every brace body).
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                matches!(candidate.key.kind, AmbiguityKind::UnownedStructuralFragment)
+                    && candidate.raw.starts_with("{generation,database_id")
+            }),
+            "the unrelated a04:1544 anonymous header lost its unowned reading"
+        );
+
+        // Fabricated-absent control.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_gpzz_control")),
+            "fabricated-absent control unexpectedly matched"
+        );
     }
 
     #[test]
@@ -3679,6 +6131,281 @@ mod tests {
     }
 
     #[test]
+    fn embeds_definition_cue_is_token_aware_and_mutation_proved() {
+        let source = concat!(
+            "`EmbeddedRecord` embeds `{embedded_value:u8}`.\n",
+            "`NamedEvidence` embeds exact imported bytes without an inline schema.\n",
+            "`PrefixCollision` embedsExtra fields but defines no schema.\n",
+            "`IncidentalConcept` precedes a successor that embeds an imported plan.\n",
+            "`IncidentalRecord{value:u8}` embeds nothing further.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "embeds",
+            start_line: 30,
+            end_line: 34,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 30, &slices)
+            .expect("an exact embeds cue must remain conservative");
+
+        let record = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family.eq("EmbeddedRecord"))
+            .expect("embeds plus an adjacent record is an explicit definition");
+        assert!(
+            record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::ConfirmedTopLevel)
+        );
+        assert!(census.fields.iter().any(|field| {
+            field.key.schema_owner.eq("EmbeddedRecord")
+                && field.key.stable_name.eq("embedded_value")
+        }));
+
+        let name_only = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family.eq("NamedEvidence"))
+            .expect("embeds without a structural body still names the exact type");
+        assert!(
+            name_only
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::NamedConceptNoBody)
+        );
+        assert!(census.ambiguities.iter().any(|ambiguity| {
+            ambiguity
+                .key
+                .kind
+                .eq(&AmbiguityKind::DefinitionWithoutStructuralBody)
+                && ambiguity
+                    .key
+                    .schema_family
+                    .as_deref()
+                    .is_some_and(|family| family.eq("NamedEvidence"))
+                && ambiguity
+                    .affected_source_keys
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["top|NamedEvidence"])
+        }));
+
+        for incidental in ["PrefixCollision", "IncidentalConcept"] {
+            assert!(
+                census
+                    .schemas
+                    .iter()
+                    .all(|schema| !schema.key.family.eq(incidental)),
+                "{incidental} is not headed by the exact embeds token"
+            );
+        }
+        let incidental_record = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family.eq("IncidentalRecord"))
+            .expect("the direct record remains visible as ambiguous structure");
+        assert!(
+            incidental_record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::AmbiguousUnownedStructure)
+        );
+        assert!(
+            !incidental_record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::ConfirmedTopLevel),
+            "a later standalone embeds token must not promote an earlier direct record"
+        );
+
+        // INJECTED FAULT / VACUITY CONTROL: erase only the positive definition
+        // cue. The structural owner and its field must disappear, proving that
+        // the test does not pass through an independent record reader.
+        let faulted_source = source.replacen(" embeds ", " resembles ", 1);
+        assert_ne!(faulted_source, source, "the cue mutation must fire");
+        let faulted = census_appendix_source(faulted_source.as_bytes(), 30, &slices)
+            .expect("the faulted source must remain syntactically valid");
+        assert!(
+            faulted
+                .schemas
+                .iter()
+                .all(|schema| !schema.key.family.eq("EmbeddedRecord"))
+        );
+        assert!(
+            faulted
+                .fields
+                .iter()
+                .all(|field| !field.key.schema_owner.eq("EmbeddedRecord"))
+        );
+    }
+
+    #[test]
+    fn appendix_embeds_definition_population_has_exact_corpus_delta() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the current Appendix A source must census");
+        assert_eq!(
+            source
+                .split(|character: char| { !character.is_ascii_alphanumeric() && character != '_' })
+                .filter(|word| word.eq_ignore_ascii_case("embeds"))
+                .count(),
+            7,
+            "the Appendix-wide embeds population must be re-audited before this grammar widens"
+        );
+        let incidental_record = census
+            .schemas
+            .iter()
+            .find(|row| {
+                row.key
+                    .family
+                    .eq("PreBootstrapJournalAbandonmentTerminalizationReceipt")
+            })
+            .expect("the a17 direct-record incidental control remains visible");
+        assert!(
+            incidental_record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::AmbiguousUnownedStructure)
+                && !incidental_record
+                    .owner_statuses
+                    .contains(&super::SchemaOwnerStatus::ConfirmedTopLevel),
+            "a later incidental embeds token must not promote the a17 direct record"
+        );
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|row| !row.key.family.eq("PrepareAdmissionScaffolding")),
+            "a21 incidental prose before embeds must not become a definition head"
+        );
+
+        // INJECTED FAULT / OLD-GRAMMAR CONTROL: erase exactly the three
+        // definition-head tokens this grammar addition is meant to recover.
+        // Incidental uses remain byte-identical, so any collateral authority
+        // change appears in the exact set differences below.
+        let mut faulted_source = source.clone();
+        for head in [
+            "`MetadataTreeBootstrap` embeds ",
+            "`PortableCertificateProjection<T>` embeds ",
+            "`ImportedNonRequiredAuditEvidence` embeds ",
+        ] {
+            assert_eq!(
+                faulted_source.matches(head).count(),
+                1,
+                "each measured definition head must occur exactly once"
+            );
+            let replacement = head.replacen(" embeds ", " resembles ", 1);
+            let next = faulted_source.replacen(head, &replacement, 1);
+            assert_ne!(next, faulted_source, "the old-grammar mutation must fire");
+            faulted_source = next;
+        }
+        let faulted = census_appendix_source(faulted_source.as_bytes(), 1388, &slices)
+            .expect("the old-grammar control must remain syntactically valid");
+
+        let schema_keys = census
+            .schemas
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        let faulted_schema_keys = faulted
+            .schemas
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            schema_keys
+                .difference(&faulted_schema_keys)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "top|ImportedNonRequiredAuditEvidence",
+                "top|MetadataTreeBootstrap",
+                "top|PortableCertificateProjection<T>",
+            ]
+        );
+        assert!(
+            faulted_schema_keys
+                .difference(&schema_keys)
+                .next()
+                .is_none(),
+            "recognizing embeds must not retire an unrelated top-level candidate"
+        );
+
+        let field_keys = census
+            .fields
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        let faulted_field_keys = faulted
+            .fields
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            field_keys
+                .difference(&faulted_field_keys)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.cipher_descriptor|cipher_descriptor",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.ciphertext_id|ciphertext_id",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.closure_digest|closure_digest",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.encoding_descriptor|encoding_descriptor",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.placement_records|placement_records",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.root_oid|root_oid",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_generation|tree_generation",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_key_id|tree_key_id",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_key_opener|tree_key_opener",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_kind|tree_kind",
+            ]
+        );
+        assert!(
+            faulted_field_keys.difference(&field_keys).next().is_none(),
+            "recognizing embeds must not retire an unrelated field candidate"
+        );
+
+        assert_eq!(
+            census.counts.schema_candidates,
+            faulted.counts.schema_candidates + 3
+        );
+        assert_eq!(
+            census.counts.field_candidates,
+            faulted.counts.field_candidates + 10
+        );
+        assert_eq!(census.counts.ambiguities, faulted.counts.ambiguities + 11);
+        assert_eq!(census.transcripts.unions, faulted.transcripts.unions);
+        assert_eq!(census.transcripts.arms, faulted.transcripts.arms);
+        let named = census
+            .schemas
+            .iter()
+            .filter(|row| {
+                row.owner_statuses
+                    .contains(&super::SchemaOwnerStatus::NamedConceptNoBody)
+            })
+            .count();
+        let faulted_named = faulted
+            .schemas
+            .iter()
+            .filter(|row| {
+                row.owner_statuses
+                    .contains(&super::SchemaOwnerStatus::NamedConceptNoBody)
+            })
+            .count();
+        assert_eq!(named, faulted_named + 2);
+    }
+
+    #[test]
     fn malformed_structural_remainders_are_explicit_ambiguities() {
         let source = concat!(
             "`Record = {field:,other=,,field:u8}`.\n",
@@ -3712,7 +6439,7 @@ mod tests {
         assert!(census.ambiguities.iter().any(|row| {
             row.key.kind == AmbiguityKind::UnparsedTrailingTokens
                 && row.raw == "junk"
-                && row.affected_source_keys == ["arm|Choice|Choice|Left"]
+                && row.affected_source_keys.eq(&["arm|Choice|Choice|Left"])
         }));
         assert!(census.ambiguities.iter().any(|row| {
             row.key.kind == AmbiguityKind::UnparsedUnionArm
@@ -3855,7 +6582,7 @@ mod tests {
         }));
         assert!(conflicting.iter().any(|row| {
             row.key.reason == "the same arm source key has divergent payloads"
-                && row.affected_source_keys == ["arm|Same|Same|Left"]
+                && row.affected_source_keys.eq(&["arm|Same|Same|Left"])
         }));
         for ambiguity in &census.ambiguities {
             assert_ambiguity_relation_digest(ambiguity);
@@ -4023,5 +6750,733 @@ mod tests {
         let error = census_appendix_source(b"first\nsecond", usize::MAX, &overflowing)
             .expect_err("unrepresentable source coordinates must not panic");
         assert_eq!(error.kind, CensusErrorKind::SourceCoordinateOverflow);
+    }
+
+    fn census_801o_fixture(source: &str) -> super::AppendixSourceCensus {
+        let slices = [SourceSliceSpec {
+            id: "801o",
+            start_line: 1,
+            end_line: 1,
+        }];
+        census_appendix_source(source.as_bytes(), 1, &slices)
+            .expect("the two-union fixture must census")
+    }
+
+    /// The metamorphic contract in both directions. Joining two definitions
+    /// into one sentence and splitting that sentence again must preserve the
+    /// union and arm transcripts.
+    #[test]
+    fn two_union_sentence_join_and_split_are_transcript_invariant() {
+        const ORDER_JOINED: &str = concat!(
+            "`LocalOrderSubject` is ",
+            "`Terminal{reservation_ref:StrongRef<LocalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<SequenceNeutralSpec>}`; ",
+            "`MetaOrderSubject` is the corresponding ",
+            "`Terminal{reservation_ref:StrongRef<GlobalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<GlobalSequenceNeutralSpec>}`.\n",
+        );
+        const ORDER_SPLIT: &str = concat!(
+            "`LocalOrderSubject` is ",
+            "`Terminal{reservation_ref:StrongRef<LocalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<SequenceNeutralSpec>}`. ",
+            "`MetaOrderSubject` is the corresponding ",
+            "`Terminal{reservation_ref:StrongRef<GlobalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<GlobalSequenceNeutralSpec>}`.\n",
+        );
+        const KEY_JOINED: &str = concat!(
+            "`KeyDestroyFloorRef` is ",
+            "`Checkpoint{checkpoint_ref:StrongRef<RecoveryCheckpoint>}|",
+            "Configuration{floor_ref:StrongRef<ConfigPayloadFloor>}` and ",
+            "`KeyDestroyExternalAckRef` is ",
+            "`Backup{ack_ref:StrongRef<BackupKeyReleaseAck>}|",
+            "LegalHold{ack_ref:StrongRef<LegalHoldReleaseAck>}|",
+            "RemoteConsumer{ack_ref:StrongRef<RemoteKeyConsumerReleaseAck>}`.\n",
+        );
+        const KEY_SPLIT: &str = concat!(
+            "`KeyDestroyFloorRef` is ",
+            "`Checkpoint{checkpoint_ref:StrongRef<RecoveryCheckpoint>}|",
+            "Configuration{floor_ref:StrongRef<ConfigPayloadFloor>}`. ",
+            "`KeyDestroyExternalAckRef` is ",
+            "`Backup{ack_ref:StrongRef<BackupKeyReleaseAck>}|",
+            "LegalHold{ack_ref:StrongRef<LegalHoldReleaseAck>}|",
+            "RemoteConsumer{ack_ref:StrongRef<RemoteKeyConsumerReleaseAck>}`.\n",
+        );
+        const READY_JOINED: &str = concat!(
+            "`ReadyChannelSurface` has exactly ",
+            "`0x0001 NativeFgp|0x0002 Http2|0x0003 Grpc|0x0004 WebSocket`, and ",
+            "`BoltBookmarkRequestKind` exactly `0x0001 Begin|0x0002 Run`; ",
+            "all other nested tags are reserved-invalid.\n",
+        );
+        const READY_SPLIT: &str = concat!(
+            "`ReadyChannelSurface` has exactly ",
+            "`0x0001 NativeFgp|0x0002 Http2|0x0003 Grpc|0x0004 WebSocket`. ",
+            "`BoltBookmarkRequestKind` exactly `0x0001 Begin|0x0002 Run`; ",
+            "all other nested tags are reserved-invalid.\n",
+        );
+        const RETRY_JOINED: &str = concat!(
+            "`SubscriptionClosePrecondition` has exactly the stable `u16` tags ",
+            "`0x0001 NoOutstanding{current_cursor_state_digest}|",
+            "0x0002 Outstanding{current_cursor_state_digest,lease_identity,",
+            "output_kind_and_id,public_digest}`, and ",
+            "`CapabilityMigrationRetrySelector` exactly ",
+            "`0x0001 Initial|0x0002 ExactLiveSuccessorRetry{entry_digest}`; ",
+            "every other nested tag is reserved-invalid.\n",
+        );
+        const RETRY_SPLIT: &str = concat!(
+            "`SubscriptionClosePrecondition` has exactly the stable `u16` tags ",
+            "`0x0001 NoOutstanding{current_cursor_state_digest}|",
+            "0x0002 Outstanding{current_cursor_state_digest,lease_identity,",
+            "output_kind_and_id,public_digest}`. ",
+            "`CapabilityMigrationRetrySelector` exactly ",
+            "`0x0001 Initial|0x0002 ExactLiveSuccessorRetry{entry_digest}`; ",
+            "every other nested tag is reserved-invalid.\n",
+        );
+
+        let cases = [
+            (
+                "local/meta order subjects",
+                ORDER_JOINED,
+                ORDER_SPLIT,
+                "; `MetaOrderSubject` is",
+                ". `MetaOrderSubject` is",
+                "`MetaOrderSubject` is",
+                "`MetaOrderSubject` resembles",
+                "LocalOrderSubject",
+                ["Control", "Terminal"].as_slice(),
+                4usize,
+            ),
+            (
+                "key-destroy reference selectors",
+                KEY_JOINED,
+                KEY_SPLIT,
+                " and `KeyDestroyExternalAckRef` is",
+                ". `KeyDestroyExternalAckRef` is",
+                "`KeyDestroyExternalAckRef` is",
+                "`KeyDestroyExternalAckRef` resembles",
+                "KeyDestroyFloorRef",
+                ["Checkpoint", "Configuration"].as_slice(),
+                5,
+            ),
+            (
+                "ready-channel selectors",
+                READY_JOINED,
+                READY_SPLIT,
+                ", and `BoltBookmarkRequestKind` exactly",
+                ". `BoltBookmarkRequestKind` exactly",
+                "`BoltBookmarkRequestKind` exactly",
+                "`BoltBookmarkRequestKind` nominally",
+                "ReadyChannelSurface",
+                [
+                    "0x0001 NativeFgp",
+                    "0x0002 Http2",
+                    "0x0003 Grpc",
+                    "0x0004 WebSocket",
+                ]
+                .as_slice(),
+                6usize,
+            ),
+            (
+                "close/retry selectors",
+                RETRY_JOINED,
+                RETRY_SPLIT,
+                ", and `CapabilityMigrationRetrySelector` exactly",
+                ". `CapabilityMigrationRetrySelector` exactly",
+                "`CapabilityMigrationRetrySelector` exactly",
+                "`CapabilityMigrationRetrySelector` nominally",
+                "SubscriptionClosePrecondition",
+                [
+                    "0x0001 Initial",
+                    "0x0001 NoOutstanding",
+                    "0x0002 ExactLiveSuccessorRetry",
+                    "0x0002 Outstanding",
+                ]
+                .as_slice(),
+                4,
+            ),
+        ];
+
+        let mut split_mutations = 0usize;
+        let mut join_mutations = 0usize;
+        let mut fault_controls_fired = 0usize;
+        let mut correct_unions = 0usize;
+        let mut correct_arms = 0usize;
+        for (
+            label,
+            joined,
+            split,
+            joined_separator,
+            split_boundary,
+            second_head,
+            faulted_head,
+            first_owner,
+            faulted_first_arms,
+            expected_arm_count,
+        ) in cases
+        {
+            let resplit = joined.replacen(joined_separator, split_boundary, 1);
+            assert_eq!(resplit, split, "{label}: the split mutation did not fire");
+            split_mutations += 1;
+
+            let rejoined = split.replacen(split_boundary, joined_separator, 1);
+            assert_eq!(
+                rejoined, joined,
+                "{label}: the inverse join mutation did not fire"
+            );
+            join_mutations += 1;
+
+            let joined_census = census_801o_fixture(joined);
+            let split_census = census_801o_fixture(&resplit);
+            let rejoined_census = census_801o_fixture(&rejoined);
+            assert_eq!(
+                joined_census.transcripts.unions, split_census.transcripts.unions,
+                "{label}: splitting changed the union transcript"
+            );
+            assert_eq!(
+                joined_census.transcripts.arms, split_census.transcripts.arms,
+                "{label}: splitting changed the arm transcript"
+            );
+            assert_eq!(
+                joined_census.transcripts.unions, rejoined_census.transcripts.unions,
+                "{label}: joining changed the union transcript"
+            );
+            assert_eq!(
+                joined_census.transcripts.arms, rejoined_census.transcripts.arms,
+                "{label}: joining changed the arm transcript"
+            );
+            assert_eq!(joined_census.counts.union_candidates, 2, "{label}");
+            assert_eq!(
+                joined_census.counts.arm_candidates, expected_arm_count,
+                "{label}"
+            );
+            correct_unions += joined_census.counts.union_candidates;
+            correct_arms += joined_census.counts.arm_candidates;
+
+            // INJECTED FAULT / VACUITY CONTROL: erase only the second
+            // definition cue. This reconstructs the defect's two real shapes:
+            // the second union vanishes in both; the first either stays intact
+            // or absorbs the foreign arms depending on whether its cue enables
+            // continuation.
+            let faulted = joined.replacen(second_head, faulted_head, 1);
+            assert_ne!(faulted, joined, "{label}: fault injection was inert");
+            let faulted_census = census_801o_fixture(&faulted);
+            if faulted_census
+                .transcripts
+                .unions
+                .ne(&joined_census.transcripts.unions)
+                && faulted_census
+                    .transcripts
+                    .arms
+                    .ne(&joined_census.transcripts.arms)
+            {
+                fault_controls_fired += 1;
+            }
+            assert_eq!(
+                faulted_census.counts.union_candidates, 1,
+                "{label}: the erased second head must make one union vanish"
+            );
+            let first = faulted_census
+                .unions
+                .iter()
+                .find(|row| row.key.schema_owner == first_owner)
+                .expect("the first owner remains visible under the injected fault");
+            assert_eq!(
+                first.arm_names,
+                faulted_first_arms
+                    .iter()
+                    .map(|arm| (*arm).to_owned())
+                    .collect::<Vec<_>>(),
+                "{label}: the injected fault did not reproduce its named shape"
+            );
+        }
+
+        assert_eq!(split_mutations, 4, "all source sentences must be split");
+        assert_eq!(join_mutations, 4, "all split sentences must be rejoined");
+        assert_eq!(
+            fault_controls_fired, 4,
+            "the erased-head control must change both union and arm transcripts \
+             on all source shapes"
+        );
+        assert_eq!(correct_unions, 8);
+        assert_eq!(correct_arms, 19);
+        println!(
+            "801o metamorphic: split 4/4; join 4/4; correct union/arm population \
+             8/19; erased-head control fired 4/4"
+        );
+    }
+
+    #[test]
+    fn meta_restore_phase_is_exact_source_ordered_and_mutation_sensitive() {
+        const TOP: &str = "MetaRestorePhase";
+        const TERMINAL: &str = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal";
+
+        fn a18_census(source: &str) -> AppendixSourceCensus {
+            let slices = [SourceSliceSpec {
+                id: "a18",
+                start_line: 2349,
+                end_line: 2458,
+            }];
+            census_appendix_source(source.as_bytes(), 2349, &slices)
+                .expect("the a18 source must census")
+        }
+
+        fn source_ordered_arms(census: &AppendixSourceCensus, union_path: &str) -> Vec<String> {
+            let mut arms = census
+                .arms
+                .iter()
+                .filter(|arm| {
+                    arm.key.schema_owner.as_str().eq(TOP)
+                        && arm.key.union_path.as_str().eq(union_path)
+                })
+                .collect::<Vec<_>>();
+            arms.sort_by_key(|arm| {
+                arm.locations
+                    .first()
+                    .map(|location| location.start)
+                    .expect("a source-backed arm has a location")
+            });
+            arms.into_iter()
+                .map(|arm| arm.key.arm_name.clone())
+                .collect()
+        }
+
+        fn payload<'a>(
+            census: &'a AppendixSourceCensus,
+            union_path: &str,
+            arm_name: &str,
+        ) -> &'a str {
+            let arm = census
+                .arms
+                .iter()
+                .find(|arm| {
+                    arm.key.schema_owner.as_str().eq(TOP)
+                        && arm.key.union_path.as_str().eq(union_path)
+                        && arm.key.arm_name.as_str().eq(arm_name)
+                })
+                .expect("the source-backed MetaRestorePhase arm exists");
+            assert!(!arm.payload_conflict, "{union_path}.{arm_name}");
+            assert_eq!(arm.payload_sha256s.len(), 1, "{union_path}.{arm_name}");
+            &arm.payload_sha256s[0]
+        }
+
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(2348)
+            .take(2458 - 2349 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            sha256_hex(source.as_bytes()),
+            "8793cbfbcd974a66322010e53d7043c40ed31d1ec1ed268fe1f9da13ef0fac9f",
+            "the MetaRestorePhase ruling was measured on a different a18 source"
+        );
+        assert!(
+            source.contains(concat!(
+                "AwaitingSourceRelease = 0x0006; the nested terminal tags are ",
+                "Operational = 0x0001 and Abandoned = 0x0002"
+            )),
+            "the source must freeze both dense u8 tag sequences"
+        );
+
+        let census = a18_census(&source);
+        let schema = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family.as_str().eq(TOP))
+            .expect("MetaRestorePhase is a top-level source candidate");
+        assert_eq!(
+            schema.owner_statuses,
+            [SchemaOwnerStatus::ConfirmedTopLevel]
+        );
+        assert_eq!(
+            schema.definition_kinds,
+            [DefinitionKind::ProseLinkedStructural]
+        );
+        assert!(!schema.body_conflict);
+
+        let unions = census
+            .unions
+            .iter()
+            .filter(|union| union.key.schema_owner.as_str().eq(TOP))
+            .collect::<Vec<_>>();
+        assert_eq!(unions.len(), 2, "MetaRestorePhase owns only its two unions");
+        assert!(unions.iter().all(|union| {
+            union.unparsed_arm_count.eq(&0)
+                && !union.arm_set_conflict
+                && union.occurrence_count.eq(&1)
+        }));
+
+        let top_order = [
+            "ActiveHidden",
+            "AbandonAuthorizedHidden",
+            "PromotedAwaitingReopen",
+            "AbandonedAwaitingTerminalPin",
+            "AwaitingSourceAccessCleanup",
+            "AwaitingSourceRelease",
+        ];
+        let terminal_order = ["Operational", "Abandoned"];
+        assert_eq!(source_ordered_arms(&census, TOP), top_order);
+        assert_eq!(source_ordered_arms(&census, TERMINAL), terminal_order);
+
+        for (union_path, arm_name, expected_sha256) in [
+            (
+                TOP,
+                "ActiveHidden",
+                "7ca0fce9d492be43bba310839ac59e473fa8734cc92fc5df7361c55c2bd3fe2e",
+            ),
+            (
+                TOP,
+                "AbandonAuthorizedHidden",
+                "6e30b8c7b5a280500987616ce55de2e3ddc7da84bf66a0a0572d26745984225d",
+            ),
+            (
+                TOP,
+                "PromotedAwaitingReopen",
+                "34df00498bbc6513828eba98c738e6b845093a0b51b94f0183e93ffb4df80546",
+            ),
+            (
+                TOP,
+                "AbandonedAwaitingTerminalPin",
+                "d99107150d7a963ce2a6abdcfcf1f4b74b6a3be5071c7bea92874020f45cb1ee",
+            ),
+            (
+                TOP,
+                "AwaitingSourceAccessCleanup",
+                "ec6139a595acbedfd12c1dfdefc6ce63f81f66ddd9c4bbd50c8e819cdb0e7301",
+            ),
+            (
+                TOP,
+                "AwaitingSourceRelease",
+                "9d9f52e7fb85b05bb70ec609d517f7a768d7cb1e5c45d4fcccff2c473c81f5e5",
+            ),
+            (
+                TERMINAL,
+                "Operational",
+                "a4a2ce8151ad7e073843bd1ddc4c3068bdfa13b5678947179c9721895616ecd4",
+            ),
+            (
+                TERMINAL,
+                "Abandoned",
+                "86c9aed8b7f831b123423f1d1908a8447df54cd30f7801b52205c854fe6e5d63",
+            ),
+        ] {
+            assert_eq!(
+                payload(&census, union_path, arm_name),
+                expected_sha256,
+                "{union_path}.{arm_name}"
+            );
+        }
+
+        let meta_fields = census
+            .fields
+            .iter()
+            .filter(|field| field.key.schema_owner.as_str().eq(TOP))
+            .collect::<Vec<_>>();
+        assert_eq!(meta_fields.len(), 34);
+        assert!(meta_fields.iter().all(|field| {
+            !field.ambiguous
+                && !field.type_conflict
+                && field.exact_types.len().eq(&1)
+                && !field.exact_types[0].is_empty()
+        }));
+        assert!(census.ambiguities.iter().all(|ambiguity| {
+            ambiguity.key.schema_family.as_deref().ne(&Some(TOP))
+                && !ambiguity
+                    .key
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with(TOP))
+        }));
+
+        let renamed = source.replacen(
+            "`MetaRestorePhase` is the exact `u8` union `ActiveHidden{",
+            "`MetaRestorePhase` is the exact `u8` union `ActiveHiddenMutant{",
+            1,
+        );
+        assert_ne!(renamed, source, "the arm-name mutant must fire");
+        assert_ne!(
+            source_ordered_arms(&a18_census(&renamed), TOP),
+            top_order,
+            "renaming one arm must violate the pinned source arm set"
+        );
+
+        let active = "ActiveHidden{restore_state_ref:MetaRestoreStateRef}";
+        let abandon_authorized = concat!(
+            "AbandonAuthorizedHidden{restore_state_ref:MetaRestoreStateRef,",
+            "abandon_operation_record_ref:",
+            "StrongRef<RestoreAbandonOperationRecord<Meta>>}"
+        );
+        let ordered_prefix = format!("{active}|{abandon_authorized}|");
+        let swapped_prefix = format!("{abandon_authorized}|{active}|");
+        let reordered = source.replacen(&ordered_prefix, &swapped_prefix, 1);
+        assert_ne!(reordered, source, "the source-order mutant must fire");
+        assert_ne!(
+            source_ordered_arms(&a18_census(&reordered), TOP),
+            top_order,
+            "swapping two arms must violate the dense tag assignment"
+        );
+
+        let payload_mutated = source.replacen(
+            "PromotedAwaitingReopen{promotion_applied_ref:AuthorityAppliedRef,",
+            "PromotedAwaitingReopen{promotion_applied_ref:WeakDigest,",
+            1,
+        );
+        assert_ne!(payload_mutated, source, "the payload mutant must fire");
+        assert_ne!(
+            payload(&a18_census(&payload_mutated), TOP, "PromotedAwaitingReopen"),
+            "34df00498bbc6513828eba98c738e6b845093a0b51b94f0183e93ffb4df80546",
+            "changing one exact member type must violate the payload digest"
+        );
+    }
+
+    /// The complete real-source partition. The Appendix A population is small
+    /// enough to name: four sentences, eight owners.
+    #[test]
+    fn appendix_a_two_union_sentence_population_is_exact_and_source_ordered() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        // This guard did its job: 65a21da (fgdb-ymqm) edited Appendix A and the guard
+        // fired, refusing to let the population assertion below be read as current.
+        // Re-measured on the new source, the population is BYTE-FOR-BYTE UNCHANGED --
+        // same four sentences, same lines 1758/2057/2645/2651, same owners, same order.
+        // So only the "measured on" sha moves here; the law below is untouched, and this
+        // is a re-measurement rather than a re-pin.
+        assert_eq!(
+            sha256_hex(source.as_bytes()),
+            "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16",
+            "the two-union population was measured on a different Appendix A source"
+        );
+
+        let source_map = SourceMap::new(&source, 1388);
+        let (fragments, _) = super::extract_markdown_fragments(&source_map);
+        let links = super::prose_schema_links(&fragments, &source_map);
+        assert!(
+            links
+                .iter()
+                .all(|link| link.display_name != "DefinitelyFabricatedTwoUnionOwner"),
+            "fabricated-absent control matched a prose definition"
+        );
+
+        let mut by_line: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, fragment) in fragments.iter().enumerate() {
+            if fragment.kind == super::FragmentKind::Inline {
+                by_line
+                    .entry(source_map.position(fragment.source_range.start).line)
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let mut sentence_by_fragment = std::collections::BTreeMap::new();
+        for (line, indexes) in &mut by_line {
+            indexes.sort_by_key(|index| fragments[*index].source_range.start);
+            let mut sentence = 0usize;
+            for index in indexes {
+                sentence_by_fragment.insert(*index, (*line, sentence));
+                if super::sentence_ends(&fragments[*index].after) {
+                    sentence += 1;
+                }
+            }
+        }
+
+        let mut union_links_by_sentence: std::collections::BTreeMap<
+            (usize, usize),
+            Vec<(usize, String)>,
+        > = std::collections::BTreeMap::new();
+        for link in &links {
+            if !link
+                .rhs_fragments
+                .iter()
+                .any(|index| matches!(super::has_top_level_pipe(&fragments[*index].text), Ok(true)))
+            {
+                continue;
+            }
+            let sentence = sentence_by_fragment[&link.owner_fragment];
+            union_links_by_sentence.entry(sentence).or_default().push((
+                fragments[link.owner_fragment].source_range.start,
+                link.display_name.clone(),
+            ));
+        }
+        let mut population = Vec::new();
+        for ((line, _), mut owners) in union_links_by_sentence {
+            if owners.len() < 2 {
+                continue;
+            }
+            owners.sort_by_key(|(source_start, _)| *source_start);
+            population.push((
+                line,
+                owners
+                    .into_iter()
+                    .map(|(_, owner)| owner)
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        assert_eq!(
+            population,
+            [
+                (
+                    1758,
+                    vec![
+                        "LocalOrderSubject".to_owned(),
+                        "MetaOrderSubject".to_owned(),
+                    ],
+                ),
+                (
+                    2057,
+                    vec![
+                        "KeyDestroyFloorRef".to_owned(),
+                        "KeyDestroyExternalAckRef".to_owned(),
+                    ],
+                ),
+                (
+                    2645,
+                    vec![
+                        "ReadyChannelSurface".to_owned(),
+                        "BoltBookmarkRequestKind".to_owned(),
+                    ],
+                ),
+                (
+                    2651,
+                    vec![
+                        "SubscriptionClosePrecondition".to_owned(),
+                        "CapabilityMigrationRetrySelector".to_owned(),
+                    ],
+                ),
+            ],
+            "every real sentence that spells two unions must be named in source order"
+        );
+        for tagged_source_spelling in [
+            concat!(
+                "`ReadyChannelSurface` has exactly ",
+                "`0x0001 NativeFgp|0x0002 Http2|0x0003 Grpc|0x0004 WebSocket`",
+            ),
+            concat!(
+                "`BoltBookmarkRequestKind` exactly ",
+                "`0x0001 Begin|0x0002 Run`",
+            ),
+            concat!(
+                "`SubscriptionClosePrecondition` has exactly the stable `u16` tags ",
+                "`0x0001 NoOutstanding{current_cursor_state_digest}|",
+                "0x0002 Outstanding{current_cursor_state_digest,lease_identity,",
+                "output_kind_and_id,public_digest}`",
+            ),
+            concat!(
+                "`CapabilityMigrationRetrySelector` exactly ",
+                "`0x0001 Initial|0x0002 ExactLiveSuccessorRetry{entry_digest}`",
+            ),
+        ] {
+            assert!(
+                source.contains(tagged_source_spelling),
+                "tag assignment must be read from this exact source-order spelling: \
+                 {tagged_source_spelling}"
+            );
+        }
+
+        let slices = crate::appendix_a::SLICE_PINS
+            .iter()
+            .map(|slice| SourceSliceSpec {
+                id: slice.id,
+                start_line: usize::try_from(slice.start_line).expect("positive start line"),
+                end_line: usize::try_from(slice.end_line).expect("positive end line"),
+            })
+            .collect::<Vec<_>>();
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the committed Appendix A source must census");
+        for (owner, expected_arms) in [
+            ("LocalOrderSubject", ["Control", "Terminal"].as_slice()),
+            ("MetaOrderSubject", ["Control", "Terminal"].as_slice()),
+            (
+                "KeyDestroyFloorRef",
+                ["Checkpoint", "Configuration"].as_slice(),
+            ),
+            (
+                "KeyDestroyExternalAckRef",
+                ["Backup", "LegalHold", "RemoteConsumer"].as_slice(),
+            ),
+            (
+                "ReadyChannelSurface",
+                [
+                    "0x0001 NativeFgp",
+                    "0x0002 Http2",
+                    "0x0003 Grpc",
+                    "0x0004 WebSocket",
+                ]
+                .as_slice(),
+            ),
+            (
+                "BoltBookmarkRequestKind",
+                ["0x0001 Begin", "0x0002 Run"].as_slice(),
+            ),
+            (
+                "SubscriptionClosePrecondition",
+                ["0x0001 NoOutstanding", "0x0002 Outstanding"].as_slice(),
+            ),
+            (
+                "CapabilityMigrationRetrySelector",
+                ["0x0001 Initial", "0x0002 ExactLiveSuccessorRetry"].as_slice(),
+            ),
+        ] {
+            let rows = census
+                .unions
+                .iter()
+                .filter(|row| row.key.schema_owner == owner)
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 1, "{owner} must own exactly one union");
+            assert_eq!(rows[0].key.union_path, owner);
+            assert_eq!(
+                rows[0].arm_names,
+                expected_arms
+                    .iter()
+                    .map(|arm| (*arm).to_owned())
+                    .collect::<Vec<_>>(),
+                "{owner}: the canonical census set must contain exactly the \
+                 source-spelled arm identities; this alphabetical set order is \
+                 not a tag-assignment order"
+            );
+            assert_eq!(rows[0].unparsed_arm_count, 0);
+            assert!(!rows[0].arm_set_conflict);
+        }
+        assert!(
+            census.fields.iter().any(|field| {
+                field.key.path
+                    == concat!(
+                        "CapabilityMigrationRetrySelector.0x0002 ",
+                        "ExactLiveSuccessorRetry.entry_digest"
+                    )
+            }),
+            "the retry selector payload field must belong to its source owner"
+        );
+        assert!(
+            census.fields.iter().all(|field| {
+                field.key.path
+                    != concat!(
+                        "SubscriptionClosePrecondition.0x0002 ",
+                        "ExactLiveSuccessorRetry.entry_digest"
+                    )
+            }),
+            "the retry selector payload field must not remain on the preceding union"
+        );
+        println!(
+            "801o source partition: 4 sentences, 8 unions, 19 arms; global \
+             schemas={} fields={} unions={} arms={} ambiguities={}",
+            census.counts.schema_candidates,
+            census.counts.field_candidates,
+            census.counts.union_candidates,
+            census.counts.arm_candidates,
+            census.counts.ambiguities
+        );
     }
 }

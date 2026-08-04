@@ -544,10 +544,24 @@ mod tests {
             census.target_ids_sha256,
             "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
         );
-        assert_eq!(census.occurrence_count, 2_458);
+        // MOVED BY fgdb-mtxm when the previously name-only MetaRestorePhase acquired its
+        // exact six-arm body and exact two-arm nested terminal union. The prior pin was
+        // 2_442 / ea5ea31e..; the twelve added occurrences are the source-spelled
+        // StrongRef payloads in those arms, not newly allocated target families.
+        //
+        // This is a CURRENT-STATE census of the committed plan, not a historical
+        // witness: precedent c5570ce, cc9fc26, 65a21da, and fgdb-mtxm all moved it when
+        // the plan legitimately changed. The values below are re-derived from the plan
+        // bytes and independently corroborated by the catalog's [reference_manifest],
+        // which the appendix checker validates against the same source.
+        //
+        // THE PARTITION IS THE POINT: target_count and target_ids_sha256 above are
+        // UNCHANGED, so no reference TARGET was added or removed. Only OCCURRENCES of
+        // those same 813 targets were added by the exact Meta phase payloads.
+        assert_eq!(census.occurrence_count, 2_454);
         assert_eq!(
             census.occurrence_transcript_sha256,
-            "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
+            "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
         );
     }
 }

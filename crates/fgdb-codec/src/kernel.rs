@@ -65,6 +65,27 @@ pub trait KernelDispatch: private::Sealed {
 /// Construction is private to this module, and the dispatch traits are sealed.
 /// Evidence consumers can therefore read the bytes and path but cannot attach
 /// an arbitrary path label to unrelated bytes.
+///
+/// Calling the internal raw-byte constructor from another crate is rejected:
+///
+/// ```compile_fail,E0624
+/// use fgdb_codec::kernel::{KernelOutput, ScalarKernels};
+///
+/// let _forged = KernelOutput::new(&ScalarKernels, b"caller bytes".to_vec());
+/// ```
+///
+/// The producer boundary is sealed independently, so callers cannot add a
+/// dispatch implementation of their own:
+///
+/// ```compile_fail,E0277
+/// use fgdb_codec::kernel::{DispatchPath, KernelDispatch};
+///
+/// struct CallerDispatch;
+///
+/// impl KernelDispatch for CallerDispatch {
+///     const DISPATCH_PATH: DispatchPath = DispatchPath::Scalar;
+/// }
+/// ```
 #[derive(Clone)]
 pub struct KernelOutput {
     bytes: KernelOutputBytes,

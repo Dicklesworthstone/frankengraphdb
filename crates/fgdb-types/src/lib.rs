@@ -3,8 +3,10 @@
 //! Pure types only: no I/O, no durable state, `forbid(unsafe_code)`. Durable
 //! *encoders* for these types are generated from the registries by
 //! `fgdb-w1-generated-parsers` — the encodings here are the canonical value
-//! encodings required for FG-INV-12 coherence (equality ⇒ same hash; total
-//! order; encode/decode round trip), not wire formats.
+//! encodings required for FG-INV-12 coherence (equality independently implies
+//! the same hash and the same canonical encoding; total order agrees with
+//! encoded-byte order; encode/decode round trip), not wire formats. Hash
+//! equality is never scalar or encoding identity.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +18,7 @@ pub mod refs;
 pub mod scalar;
 pub mod temporal;
 pub mod text;
+pub mod value;
 
 pub use bytes::{BoundedBytes, BoundedBytesError};
 pub use context::{
@@ -24,19 +27,19 @@ pub use context::{
     MergeEvalCx, ObligationAcquireError, ObligationBoundary, ObligationCancellationError,
     ObligationGeneration, ObligationId, ObligationLifecycleEvent, ObligationReceipt,
     ObligationResolution, ObligationStage, Published, PurposeContexts, PurposeObligation, QueryCx,
-    REPLICATION_CAPABILITIES, ReplCx, RestrictedFuture, Transferred, TxnCx,
+    REPLICATION_CAPABILITIES, ReplCx, RestrictedFuture, StorageReadCx, Transferred, TxnCx,
 };
 pub use decimal::{
     CanonicalDecimal, DecimalDecodeError, DecimalError, DecimalOperation, MAX_DECIMAL_COEFFICIENT,
     MIN_DECIMAL_COEFFICIENT, STRICT_PORTABLE_DECIMAL_PRECISION, STRICT_PORTABLE_DECIMAL_SCALE,
 };
 pub use ids::{
-    BranchId, CommitSeq, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId, ObjectId,
-    ServiceVisibilityEpoch, VId, WriterFenceEpoch,
+    BranchId, CommitSeq, CommitSeqExhausted, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId,
+    LogicalCommandSeq, ObjectId, ServiceVisibilityEpoch, VId, WriterFenceEpoch,
 };
 pub use refs::{
     CommandRef, ConditionalCoordinateRef, ConditionalMarkerAxis, ConditionalMarkerRef,
-    LogicalObjectKind, MarkerRef, StrongRef, WeakDigest,
+    LogicalObjectKind, LogicalObjectKindCode, MarkerRef, StrongRef, WeakDigest,
 };
 pub use scalar::{
     CanonicalBytes, CanonicalF64, CanonicalScalar, CanonicalScalarResolver, MAX_SCALAR_BYTES,
@@ -51,4 +54,11 @@ pub use text::{
     CanonicalText, CanonicalTextError, CollationResolver, CollationResolverError,
     MAX_CANONICAL_SORT_KEY_BYTES, MAX_CANONICAL_TEXT_BYTES, NonBinaryTextBinding, TextArtifactRole,
     TextBinding, TextField,
+};
+pub use value::{
+    CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue,
+    CanonicalPropertyValueError, CanonicalScalarCoercionError, CanonicalScalarKind,
+    CanonicalScalarProfile, CanonicalScalarProfileError, CanonicalScalarProfileIdentityVerifier,
+    MAX_PROFILE_COLLATIONS, MAX_PROPERTY_COLLECTION_ENTRIES, MAX_PROPERTY_NESTING_DEPTH,
+    MAX_PROPERTY_VALUE_BYTES, ScalarProfileArtifactRole,
 };

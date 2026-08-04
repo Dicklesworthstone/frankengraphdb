@@ -49,6 +49,36 @@
 # cannot count as covered"). Workstream beads flip status stub -> live in the
 # same change that lands the checker, never before.
 #
+# THE PROMOTION LAW IS NOW ENFORCED
+# (fgdb-clause-promotion-to-live-is-unguarded-nllh).
+# The sentence above was prose and no code. Measured: promoting a clause here to
+# `live` and changing nothing else produced ZERO violations — its checker stayed
+# a `status = "stub"` row pointing into a crate that does not exist. So did the
+# degenerate case, a clause whose negative_test_entrypoint IS its
+# checker_entrypoint. The entire law for both fields was "the string resolves to
+# a row", and 18 of the 20 clauses below carry first_gate = "G1", so at G1
+# roughly eighteen invariants promote in one window with nothing but reviewer
+# attention between "enforced" and "a row exists".
+#
+# An ENFORCED clause (see `CLAUSE_STATUS_ENFORCED` in validate.rs — one list
+# decides both the accepted vocabulary and which statuses enforce) now requires:
+#
+#   * `checker_entrypoint` resolves to a checker_index row that is
+#     `status = "live"` AND live in the full sense `liveness.rs` defines
+#     (registered + invoked + capable of failing). That question is DELEGATED to
+#     the same reader that answers it for checker_index.toml and
+#     proof_lanes.toml, not answered a third time;
+#   * `negative_test_entrypoint` meets the SAME bar, not a weaker one. Its whole
+#     purpose is to prove the checker can go red, so a negative test that cannot
+#     itself fail proves nothing;
+#   * the two are DISTINCT SYMBOLS. They may share an ARTIFACT — all twenty
+#     clauses below do, and tests/claims.rs holds both a checker and a negative
+#     test — but one symbol cannot be both the proof and the proof that the
+#     proof can fail.
+#
+# `dormant` does not enforce, by the same header sentence that defines it: a
+# dormant clause forces its feature off and cannot count as covered.
+#
 # CI (tools/registry-check) verifies: the twenty-ID set and table hash, the
 # clause dependency DAG (acyclic, registered targets only), checker/negative-
 # test symbol existence, waiver = "forbidden" on every clause, proof-lane
@@ -63,6 +93,68 @@ name = "invariants"
 allowed_claim_classes = ["invariant", "proof", "bounded_model"]
 waiver_policy = "forbidden"
 twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
+
+# THE ENFORCEMENT LEDGER (fgdb-fginv-spine-zero-live-checkers-v05b).
+#
+# AGENTS.md: "CI cross-checks that every ID has a live checker", and under it the
+# hard rule "no subsystem ships against an unenforced invariant". Every clause
+# below is stub and every entrypoint resolves to a stub checker_index row, so
+# that cross-check quantified over an EMPTY SET and passed — an exit code
+# indistinguishable from a fully enforced spine.
+#
+# These two numbers are what make the zero mean "deliberately zero" instead of
+# "nothing was examined", in the same shape sample_capability_manifest.toml's
+# `expected_reachable_clauses` already uses. registry-check recomputes both by
+# asking liveness.rs whether each clause's apparatus is live, and fails when
+# either differs in EITHER direction: too few means a clause silently regressed
+# to stub, too many means one was promoted without the gate review the doctrine
+# requires. It also fails if the ledger accounted for fewer than the twenty ids,
+# or if the spine holds no clauses at all — a law cannot pass by having nothing
+# to check.
+#
+# A clause counts as enforced only when its status enforces AND both its
+# entrypoints are live checker rows in the full liveness.rs sense. An ID counts
+# only when every clause under it does. Raising either number is a G-gate event:
+# land the checker, then bump the declaration in the same change.
+expected_enforced_clauses = 0
+expected_enforced_invariants = 0
+
+# The CLOSED vocabulary of capability atoms an activation_predicate or a
+# capability manifest may name (bead fgdb-regcheck-closure-vacuous-no-control-hp0f).
+#
+# Why this list has to exist. An atom that is misspelled evaluates false in
+# exactly the same way as an atom whose capability has not landed yet, so
+# `mvcc-visibilty` in a predicate makes its clause unreachable FOREVER, silently
+# escaping enforcement under a green verdict, and no gate could ever say so —
+# including after Genesis. Measured before this list existed: misspelling one
+# atom shrank the reachable set from 20 to 19 with no violation of any kind.
+# With the vocabulary closed, registry-check rejects the typo instead.
+#
+# Adding a capability means adding its atom here first. That is deliberate: the
+# vocabulary is a positive claim about what capabilities this system HAS, and it
+# is checked in both directions against the twenty-ID spine.
+capability_atoms = [
+    "authorization",
+    "base-semantics",
+    "branching",
+    "canonical-scalars",
+    "commit-stream",
+    "content-addressing",
+    "durable-formats",
+    "exclusive-ownership",
+    "garbage-collection",
+    "id-allocation",
+    "incremental-derivatives",
+    "merge-ladder",
+    "mvcc-storage",
+    "mvcc-visibility",
+    "obligation-tracking",
+    "replay-manifests",
+    "root-publication",
+    "serializable-isolation",
+    "ssi-witnesses",
+    "txn-lifecycle",
+]
 
 # -----------------------------------------------------------------------------
 # FG-INV-01

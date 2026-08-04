@@ -999,6 +999,13 @@ impl OpeLedger {
         if self.is_complete() {
             return Err(OpeError::WindowAlreadyComplete);
         }
+        if decision.sequence > self.identity.window.last_sequence {
+            return Err(OpeError::SequenceOutsideWindow {
+                first: self.identity.window.first_sequence,
+                last: self.identity.window.last_sequence,
+                actual: decision.sequence,
+            });
+        }
         let observation_count =
             u64::try_from(self.observations.len()).map_err(|_| OpeError::ArithmeticOverflow)?;
         let expected_sequence = self
@@ -1013,14 +1020,6 @@ impl OpeLedger {
                 actual: decision.sequence,
             });
         }
-        if decision.sequence > self.identity.window.last_sequence {
-            return Err(OpeError::SequenceOutsideWindow {
-                first: self.identity.window.first_sequence,
-                last: self.identity.window.last_sequence,
-                actual: decision.sequence,
-            });
-        }
-
         let action_count = decision.actions.len();
         if action_count > self.profile.maximum_actions_per_observation {
             return Err(OpeError::TooManyActions {
@@ -1963,6 +1962,432 @@ mod tests {
     }
 
     #[test]
+    fn empty_or_noncanonical_action_tables_are_rejected_before_any_estimate() -> TestResult {
+        assert_eq!(
+            LoggedDecision::try_new(1, oid(30), oid(40), oid(50), oid(20), outcome(0)?, vec![]),
+            Err(OpeError::EmptyActionTable { sequence: 1 })
+        );
+
+        // Descending order. Every distribution still sums to exactly one, so
+        // the ordering rule is the only thing that can reject this table.
+        let descending = vec![
+            LoggedAction::new(oid(21), HALF, HALF, HALF, Some(outcome(0)?)),
+            LoggedAction::new(oid(20), HALF, HALF, HALF, Some(outcome(0)?)),
+        ];
+        assert_eq!(
+            LoggedDecision::try_new(
+                1,
+                oid(30),
+                oid(40),
+                oid(50),
+                oid(20),
+                outcome(0)?,
+                descending
+            ),
+            Err(OpeError::ActionsOutOfOrder {
+                sequence: 1,
+                index: 1,
+                previous: oid(21),
+                current: oid(20),
+            })
+        );
+
+        let duplicated = vec![
+            LoggedAction::new(oid(20), HALF, HALF, HALF, Some(outcome(0)?)),
+            LoggedAction::new(oid(20), HALF, HALF, HALF, Some(outcome(0)?)),
+        ];
+        assert_eq!(
+            LoggedDecision::try_new(
+                1,
+                oid(30),
+                oid(40),
+                oid(50),
+                oid(20),
+                outcome(0)?,
+                duplicated
+            ),
+            Err(OpeError::DuplicateAction {
+                sequence: 1,
+                index: 1,
+                action_oid: oid(20),
+            })
+        );
+
+        // The uniqueness check only compares against the IMMEDIATELY preceding
+        // action, so on its own it would miss a non-adjacent repeat. It is the
+        // monotonicity rule that closes that hole: a repeat at distance
+        // necessarily descends first. This case is what makes the pair
+        // sufficient rather than merely suggestive, and it is reported as an
+        // ordering violation rather than a duplicate.
+        let repeated_at_distance = vec![
+            LoggedAction::new(oid(20), HALF, HALF, HALF, Some(outcome(0)?)),
+            LoggedAction::new(oid(21), HALF, HALF, HALF, Some(outcome(0)?)),
+            LoggedAction::new(
+                oid(20),
+                Probability::zero(),
+                Probability::zero(),
+                Probability::zero(),
+                Some(outcome(0)?),
+            ),
+        ];
+        assert_eq!(
+            LoggedDecision::try_new(
+                1,
+                oid(30),
+                oid(40),
+                oid(50),
+                oid(20),
+                outcome(0)?,
+                repeated_at_distance
+            ),
+            Err(OpeError::ActionsOutOfOrder {
+                sequence: 1,
+                index: 2,
+                previous: oid(21),
+                current: oid(20),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_action_must_be_present_with_positive_logging_probability() -> TestResult {
+        let table = || {
+            vec![
+                LoggedAction::new(oid(20), HALF, HALF, HALF, Some(Outcome { scaled: 0 })),
+                LoggedAction::new(oid(21), HALF, HALF, HALF, Some(Outcome { scaled: 0 })),
+            ]
+        };
+        assert_eq!(
+            LoggedDecision::try_new(1, oid(30), oid(40), oid(50), oid(22), outcome(0)?, table()),
+            Err(OpeError::SelectedActionMissing {
+                sequence: 1,
+                selected_action_oid: oid(22),
+            })
+        );
+
+        // A logging policy cannot have selected an action it assigned zero
+        // probability, and admitting one would not merely be untidy:
+        // `clipped_weight` answers a zero behavior probability with the FULL
+        // clipping limit, so the observation would silently enter both
+        // estimates at maximum weight instead of being refused. This rejection
+        // is what keeps that path unreachable for the selected action.
+        let unsupported_selection = vec![
+            LoggedAction::new(
+                oid(20),
+                Probability::zero(),
+                HALF,
+                HALF,
+                Some(Outcome { scaled: 0 }),
+            ),
+            LoggedAction::new(
+                oid(21),
+                Probability::one(),
+                HALF,
+                HALF,
+                Some(Outcome { scaled: 0 }),
+            ),
+        ];
+        assert_eq!(
+            LoggedDecision::try_new(
+                1,
+                oid(30),
+                oid(40),
+                oid(50),
+                oid(20),
+                outcome(0)?,
+                unsupported_selection
+            ),
+            Err(OpeError::SelectedActionHasZeroBehaviorProbability {
+                sequence: 1,
+                selected_action_oid: oid(20),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_trial_cannot_evaluate_a_candidate_against_itself() -> TestResult {
+        // Comparing a policy with itself yields an advantage of exactly zero
+        // for every estimator, which would report `CandidateNotBetter` as
+        // though a real comparison had happened. Refusing it at identity
+        // construction keeps that meaningless evidence unconstructible.
+        assert_eq!(
+            OpeIdentity::try_new(
+                oid(1),
+                OpeWindow::try_new(1, 1)?,
+                oid(2),
+                oid(3),
+                oid(4),
+                oid(5),
+                9,
+                oid(6),
+                oid(6),
+                oid(8),
+                OpeEstimator::Direct,
+            ),
+            Err(OpeError::CandidateEqualsFallback)
+        );
+        assert!(
+            OpeIdentity::try_new(
+                oid(1),
+                OpeWindow::try_new(1, 1)?,
+                oid(2),
+                oid(3),
+                oid(4),
+                oid(5),
+                9,
+                oid(6),
+                oid(7),
+                oid(8),
+                OpeEstimator::Direct,
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_declared_window_is_exactly_the_admissible_sequence_run() -> TestResult {
+        assert_eq!(
+            OpeWindow::try_new(5, 4),
+            Err(OpeError::ReversedWindow { first: 5, last: 4 })
+        );
+        assert_eq!(
+            OpeWindow::try_new(0, u64::MAX),
+            Err(OpeError::WindowLengthOverflow {
+                first: 0,
+                last: u64::MAX,
+            })
+        );
+        assert_eq!(OpeWindow::try_new(7, 7)?.observation_capacity(), 1);
+
+        // A complete window is closed, not merely full: the ledger refuses a
+        // further decision outright rather than letting a late arrival displace
+        // or extend the frozen run the evidence is computed over.
+        let mut ledger = OpeLedger::try_new(
+            identity(OpeEstimator::Direct, 100, 103)?,
+            profile(2, 4, 2, 8)?,
+        )?;
+        for sequence in 100..=103 {
+            ledger.record(binary_decision(
+                sequence,
+                sequence % 2 == 0,
+                HALF,
+                Probability::one(),
+                Probability::zero(),
+                outcome(OUTCOME_SCALE)?,
+                outcome(0)?,
+            )?)?;
+        }
+        assert!(ledger.is_complete());
+        assert_eq!(
+            ledger.record(binary_decision(
+                104,
+                true,
+                HALF,
+                Probability::one(),
+                Probability::zero(),
+                outcome(OUTCOME_SCALE)?,
+                outcome(0)?,
+            )?),
+            Err(OpeError::WindowAlreadyComplete)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_profile_bound_is_validated_at_construction() -> TestResult {
+        // One perturbation per bound off a known-good baseline, so each case
+        // isolates exactly one rule. The checks are ordered, so each input is
+        // chosen to clear every earlier rule and trip only its own.
+        let build = |clipping, ess, observations, actions, rows| {
+            OpeProfile::try_new(clipping, ess, observations, actions, rows)
+        };
+        assert!(build(10 * WEIGHT_SCALE, 2, 4, 2, 8).is_ok());
+
+        assert_eq!(build(0, 2, 4, 2, 8), Err(OpeError::ZeroClippingLimit));
+        assert_eq!(
+            build(MAX_CLIPPING_WEIGHT_UNITS + 1, 2, 4, 2, 8),
+            Err(OpeError::ClippingLimitTooLarge {
+                actual: MAX_CLIPPING_WEIGHT_UNITS + 1,
+                maximum: MAX_CLIPPING_WEIGHT_UNITS,
+            })
+        );
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 0, 4, 2, 8),
+            Err(OpeError::ZeroMinimumEffectiveSampleSize)
+        );
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 2, 0, 2, 8),
+            Err(OpeError::ZeroObservationLimit)
+        );
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 2, MAX_OBSERVATIONS + 1, 2, 8),
+            Err(OpeError::ObservationLimitTooLarge {
+                actual: MAX_OBSERVATIONS + 1,
+                maximum: MAX_OBSERVATIONS,
+            })
+        );
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 2, 4, 0, 8),
+            Err(OpeError::ZeroActionLimit)
+        );
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 2, 4, MAX_ACTIONS_PER_OBSERVATION + 1, 8),
+            Err(OpeError::ActionLimitTooLarge {
+                actual: MAX_ACTIONS_PER_OBSERVATION + 1,
+                maximum: MAX_ACTIONS_PER_OBSERVATION,
+            })
+        );
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 2, 4, 2, 0),
+            Err(OpeError::ZeroTotalActionRowLimit)
+        );
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 2, 4, 2, MAX_TOTAL_ACTION_ROWS + 1),
+            Err(OpeError::TotalActionRowLimitTooLarge {
+                actual: MAX_TOTAL_ACTION_ROWS + 1,
+                maximum: MAX_TOTAL_ACTION_ROWS,
+            })
+        );
+
+        // A total-row budget below the per-observation budget could never admit
+        // even one full decision, so it is rejected rather than left to fail
+        // later as an opaque row-cap breach mid-window.
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 2, 4, 2, 1),
+            Err(OpeError::TotalActionRowLimitBelowPerObservationLimit {
+                total: 1,
+                per_observation: 2,
+            })
+        );
+
+        // An ESS gate above the observation budget is unsatisfiable by
+        // construction: the gate could never pass however the window logged.
+        assert_eq!(
+            build(10 * WEIGHT_SCALE, 5, 4, 2, 8),
+            Err(
+                OpeError::MinimumEffectiveSampleSizeExceedsObservationLimit {
+                    minimum: 5,
+                    maximum_observations: 4,
+                }
+            )
+        );
+
+        // Each declared maximum is itself admissible, exactly as the outcome
+        // bound is. A `>` that drifted to `>=` on any of these would silently
+        // shrink the profile space by one unit at every bound.
+        assert!(build(MAX_CLIPPING_WEIGHT_UNITS, 2, 4, 2, 8).is_ok());
+        assert!(
+            build(
+                10 * WEIGHT_SCALE,
+                2,
+                4,
+                MAX_ACTIONS_PER_OBSERVATION,
+                MAX_TOTAL_ACTION_ROWS
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identity_and_profile_must_be_mutually_satisfiable_where_they_meet() -> TestResult {
+        // These are the cross-object rules: neither the window nor the profile
+        // is wrong on its own, so neither constructor can catch them. Each pair
+        // below is individually legal and jointly impossible, which is exactly
+        // why the ledger has to be the one to refuse it.
+
+        // A window longer than the profile's observation budget.
+        assert_eq!(
+            OpeLedger::try_new(
+                identity(OpeEstimator::Direct, 100, 103)?,
+                profile(1, 2, 2, 8)?
+            )
+            .map(|_| ()),
+            Err(OpeError::WindowExceedsObservationLimit {
+                window_observations: 4,
+                maximum: 2,
+            })
+        );
+
+        // An ESS gate the window is too short to ever satisfy. The profile
+        // accepts it because its own observation budget is generous; only the
+        // narrower window makes it unreachable.
+        assert_eq!(
+            OpeLedger::try_new(
+                identity(OpeEstimator::Direct, 100, 101)?,
+                profile(4, 8, 2, 16)?
+            )
+            .map(|_| ()),
+            Err(OpeError::MinimumEffectiveSampleSizeExceedsWindow {
+                minimum: 4,
+                window_observations: 2,
+            })
+        );
+
+        // A total-row budget that cannot cover one action per observation, so
+        // the window could not be completed even by minimal decisions.
+        assert_eq!(
+            OpeLedger::try_new(
+                identity(OpeEstimator::Direct, 100, 103)?,
+                profile(1, 4, 2, 2)?
+            )
+            .map(|_| ()),
+            Err(OpeError::TotalActionRowLimitCannotCoverWindow {
+                total: 2,
+                window_observations: 4,
+            })
+        );
+
+        // Per-observation action budget is enforced at record time, since it is
+        // a property of the decision rather than of the window.
+        let mut ledger = OpeLedger::try_new(
+            identity(OpeEstimator::Direct, 100, 103)?,
+            profile(1, 4, 1, 4)?,
+        )?;
+        assert_eq!(
+            ledger.record(binary_decision(
+                100,
+                true,
+                HALF,
+                Probability::one(),
+                Probability::zero(),
+                outcome(OUTCOME_SCALE)?,
+                outcome(0)?,
+            )?),
+            Err(OpeError::TooManyActions {
+                sequence: 100,
+                actual: 2,
+                maximum: 1,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_probability_numerator_above_the_scale_is_not_a_probability() -> TestResult {
+        assert_eq!(
+            Probability::try_from_numerator(PROBABILITY_SCALE).map(Probability::numerator),
+            Ok(PROBABILITY_SCALE)
+        );
+        assert_eq!(
+            Probability::try_from_numerator(PROBABILITY_SCALE + 1),
+            Err(OpeError::ProbabilityAboveOne {
+                numerator: PROBABILITY_SCALE + 1,
+            })
+        );
+        assert_eq!(
+            Probability::try_from_numerator(u64::MAX),
+            Err(OpeError::ProbabilityAboveOne {
+                numerator: u64::MAX,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn identity_binds_regime_and_conservative_failure_behavior() -> TestResult {
         let value = identity(OpeEstimator::DoublyRobust, 1, 1)?;
         assert_eq!(value.regime_epoch(), 9);
@@ -1983,6 +2408,114 @@ mod tests {
             MAX_TOTAL_ACTION_ROWS,
         )?;
         assert_eq!(value.maximum_observations(), MAX_OBSERVATIONS);
+        Ok(())
+    }
+
+    #[test]
+    fn outcome_magnitude_bound_is_inclusive_and_total() -> TestResult {
+        // MAX_ABS_OUTCOME_UNITS is the declared limit the arithmetic envelope
+        // is proved against, so where exactly it falls is load-bearing rather
+        // than decorative: the check is `unsigned_abs() > MAX`, making the
+        // limit itself representable.
+        let maximum = i64::try_from(MAX_ABS_OUTCOME_UNITS)?;
+        assert_eq!(outcome(maximum)?.scaled(), maximum);
+        assert_eq!(outcome(-maximum)?.scaled(), -maximum);
+        assert_eq!(outcome(0)?.scaled(), 0);
+
+        for rejected in [maximum + 1, -maximum - 1, i64::MAX] {
+            assert_eq!(
+                outcome(rejected),
+                Err(OpeError::OutcomeOutOfRange { scaled: rejected }),
+                "outcome {rejected} outside the declared bound must be refused"
+            );
+        }
+
+        // i64::MIN has no positive counterpart, so a plain `abs()` here would
+        // overflow rather than reject. The bound uses `unsigned_abs`, which is
+        // what makes the check total over every i64 instead of panicking on
+        // one input.
+        assert_eq!(
+            outcome(i64::MIN),
+            Err(OpeError::OutcomeOutOfRange { scaled: i64::MIN })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn outcomes_at_the_declared_bound_evaluate_inside_the_arithmetic_envelope() -> TestResult {
+        // The envelope check derives its headroom from MAX_ABS_OUTCOME_UNITS,
+        // but no test drove outcomes that actually sit at that magnitude. An
+        // envelope that admits the profile while the estimator overflows on
+        // conforming inputs would be a proof about the wrong quantity.
+        let maximum = i64::try_from(MAX_ABS_OUTCOME_UNITS)?;
+        let high = outcome(maximum)?;
+        let low = outcome(-maximum)?;
+
+        for estimator in [
+            OpeEstimator::Direct,
+            OpeEstimator::ImportanceWeighted,
+            OpeEstimator::DoublyRobust,
+        ] {
+            let mut ledger =
+                OpeLedger::try_new(identity(estimator, 100, 103)?, profile(2, 4, 2, 8)?)?;
+            for sequence in 100..=103 {
+                ledger.record(binary_decision(
+                    sequence,
+                    sequence % 2 == 0,
+                    HALF,
+                    Probability::one(),
+                    Probability::zero(),
+                    high,
+                    low,
+                )?)?;
+            }
+
+            let evidence = ledger.evidence()?;
+            assert!(evidence.complete());
+            assert_eq!(evidence.selection(), OpeSelection::Candidate);
+            assert_eq!(
+                evidence.selection_reason(),
+                OpeSelectionReason::CandidateEstimatedBetter
+            );
+            assert!(evidence.zero_support_exclusions().is_empty());
+
+            // Exact, not merely ordered. These are ratios of exact fixed-point
+            // integers, so "it did not overflow and it ranked correctly" would
+            // leave the actual arithmetic unproved at the one magnitude the
+            // envelope is declared against. Each of the four observations
+            // contributes PROBABILITY_SCALE * MAX_ABS_OUTCOME_UNITS to the
+            // candidate and its negation to the fallback. All three estimators
+            // agree because the direct model predicts the selected action's
+            // logged outcome exactly, so every importance-weighted residual is
+            // zero and the two estimator families coincide on this fixture.
+            let magnitude = 4 * i128::from(PROBABILITY_SCALE) * i128::from(MAX_ABS_OUTCOME_UNITS);
+            assert_eq!(
+                evidence.candidate_estimate().numerator(),
+                magnitude,
+                "{estimator:?} candidate estimate at the declared outcome bound"
+            );
+            assert_eq!(
+                evidence.fallback_estimate().numerator(),
+                -magnitude,
+                "{estimator:?} fallback estimate at the declared outcome bound"
+            );
+            assert_eq!(
+                evidence.candidate_estimate().denominator(),
+                4 * u128::from(PROBABILITY_SCALE) * u128::try_from(OUTCOME_SCALE)?
+            );
+
+            // The advantage numerator is the widest intermediate the envelope
+            // guards: `validate_arithmetic_envelope` is the only place that
+            // compares a derived quantity against `i128::MAX`, and that
+            // quantity is this one. Driving it at the declared bound is what
+            // makes this a test of the envelope rather than of the estimators.
+            assert_eq!(
+                evidence.advantage_estimate().numerator(),
+                magnitude
+                    .checked_mul(2)
+                    .expect("advantage at the declared bound must stay representable")
+            );
+        }
         Ok(())
     }
 
@@ -2357,6 +2890,36 @@ mod tests {
             })
         ));
         assert_eq!(ledger.evidence()?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn sequence_above_window_is_named_by_ope() -> TestResult {
+        let mut ledger = OpeLedger::try_new(
+            identity(OpeEstimator::ImportanceWeighted, 5, 6)?,
+            profile(1, 2, 2, 4)?,
+        )?;
+        let before = ledger.evidence()?;
+
+        let error = ledger.record(binary_decision(
+            7,
+            true,
+            HALF,
+            HALF,
+            HALF,
+            outcome(OUTCOME_SCALE)?,
+            outcome(0)?,
+        )?);
+        assert!(matches!(
+            error,
+            Err(OpeError::SequenceOutsideWindow {
+                first: 5,
+                last: 6,
+                actual: 7,
+            })
+        ));
+        assert_eq!(ledger.evidence()?, before);
+        assert!(ledger.observations().is_empty());
         Ok(())
     }
 

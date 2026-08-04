@@ -1102,6 +1102,13 @@ impl AnnRecallLedger {
         if self.is_complete() {
             return Err(AnnRecallError::WindowAlreadyComplete);
         }
+        if observation.sequence > self.identity.window.last_sequence {
+            return Err(AnnRecallError::SequenceOutsideWindow {
+                first: self.identity.window.first_sequence,
+                last: self.identity.window.last_sequence,
+                actual: observation.sequence,
+            });
+        }
 
         let accepted = u64::try_from(self.observations.len())
             .map_err(|_| AnnRecallError::ArithmeticOverflow)?;
@@ -1117,14 +1124,6 @@ impl AnnRecallLedger {
                 actual: observation.sequence,
             });
         }
-        if observation.sequence > self.identity.window.last_sequence {
-            return Err(AnnRecallError::SequenceOutsideWindow {
-                first: self.identity.window.first_sequence,
-                last: self.identity.window.last_sequence,
-                actual: observation.sequence,
-            });
-        }
-
         validate_binding(self.identity, observation.binding)?;
 
         if self.sample_members.contains(&observation.sample_member_oid) {
@@ -2164,7 +2163,8 @@ fn sorted_intersection_count(
     Ok(hits)
 }
 
-fn confidence_interval(
+/// Derives the canonical outward-rounded interval used by evidence and log validation.
+pub(crate) fn confidence_interval(
     hits: u64,
     baseline_results: u64,
     queries: u64,
@@ -2364,6 +2364,126 @@ mod tests {
             baseline.iter().copied().map(oid).collect(),
             candidate.iter().copied().map(oid).collect(),
         )
+    }
+
+    #[test]
+    fn every_ann_recall_profile_bound_is_validated_at_construction() -> Result<(), AnnRecallError> {
+        // One perturbation per bound off a known-good baseline. The checks are
+        // ordered, so each input clears every earlier rule and trips only its
+        // own.
+        let build = |top_k, queries, result_ids, exponent, candidate, rebuild| {
+            AnnRecallProfile::try_new(
+                oid(2),
+                top_k,
+                queries,
+                result_ids,
+                exponent,
+                candidate,
+                rebuild,
+                supported_assumptions(),
+            )
+            .map(|_| ())
+        };
+        let half = RECALL_SCALE / 2;
+        let quarter = RECALL_SCALE / 4;
+        assert!(build(4, 8, 64, 1, half, quarter).is_ok());
+
+        assert_eq!(
+            build(0, 8, 64, 1, half, quarter),
+            Err(AnnRecallError::ZeroTopK)
+        );
+        assert_eq!(
+            build(MAX_RECALL_TOP_K + 1, 8, 64, 1, half, quarter),
+            Err(AnnRecallError::TopKTooLarge {
+                actual: MAX_RECALL_TOP_K + 1,
+                maximum: MAX_RECALL_TOP_K,
+            })
+        );
+        assert_eq!(
+            build(4, 0, 64, 1, half, quarter),
+            Err(AnnRecallError::ZeroQueryLimit)
+        );
+        assert_eq!(
+            build(4, MAX_RECALL_QUERIES + 1, 64, 1, half, quarter),
+            Err(AnnRecallError::QueryLimitTooLarge {
+                actual: MAX_RECALL_QUERIES + 1,
+                maximum: MAX_RECALL_QUERIES,
+            })
+        );
+        assert_eq!(
+            build(4, 8, 0, 1, half, quarter),
+            Err(AnnRecallError::ZeroResultIdLimit)
+        );
+        assert_eq!(
+            build(4, 8, MAX_RECALL_RESULT_IDS + 1, 1, half, quarter),
+            Err(AnnRecallError::ResultIdLimitTooLarge {
+                actual: MAX_RECALL_RESULT_IDS + 1,
+                maximum: MAX_RECALL_RESULT_IDS,
+            })
+        );
+
+        // Recall needs the exact baseline and the candidate list for one query,
+        // so a budget below 2*top_k could not measure even a single query.
+        assert_eq!(
+            build(4, 8, 7, 1, half, quarter),
+            Err(AnnRecallError::ResultIdLimitCannotCoverOneQuery {
+                required: 8,
+                maximum: 7,
+            })
+        );
+
+        for exponent in [0, MAX_CONFIDENCE_EXPONENT + 1] {
+            assert_eq!(
+                build(4, 8, 64, exponent, half, quarter),
+                Err(AnnRecallError::InvalidConfidenceExponent {
+                    actual: exponent,
+                    minimum: 1,
+                    maximum: MAX_CONFIDENCE_EXPONENT,
+                })
+            );
+        }
+
+        // Both thresholds are fixed-point fractions, so neither may exceed one.
+        // The two arms are distinguished by field, which is what stops a
+        // decoder from reading one bound in place of the other.
+        assert_eq!(
+            build(4, 8, 64, 1, RECALL_SCALE + 1, quarter),
+            Err(AnnRecallError::RecallThresholdAboveOne {
+                field: RecallThresholdKind::Candidate,
+                actual: RECALL_SCALE + 1,
+            })
+        );
+        assert_eq!(
+            build(4, 8, 64, 1, RECALL_SCALE, RECALL_SCALE + 1),
+            Err(AnnRecallError::RecallThresholdAboveOne {
+                field: RecallThresholdKind::Rebuild,
+                actual: RECALL_SCALE + 1,
+            })
+        );
+
+        // Rebuilding at a recall the candidate gate would already have accepted
+        // is incoherent: the ordering between the two gates is the policy.
+        assert_eq!(
+            build(4, 8, 64, 1, quarter, half),
+            Err(AnnRecallError::RebuildThresholdAboveCandidate {
+                rebuild: half,
+                candidate: quarter,
+            })
+        );
+
+        // Each declared maximum is itself admissible.
+        assert!(
+            build(
+                4,
+                8,
+                64,
+                MAX_CONFIDENCE_EXPONENT,
+                RECALL_SCALE,
+                RECALL_SCALE
+            )
+            .is_ok()
+        );
+        Ok(())
     }
 
     #[test]
@@ -2800,16 +2920,16 @@ mod tests {
     #[test]
     fn identity_and_sequence_failures_are_atomic() -> Result<(), AnnRecallError> {
         let mut ledger =
-            AnnRecallLedger::try_new(identity(2)?, profile(2, 2, 0, 0, supported_assumptions())?)?;
+            AnnRecallLedger::try_new(identity(3)?, profile(3, 2, 0, 0, supported_assumptions())?)?;
         ledger.record(observation(100, 20, &[1, 2], &[1, 2])?)?;
         let before = ledger.evidence()?;
 
-        let bad_sequence = observation(103, 21, &[3, 4], &[3, 4])?;
+        let bad_sequence = observation(102, 21, &[3, 4], &[3, 4])?;
         assert!(matches!(
             ledger.record(bad_sequence),
             Err(AnnRecallError::UnexpectedSequence {
                 expected: 101,
-                actual: 103
+                actual: 102
             })
         ));
         assert_eq!(ledger.evidence()?, before);
@@ -2844,6 +2964,25 @@ mod tests {
         ));
         assert_eq!(ledger.evidence()?, before);
         assert_eq!(ledger.observations().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn sequence_above_window_is_named_by_ann_recall() -> Result<(), AnnRecallError> {
+        let mut ledger =
+            AnnRecallLedger::try_new(identity(2)?, profile(2, 2, 0, 0, supported_assumptions())?)?;
+        let before = ledger.evidence()?;
+
+        assert_eq!(
+            ledger.record(observation(102, 20, &[1, 2], &[1, 2])?),
+            Err(AnnRecallError::SequenceOutsideWindow {
+                first: 100,
+                last: 101,
+                actual: 102,
+            })
+        );
+        assert_eq!(ledger.evidence()?, before);
+        assert!(ledger.observations().is_empty());
         Ok(())
     }
 

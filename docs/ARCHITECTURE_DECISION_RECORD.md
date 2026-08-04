@@ -1,17 +1,80 @@
+<!-- GENERATED FILE — DO NOT EDIT BY HAND.
+     Source: registries/architecture_decisions.toml
+     Regenerate: cargo run -p registry-check --bin architecture-check -- --root . --write
+     Verify:     cargo run -p registry-check --bin architecture-check -- --root .
+-->
+
 # FrankenGraphDB Architectural Decision Record
 
-This record freezes the reasoning that governs FrankenGraphDB's architecture. The exact audited source corpus is preserved below, while the normative, machine-readable decision and provenance matrix lives in [`registries/architecture_decisions.toml`](../registries/architecture_decisions.toml). Together they bind every thesis bet, constitutional constraint, foundation capability or gap, state-of-the-art lesson, rejection or deferral, calibration principle, and distinct bibliography anchor to a stable `FG-ADR-*` identity, an implementation owner, a verification route, and an explicit no-claim boundary.
+This record freezes the reasoning that governs FrankenGraphDB's architecture. The exact audited source corpus is preserved below, while the normative, machine-readable decision and provenance matrix lives in [`registries/architecture_decisions.toml`](../registries/architecture_decisions.toml). The registry is the master and this document is its rendering: every count, vocabulary row, and table cell below is derived from the registry at render time, and the checker fails if the committed bytes differ from the regenerated ones. Together they bind every decision category listed below to a stable `FG-ADR-*` identity, an implementation owner, a verification route, and an explicit no-claim boundary.
 
-The source excerpts are historical evidence, not proof that an implementation or gate is complete. Time-sensitive market, foundation, and research statements retain their original review date; changing one requires a fresh external-source review rather than silently rewriting the frozen rationale. `architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON.
+The source excerpts are historical evidence, not proof that an implementation or gate is complete. Time-sensitive market, foundation, and research statements retain their original review date; changing one requires a fresh external-source review rather than silently rewriting the frozen rationale. Neither of those two sentences is mechanically checked, and neither is written as if it were: no artifact can contradict a claim about what is *not* proven, and a checker can observe that an `[[external_review]]` row was added but never that a review happened.
 
-The provenance closure covers all 294 Beads records, including closed historical work. Each issue resolves through exactly one precedence tier: a direct decision owner edge; its closed `b1`–`b6` label set; a named exact override; or one disjoint family/workstream rule. The binding table and class counts are pinned. An unknown bet label, shadowed override, ambiguous rule, missing decision/profile/rationale, or future orphan Bead fails the architecture gate.
+`architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, regenerates this document, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON. The exact fail-closed codes behind those enforcement claims are `source_bytes_mismatch`, `id_table_hash_mismatch`, `semantic_contract_hash_mismatch`, `owner_bead_unresolved`, `live_verification_checker_missing`, `research_dependency_promotion`, `document_drift`. Every cited code has a paired control-and-mutation witness. Run it from the repository root with `cargo run -p registry-check --bin architecture-check -- --root .`.
 
-Run the record check from the repository root with `cargo run -p registry-check --bin architecture-check -- --root .`. Its dependency-universe relationships are closed: `consume_as_is` means an audited foundation capability is linked directly; `design_donor` means a design is re-instantiated and re-proved locally; `upstream_prerequisite` keeps a feature absent until a named upstream capability exists; `build_in_house` assigns graph-specific implementation to the §18 crate universe; `test_only_oracle` permits a dependency only in verification; and `research_only_citation` records provenance without authorizing any dependency.
+## Decision categories
+
+The closed category vocabulary — 12 rows, exactly as `registry.allowed_categories` declares it. A category with no row here fails the gate rather than quietly leaving the document.
+
+| Category | What a row of it binds |
+| --- | --- |
+| `thesis_bet` | one of the six leapfrog bets of §0 |
+| `constraint` | a constitutional non-negotiable of §1 |
+| `foundation_asupersync` | an audited asupersync capability, consumed as-is |
+| `foundation_fnx` | an audited franken_networkx capability, consumed as-is |
+| `foundation_frankensqlite` | a frankensqlite design, re-instantiated and re-proved locally |
+| `foundation_gap` | a capability the foundations do not provide, so §18 builds it |
+| `sota_storage` | a dynamic-graph-storage lesson from §3.1 |
+| `sota_query` | a query-processing lesson from §3.2 |
+| `sota_incremental` | an incremental, temporal, or vector lesson from §3.3 |
+| `rejection` | an alternative evaluated and rejected or deferred, with its recorded reason |
+| `calibration` | a calibration, control, or verifiability principle from §3.5 |
+| `bibliography` | a distinct reviewed anchor from Appendix E |
+
+## Dependency-universe relationships
+
+The 6 relationship kinds are closed: they are the complete set of ways a decision may relate this codebase to something outside it.
+
+| Relationship | Meaning |
+| --- | --- |
+| `consume_as_is` | an audited foundation capability is linked directly |
+| `design_donor` | a design is re-instantiated and re-proved locally |
+| `upstream_prerequisite` | a feature stays absent until a named upstream capability exists |
+| `build_in_house` | graph-specific implementation is assigned to the §18 crate universe |
+| `test_only_oracle` | a dependency is permitted only in verification |
+| `research_only_citation` | provenance is recorded without authorizing any dependency |
+
+## Bead-provenance closure
+
+The provenance closure is **total**: every record in [`.beads/issues.jsonl`](../.beads/issues.jsonl) resolves to a rationale, including closed historical work, and a record that does not resolve fails the architecture gate. Totality is the property the gate enforces — not a cardinality. The corpus is shared and multi-writer, so the declared counts below are monotone **floors**, never equalities: a `br create` in any pane can only raise the observed counts, so it never invalidates a floor, while a record disappearing still trips one. Raising a floor is a deliberate ratchet, and is never required to make the tree green.
+
+| Resolution floor | Declared minimum |
+| --- | --- |
+| records | ≥ 401 |
+| `direct_owner` | ≥ 98 |
+| `bet_label` | ≥ 245 |
+| `exact_override` | ≥ 19 |
+| `family_rule` | ≥ 39 |
+
+Each issue resolves through exactly one precedence tier, tried in this order. Two tiers matching the same Bead is a shadowed override or an ambiguous rule, and both fail the gate.
+
+| Tier | Resolves when |
+| --- | --- |
+| `direct_owner` | a decision names the Bead in its `owner_beads` |
+| `bet_label` | the Bead's own closed `b1`–`b6` label set |
+| `exact_override` | a named `[[bead_override]]` row for that exact Bead |
+| `family_rule` | exactly one disjoint `[[bead_family]]` prefix or Appendix-A rule |
+
+The bet-label vocabulary is closed to `b1`, `b2`, `b3`, `b4`, `b5`, `b6`. The rule-binding table is pinned by exact equality at `fnv1a64:66a303ca1f79e606` — keyed by rule rather than by Bead, so no Bead can move it and a rule edit must. An unknown bet label, a shadowed override, an ambiguous rule, a missing decision, profile, or rationale, or an unresolved Bead fails the architecture gate. The exact codes behind those failure claims are `bead_bet_label_set`, `bead_bet_label_unknown`, `bead_override_shadowed`, `bead_family_ambiguous`, `provenance_rationale_missing`, `bead_provenance_not_total`.
+
+## Frozen source blocks
+
+Each block below is embedded verbatim from the master plan under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the frozen rationale.
 
 | Block ID | Repository-relative source | Inclusive lines | Lines | Bytes | FNV-1a-64 |
-|---|---|---:|---:|---:|---|
+| --- | --- | --- | --- | --- | --- |
 | `plan-thesis-foundations-sota-v1` | `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md` | 1–184 | 184 | 46,176 | `0xb09e44e4eec5c18a` |
-| `plan-reviewed-bibliography-v1` | `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md` | 3120–3123 | 4 | 4,741 | `0xba0fcc184882baec` |
+| `plan-reviewed-bibliography-v1` | `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md` | 3196–3199 | 4 | 4,741 | `0xba0fcc184882baec` |
 
 <!-- CHECKED-SOURCE-BEGIN id="plan-thesis-foundations-sota-v1" -->
 # COMPREHENSIVE PLAN FOR THE DESIGN OF FRANKENGRAPHDB

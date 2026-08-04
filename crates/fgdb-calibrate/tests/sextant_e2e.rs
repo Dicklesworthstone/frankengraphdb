@@ -62,9 +62,15 @@ use fgdb_calibrate::{
     },
 };
 use fgdb_claim::{EvidenceClaim, StatisticalErrorControl};
-use fgdb_evidence::{CalibrationWindow, EvidenceEnvelope, FallbackBehavior};
+use fgdb_evidence::{
+    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity,
+    StrataIdentity,
+};
 use fgdb_sketch::{
     count_min::{CountMinDecodeLimits, CountMinError, CountMinProfile, CountMinSketch},
+    label_counts::{
+        LabelCounts, LabelCountsDecodeLimits, LabelCountsDomain, LabelCountsKey, LabelCountsProfile,
+    },
     maintenance_log::{
         SketchFamily, SketchMaintenanceLog, SketchMaintenanceLogDecodeLimits,
         SketchMaintenanceOutcome, SketchMaintenanceRecord, SketchStateDigest,
@@ -78,7 +84,7 @@ type PromotionResult = (Vec<u8>, Vec<EvidenceEnvelope>, DecisionPolicyEpoch, Vec
 const REGIME_EPOCH: u64 = 7;
 const FIXTURE_LOG_DECODE_LIMITS: StatisticalLogDecodeLimits =
     StatisticalLogDecodeLimits::new(16, 1 << 20);
-const SKETCH_MAINTENANCE_MAX_RECORDS: usize = 2;
+const SKETCH_MAINTENANCE_MAX_RECORDS: usize = 3;
 const SKETCH_MAINTENANCE_DECODE_LIMITS: SketchMaintenanceLogDecodeLimits =
     SketchMaintenanceLogDecodeLimits::new(SKETCH_MAINTENANCE_MAX_RECORDS, 1 << 10);
 const ANN_RECALL_QUERY_COUNT: usize = 4;
@@ -97,6 +103,7 @@ const NO_REGRET_REPLAY_SEED: u64 = 0xa11c_e5e5_7a17;
 #[derive(Debug, PartialEq)]
 struct SketchFixture {
     final_state_bytes: Vec<u8>,
+    label_counts_final_state_bytes: Vec<u8>,
     maintenance_log: SketchMaintenanceLog,
     maintenance_log_bytes: Vec<u8>,
 }
@@ -314,6 +321,97 @@ fn canonical_count_min_delete(key: &[u8], weight: u64) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Maintains the one sketch family whose deletions apply exactly.
+///
+/// This is the deliberate counterpart to the count-min phase below: there, a
+/// deletion is refused with a typed rebuild requirement and the state must not
+/// move; here the same workload applies exactly and the state must move. A
+/// StatsSegment carries both kinds, so the E2E has to exercise both.
+///
+/// The deletion is applied *before* the merge on purpose. The maintenance log's
+/// vocabulary is `Merged | RebuildRequired`, so an applied deletion has no
+/// record of its own; ordering the merge last keeps the family's final logged
+/// `after_digest` an accurate description of the final canonical state rather
+/// than a stale one. Records carry no digest chaining, so this is an ordering
+/// choice for honest evidence, not a codec requirement.
+fn run_label_counts_maintenance(
+    maintenance_log: &mut SketchMaintenanceLog,
+    sequence: u64,
+) -> TestResult<Vec<u8>> {
+    const PERSON: &[u8] = b"Person";
+    const CITY: &[u8] = b"City";
+    const FOLLOWS: &[u8] = b"FOLLOWS";
+    const VISITED: &[u8] = b"VISITED";
+
+    let vertex = |name: &'static [u8]| LabelCountsKey::new(LabelCountsDomain::VertexLabel, name);
+    let edge = |name: &'static [u8]| LabelCountsKey::new(LabelCountsDomain::EdgeType, name);
+
+    let profile = LabelCountsProfile::new(16, 32, 1_000);
+    let profile_state_bytes = LabelCounts::try_new(profile)?.try_to_canonical_bytes()?;
+    let sketch_profile_oid = FixtureOnlyIdentityAuthority::issue_for_domain(
+        b"fgdb:fixture-only:label-counts-profile-oid:v1",
+        &profile_state_bytes,
+    );
+
+    let mut maintained = LabelCounts::try_new(profile)?;
+    maintained.try_observe(vertex(PERSON), 5)?;
+    maintained.try_observe(vertex(CITY), 2)?;
+    maintained.try_observe(edge(FOLLOWS), 4)?;
+    assert_eq!(maintained.total_count(), 11);
+    assert_eq!(maintained.distinct_keys(), 3);
+    let before_delete = maintained.try_to_canonical_bytes()?;
+
+    // Exact deletion: it applies, and the state moves. Removing a key's last
+    // observation drops the key rather than retaining a zero, which is what
+    // keeps canonical bytes a function of logical state alone.
+    maintained.try_remove(vertex(PERSON), 2)?;
+    maintained.try_remove(vertex(CITY), 2)?;
+    assert_eq!(maintained.count(vertex(PERSON)), 3);
+    assert_eq!(maintained.count(vertex(CITY)), 0);
+    assert_eq!(maintained.total_count(), 7);
+    assert_eq!(maintained.distinct_keys(), 2);
+    let after_delete = maintained.try_to_canonical_bytes()?;
+    assert_ne!(after_delete, before_delete);
+
+    let mut operand = LabelCounts::try_new(profile)?;
+    operand.try_observe(vertex(PERSON), 1)?;
+    operand.try_observe(edge(VISITED), 6)?;
+    let operand_bytes = operand.try_to_canonical_bytes()?;
+    let merge_operation_oid = FixtureOnlyIdentityAuthority::issue_for_domain(
+        b"fgdb:fixture-only:label-counts-merge-oid:v1",
+        &operand_bytes,
+    );
+
+    maintained.try_merge(&operand)?;
+    assert_eq!(maintained.count(vertex(PERSON)), 4);
+    assert_eq!(maintained.count(edge(FOLLOWS)), 4);
+    assert_eq!(maintained.count(edge(VISITED)), 6);
+    assert_eq!(maintained.total_count(), 14);
+    assert_eq!(maintained.distinct_keys(), 3);
+    let after_merge = maintained.try_to_canonical_bytes()?;
+    assert_ne!(after_merge, after_delete);
+
+    let decoded_state = LabelCounts::try_from_canonical_bytes(
+        &after_merge,
+        profile,
+        LabelCountsDecodeLimits::conservative(),
+    )?;
+    assert_eq!(decoded_state, maintained);
+    assert_eq!(decoded_state.try_to_canonical_bytes()?, after_merge);
+
+    maintenance_log.append(SketchMaintenanceRecord::merged(
+        sequence,
+        SketchFamily::LabelCounts,
+        sketch_profile_oid,
+        merge_operation_oid,
+        &after_delete,
+        &operand_bytes,
+        &after_merge,
+    ))?;
+
+    Ok(after_merge)
+}
+
 fn run_sketch_maintenance() -> TestResult<SketchFixture> {
     const PRIMARY_KEY: &[u8] = b"vertex-label:person";
     const SECONDARY_KEY: &[u8] = b"edge-type:follows";
@@ -393,6 +491,8 @@ fn run_sketch_maintenance() -> TestResult<SketchFixture> {
         &canonical_deletion,
     ))?;
 
+    let label_counts_final_state_bytes = run_label_counts_maintenance(&mut maintenance_log, 2)?;
+
     let maintenance_log_bytes = maintenance_log.to_canonical_bytes()?;
     let decoded_log = SketchMaintenanceLog::from_canonical_bytes(
         &maintenance_log_bytes,
@@ -404,6 +504,7 @@ fn run_sketch_maintenance() -> TestResult<SketchFixture> {
 
     Ok(SketchFixture {
         final_state_bytes: after_delete,
+        label_counts_final_state_bytes,
         maintenance_log,
         maintenance_log_bytes,
     })
@@ -588,7 +689,7 @@ fn no_regret_numeric_fingerprint() -> NoRegretNumericFingerprint {
         ),
         fixture_identity(
             b"fgdb:fixture-only:asupersync-revision-oid:v1",
-            b"e464a484cb65c1a55be0d9c925e6e9c20318edcb",
+            b"8ccae2fa8d15d780a9ab774aaf255a4ec7731a71",
         ),
         fixture_identity(
             b"fgdb:fixture-only:math-abi-oid:v1",
@@ -1014,8 +1115,20 @@ fn calibration_window(record: StatisticalLogRecord) -> TestResult<CalibrationWin
 }
 
 fn evidence_envelope(record: StatisticalLogRecord) -> TestResult<EvidenceEnvelope> {
+    let evidence_oid = record.evidence_oid();
+    let statistic = record.statistic();
+    let (strata_identity, propensity_support_identity) = match statistic {
+        StatisticalStatistic::OffPolicyEvaluation { strata_oid, .. } => (
+            StrataIdentity::Bound(strata_oid),
+            PropensitySupportIdentity::Bound(evidence_oid),
+        ),
+        _ => (
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
+        ),
+    };
     let (error_control, population, sampling_rule, power_or_effective_sample_size, assumptions) =
-        match record.statistic() {
+        match statistic {
             StatisticalStatistic::ExplorationBudget {
                 alpha_bits,
                 residual_rate_bits,
@@ -1160,8 +1273,10 @@ fn evidence_envelope(record: StatisticalLogRecord) -> TestResult<EvidenceEnvelop
             power_or_effective_sample_size,
             assumptions,
         },
-        record.evidence_oid(),
+        evidence_oid,
         record.selected_policy_oid(),
+        strata_identity,
+        propensity_support_identity,
         Some(calibration_window(record)?),
         record.regime_epoch(),
         FallbackBehavior::DeterministicPolicy {
@@ -1601,6 +1716,25 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
             .find(|envelope| envelope.evidence_oid() == record.evidence_oid())
             .ok_or_else(|| io::Error::other("promotion envelope omitted a log record"))?;
         assert_eq!(envelope.selection_policy_oid(), oid(40));
+        match record.statistic() {
+            StatisticalStatistic::OffPolicyEvaluation { strata_oid, .. } => {
+                assert_eq!(
+                    envelope.strata_identity(),
+                    StrataIdentity::Bound(strata_oid)
+                );
+                assert_eq!(
+                    envelope.propensity_support_identity(),
+                    PropensitySupportIdentity::Bound(record.evidence_oid())
+                );
+            }
+            _ => {
+                assert_eq!(envelope.strata_identity(), StrataIdentity::NotApplicable);
+                assert_eq!(
+                    envelope.propensity_support_identity(),
+                    PropensitySupportIdentity::NotApplicable
+                );
+            }
+        }
         assert_eq!(
             envelope.fallback(),
             FallbackBehavior::DeterministicPolicy {
@@ -1798,6 +1932,19 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
     assert_eq!(
         sketch_records[1].after_digest,
         SketchStateDigest::from_canonical_state(&first.sketch.final_state_bytes)
+    );
+    // The exact-deletion family: its merge moved the state, and because the
+    // merge is ordered last its logged after-digest still names the family's
+    // final canonical state.
+    assert_eq!(sketch_records[2].family, SketchFamily::LabelCounts);
+    assert_eq!(sketch_records[2].outcome, SketchMaintenanceOutcome::Merged);
+    assert_ne!(
+        sketch_records[2].before_digest,
+        sketch_records[2].after_digest
+    );
+    assert_eq!(
+        sketch_records[2].after_digest,
+        SketchStateDigest::from_canonical_state(&first.sketch.label_counts_final_state_bytes)
     );
     let replayed_sketch_log = SketchMaintenanceLog::from_canonical_bytes(
         &first.sketch.maintenance_log_bytes,

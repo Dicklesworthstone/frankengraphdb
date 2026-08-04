@@ -5,5 +5,12 @@ edition = "2024"
 description = "Deterministic in-memory collection kernels for FrankenGraphDB."
 publish = false
 
+[dependencies]
+fgdb-types = { path = "../fgdb-types" }
+fgdb-unsafe-arena = { path = "../fgdb-unsafe-arena" }
+
+[dev-dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "8ccae2fa8d15d780a9ab774aaf255a4ec7731a71", default-features = false, features = ["test-internals"] }
+
 [lints]
 workspace = true

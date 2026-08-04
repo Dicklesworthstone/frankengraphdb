@@ -956,6 +956,7 @@ impl PathCorrelationSketch {
     }
 
     /// Encodes the complete profile and canonical retained state.
+    /// Fixed-width integers use the workspace's little-endian durable law.
     pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, PathCorrelationCodecError> {
         let layout = validate_canonical_state(self.profile, self.sample_bytes, &self.samples)?;
         let mut bytes = Vec::new();
@@ -1483,11 +1484,11 @@ fn decode_hash_algorithm(
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 struct PathCorrelationDecoder<'bytes> {
@@ -1530,11 +1531,11 @@ impl<'bytes> PathCorrelationDecoder<'bytes> {
     }
 
     fn read_u16(&mut self) -> Result<u16, PathCorrelationCodecError> {
-        Ok(u16::from_be_bytes(self.read_array::<2>()?))
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     fn read_u64(&mut self) -> Result<u64, PathCorrelationCodecError> {
-        Ok(u64::from_be_bytes(self.read_array::<8>()?))
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 
     fn finish(self) -> Result<(), PathCorrelationCodecError> {
@@ -1605,6 +1606,7 @@ mod tests {
     }
 
     fn path_key(index: u64) -> [u8; 8] {
+        // Test-only opaque key identity, not a durable fixed-integer field.
         index.to_be_bytes()
     }
 
@@ -1909,7 +1911,7 @@ mod tests {
         assert_eq!(&forward_bytes[..8], b"FGDBPCR1");
         assert_eq!(
             &forward_bytes[VERSION_OFFSET..HASH_ALGORITHM_OFFSET],
-            &1_u16.to_be_bytes()
+            &1_u16.to_le_bytes()
         );
         assert_eq!(
             forward_bytes[HASH_ALGORITHM_OFFSET],
@@ -2027,7 +2029,7 @@ mod tests {
         ));
 
         let mut wrong_version = encoded.clone();
-        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_be_bytes());
+        wrong_version[VERSION_OFFSET..HASH_ALGORITHM_OFFSET].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(
             PathCorrelationSketch::try_from_canonical_bytes(
                 &wrong_version,
@@ -2076,7 +2078,7 @@ mod tests {
 
         let mut huge_count = encoded.clone();
         huge_count[SAMPLE_COUNT_OFFSET..SAMPLE_COUNT_OFFSET + 8]
-            .copy_from_slice(&u64::MAX.to_be_bytes());
+            .copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(matches!(
             PathCorrelationSketch::try_from_canonical_bytes(
                 &huge_count,
@@ -2092,7 +2094,7 @@ mod tests {
 
         let mut excessive_payload = encoded.clone();
         excessive_payload[SAMPLE_BYTES_OFFSET..SAMPLE_BYTES_OFFSET + 8]
-            .copy_from_slice(&(expected_profile.max_sample_bytes as u64 + 1).to_be_bytes());
+            .copy_from_slice(&(expected_profile.max_sample_bytes as u64 + 1).to_le_bytes());
         assert_eq!(
             PathCorrelationSketch::try_from_canonical_bytes(
                 &excessive_payload,
@@ -2108,7 +2110,7 @@ mod tests {
 
         let mut excessive_path_key = encoded.clone();
         excessive_path_key[CANONICAL_HEADER_BYTES + 8..CANONICAL_HEADER_BYTES + 16]
-            .copy_from_slice(&(expected_profile.max_path_key_bytes as u64 + 1).to_be_bytes());
+            .copy_from_slice(&(expected_profile.max_path_key_bytes as u64 + 1).to_le_bytes());
         assert_eq!(
             PathCorrelationSketch::try_from_canonical_bytes(
                 &excessive_path_key,
@@ -2140,9 +2142,10 @@ mod tests {
         assert_eq!(rank, 0x545e_3020_a1d4_66d5);
         assert_eq!(
             to_hex(&bytes),
-            "4647444250435231000101000000000000000100000000000000070000000000000001\
-             0000000000000001000000000000000300000000000000030000000000000001\
-             545e3020a1d466d5000000000000000100000000000000010000000000000001706162"
+            "4647444250435231010001010000000000000007000000000000000100000000\
+             0000000100000000000000030000000000000003000000000000000100000000\
+             000000d566d4a120305e54010000000000000001000000000000000100000000\
+             000000706162"
         );
     }
 
@@ -2169,6 +2172,8 @@ mod tests {
                         if start == end {
                             continue;
                         }
+                        // Test-only opaque path identity, not a durable scalar
+                        // encoding.
                         let mut key = [0_u8; 24];
                         key[..8].copy_from_slice(&start.to_be_bytes());
                         key[8..16].copy_from_slice(&(middle as u64).to_be_bytes());

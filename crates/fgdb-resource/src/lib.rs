@@ -219,6 +219,34 @@ impl ResourceCeiling {
 /// only through [`ResourceCeiling::admit`]. Downstream permit machinery
 /// takes `Admitted`, not raw vectors, so "forgot to check the budget" is
 /// unrepresentable.
+///
+/// Direct construction from an unchecked vector is rejected outside this
+/// crate:
+///
+/// ```compile_fail,E0451
+/// use fgdb_resource::{Admitted, ResourceVector};
+///
+/// let _unchecked = Admitted {
+///     vector: ResourceVector::ZERO,
+/// };
+/// ```
+///
+/// The checked admission path is the legal constructor:
+///
+/// ```
+/// use fgdb_resource::{ResourceCeiling, ResourceVector};
+///
+/// let requested = ResourceVector {
+///     memory_bytes: 64,
+///     ..ResourceVector::ZERO
+/// };
+/// let ceiling = ResourceCeiling::new(ResourceVector {
+///     memory_bytes: 128,
+///     ..ResourceVector::ZERO
+/// });
+/// let admitted = ceiling.admit(requested).unwrap();
+/// assert_eq!(*admitted.vector(), requested);
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Admitted {
     vector: ResourceVector,

@@ -19,15 +19,162 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${G0_E2E_WORKDIR:-$(mktemp -d)}"
-TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-BIN="$TARGET_DIR/debug/registry-check"
-PASS=0
-FAIL=0
+
+# Read one scalar from the catalog's [target_manifest] block. Block-scoped so a
+# same-named key in another table -- e.g. the reservation partition's own
+# target_count -- can never be picked up by accident.
+catalog_manifest_value() {
+  awk -v key="$1" '
+    /^\[target_manifest\]/ { inblock = 1; next }
+    /^\[/ { inblock = 0 }
+    inblock && $1 == key { gsub(/"/, "", $3); print $3; found = 1; exit }
+    END {
+      if (!found) {
+        print "target_manifest key " key " not found in the catalog" > "/dev/stderr"
+        exit 42
+      }
+    }
+  ' "$ROOT/registries/appendix_a_catalog.toml"
+}
+
+# Recount one closure-census number straight from the catalog rows.
+#
+# WHY A SECOND READER RATHER THAN A NUMBER TYPED HERE. Every count this returns
+# is the size of a catalog that grows on nearly every Appendix A commit, so a
+# number typed here is stale by construction and the gate then measures how
+# recently somebody swept it rather than anything about the tree. MEASURED
+# 2026-07-26: e7b6f09 (a20, fgdb-5cgb) flipped three a20 restore certificates
+# reserved->existing and moved the reservation split 431/382 -> 434/379, and
+# this script went red on a clean tree for every pane from that commit until
+# fgdb-su5y; the three symbol/candidate counts survived that but were staled two
+# hours later by ac572bc, which re-attributed four heading-led bodies.
+#
+# WHY THE READER AND NOT THE COMPILED PIN. The reservation partition is also
+# pinned in tools/registry-check/src/appendix_a.rs, and restating that pin here
+# looks like the stronger move. It is not: MEASURED 2026-07-26, mutating
+# EXPECTED_EXISTING_TYPE_RESERVATION_COUNT 434 -> 433 with the rows untouched
+# reds phase 0 ("canonical Appendix A validation failed") on the checker's own
+# catalog_reservation_epoch_drift, before any assertion in this file runs. A
+# shell-side pin-versus-rows comparison can therefore only ever pass, and an
+# assertion that cannot fire is not a gate. What this file can still catch is
+# the emitter disagreeing with the rows it claims to be counting -- so the
+# expectation is derived by a reader that is structurally independent of the
+# checker's TOML parser (line-oriented block counting here, a full parse there)
+# and compared against the emitted event.
+catalog_closure_census() {
+  awk -v key="$1" '
+    /^\[\[reservation\]\]/               { blk = "res"; next }
+    /^\[\[source_symbol_disposition\]\]/ { blk = "ssd"; ssd++; slice = ""; next }
+    /^\[\[top_level_candidate\]\]/       { blk = "tlc"; tlc++; next }
+    /^\[\[/                              { blk = "other"; next }
+    blk == "res" && $1 == "disposition" { gsub(/"/, "", $3); res[$3]++ }
+    blk == "ssd" && $1 == "slice_id"    { gsub(/"/, "", $3); slice = $3 }
+    blk == "ssd" && $1 == "disposition" { gsub(/"/, "", $3); ssd_disposition[$3]++ }
+    blk == "ssd" && $1 == "source_locations" {
+      entries = $0
+      sub(/^[^=]*=[[:space:]]*\[/, "", entries)
+      sub(/\].*$/, "", entries)
+      gsub(/[[:space:]]/, "", entries)
+      if (entries != "" && slice != "g0") {
+        pairs += split(entries, parts, /","/)
+      }
+    }
+    END {
+      value["reservations"]                = res["existing"] + res["reserved"] + 0
+      value["existing_reservations"]       = res["existing"] + 0
+      value["reserved_reservations"]       = res["reserved"] + 0
+      value["source_dispositions"]         = ssd + 0
+      value["top_level_candidates"]        = tlc + 0
+      value["reference_only_symbols"]      = ssd_disposition["reference-only"] + 0
+      value["appendix_structural_symbols"] = \
+        ssd_disposition["appendix-structural-definition"] + 0
+      value["source_location_pairs"]       = pairs + 0
+      if (!(key in value)) {
+        print "closure census key " key " is not one this reader derives" > "/dev/stderr"
+        exit 44
+      }
+      # A reader that matched nothing would hand its caller an empty expectation,
+      # and an empty expectation is a substring of every observed value -- the
+      # assertion would pass without ever comparing anything. Refuse to answer
+      # instead: the tables below are non-empty in every tree that has a catalog.
+      if (ssd == 0 || tlc == 0 || value["reservations"] == 0) {
+        print "closure census reader parsed no catalog rows" > "/dev/stderr"
+        exit 45
+      }
+      print value[key]
+    }
+  ' "$ROOT/registries/appendix_a_catalog.toml"
+}
+# The Appendix support fixtures below use hard links on purpose: their manifest
+# proves that no negative fixture wrote through a shared input. A global TMPDIR
+# can legitimately live on another filesystem (for example /dev/shm during
+# root-disk pressure), where `cp -l` must fail with EXDEV. Give this one gate a
+# specific override so the runner can keep its hard-link evidence on ROOT's
+# filesystem without forcing every other gate's temporary data there.
+WORK="${G0_IDENTITY_E2E_WORKDIR:-${G0_E2E_WORKDIR:-$(mktemp -d)}}"
+BIN="$WORK/bin/registry-check"
+WORK_REAPER_LOCK_FD=""
+WORK_REAPER_PARENT_LOCK_FD=""
+WORK_REAPABLE_FINALIZED=0
+
+# The shared verdict contract (fgdb-udco). Before it, this gate said
+# "[g0-identity-e2e] FAIL: ..." — the token was right but the prefix pushed it
+# off column 0, so `grep '^FAIL'` returned 0 on a red run. ok()/die() now
+# delegate; the counters live in the library so there is one place they can
+# drift from.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
 
 log() { printf '[g0-identity-e2e] %s\n' "$*"; }
-ok()  { PASS=$((PASS + 1)); log "PASS: $*"; }
-die() { FAIL=$((FAIL + 1)); log "FAIL: $*"; exit 1; }
+ok()  { gate_pass "$*"; }
+# An ASSERTION failure is recorded and the run continues; it does not end the
+# run. This matches g0_claims_e2e.sh:26 and g0_spine_e2e.sh:49, which have
+# always been written this way -- this file was the one outlier, and its die()
+# carried `exit 1` from e8ca589 onward.
+#
+# WHAT THE OUTLIER COST, MEASURED 2026-07-26 on a clean tree: one stale census
+# constant at the phase-0 closure gate ended the run at assertion 8, so 91 of
+# the file's 99 assertions never executed, AND `exit 1` inside die() jumps past
+# the verdict at the bottom, so the run printed no tally at all. A reader saw
+# seven PASS lines and one FAIL line, with nothing anywhere in the output
+# saying that 91 checks had been skipped. Every pane that hit it concluded
+# "one problem"; the gate could not tell them whether it was one or ninety-two.
+#
+# A STRUCTURAL failure still ends the run immediately and deliberately, with
+# `exit 2` (the subject failed to build, or the artifact is not this tree's).
+# Those invalidate every assertion after them, so continuing would manufacture
+# failures rather than report them.
+die() { gate_fail "$*"; }
+
+# Fail-slow becomes fail-never if the run dies before the verdict prints. Under
+# `set -e` any unguarded command can do that -- a derivation helper refusing to
+# answer, a missing evidence file -- and the tally at the bottom is then never
+# reached. This trap makes the count unconditional, and says plainly that the
+# rest did not run rather than letting a truncated log read like a whole one.
+VERDICT_REACHED=0
+# Finalize the producer-owned lifecycle record exactly once. The function is
+# defined before private_subject.sh is sourced because gate_init needs the hook
+# now; it resolves reapable_dir_stamp only when the EXIT trap eventually runs.
+finalize_reapable_workdir() {
+  [ "$WORK_REAPABLE_FINALIZED" -eq 0 ] || return 0
+  declare -F reapable_dir_stamp >/dev/null || return 1
+  reapable_dir_stamp "$WORK" g0-identity-work "$WORK_REAPER_LOCK_FD" || return 1
+  WORK_REAPABLE_FINALIZED=1
+}
+# The exit code arrives as $1: this now runs as gate_on_exit's tally hook, so
+# `$?` here would be the library's last command, not the script's exit status.
+report_partial_tally() {
+  local rc="$1"
+  if [ "$WORK_REAPABLE_FINALIZED" -eq 0 ] \
+    && declare -F reapable_dir_stamp >/dev/null \
+    && ! finalize_reapable_workdir; then
+    log "work-directory lifecycle record could not be finalized; this directory remains fail-closed and unreapable"
+  fi
+  [ "$VERDICT_REACHED" -eq 1 ] && return 0
+  log "ABORTED before the verdict (exit $rc): $GATE_PASS passed, $GATE_FAIL failed so far; every assertion after this point did not run"
+  return 0
+}
+gate_init "g0_identity_e2e" report_partial_tally
 
 # Match required JSON fragments on one line without depending on field order.
 # This deliberately recognizes only exact fragments; it is not a permissive
@@ -47,6 +194,26 @@ jsonl_line_has_all() {
     [ "$matched" -eq 1 ] && return 0
   done < "$file"
   return 1
+}
+
+# Return the first event line for a failed exact-fragment assertion. Keeping the
+# observed event in the failure makes stale script-side pins distinguishable
+# from a missing checker event.
+jsonl_event_or_missing() {
+  local file="$1"
+  local event_name="$2"
+  awk -v needle="\"event\":\"$event_name\"" '
+    index($0, needle) {
+      print
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        print "<missing>"
+      }
+    }
+  ' "$file"
 }
 
 # Operational regeneration errors must retain one stable terminal envelope,
@@ -102,9 +269,77 @@ assert_load_error_path() {
 log "work directory: $WORK"
 mkdir -p "$WORK"
 
-log "building registry-check"
-(cd "$ROOT" && cargo build -p registry-check --quiet)
-[ -x "$BIN" ] || { log "registry-check binary missing at $BIN"; exit 2; }
+# The subject is compiled from THIS tree into $WORK by
+# scripts/lib/private_subject.sh, the single implementation shared with
+# g0_spine_e2e.sh and g0_claims_e2e.sh. It used to be
+# "${CARGO_TARGET_DIR:-$ROOT/target}/debug/registry-check" gated only on
+# `[ -x "$BIN" ]` after a cargo build whose exit status nothing read — the
+# shape that let a neighbouring pane's artifact decide this gate's verdict.
+# The library states what that measured and what it costs. Disk price here:
+# 73MB per run for the artifact, same as its two siblings.
+# shellcheck source=lib/private_subject.sh
+. "$ROOT/scripts/lib/private_subject.sh"
+
+if ! reapable_parent_lock_shared "${WORK%/*}" \
+  .fgdb-g0-identity-reaper-parent.lock WORK_REAPER_PARENT_LOCK_FD; then
+  gate_unrun "could not acquire the g0_identity_e2e parent-namespace lock"
+  exit 2
+fi
+if ! reapable_lock_fd_is_open "$WORK_REAPER_PARENT_LOCK_FD"; then
+  gate_unrun "g0_identity_e2e parent-namespace lock was not retained"
+  exit 2
+fi
+if ! reapable_dir_lock_shared "$WORK" WORK_REAPER_LOCK_FD; then
+  gate_unrun "could not acquire the g0_identity_e2e work-directory liveness lock"
+  exit 2
+fi
+
+mkdir -p "$WORK/bin"
+log "acquiring the subject for this tree state"
+SUBJECT_REAPER_LOCK_FD=""
+SUBJECT_REAPER_PARENT_LOCK_FD=""
+if ! subject_acquire_leased "$ROOT" SUBJECT_DIR SUBJECT_REAPER_LOCK_FD \
+  SUBJECT_REAPER_PARENT_LOCK_FD; then
+  log "FATAL: building registry-check from this tree failed (see $SUBJECT_DIR/build.log)"
+  exit 2
+fi
+reapable_lock_fd_is_open "$SUBJECT_REAPER_LOCK_FD" || {
+  log "FATAL: subject liveness lock was not retained by this gate"
+  exit 2
+}
+reapable_lock_fd_is_open "$SUBJECT_REAPER_PARENT_LOCK_FD" || {
+  log "FATAL: subject parent-namespace lock was not retained by this gate"
+  exit 2
+}
+BIN="$SUBJECT_DIR/registry-check"
+subject_is_fresh "$BIN" "$ROOT" || {
+  log "FATAL: $BIN is not newer than $(subject_newest_source "$ROOT") — the build did not produce this tree's artifact"
+  exit 2
+}
+log "subject artifact: $BIN (newer than $(subject_newest_source "$ROOT"))"
+
+# THIS SCRIPT'S OWN control over the shared predicate, counted in this script's
+# own tally. Sharing the runner must not mean sharing the credit: a gate that
+# passes only because some OTHER script proved the predicate has no evidence
+# about its own subject. This gate is the one that pins Appendix A identity, so
+# a subject it never verified is exactly how phantom pin drift gets reported.
+subject_write_stale_probe "$WORK/bin/stale-probe"
+if subject_is_fresh "$BIN" "$ROOT" && ! subject_is_fresh "$WORK/bin/stale-probe" "$ROOT"; then
+  ok "control: the freshness rule accepts this run's artifact and rejects a backdated one"
+else
+  die "control: the freshness rule does not separate a fresh artifact from a stale one; this script's subject is unproven"
+fi
+
+# THIS SCRIPT'S OWN control over the shared subject RUNNER, counted in this
+# script's own tally, for the same reason as the one above. The subject is no
+# longer a private directory per run (fgdb-1j16: 113 abandoned directories,
+# 18.01GB, two build freezes in one night), and a reuse that quietly stops
+# reusing looks exactly like one that works.
+if subject_residue_control "$WORK"; then
+  ok "control: the subject runner reuses one directory and leaves no residue"
+else
+  die "control: the subject runner leaks a directory per run"
+fi
 
 # --- Phase 0: canonical Appendix A source and projections -------------------
 log "phase 0: canonical Appendix A catalog, exact source, and six projections"
@@ -119,29 +354,47 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"start_line":1388' \
     '"end_line":2728' \
     '"line_count":1341' \
-    '"byte_count":1020717' \
-    '"sha256":"71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1"' \
+    '"byte_count":1027538' \
+    '"sha256":"c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16"' \
     '"outcome":"pass"'; then
   ok "Appendix A exact source manifest is pinned"
 else
   die "Appendix A source-manifest event is missing or drifted"
 fi
+# The reference manifest's target_count is the same reservation total the
+# closure event reports -- appendix_a.rs:9887 compares it to
+# EXPECTED_TYPE_RESERVATION_COUNT -- so it is derived from the rows for the same
+# reason. It has held at 813 across the whole window only because no new
+# StrongRef family has needed a reservation minted; the bijection law permits
+# that to move, and a sixth typed copy of the census in this file would go stale
+# the first time it does.
+EXPECT_RESERVATION_COUNT="$(catalog_closure_census reservations)"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_reference_manifest"' \
-    '"target_count":813' \
+    '"target_count":'"$EXPECT_RESERVATION_COUNT" \
     '"target_ids_sha256":"84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"' \
-    '"occurrence_count":2458' \
-    '"occurrence_transcript_sha256":"9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"' \
+    '"occurrence_count":2454' \
+    '"occurrence_transcript_sha256":"998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"' \
     '"outcome":"pass"'; then
   ok "full-plan Appendix A reference census is pinned"
 else
   die "Appendix A reference-manifest event is missing or drifted"
 fi
+EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
+EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
+EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
+EXPECT_EXISTING_RESERVATION_COUNT="$(catalog_closure_census existing_reservations)"
+EXPECT_RESERVED_RESERVATION_COUNT="$(catalog_closure_census reserved_reservations)"
+EXPECT_SOURCE_DISPOSITION_COUNT="$(catalog_closure_census source_dispositions)"
+EXPECT_TOP_LEVEL_CANDIDATE_COUNT="$(catalog_closure_census top_level_candidates)"
+EXPECT_REFERENCE_ONLY_SYMBOL_COUNT="$(catalog_closure_census reference_only_symbols)"
+EXPECT_APPENDIX_STRUCTURAL_SYMBOL_COUNT="$(catalog_closure_census appendix_structural_symbols)"
+EXPECT_SOURCE_LOCATION_PAIR_COUNT="$(catalog_closure_census source_location_pairs)"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":357' \
-    '"projection_fallback_count":83' \
-    '"target_source_assignment_sha256":"7543f2d271f86683f61c3724968496f62b337a21bf89aa0f93e68d80a8b9602c"' \
+    '"target_count":'"$EXPECT_TARGET_COUNT" \
+    '"projection_fallback_count":'"$EXPECT_FALLBACK_COUNT" \
+    '"target_source_assignment_sha256":"'"$EXPECT_TARGET_ASSIGNMENT_SHA"'"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else
@@ -152,54 +405,116 @@ APPENDIX_SLICE_PASSES=$(awk '
   index($0, "\"outcome\":\"pass\"") { count++ }
   END { print count + 0 }
 ' "$WORK/appendix-baseline.jsonl")
-[ "$APPENDIX_SLICE_PASSES" -eq 21 ] \
-  && ok "all 21 Appendix A slices validate" \
-  || die "expected 21 passing Appendix A slices, found $APPENDIX_SLICE_PASSES"
+if [ "$APPENDIX_SLICE_PASSES" -eq 21 ]; then
+  ok "all 21 Appendix A slices validate"
+else
+  die "expected 21 passing Appendix A slices, found $APPENDIX_SLICE_PASSES"
+fi
 APPENDIX_PROJECTION_PASSES=$(awk '
   index($0, "\"event\":\"appendix_projection_checked\"") &&
   index($0, "\"outcome\":\"pass\"") { count++ }
   END { print count + 0 }
 ' "$WORK/appendix-baseline.jsonl")
-[ "$APPENDIX_PROJECTION_PASSES" -eq 6 ] \
-  && ok "all six generated projections byte-match" \
-  || die "expected six passing Appendix A projections, found $APPENDIX_PROJECTION_PASSES"
+if [ "$APPENDIX_PROJECTION_PASSES" -eq 6 ]; then
+  ok "all six generated projections byte-match"
+else
+  die "expected six passing Appendix A projections, found $APPENDIX_PROJECTION_PASSES"
+fi
+# THE RULE FOR THIS EVENT, so the next author does not have to re-derive it:
+# a field whose value is the size of a growing catalog is DERIVED above, and a
+# field whose correct value is a law is written here. The laws are the four
+# empty completion layers, the empty outside-structural bucket, the four
+# completion-layer schemas, and the 35-row G0 projection slice -- none of which
+# moved across the 40 Appendix A commits before this one, while every derived
+# field did. A law that moves is an event and should red this gate; a census
+# that moves is Tuesday.
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_closure_checked"' \
-    '"reservations":813' \
-    '"existing_reservations":35' \
-    '"reserved_reservations":778' \
-    '"source_dispositions":848' \
-    '"top_level_candidates":1229' \
-    '"targets":357' \
+    '"reservations":'"$EXPECT_RESERVATION_COUNT" \
+    '"existing_reservations":'"$EXPECT_EXISTING_RESERVATION_COUNT" \
+    '"reserved_reservations":'"$EXPECT_RESERVED_RESERVATION_COUNT" \
+    '"source_dispositions":'"$EXPECT_SOURCE_DISPOSITION_COUNT" \
+    '"top_level_candidates":'"$EXPECT_TOP_LEVEL_CANDIDATE_COUNT" \
+    '"targets":'"$EXPECT_TARGET_COUNT" \
+    '"completion_layer_schemas":4' \
+    '"annotations":0' \
     '"semantic_bindings":0' \
+    '"expansion_bindings":0' \
     '"evidence_rows":0' \
-    '"reference_only_symbols":343' \
-    '"appendix_structural_symbols":314' \
+    '"reference_only_symbols":'"$EXPECT_REFERENCE_ONLY_SYMBOL_COUNT" \
+    '"appendix_structural_symbols":'"$EXPECT_APPENDIX_STRUCTURAL_SYMBOL_COUNT" \
     '"outside_structural_symbols":0' \
-    '"source_location_pairs":1999' \
+    '"source_location_pairs":'"$EXPECT_SOURCE_LOCATION_PAIR_COUNT" \
     '"g0_projection_dispositions":35' \
     '"outcome":"pass"'; then
   ok "Appendix A source/target/owner/evidence scaffold closure is exact"
 else
-  die "Appendix A closure event is missing or drifted"
+  OBSERVED_APPENDIX_CLOSURE="$(
+    jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_closure_checked
+  )"
+  die "Appendix A closure event is missing or drifted; expected reservations=$EXPECT_RESERVATION_COUNT existing=$EXPECT_EXISTING_RESERVATION_COUNT reserved=$EXPECT_RESERVED_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_CLOSURE"
+fi
+# THE UNCLASSIFIED RESIDUE, AS A CEILING THAT CAN ONLY CLOSE.
+#
+# A top-level source candidate whose class the source does not force sits at
+# `identity_class = "unclassified"`. appendix_a.rs classifies candidates four
+# ways and the fourth arm -- unprojected AND unclassified -- is empty: no
+# violation, no count, no pin. Nothing anywhere in the tree stated how much
+# residue there was. MEASURED 2026-07-27: 542 of 1237 candidates, 44%, while
+# fgdb-a18-restore-union-source-gates-a4fq's prose named seven of them.
+#
+# A CEILING, not a pin, and the distinction is load-bearing. Between two reads
+# eleven minutes apart the number fell 543 -> 542, because dec248a classified
+# one: legitimate progress by another pane, which a pin would have redded. A
+# ceiling lets the residue close and fails only when it GROWS, so adding an
+# unclassified candidate becomes a deliberate bump of this line rather than
+# silence. Same instrument as claims_lint.toml's unmarked_rows gap ledger.
+#
+# The slack is printed on every green run: a ceiling that drifts far above the
+# observed value is a weakened gate, and the only way to notice is to say it.
+EXPECT_UNCLASSIFIED_CEILING=542
+UNCLASSIFIED_OBSERVED=$(awk '
+  index($0, "\"event\":\"appendix_closure_checked\"") {
+    if (match($0, /"unclassified_candidates":[0-9]+/)) {
+      value = substr($0, RSTART, RLENGTH)
+      sub(/^"unclassified_candidates":/, "", value)
+      print value
+      found = 1
+      exit
+    }
+  }
+  END { if (!found) print "missing" }
+' "$WORK/appendix-baseline.jsonl")
+if [ "$UNCLASSIFIED_OBSERVED" = "missing" ]; then
+  die "the closure event carries no unclassified_candidates field; the residue is unreported again"
+elif [ "$UNCLASSIFIED_OBSERVED" -le "$EXPECT_UNCLASSIFIED_CEILING" ]; then
+  ok "unclassified source-candidate residue is within its ceiling ($UNCLASSIFIED_OBSERVED of $EXPECT_UNCLASSIFIED_CEILING, slack $((EXPECT_UNCLASSIFIED_CEILING - UNCLASSIFIED_OBSERVED)))"
+else
+  die "unclassified source-candidate residue GREW: $UNCLASSIFIED_OBSERVED observed against a ceiling of $EXPECT_UNCLASSIFIED_CEILING. Landing a candidate the source does not classify is allowed, but it is a deliberate act: lower or raise EXPECT_UNCLASSIFIED_CEILING in the same commit and say which candidates moved."
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":357' \
+    '"projection_rows":'"$EXPECT_TARGET_COUNT" \
     '"projection_files":6' \
-    '"reservations":813' \
-    '"source_dispositions":848' \
-    '"top_level_candidates":1229' \
-    '"targets":357' \
+    '"reservations":'"$EXPECT_RESERVATION_COUNT" \
+    '"source_dispositions":'"$EXPECT_SOURCE_DISPOSITION_COUNT" \
+    '"top_level_candidates":'"$EXPECT_TOP_LEVEL_CANDIDATE_COUNT" \
+    '"targets":'"$EXPECT_TARGET_COUNT" \
+    '"completion_layer_schemas":4' \
+    '"annotations":0' \
     '"semantic_bindings":0' \
+    '"expansion_bindings":0' \
     '"evidence_rows":0' \
-    '"reference_only_symbols":343' \
+    '"reference_only_symbols":'"$EXPECT_REFERENCE_ONLY_SYMBOL_COUNT" \
     '"violations":0' \
     '"outcome":"pass"'; then
   ok "Appendix A catalog closure is exact"
 else
-  die "Appendix A completion event is missing or incomplete"
+  OBSERVED_APPENDIX_COMPLETION="$(
+    jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_completed
+  )"
+  die "Appendix A completion event is missing or incomplete; expected projection_rows=$EXPECT_TARGET_COUNT reservations=$EXPECT_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_COMPLETION"
 fi
 if (cd "$ROOT" && cargo test -p registry-check hash::tests --lib --quiet); then
   ok "SHA-256 standard vectors pass"
@@ -230,92 +545,238 @@ else
   die "construction DAG check missing or failed"
 fi
 
-# Freeze the §5.1 BodyDigest recipe identities.  Counting every
-# digest_verified event is unsound because target, transcript, and
-# weak-identity digests are different identity laws.
-BODY_RECIPES=(
-  'AuthorityBindingRecord#body_digest|fnv1a64:2be6808e91bd9d0d'
-  'RootAuthorityTrustBody#body_digest|fnv1a64:1a58c8b267ed37c9'
-  'RaftSnapshotLocal#body_digest|fnv1a64:3dedb18b0ac32f0c'
-  'RaftSnapshotMeta#body_digest|fnv1a64:59702ceb4c836ec2'
-  'RaftSnapshotShard#body_digest|fnv1a64:69bb104a85eb6128'
-  'ShardHistoryInventory#body_digest|fnv1a64:7f652e0dd29a56aa'
-  'GlobalKeyEnvelopeManifest#body_digest|fnv1a64:55336bfa5c150521'
-)
-for recipe in "${BODY_RECIPES[@]}"; do
-  row_id="${recipe%%|*}"
-  recipe_pin="${recipe#*|}"
-  if jsonl_line_has_all "$WORK/identity-baseline.jsonl" \
-      '"event":"digest_verified"' \
-      '"digest_class":"body"' \
-      "\"row_id\":\"$row_id\"" \
-      "\"recipe_pin\":\"$recipe_pin\"" \
-      '"outcome":"pass"'; then
-    ok "BodyDigest recipe verified: $row_id ($recipe_pin)"
-  else
-    die "missing/failed BodyDigest recipe: $row_id ($recipe_pin)"
-  fi
-done
+# Freeze the §5.1 BodyDigest recipe identities without a second hand-written
+# reader. `registry-check identity` emits one `digest_verified` event for every
+# digest-bearing durable field and recomputes each BodyDigest pin. The floor is
+# monotone: a newly declared valid recipe is growth, while losing any of the 14
+# recipes shipped when this law was installed is a durable-format regression.
+BODY_DIGEST_FLOOR=14
+BODY_DIGEST_EVENTS=$(awk '
+  index($0, "\"event\":\"digest_verified\"") &&
+  index($0, "\"digest_class\":\"body\"") { count++ }
+  END { print count + 0 }
+' "$WORK/identity-baseline.jsonl")
 BODY_DIGEST_PASSES=$(awk '
   index($0, "\"event\":\"digest_verified\"") &&
   index($0, "\"digest_class\":\"body\"") &&
   index($0, "\"outcome\":\"pass\"") { count++ }
   END { print count + 0 }
 ' "$WORK/identity-baseline.jsonl")
-if [ "$BODY_DIGEST_PASSES" -eq "${#BODY_RECIPES[@]}" ]; then
-  ok "BodyDigest event closure is exact ($BODY_DIGEST_PASSES recipes)"
+if [ "$BODY_DIGEST_EVENTS" -lt "$BODY_DIGEST_FLOOR" ]; then
+  die "BodyDigest recipe population regressed: found $BODY_DIGEST_EVENTS, floor $BODY_DIGEST_FLOOR"
+elif [ "$BODY_DIGEST_PASSES" -eq "$BODY_DIGEST_EVENTS" ]; then
+  ok "BodyDigest event closure is complete ($BODY_DIGEST_PASSES of $BODY_DIGEST_EVENTS recipes; floor $BODY_DIGEST_FLOOR)"
 else
-  die "expected exactly ${#BODY_RECIPES[@]} passing BodyDigest recipes, found $BODY_DIGEST_PASSES"
+  die "BodyDigest event closure is incomplete: $BODY_DIGEST_PASSES of $BODY_DIGEST_EVENTS recipes pass"
 fi
 
 # --- Phase 2: negative fixtures ----------------------------------------------
-stage() { # stage <name> -> stages registries into $WORK/<name>/registries
-  local name="$1"
-  mkdir -p "$WORK/$name/registries"
-  cp "$ROOT"/registries/*.toml "$WORK/$name/registries/"
+registry_is_private() { # registry_is_private <basename> [private-basename...]
+  local basename="$1"
+  shift
+  local private
+  for private in "$@"; do
+    [ "$basename" = "$private" ] && return 0
+  done
+  return 1
 }
 
-stage_except() { # stage_except <name> <basename> -> leave one output uncreated
-  local name="$1"
-  local excluded="$2"
-  local source basename
-  mkdir -p "$WORK/$name/registries"
-  for source in "$ROOT"/registries/*.toml; do
-    basename="${source##*/}"
-    [ "$basename" = "$excluded" ] || cp "$source" "$WORK/$name/registries/"
+validate_private_registries() { # validate_private_registries [basename...]
+  local private
+  for private in "$@"; do
+    [ -f "$ROOT/registries/$private" ] \
+      || die "fixture names unknown private registry $private"
   done
 }
 
-stage_appendix_support() { # stage_appendix_support <name> -> non-registry proof inputs
+stage() { # stage <name> [private-basename...] -> stages registries
   local name="$1"
-  local manifest relative
+  shift
+  local source basename
+  validate_private_registries "$@"
+  mkdir -p "$WORK/$name/registries"
+  for source in "$ROOT"/registries/*.toml; do
+    basename="${source##*/}"
+    if registry_is_private "$basename" "$@"; then
+      cp "$source" "$WORK/$name/registries/"
+    else
+      link_shared_support "$source" "$WORK/$name/registries/"
+    fi
+  done
+  assert_linked_manifest_complete "$WORK/$name"
+}
+
+stage_except() { # stage_except <name> <excluded> [private-basename...]
+  local name="$1"
+  local excluded="$2"
+  shift 2
+  local source basename
+  [ -f "$ROOT/registries/$excluded" ] \
+    || die "fixture excludes unknown registry $excluded"
+  validate_private_registries "$@"
+  mkdir -p "$WORK/$name/registries"
+  for source in "$ROOT"/registries/*.toml; do
+    basename="${source##*/}"
+    if [ "$basename" = "$excluded" ]; then
+      continue
+    elif registry_is_private "$basename" "$@"; then
+      cp "$source" "$WORK/$name/registries/"
+    else
+      link_shared_support "$source" "$WORK/$name/registries/"
+    fi
+  done
+  assert_linked_manifest_complete "$WORK/$name"
+}
+
+# LINKED_MANIFEST — "<sha256>  <staged-path>", one row per hard-linked input.
+#
+# THE SUBJECT IS THE FIXTURE, NOT $ROOT, and that is the whole correction
+# (fgdb-g0-root-guard-beads-blind-c7oe). The root before/after snapshot excludes
+# './.beads' and './.beads/*' — added by fgdb-flbb so that a peer bead flush
+# mid-run would not fire it — but .beads/issues.jsonl is 8,203 KB of the ~10 MB
+# linkable set, so the guard was blind to roughly three quarters of the bytes
+# whose safety it is cited for. Excluding .git was right; excluding .beads
+# blinded the instrument to its own subject.
+#
+# WIDENING THE ROOT SNAPSHOT IS THE WRONG FIX. It would re-introduce the false
+# positive flbb removed. The two things that touch .beads are NOT the same:
+#
+#   COORDINATION CHURN     a peer runs `br update` / `br sync --flush-only`
+#   WRITE-THROUGH DAMAGE   a fixture writes a path it hard-links
+#
+# MEASURED 2026-07-27, and this is what separates them: `br` replaces the file
+# rather than rewriting it. Staging a link at nlink=2 and then letting a peer
+# write produced real-file digest 00b40f54 -> 4ead27df ON A NEW INODE, while the
+# fixture's digest stayed 00b40f54 on the old inode at nlink=1. So coordination
+# churn DETACHES the fixture; it cannot alter it. Write-through damage, by
+# contrast, mutates the shared inode and therefore shows up in the FIXTURE.
+# Digesting the fixture side is immune to peer churn BY CONSTRUCTION, and it
+# measures the actual law — "no fixture wrote a linked inode after staging" —
+# instead of a proxy for it.
+LINKED_MANIFEST="$WORK/.linked-manifest"
+SHARED_INPUT_ROOT="$WORK/.shared-inputs"
+
+link_support() { # link_support <source-file> <destination-dir-or-file>
+  local source="$1" destination="$2"
+  cp -l "$source" "$destination"
+  [ -d "$destination" ] && destination="${destination%/}/${source##*/}"
+  sha256sum "$destination" >> "$LINKED_MANIFEST"
+}
+
+link_shared_support() { # link_shared_support <root-source> <destination>
+  local source="$1" destination="$2"
+  local relative anchor
+  relative="${source#"$ROOT"/}"
+  [ "$relative" != "$source" ] \
+    || die "shared fixture input is outside the repository root: $source"
+  anchor="$SHARED_INPUT_ROOT/$relative"
+  if [ ! -f "$anchor" ]; then
+    mkdir -p "${anchor%/*}"
+    cp "$source" "$anchor"
+  fi
+  link_support "$anchor" "$destination"
+}
+
+stage_appendix_support() { # stage_appendix_support <name> <linked|private>
+  local name="$1"
+  local plan_disposition="$2"
+  local manifest relative source
   mkdir -p "$WORK/$name/.beads"
-  cp "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
-  cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" "$WORK/$name/"
-  cp "$ROOT/Cargo.toml" "$WORK/$name/"
+  # Every hard link goes through link_support so the linked set is DERIVED
+  # rather than declared — see assert_linked_manifest_complete for why a
+  # declared list is not enough.
+  link_support "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
+  case "$plan_disposition" in
+    linked)
+      link_shared_support \
+        "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
+        "$WORK/$name/"
+      ;;
+    private)
+      cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
+        "$WORK/$name/"
+      ;;
+    *)
+      die "fixture $name has unknown plan disposition $plan_disposition"
+      ;;
+  esac
+  link_support "$ROOT/Cargo.toml" "$WORK/$name/"
   for manifest in "$ROOT"/crates/*/Cargo.toml "$ROOT"/tools/*/Cargo.toml; do
     [ -f "$manifest" ] || continue
     relative="${manifest#"$ROOT"/}"
     mkdir -p "$WORK/$name/${relative%/*}"
-    cp "$manifest" "$WORK/$name/$relative"
+    link_support "$manifest" "$WORK/$name/$relative"
   done
   mkdir -p "$WORK/$name/scripts" "$WORK/$name/tools/registry-check/src"
-  cp "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
-  cp "$ROOT/tools/registry-check/src/appendix_a.rs" \
-    "$WORK/$name/tools/registry-check/src/"
+  link_support "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
+  for source in "$ROOT"/tools/registry-check/src/*.rs; do
+    link_support "$source" "$WORK/$name/tools/registry-check/src/"
+  done
+  assert_linked_manifest_complete "$WORK/$name"
 }
 
-stage_appendix() { # stage_appendix <name> -> complete isolated Appendix root
+# assert_linked_manifest_complete <fixture-root>
+#
+# THE COMPLETENESS GUARD, AND IT FAILS CLOSED. It does not trust link_support to
+# have been called: it ENUMERATES every multiply-linked regular file under the
+# fixture and requires each to appear in the manifest. A future `cp -l` added to
+# stage_appendix_support without a record is caught here, rather than escaping
+# verification in exactly the way .beads escapes the root snapshot today — that
+# is this bead's own defect one layer up, so the guard has to be derived, not
+# declared.
+#
+# Enumeration happens AT STAGING, not at exit, and deliberately: a peer write
+# during the run drops the real file's link count, so `-links +1` stops being a
+# reliable enumerator once the run is under way.
+assert_linked_manifest_complete() { # assert_linked_manifest_complete <fixture-root>
+  local fixture_root="$1" path unrecorded=0
+  while IFS= read -r -d '' path; do
+    if ! grep -Fqx -- "$(sha256sum "$path")" "$LINKED_MANIFEST"; then
+      echo "ERROR: g0_linked_input_unrecorded: $path is hard-linked into the" >&2
+      echo "  fixture but carries no manifest row, so nothing would notice if a" >&2
+      echo "  fixture wrote through it. Stage it with link_support." >&2
+      unrecorded=1
+    fi
+  done < <(find "$fixture_root" -type f -links +1 -print0)
+  [ "$unrecorded" -eq 0 ] || die "g0_linked_input_unrecorded"
+}
+
+# assert_linked_inputs_unwritten
+#
+# THE INTEGRITY GUARD. Every recorded fixture path must still hash to what it
+# hashed at staging. This is the law the root snapshot was standing in for, and
+# unlike that snapshot it sees .beads/issues.jsonl — 76.7% of the linkable bytes.
+assert_linked_inputs_unwritten() {
+  local rechecked=0 recorded=0
+  if [ ! -s "$LINKED_MANIFEST" ]; then
+    die "g0_linked_manifest_empty: no linked inputs were recorded, so the \
+write-through guard verified nothing"
+  fi
+  recorded=$(wc -l < "$LINKED_MANIFEST")
+  if LC_ALL=C sha256sum -c --quiet "$LINKED_MANIFEST" >"$WORK/.linked-recheck.log" 2>&1; then
+    rechecked=$recorded
+    ok "linked inputs unwritten: $rechecked/$recorded staged paths byte-identical"
+  else
+    cat "$WORK/.linked-recheck.log" >&2
+    die "g0_linked_input_written: a fixture wrote through a hard-linked input"
+  fi
+}
+
+stage_appendix() { # stage_appendix <name> <plan-disposition> [private-registry...]
   local name="$1"
-  stage "$name"
-  stage_appendix_support "$name"
+  local plan_disposition="$2"
+  shift 2
+  stage "$name" "$@"
+  stage_appendix_support "$name" "$plan_disposition"
 }
 
-stage_appendix_except() { # stage_appendix_except <name> <projection-basename>
+stage_appendix_except() { # stage_appendix_except <name> <excluded> <plan-disposition> [private-registry...]
   local name="$1"
   local excluded="$2"
-  stage_except "$name" "$excluded"
-  stage_appendix_support "$name"
+  local plan_disposition="$3"
+  shift 3
+  stage_except "$name" "$excluded" "$@"
+  stage_appendix_support "$name" "$plan_disposition"
 }
 
 snapshot_nonprojection_tree() { # snapshot_nonprojection_tree <staged-root>
@@ -323,6 +784,8 @@ snapshot_nonprojection_tree() { # snapshot_nonprojection_tree <staged-root>
   (
     cd "$staged_root"
     find . \
+      ! -path './.git' ! -path './.git/*' \
+      ! -path './.beads' ! -path './.beads/*' \
       ! -path './registries/logical_object_kinds.toml' \
       ! -path './registries/physical_record_kinds.toml' \
       ! -path './registries/bootstrap_frames.toml' \
@@ -331,6 +794,8 @@ snapshot_nonprojection_tree() { # snapshot_nonprojection_tree <staged-root>
       ! -path './registries/durable_fields.toml' \
       -printf '%y|%m|%p|%l\n' | LC_ALL=C sort
     find . -type f \
+      ! -path './.git' ! -path './.git/*' \
+      ! -path './.beads' ! -path './.beads/*' \
       ! -path './registries/logical_object_kinds.toml' \
       ! -path './registries/physical_record_kinds.toml' \
       ! -path './registries/bootstrap_frames.toml' \
@@ -413,6 +878,8 @@ expect_identity_violation() { # expect_identity_violation <fixture> <code> <regi
   fi
 }
 
+ROOT_SNAPSHOT_BEFORE=$(snapshot_nonprojection_tree "$ROOT" | sha256sum)
+
 assert_only_violation_code() { # assert_only_violation_code <fixture> <code>
   local fixture="$1"
   local expected_code="$2"
@@ -434,7 +901,7 @@ assert_only_violation_code() { # assert_only_violation_code <fixture> <code>
 }
 
 log "phase 2a: planted future-result edge (command input naming its applied record)"
-stage neg-future
+stage neg-future durable_fields.toml
 cat >> "$WORK/neg-future/registries/durable_fields.toml" <<'EOF'
 
 [[field]]
@@ -465,7 +932,7 @@ else
 fi
 
 log "phase 2b: planted StrongRef-to-placement (physical record as strong target)"
-stage neg-placement
+stage neg-placement durable_fields.toml
 cat >> "$WORK/neg-placement/registries/durable_fields.toml" <<'EOF'
 
 [[field]]
@@ -495,7 +962,7 @@ else
 fi
 
 log "phase 2c: planted experimental row in the production registry"
-stage neg-experimental
+stage neg-experimental logical_object_kinds.toml
 cat >> "$WORK/neg-experimental/registries/logical_object_kinds.toml" <<'EOF'
 
 [[kind]]
@@ -528,7 +995,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2d planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/durable_fields.toml" \
   > "$WORK/neg-recipe/registries/durable_fields.toml"
 if "$BIN" identity --root "$WORK/neg-recipe" >"$WORK/neg-recipe.jsonl" 2>/dev/null; then
@@ -552,7 +1024,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2e planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-schema-version/registries/logical_object_kinds.toml"
 if "$BIN" identity --root "$WORK/neg-schema-version" \
@@ -581,7 +1058,12 @@ awk '
     changed = 1
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2f planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-unknown-top-level/registries/logical_object_kinds.toml"
 if "$BIN" identity --root "$WORK/neg-unknown-top-level" \
@@ -610,7 +1092,12 @@ awk '
     print "unknown_row_key = true"
     changed = 1
   }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2g planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-unknown-row/registries/logical_object_kinds.toml"
 if "$BIN" identity --root "$WORK/neg-unknown-row" \
@@ -633,14 +1120,21 @@ fi
 
 log "phase 2h: registry epoch drift without a reviewed assignment change"
 stage_except neg-registry-epoch logical_object_kinds.toml
-awk '
-  !changed && $0 == "registry_epoch = 2" {
-    print "registry_epoch = 3"
+LOGICAL_EPOCH="$(awk '/^registry_epoch = /{gsub(/[^0-9]/,"",$3); print $3; exit}' \
+  "$ROOT/registries/logical_object_kinds.toml")"
+awk -v cur="registry_epoch = $LOGICAL_EPOCH" -v nxt="registry_epoch = $((LOGICAL_EPOCH + 1))" '
+  !changed && $0 == cur {
+    print nxt
     changed = 1
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "epoch-drift fixture matched nothing: expected \"" cur "\"" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-registry-epoch/registries/logical_object_kinds.toml"
 expect_identity_violation \
@@ -656,7 +1150,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2i planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-released-reuse/registries/logical_object_kinds.toml"
 expect_identity_violation \
@@ -748,7 +1247,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2l planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/durable_fields.toml" \
   > "$WORK/neg-union-role/registries/durable_fields.toml"
 expect_identity_violation \
@@ -756,7 +1260,7 @@ expect_identity_violation \
 
 # --- Phase 3: Appendix source/catalog/projection mutation corpus ------------
 log "phase 3a: wrong Appendix slice Bead binding"
-stage_appendix neg-appendix-bead
+stage_appendix neg-appendix-bead linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "bead_id = \"fgdb-a01-reference-roots-2k0q\"" {
     print "bead_id = \"fgdb-a01-wrong-owner\""
@@ -764,13 +1268,18 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3a planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-bead/registries/appendix_a_catalog.toml"
 expect_appendix_violation neg-appendix-bead catalog_pin_mismatch a01
 
 log "phase 3a-redaction: attacker-controlled catalog values never reach diagnostics"
-stage_appendix neg-appendix-redaction
+stage_appendix neg-appendix-redaction linked appendix_a_catalog.toml
 APPENDIX_SECRET_SENTINEL='APPENDIX_SECRET_SENTINEL_7f7c9d5b'
 awk -v sentinel="$APPENDIX_SECRET_SENTINEL" '
   !title_changed && $0 == "title = \"Appendix A exact catalog: Reference semantics, RootSlot, and RootBootstrap\"" {
@@ -798,7 +1307,7 @@ else
 fi
 
 log "phase 3b: exact Appendix source-byte drift"
-stage_appendix neg-appendix-source
+stage_appendix neg-appendix-source private
 awk '
   !changed && $0 == "## Appendix A — On-Disk Object Formats (normative contract)" {
     print "## Appendix X — On-Disk Object Formats (normative contract)"
@@ -806,14 +1315,19 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3b planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
   > "$WORK/neg-appendix-source/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 expect_appendix_violation \
   neg-appendix-source source_sha256_mismatch source_manifest
 
 log "phase 3c: semantically invisible checked-in projection-byte drift"
-stage_appendix neg-appendix-projection
+stage_appendix neg-appendix-projection linked logical_object_kinds.toml
 printf '\n# planted byte-only projection drift\n' \
   >> "$WORK/neg-appendix-projection/registries/logical_object_kinds.toml"
 expect_appendix_violation \
@@ -831,7 +1345,7 @@ else
 fi
 
 log "phase 3d: projection generation is a read-only, deterministic verifier"
-stage_appendix neg-appendix-generate-write
+stage_appendix neg-appendix-generate-write linked logical_object_kinds.toml
 printf '\n# planted generation-write sentinel\n' \
   >> "$WORK/neg-appendix-generate-write/registries/logical_object_kinds.toml"
 sha256sum \
@@ -870,7 +1384,7 @@ else
   die "Appendix generation changed a checked-in projection"
 fi
 
-stage_appendix appendix-generate
+stage_appendix appendix-generate linked
 sha256sum \
   "$WORK/appendix-generate/registries/logical_object_kinds.toml" \
   "$WORK/appendix-generate/registries/physical_record_kinds.toml" \
@@ -907,7 +1421,10 @@ else
 fi
 
 log "phase 3d-regenerate: sanctioned projection writer is scoped and idempotent"
-stage_appendix appendix-regenerate
+stage_appendix appendix-regenerate linked \
+  logical_object_kinds.toml physical_record_kinds.toml \
+  bootstrap_frames.toml prebootstrap_artifact_kinds.toml \
+  wire_types.toml durable_fields.toml
 APPENDIX_REGENERATE_SENTINEL='APPENDIX_REGENERATE_SECRET_8b5ad169'
 printf '\n# %s\n' "$APPENDIX_REGENERATE_SENTINEL" \
   >> "$WORK/appendix-regenerate/registries/logical_object_kinds.toml"
@@ -1015,7 +1532,11 @@ else
   die "Appendix regeneration changed a file outside the six projections"
 fi
 
-stage_appendix neg-appendix-regenerate-load
+stage_appendix neg-appendix-regenerate-load linked \
+  appendix_a_catalog.toml \
+  logical_object_kinds.toml physical_record_kinds.toml \
+  bootstrap_frames.toml prebootstrap_artifact_kinds.toml \
+  wire_types.toml durable_fields.toml
 printf '\nbroken = {}\n' \
   >> "$WORK/neg-appendix-regenerate-load/registries/appendix_a_catalog.toml"
 status=0
@@ -1032,7 +1553,9 @@ fi
 
 log "phase 3d-regenerate-safety: unsafe projection destinations fail closed"
 stage_appendix_except \
-  neg-appendix-regenerate-symlink logical_object_kinds.toml
+  neg-appendix-regenerate-symlink logical_object_kinds.toml linked \
+  physical_record_kinds.toml bootstrap_frames.toml \
+  prebootstrap_artifact_kinds.toml wire_types.toml durable_fields.toml
 APPENDIX_SYMLINK_SENTINEL='APPENDIX_SYMLINK_TARGET_76e13f0b'
 printf '%s\n' "$APPENDIX_SYMLINK_SENTINEL" \
   > "$WORK/appendix-regenerate-symlink-external.toml"
@@ -1060,7 +1583,9 @@ else
 fi
 
 stage_appendix_except \
-  neg-appendix-regenerate-hardlink logical_object_kinds.toml
+  neg-appendix-regenerate-hardlink logical_object_kinds.toml linked \
+  physical_record_kinds.toml bootstrap_frames.toml \
+  prebootstrap_artifact_kinds.toml wire_types.toml durable_fields.toml
 APPENDIX_HARDLINK_SENTINEL='APPENDIX_HARDLINK_TARGET_c4c5b322'
 printf '%s\n' "$APPENDIX_HARDLINK_SENTINEL" \
   > "$WORK/appendix-regenerate-hardlink-external.toml"
@@ -1088,7 +1613,9 @@ else
 fi
 
 stage_appendix_except \
-  neg-appendix-regenerate-directory logical_object_kinds.toml
+  neg-appendix-regenerate-directory logical_object_kinds.toml linked \
+  physical_record_kinds.toml bootstrap_frames.toml \
+  prebootstrap_artifact_kinds.toml wire_types.toml durable_fields.toml
 mkdir -p \
   "$WORK/neg-appendix-regenerate-directory/registries/logical_object_kinds.toml"
 status=0
@@ -1113,7 +1640,7 @@ else
 fi
 
 log "phase 3e: every checked-in projection requires one target"
-stage_appendix neg-appendix-target
+stage_appendix neg-appendix-target linked appendix_a_catalog.toml
 awk '
   !removed && $0 == "[[target]]" { removed = 1; skipping = 1; next }
   skipping && /^\[\[/ { skipping = 0 }
@@ -1126,7 +1653,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3f: catalog-maintenance owners cannot masquerade as semantic owners"
-stage_appendix neg-appendix-semantic-owner
+stage_appendix neg-appendix-semantic-owner linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-semantic-owner/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[semantic_binding]]
@@ -1142,7 +1669,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3g: row IDs are derived from typed projection identity"
-stage_appendix neg-appendix-row-id
+stage_appendix neg-appendix-row-id linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "row_id = \"a03:logical-kind:logical-state-payload\"" {
     print "row_id = \"a03:logical-kind:logical-state-payload-wrong\""
@@ -1150,7 +1677,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3g planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-row-id/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
@@ -1158,7 +1690,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3h: G0 projection ownership cannot be broadened"
-stage_appendix neg-appendix-g0-owner
+stage_appendix neg-appendix-g0-owner linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "slice_id = \"a03\"" {
     print "slice_id = \"g0\""
@@ -1179,7 +1711,7 @@ expect_appendix_violation \
   neg-appendix-g0-owner g0_projection_allowlist_drift g0
 
 log "phase 3i: a declared slice cannot become vacuously complete"
-stage_appendix neg-appendix-complete
+stage_appendix neg-appendix-complete linked appendix_a_catalog.toml
 awk '
   $0 == "id = \"a02\"" { in_slice = 1 }
   in_slice && !changed && $0 == "definition_status = \"declared\"" {
@@ -1189,21 +1721,31 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3i planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-complete/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
   neg-appendix-complete slice_census_pin_mismatch a02
 
 log "phase 3j: full-plan reference occurrence drift fails closed"
-stage_appendix neg-appendix-reference-source
+stage_appendix neg-appendix-reference-source private
 awk '
   NR < 1388 && !changed && index($0, "StrongRef<") {
     sub(/StrongRef</, "StrongRefX<")
     changed = 1
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3j planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
   > "$WORK/neg-appendix-reference-source/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 expect_appendix_violation \
@@ -1211,7 +1753,7 @@ expect_appendix_violation \
   reference_manifest
 
 log "phase 3j-target: exact target/source assignments cannot be downgraded"
-stage_appendix neg-appendix-target-assignment
+stage_appendix neg-appendix-target-assignment linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "source_key = \"field|RootSlot|RootSlot.cluster_incarnation|cluster_incarnation\"" {
     print "source_key = \"projection|durable_fields|RootSlot.cluster_incarnation\""
@@ -1219,7 +1761,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3j-target planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-target-assignment/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
@@ -1227,7 +1774,7 @@ expect_appendix_violation \
   target_manifest
 
 log "phase 3j-owner: reservation ownership is derived from source"
-stage_appendix neg-appendix-source-owner
+stage_appendix neg-appendix-source-owner linked appendix_a_catalog.toml
 awk '
   $0 == "row_id = \"plan:reservation:valid-time-contract\"" {
     print "row_id = \"a21:reservation:valid-time-contract\""
@@ -1262,7 +1809,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3j-bindings: fabricated repository metadata cannot self-assert"
-stage_appendix neg-appendix-repository-bindings
+stage_appendix neg-appendix-repository-bindings linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-repository-bindings/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[semantic_binding]]
@@ -1305,7 +1852,7 @@ for code in \
 done
 
 log "phase 3j-binding-pins: real but unrelated repository metadata cannot self-authorize"
-stage_appendix neg-appendix-unrelated-bindings
+stage_appendix neg-appendix-unrelated-bindings linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-unrelated-bindings/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[semantic_binding]]
@@ -1343,7 +1890,7 @@ else
 fi
 
 log "phase 3j-annotation: placeholder annotations cannot self-assert"
-stage_appendix neg-appendix-annotation-placeholder
+stage_appendix neg-appendix-annotation-placeholder linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-annotation-placeholder/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[annotation]]
@@ -1380,7 +1927,7 @@ else
 fi
 
 log "phase 3j-annotation-reference: malformed and unregistered reference shapes fail closed"
-stage_appendix neg-appendix-annotation-reference
+stage_appendix neg-appendix-annotation-reference linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-annotation-reference/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[annotation]]
@@ -1409,7 +1956,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3k: maintenance proof ownership and evidence are release-pinned"
-stage_appendix neg-appendix-maintenance
+stage_appendix neg-appendix-maintenance linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "owner_crate = \"registry-check\"" {
     print "owner_crate = \"fgdb-warden\""
@@ -1417,7 +1964,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3k planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-maintenance/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
@@ -1425,23 +1977,49 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3l: unknown catalog keys are structural load failures"
-stage_appendix neg-appendix-unknown-key
+stage_appendix neg-appendix-unknown-key linked appendix_a_catalog.toml
 awk '
-  !changed && $0 == "schema_version = 4" {
+  !changed && $0 == "schema_version = 5" {
     print
     print "unknown_catalog_root = true"
     changed = 1
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "expected current Appendix catalog schema_version = 5" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-unknown-key/registries/appendix_a_catalog.toml"
 expect_appendix_structural_error \
   neg-appendix-unknown-key catalog_unknown_key catalog
 
-log "phase 3m: malformed projection schemas are structural load failures"
-stage_appendix neg-appendix-projection-schema
+log "phase 3m: completion-layer schema contract drift is rejected"
+stage_appendix neg-appendix-completion-schema linked appendix_a_catalog.toml
+awk '
+  !changed && $0 == "pin_policy = \"compiled-count-sha256-readable-row-contract\"" {
+    print "pin_policy = \"catalog-self-authorized\""
+    changed = 1
+    next
+  }
+  { print }
+  END {
+    if (!changed) {
+      print "expected frozen completion-layer pin_policy" > "/dev/stderr"
+      exit 42
+    }
+  }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-completion-schema/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-completion-schema catalog_completion_layer_schema_drift \
+  catalog_row
+
+log "phase 3n: malformed projection schemas are structural load failures"
+stage_appendix neg-appendix-projection-schema linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "[[logical_kind]]" {
     print
@@ -1450,14 +2028,34 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3n planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-projection-schema/registries/appendix_a_catalog.toml"
 expect_appendix_structural_error \
   neg-appendix-projection-schema catalog_projection_schema logical_object_kinds
 
 # --- Verdict -----------------------------------------------------------------
-log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
-log "result: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ] || exit 1
+ROOT_SNAPSHOT_AFTER=$(snapshot_nonprojection_tree "$ROOT" | sha256sum)
+if [ "$ROOT_SNAPSHOT_BEFORE" != "$ROOT_SNAPSHOT_AFTER" ]; then
+  die "source root changed during evidence gate (write-through guard fired)"
+else
+  ok "source root unchanged during evidence gate"
+fi
+# The root snapshot above still excludes .beads on purpose — peer coordination
+# churn there is not a defect and firing on it is what fgdb-flbb fixed. The
+# linked-input check is the instrument that actually covers those bytes.
+assert_linked_inputs_unwritten
+if finalize_reapable_workdir; then
+  ok "work directory carries an inode-aware REAPABLE-AFTER record protected by the live gate lock"
+else
+  die "work directory lifecycle record could not be finalized; it is not eligible for the scoped reaper"
+fi
+log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-completion-schema,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
+VERDICT_REACHED=1
+gate_verdict || exit 1
 log "G0 identity e2e: ALL GREEN"

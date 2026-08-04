@@ -63,6 +63,9 @@ pub struct DurableChargeVector {
 }
 
 impl DurableChargeVector {
+    /// Version of the fixed six-axis durable-charge schema.
+    pub const FORMAT_VERSION: u16 = 1;
+
     pub const ZERO: Self = Self {
         canonical_durable_bytes: 0,
         retained_history_bytes: 0,
@@ -214,6 +217,66 @@ impl fmt::Display for DurableVectorError {
 
 impl std::error::Error for DurableVectorError {}
 
+/// A deterministic amount-per-window ceiling for ephemeral I/O admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WindowedRateBudget {
+    amount: u64,
+    window_ns: u64,
+}
+
+impl WindowedRateBudget {
+    pub fn try_new(amount: u64, window_ns: u64) -> Result<Self, ResourceRequestError> {
+        if window_ns == 0 {
+            return Err(ResourceRequestError::ZeroRateWindow);
+        }
+        Ok(Self { amount, window_ns })
+    }
+
+    pub const fn amount(self) -> u64 {
+        self.amount
+    }
+
+    pub const fn window_ns(self) -> u64 {
+        self.window_ns
+    }
+}
+
+/// Process-local, cancel-correct capacity. These values are never canonical
+/// ledger state and never survive a runtime-obligation boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EphemeralResourceBudget {
+    pub cpu_ns: u64,
+    pub resident_bytes: u64,
+    pub temp_bytes: u64,
+    pub read_iops: WindowedRateBudget,
+    pub write_iops: WindowedRateBudget,
+    pub egress_bytes: u64,
+    pub output_bytes: u64,
+    pub output_rows: u64,
+    pub max_snapshot_age: u64,
+    pub maximum_subscription_backlog: u64,
+}
+
+/// Admission request with an explicit noncanonical/canonical accounting split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResourceRequest {
+    pub ephemeral: EphemeralResourceBudget,
+    pub durable: DurableChargeVector,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceRequestError {
+    ZeroRateWindow,
+}
+
+impl fmt::Display for ResourceRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid ephemeral resource budget: {self:?}")
+    }
+}
+
+impl std::error::Error for ResourceRequestError {}
+
 /// Only these roles may author canonical durable accounting state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResourceAccountingRole {
@@ -226,6 +289,28 @@ pub enum ResourceAccountingRole {
 pub enum ResourceClass {
     Ordinary,
     RegisteredMaintenance,
+}
+
+/// Stable operation tags used by resource-class policy rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LedgerOperationKind {
+    Reserve,
+    Charge,
+    Release,
+    Expire,
+    Transfer,
+    Adjust,
+}
+
+impl LedgerOperationKind {
+    pub const ALL: [Self; 6] = [
+        Self::Reserve,
+        Self::Charge,
+        Self::Release,
+        Self::Expire,
+        Self::Transfer,
+        Self::Adjust,
+    ];
 }
 
 /// One level in the canonical quota hierarchy.
@@ -327,13 +412,23 @@ impl fmt::Display for QuotaPathError {
 impl std::error::Error for QuotaPathError {}
 
 /// One quota bucket's exact accounting state.
+///
+/// Committed usage is class-scoped, and that is the whole point of the
+/// reserve: a charge keeps the class its reservation held, so capacity
+/// consumed under the maintenance lane bills against the maintenance reserve
+/// across the entire reserve→charge→adjust→release lifecycle. A single
+/// classless pool would bill maintenance usage against the ordinary band at
+/// charge time — making a valid reservation unchargeable under ordinary
+/// pressure, and letting maintenance eat the ordinary band when it is empty
+/// (fgdb-a61t).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BucketState {
     hard_limit: DurableChargeVector,
     protected_maintenance_reserve: DurableChargeVector,
     ordinary_reserved: DurableChargeVector,
     maintenance_reserved: DurableChargeVector,
-    committed: DurableChargeVector,
+    ordinary_committed: DurableChargeVector,
+    maintenance_committed: DurableChargeVector,
 }
 
 impl BucketState {
@@ -342,14 +437,16 @@ impl BucketState {
         protected_maintenance_reserve: DurableChargeVector,
         ordinary_reserved: DurableChargeVector,
         maintenance_reserved: DurableChargeVector,
-        committed: DurableChargeVector,
+        ordinary_committed: DurableChargeVector,
+        maintenance_committed: DurableChargeVector,
     ) -> Result<Self, BucketStateError> {
         let state = Self {
             hard_limit,
             protected_maintenance_reserve,
             ordinary_reserved,
             maintenance_reserved,
-            committed,
+            ordinary_committed,
+            maintenance_committed,
         };
         state.validate()?;
         Ok(state)
@@ -362,6 +459,7 @@ impl BucketState {
         Self::try_new(
             hard_limit,
             protected_maintenance_reserve,
+            DurableChargeVector::ZERO,
             DurableChargeVector::ZERO,
             DurableChargeVector::ZERO,
             DurableChargeVector::ZERO,
@@ -384,14 +482,30 @@ impl BucketState {
         self.maintenance_reserved
     }
 
-    pub const fn committed(self) -> DurableChargeVector {
-        self.committed
+    pub const fn ordinary_committed(self) -> DurableChargeVector {
+        self.ordinary_committed
     }
 
-    fn accounting_is_empty(self) -> bool {
-        self.ordinary_reserved.is_zero()
-            && self.maintenance_reserved.is_zero()
-            && self.committed.is_zero()
+    pub const fn maintenance_committed(self) -> DurableChargeVector {
+        self.maintenance_committed
+    }
+
+    /// Total committed usage across both classes. Never overflows on a
+    /// constructible state: validation bounds the sum by `hard_limit`.
+    pub fn committed(self) -> DurableChargeVector {
+        let mut total = DurableChargeVector::ZERO;
+        for axis in DurableChargeAxis::ALL {
+            let value = self.ordinary_committed.axis(axis) + self.maintenance_committed.axis(axis);
+            match axis {
+                DurableChargeAxis::CanonicalDurableBytes => total.canonical_durable_bytes = value,
+                DurableChargeAxis::RetainedHistoryBytes => total.retained_history_bytes = value,
+                DurableChargeAxis::BranchCount => total.branch_count = value,
+                DurableChargeAxis::IndexCount => total.index_count = value,
+                DurableChargeAxis::ViewCount => total.view_count = value,
+                DurableChargeAxis::SubscriptionCount => total.subscription_count = value,
+            }
+        }
+        total
     }
 
     fn validate(self) -> Result<(), BucketStateError> {
@@ -405,13 +519,15 @@ impl BucketState {
                     hard_limit: hard,
                 });
             }
+            // The ordinary band: everything that is not the protected
+            // reserve. Only ordinary usage bills against it.
             let ordinary_limit = hard - reserve;
-            let committed = self.committed.axis(axis);
+            let ordinary_committed = self.ordinary_committed.axis(axis);
             let ordinary_reserved = self.ordinary_reserved.axis(axis);
-            let ordinary_use = committed.checked_add(ordinary_reserved).ok_or(
+            let ordinary_use = ordinary_committed.checked_add(ordinary_reserved).ok_or(
                 BucketStateError::UsageOverflow {
                     axis,
-                    first: committed,
+                    first: ordinary_committed,
                     second: ordinary_reserved,
                 },
             )?;
@@ -422,19 +538,32 @@ impl BucketState {
                     limit: ordinary_limit,
                 });
             }
+            // The maintenance lane: reservations AND committed charges both
+            // bill against the reserve, so a reservation always guarantees
+            // chargeability and maintenance can never eat the ordinary band.
+            let maintenance_committed = self.maintenance_committed.axis(axis);
             let maintenance_reserved = self.maintenance_reserved.axis(axis);
-            if maintenance_reserved > reserve {
+            let maintenance_use = maintenance_committed
+                .checked_add(maintenance_reserved)
+                .ok_or(BucketStateError::UsageOverflow {
+                    axis,
+                    first: maintenance_committed,
+                    second: maintenance_reserved,
+                })?;
+            if maintenance_use > reserve {
                 return Err(BucketStateError::MaintenanceReserveExceeded {
                     axis,
-                    usage: maintenance_reserved,
+                    usage: maintenance_use,
                     reserve,
                 });
             }
-            let total = ordinary_use.checked_add(maintenance_reserved).ok_or(
+            // Implied by the two class laws above, kept as the explicit
+            // backstop the hard limit deserves.
+            let total = ordinary_use.checked_add(maintenance_use).ok_or(
                 BucketStateError::UsageOverflow {
                     axis,
                     first: ordinary_use,
-                    second: maintenance_reserved,
+                    second: maintenance_use,
                 },
             )?;
             if total > hard {
@@ -485,6 +614,221 @@ impl fmt::Display for BucketStateError {
 }
 
 impl std::error::Error for BucketStateError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResourceLimitPolicyEpoch(pub u64);
+
+/// Immutable per-path capacity fixed by a resource-limit policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceBucketPolicy {
+    hard_limit: DurableChargeVector,
+    protected_maintenance_reserve: DurableChargeVector,
+}
+
+impl ResourceBucketPolicy {
+    pub fn try_new(
+        hard_limit: DurableChargeVector,
+        protected_maintenance_reserve: DurableChargeVector,
+    ) -> Result<Self, BucketStateError> {
+        BucketState::empty(hard_limit, protected_maintenance_reserve)?;
+        Ok(Self {
+            hard_limit,
+            protected_maintenance_reserve,
+        })
+    }
+
+    pub const fn hard_limit(self) -> DurableChargeVector {
+        self.hard_limit
+    }
+
+    pub const fn protected_maintenance_reserve(self) -> DurableChargeVector {
+        self.protected_maintenance_reserve
+    }
+
+    fn empty_state(self) -> BucketState {
+        BucketState {
+            hard_limit: self.hard_limit,
+            protected_maintenance_reserve: self.protected_maintenance_reserve,
+            ordinary_reserved: DurableChargeVector::ZERO,
+            maintenance_reserved: DurableChargeVector::ZERO,
+            ordinary_committed: DurableChargeVector::ZERO,
+            maintenance_committed: DurableChargeVector::ZERO,
+        }
+    }
+}
+
+/// Exact operation-tag closure for one accounting class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceClassRule {
+    resource_class: ResourceClass,
+    allowed_operations: BTreeSet<LedgerOperationKind>,
+}
+
+impl ResourceClassRule {
+    pub fn try_new(
+        resource_class: ResourceClass,
+        allowed_operations: impl IntoIterator<Item = LedgerOperationKind>,
+    ) -> Result<Self, ResourceLimitPolicyError> {
+        let mut operations = BTreeSet::new();
+        for operation in allowed_operations {
+            if !operations.insert(operation) {
+                return Err(ResourceLimitPolicyError::DuplicateOperationRule {
+                    resource_class,
+                    operation,
+                });
+            }
+        }
+        Ok(Self {
+            resource_class,
+            allowed_operations: operations,
+        })
+    }
+
+    pub const fn resource_class(&self) -> ResourceClass {
+        self.resource_class
+    }
+
+    pub fn allowed_operations(&self) -> &BTreeSet<LedgerOperationKind> {
+        &self.allowed_operations
+    }
+
+    fn allows(&self, operation: LedgerOperationKind) -> bool {
+        self.allowed_operations.contains(&operation)
+    }
+}
+
+/// Canonical quota tree, capacities, class rules, and maintenance identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceLimitPolicy {
+    epoch: ResourceLimitPolicyEpoch,
+    buckets: BTreeMap<QuotaPath, ResourceBucketPolicy>,
+    class_rules: BTreeMap<ResourceClass, ResourceClassRule>,
+    registered_maintenance_classes: BTreeSet<u16>,
+}
+
+impl ResourceLimitPolicy {
+    pub fn try_new(
+        epoch: ResourceLimitPolicyEpoch,
+        buckets: impl IntoIterator<Item = (QuotaPath, ResourceBucketPolicy)>,
+        class_rules: impl IntoIterator<Item = ResourceClassRule>,
+        registered_maintenance_classes: impl IntoIterator<Item = u16>,
+    ) -> Result<Self, ResourceLimitPolicyError> {
+        let mut bucket_map = BTreeMap::new();
+        for (path, bucket) in buckets {
+            if bucket_map.insert(path.clone(), bucket).is_some() {
+                return Err(ResourceLimitPolicyError::DuplicateBucket { path });
+            }
+        }
+        if bucket_map.is_empty() {
+            return Err(ResourceLimitPolicyError::NoBuckets);
+        }
+        for path in bucket_map.keys() {
+            for ancestor in path.ancestors_inclusive() {
+                if !bucket_map.contains_key(&ancestor) {
+                    return Err(ResourceLimitPolicyError::MissingAncestorBucket {
+                        path: path.clone(),
+                        missing: ancestor,
+                    });
+                }
+            }
+        }
+        let roots = bucket_map.keys().filter(|path| path.depth() == 1).count();
+        if roots != 1 {
+            return Err(ResourceLimitPolicyError::RootCount { actual: roots });
+        }
+
+        let mut rule_map = BTreeMap::new();
+        for rule in class_rules {
+            let resource_class = rule.resource_class;
+            if rule_map.insert(resource_class, rule).is_some() {
+                return Err(ResourceLimitPolicyError::DuplicateClassRule { resource_class });
+            }
+        }
+        for resource_class in [
+            ResourceClass::Ordinary,
+            ResourceClass::RegisteredMaintenance,
+        ] {
+            if !rule_map.contains_key(&resource_class) {
+                return Err(ResourceLimitPolicyError::MissingClassRule { resource_class });
+            }
+        }
+
+        let mut maintenance_classes = BTreeSet::new();
+        for registered_class in registered_maintenance_classes {
+            if !maintenance_classes.insert(registered_class) {
+                return Err(
+                    ResourceLimitPolicyError::DuplicateRegisteredMaintenanceClass {
+                        registered_class,
+                    },
+                );
+            }
+        }
+
+        Ok(Self {
+            epoch,
+            buckets: bucket_map,
+            class_rules: rule_map,
+            registered_maintenance_classes: maintenance_classes,
+        })
+    }
+
+    pub const fn epoch(&self) -> ResourceLimitPolicyEpoch {
+        self.epoch
+    }
+
+    pub fn buckets(&self) -> &BTreeMap<QuotaPath, ResourceBucketPolicy> {
+        &self.buckets
+    }
+
+    pub fn class_rule(&self, resource_class: ResourceClass) -> Option<&ResourceClassRule> {
+        self.class_rules.get(&resource_class)
+    }
+
+    pub fn registered_maintenance_classes(&self) -> &BTreeSet<u16> {
+        &self.registered_maintenance_classes
+    }
+
+    fn allows(&self, resource_class: ResourceClass, operation: LedgerOperationKind) -> bool {
+        self.class_rule(resource_class)
+            .is_some_and(|rule| rule.allows(operation))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResourceLimitPolicyError {
+    NoBuckets,
+    DuplicateBucket {
+        path: QuotaPath,
+    },
+    MissingAncestorBucket {
+        path: QuotaPath,
+        missing: QuotaPath,
+    },
+    RootCount {
+        actual: usize,
+    },
+    DuplicateClassRule {
+        resource_class: ResourceClass,
+    },
+    MissingClassRule {
+        resource_class: ResourceClass,
+    },
+    DuplicateOperationRule {
+        resource_class: ResourceClass,
+        operation: LedgerOperationKind,
+    },
+    DuplicateRegisteredMaintenanceClass {
+        registered_class: u16,
+    },
+}
+
+impl fmt::Display for ResourceLimitPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid resource-limit policy: {self:?}")
+    }
+}
+
+impl std::error::Error for ResourceLimitPolicyError {}
 
 macro_rules! byte_id {
     ($name:ident) => {
@@ -727,6 +1071,19 @@ pub enum LedgerOperation {
     },
 }
 
+impl LedgerOperation {
+    pub const fn kind(&self) -> LedgerOperationKind {
+        match self {
+            Self::Reserve { .. } => LedgerOperationKind::Reserve,
+            Self::Charge { .. } => LedgerOperationKind::Charge,
+            Self::Release { .. } => LedgerOperationKind::Release,
+            Self::Expire { .. } => LedgerOperationKind::Expire,
+            Self::Transfer { .. } => LedgerOperationKind::Transfer,
+            Self::Adjust { .. } => LedgerOperationKind::Adjust,
+        }
+    }
+}
+
 /// Authority and basis fields common to every transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransitionHeader {
@@ -782,6 +1139,7 @@ struct AppliedTransition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceLedger {
     identity: ResourceLedgerIdentity,
+    policy: ResourceLimitPolicy,
     generation: u64,
     buckets: BTreeMap<QuotaPath, BucketState>,
     reservations: BTreeMap<ReservationId, ReservationEntry>,
@@ -792,48 +1150,28 @@ pub struct ResourceLedger {
 }
 
 impl ResourceLedger {
-    /// Creates a generation-zero ledger from policy buckets.
-    ///
-    /// Because this constructor accepts no reservation or charge entries,
-    /// every bucket must start with zero accounted usage. Restored ledgers need
-    /// a separate constructor that validates the complete bucket/entry
-    /// conservation relation rather than manufacturing unowned balances.
+    /// Creates a generation-zero ledger from one immutable limit policy.
     pub fn try_new(
         identity: ResourceLedgerIdentity,
-        buckets: impl IntoIterator<Item = (QuotaPath, BucketState)>,
+        policy: ResourceLimitPolicy,
     ) -> Result<Self, LedgerError> {
-        let mut bucket_map = BTreeMap::new();
-        for (path, state) in buckets {
-            state
-                .validate()
-                .map_err(|cause| LedgerError::BucketRejected {
-                    path: path.clone(),
-                    cause,
-                })?;
-            if !state.accounting_is_empty() {
-                return Err(LedgerError::NonemptyGenesisBucket { path });
-            }
-            if bucket_map.insert(path.clone(), state).is_some() {
-                return Err(LedgerError::DuplicateBucket { path });
-            }
+        let policy_epoch = policy.epoch().0;
+        if identity.limit_policy_epoch != policy_epoch {
+            return Err(LedgerError::LimitPolicyEpochMismatch {
+                identity_epoch: identity.limit_policy_epoch,
+                policy_epoch,
+            });
         }
-        if bucket_map.is_empty() {
-            return Err(LedgerError::NoBuckets);
-        }
-        for path in bucket_map.keys() {
-            for ancestor in path.ancestors_inclusive() {
-                if !bucket_map.contains_key(&ancestor) {
-                    return Err(LedgerError::MissingAncestorBucket {
-                        path: path.clone(),
-                        missing: ancestor,
-                    });
-                }
-            }
-        }
+        let buckets = policy
+            .buckets()
+            .iter()
+            .map(|(path, bucket)| (path.clone(), bucket.empty_state()))
+            .collect();
         Ok(Self {
             identity,
+            policy,
             generation: 0,
-            buckets: bucket_map,
+            buckets,
             reservations: BTreeMap::new(),
             charges: BTreeMap::new(),
             used_reservation_ids: BTreeSet::new(),
@@ -848,6 +1186,10 @@ impl ResourceLedger {
 
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub const fn policy(&self) -> &ResourceLimitPolicy {
+        &self.policy
     }
 
     pub fn bucket(&self, path: &QuotaPath) -> Option<&BucketState> {
@@ -870,7 +1212,7 @@ impl ResourceLedger {
             .applied_transitions
             .get(&transition.header.transition_id)
         {
-            if applied.transition.body_digest != transition.body_digest {
+            if !digest_matches(&applied.transition.body_digest, &transition.body_digest) {
                 return Err(LedgerError::IdempotencyBodyDrift {
                     transition_id: transition.header.transition_id,
                     recorded: applied.transition.body_digest,
@@ -904,6 +1246,21 @@ impl ResourceLedger {
                 actual: transition.header.expected_ledger_generation,
             });
         }
+        let operation_kind = transition.operation.kind();
+        if !self
+            .policy
+            .allows(transition.header.resource_class, operation_kind)
+        {
+            return Err(LedgerError::OperationDisallowedByPolicy {
+                resource_class: transition.header.resource_class,
+                operation: operation_kind,
+            });
+        }
+        validate_policy_owner(
+            &self.policy,
+            transition.header.resource_class,
+            &transition.header.owner,
+        )?;
         let next_generation = self
             .generation
             .checked_add(1)
@@ -1015,7 +1372,6 @@ impl ResourceLedger {
         vector: DurableChargeVector,
         hold: OwnerHold,
     ) -> Result<(), LedgerError> {
-        validate_maintenance_owner(transition.header.resource_class, &transition.header.owner)?;
         if vector.is_zero() {
             return Err(LedgerError::ZeroVector);
         }
@@ -1099,6 +1455,7 @@ impl ResourceLedger {
         add_committed_path_change(
             &mut changes,
             &reservation.path,
+            reservation.class,
             ChangeDirection::Add,
             charged,
         )?;
@@ -1209,7 +1566,7 @@ impl ResourceLedger {
     ) -> Result<(), LedgerError> {
         let snapshot = self.subject_snapshot(subject)?;
         snapshot.validate_binding(transition, expected_generation, exact_vector)?;
-        validate_maintenance_owner(snapshot.class, target_owner)?;
+        validate_policy_owner(&self.policy, snapshot.class, target_owner)?;
         if snapshot.owner == *target_owner && snapshot.path == *target_path {
             return Err(LedgerError::NoopTransfer);
         }
@@ -1291,12 +1648,14 @@ impl ResourceLedger {
         add_committed_path_change(
             &mut changes,
             &charge.path,
+            charge.class,
             ChangeDirection::Subtract,
             before_vector,
         )?;
         add_committed_path_change(
             &mut changes,
             &charge.path,
+            charge.class,
             ChangeDirection::Add,
             after_vector,
         )?;
@@ -1378,8 +1737,18 @@ impl ResourceLedger {
             state.maintenance_reserved = state
                 .maintenance_reserved
                 .checked_add(change.maintenance_add)?;
-            state.committed = state.committed.checked_sub(change.committed_sub)?;
-            state.committed = state.committed.checked_add(change.committed_add)?;
+            state.ordinary_committed = state
+                .ordinary_committed
+                .checked_sub(change.ordinary_committed_sub)?;
+            state.ordinary_committed = state
+                .ordinary_committed
+                .checked_add(change.ordinary_committed_add)?;
+            state.maintenance_committed = state
+                .maintenance_committed
+                .checked_sub(change.maintenance_committed_sub)?;
+            state.maintenance_committed = state
+                .maintenance_committed
+                .checked_add(change.maintenance_committed_add)?;
             state
                 .validate()
                 .map_err(|cause| LedgerError::BucketRejected {
@@ -1398,14 +1767,34 @@ impl ResourceLedger {
     }
 }
 
-fn validate_maintenance_owner(
+fn digest_matches(lhs: &[u8; 32], rhs: &[u8; 32]) -> bool {
+    let difference = lhs.iter().zip(rhs).fold(0_u8, |difference, (left, right)| {
+        difference | (left ^ right)
+    });
+    matches!(difference, 0)
+}
+
+fn validate_policy_owner(
+    policy: &ResourceLimitPolicy,
     class: ResourceClass,
     owner: &ResourceOwnerKey,
 ) -> Result<(), LedgerError> {
-    if class == ResourceClass::RegisteredMaintenance
-        && !matches!(owner, ResourceOwnerKey::Maintenance { .. })
-    {
+    if class != ResourceClass::RegisteredMaintenance {
+        return Ok(());
+    }
+    let ResourceOwnerKey::Maintenance {
+        registered_class, ..
+    } = owner
+    else {
         return Err(LedgerError::MaintenanceReserveRequiresRegisteredOwner);
+    };
+    if !policy
+        .registered_maintenance_classes()
+        .contains(registered_class)
+    {
+        return Err(LedgerError::UnregisteredMaintenanceClass {
+            registered_class: *registered_class,
+        });
     }
     Ok(())
 }
@@ -1488,7 +1877,7 @@ impl SubjectSnapshot {
                 add_path_change(changes, path, self.class, direction, self.vector)
             }
             SubjectComponent::Committed => {
-                add_committed_path_change(changes, path, direction, self.vector)
+                add_committed_path_change(changes, path, self.class, direction, self.vector)
             }
         }
     }
@@ -1548,8 +1937,10 @@ struct BucketChange {
     ordinary_add: DurableChargeVector,
     maintenance_sub: DurableChargeVector,
     maintenance_add: DurableChargeVector,
-    committed_sub: DurableChargeVector,
-    committed_add: DurableChargeVector,
+    ordinary_committed_sub: DurableChargeVector,
+    ordinary_committed_add: DurableChargeVector,
+    maintenance_committed_sub: DurableChargeVector,
+    maintenance_committed_add: DurableChargeVector,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1585,14 +1976,23 @@ fn add_path_change(
 fn add_committed_path_change(
     changes: &mut BTreeMap<QuotaPath, BucketChange>,
     path: &QuotaPath,
+    class: ResourceClass,
     direction: ChangeDirection,
     vector: DurableChargeVector,
 ) -> Result<(), LedgerError> {
     for ancestor in path.ancestors_inclusive() {
         let change = changes.entry(ancestor).or_default();
-        let target = match direction {
-            ChangeDirection::Add => &mut change.committed_add,
-            ChangeDirection::Subtract => &mut change.committed_sub,
+        let target = match (class, direction) {
+            (ResourceClass::Ordinary, ChangeDirection::Add) => &mut change.ordinary_committed_add,
+            (ResourceClass::Ordinary, ChangeDirection::Subtract) => {
+                &mut change.ordinary_committed_sub
+            }
+            (ResourceClass::RegisteredMaintenance, ChangeDirection::Add) => {
+                &mut change.maintenance_committed_add
+            }
+            (ResourceClass::RegisteredMaintenance, ChangeDirection::Subtract) => {
+                &mut change.maintenance_committed_sub
+            }
         };
         *target = target.checked_add(vector)?;
     }
@@ -1601,14 +2001,6 @@ fn add_committed_path_change(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerError {
-    NoBuckets,
-    DuplicateBucket {
-        path: QuotaPath,
-    },
-    MissingAncestorBucket {
-        path: QuotaPath,
-        missing: QuotaPath,
-    },
     UnknownBucket {
         path: QuotaPath,
     },
@@ -1619,8 +2011,9 @@ pub enum LedgerError {
     BucketPlanAllocationFailed {
         requested_buckets: usize,
     },
-    NonemptyGenesisBucket {
-        path: QuotaPath,
+    LimitPolicyEpochMismatch {
+        identity_epoch: u64,
+        policy_epoch: u64,
     },
     Vector(DurableVectorError),
     WrongAuthorityRole {
@@ -1651,7 +2044,14 @@ pub enum LedgerError {
     ChargeIdAlreadyUsed {
         charge_id: ChargeId,
     },
+    OperationDisallowedByPolicy {
+        resource_class: ResourceClass,
+        operation: LedgerOperationKind,
+    },
     MaintenanceReserveRequiresRegisteredOwner,
+    UnregisteredMaintenanceClass {
+        registered_class: u16,
+    },
     UnknownReservation {
         reservation_id: ReservationId,
     },
@@ -1809,20 +2209,45 @@ mod tests {
         }
     }
 
-    fn ledger_with_limit(limit: u64, reserve: u64) -> ResourceLedger {
-        let state = BucketState::empty(capacity(limit), capacity(reserve))
-            .expect("fixture limits are internally consistent");
-        ResourceLedger::try_new(
-            identity(),
+    fn bucket_policy(limit: u64, reserve: u64) -> ResourceBucketPolicy {
+        ResourceBucketPolicy::try_new(capacity(limit), capacity(reserve))
+            .expect("fixture limits are internally consistent")
+    }
+
+    fn policy_from_buckets(
+        buckets: impl IntoIterator<Item = (QuotaPath, ResourceBucketPolicy)>,
+    ) -> ResourceLimitPolicy {
+        ResourceLimitPolicy::try_new(
+            ResourceLimitPolicyEpoch(identity().limit_policy_epoch),
+            buckets,
             [
-                (db_path(), state),
-                (tenant_path(), state),
-                (graph_path(), state),
-                (branch_path(13), state),
-                (branch_path(17), state),
+                ResourceClassRule::try_new(ResourceClass::Ordinary, LedgerOperationKind::ALL)
+                    .expect("ordinary fixture operations are unique"),
+                ResourceClassRule::try_new(
+                    ResourceClass::RegisteredMaintenance,
+                    LedgerOperationKind::ALL,
+                )
+                .expect("maintenance fixture operations are unique"),
             ],
+            [3, 4],
         )
-        .expect("fixture contains every ancestor")
+        .expect("fixture policy is canonical")
+    }
+
+    fn policy_with_limit(limit: u64, reserve: u64) -> ResourceLimitPolicy {
+        let bucket = bucket_policy(limit, reserve);
+        policy_from_buckets([
+            (db_path(), bucket),
+            (tenant_path(), bucket),
+            (graph_path(), bucket),
+            (branch_path(13), bucket),
+            (branch_path(17), bucket),
+        ])
+    }
+
+    fn ledger_with_limit(limit: u64, reserve: u64) -> ResourceLedger {
+        ResourceLedger::try_new(identity(), policy_with_limit(limit, reserve))
+            .expect("fixture contains every ancestor")
     }
 
     fn transition(
@@ -1846,6 +2271,70 @@ mod tests {
             operation,
             body_digest: [seed.wrapping_add(2); 32],
         }
+    }
+
+    #[test]
+    fn resource_request_keeps_ephemeral_limits_out_of_durable_accounting() {
+        let rate = WindowedRateBudget::try_new(40, 1_000).expect("window is nonzero");
+        let request = ResourceRequest {
+            ephemeral: EphemeralResourceBudget {
+                cpu_ns: 10,
+                resident_bytes: 20,
+                temp_bytes: 30,
+                read_iops: rate,
+                write_iops: rate,
+                egress_bytes: 50,
+                output_bytes: 60,
+                output_rows: 70,
+                max_snapshot_age: 80,
+                maximum_subscription_backlog: 90,
+            },
+            durable: vector(100),
+        };
+        assert_eq!(request.ephemeral.read_iops.amount(), 40);
+        assert_eq!(request.ephemeral.read_iops.window_ns(), 1_000);
+        assert_eq!(request.durable, vector(100));
+        assert_eq!(DurableChargeVector::FORMAT_VERSION, 1);
+        assert_eq!(
+            WindowedRateBudget::try_new(1, 0),
+            Err(ResourceRequestError::ZeroRateWindow)
+        );
+    }
+
+    #[test]
+    fn limit_policy_requires_ancestor_closure_and_matching_epoch() {
+        let bucket = bucket_policy(100, 10);
+        let rules = [
+            ResourceClassRule::try_new(ResourceClass::Ordinary, LedgerOperationKind::ALL)
+                .expect("operation tags are unique"),
+            ResourceClassRule::try_new(
+                ResourceClass::RegisteredMaintenance,
+                LedgerOperationKind::ALL,
+            )
+            .expect("operation tags are unique"),
+        ];
+        assert_eq!(
+            ResourceLimitPolicy::try_new(
+                ResourceLimitPolicyEpoch(5),
+                [(db_path(), bucket), (graph_path(), bucket)],
+                rules,
+                [3],
+            ),
+            Err(ResourceLimitPolicyError::MissingAncestorBucket {
+                path: graph_path(),
+                missing: tenant_path(),
+            })
+        );
+
+        let mut wrong_identity = identity();
+        wrong_identity.limit_policy_epoch += 1;
+        assert_eq!(
+            ResourceLedger::try_new(wrong_identity, policy_with_limit(100, 10)),
+            Err(LedgerError::LimitPolicyEpochMismatch {
+                identity_epoch: 6,
+                policy_epoch: 5,
+            })
+        );
     }
 
     #[test]
@@ -1970,6 +2459,56 @@ mod tests {
     }
 
     #[test]
+    fn resource_class_rules_reject_disallowed_operations_before_state_lookup() {
+        let bucket = bucket_policy(100, 10);
+        let policy = ResourceLimitPolicy::try_new(
+            ResourceLimitPolicyEpoch(identity().limit_policy_epoch),
+            [
+                (db_path(), bucket),
+                (tenant_path(), bucket),
+                (graph_path(), bucket),
+                (branch_path(13), bucket),
+            ],
+            [
+                ResourceClassRule::try_new(ResourceClass::Ordinary, [LedgerOperationKind::Reserve])
+                    .expect("one operation is unique"),
+                ResourceClassRule::try_new(
+                    ResourceClass::RegisteredMaintenance,
+                    LedgerOperationKind::ALL,
+                )
+                .expect("operation tags are unique"),
+            ],
+            [3],
+        )
+        .expect("restricted policy is canonical");
+        let mut ledger =
+            ResourceLedger::try_new(identity(), policy).expect("policy epoch matches identity");
+        let before = ledger.clone();
+        let charge = transition(
+            &ledger,
+            29,
+            owner(2),
+            branch_path(13),
+            ResourceClass::Ordinary,
+            LedgerOperation::Charge {
+                reservation_id: ReservationId([28; 32]),
+                expected_reservation_generation: 0,
+                charge_id: ChargeId([27; 32]),
+                vector: vector(1),
+                stable_subject_key: StableSubjectKey([26; 32]),
+            },
+        );
+        assert_eq!(
+            ledger.apply(&charge),
+            Err(LedgerError::OperationDisallowedByPolicy {
+                resource_class: ResourceClass::Ordinary,
+                operation: LedgerOperationKind::Charge,
+            })
+        );
+        assert_eq!(ledger, before);
+    }
+
+    #[test]
     fn maintenance_reserve_requires_a_registered_owner_across_transfer() {
         let mut ledger = ledger_with_limit(100, 20);
         let before = ledger.clone();
@@ -1988,6 +2527,26 @@ mod tests {
         assert_eq!(
             ledger.apply(&invalid_reserve),
             Err(LedgerError::MaintenanceReserveRequiresRegisteredOwner)
+        );
+        assert_eq!(ledger, before);
+
+        let unregistered_reserve = transition(
+            &ledger,
+            35,
+            maintenance_owner(9),
+            branch_path(13),
+            ResourceClass::RegisteredMaintenance,
+            LedgerOperation::Reserve {
+                reservation_id: ReservationId([34; 32]),
+                vector: vector(10),
+                hold: OwnerHold::None,
+            },
+        );
+        assert_eq!(
+            ledger.apply(&unregistered_reserve),
+            Err(LedgerError::UnregisteredMaintenanceClass {
+                registered_class: 9,
+            })
         );
         assert_eq!(ledger, before);
 
@@ -2157,19 +2716,17 @@ mod tests {
         assert_eq!(entry.generation(), 1);
         assert_eq!(entry.owner(), &owner(6));
 
-        let ancestor_state =
-            BucketState::empty(capacity(100), capacity(10)).expect("ancestor limits are valid");
-        let constrained_target =
-            BucketState::empty(capacity(50), capacity(10)).expect("target limits are valid");
+        let ancestor_policy = bucket_policy(100, 10);
+        let constrained_target = bucket_policy(50, 10);
         let mut constrained = ResourceLedger::try_new(
             identity(),
-            [
-                (db_path(), ancestor_state),
-                (tenant_path(), ancestor_state),
-                (graph_path(), ancestor_state),
-                (branch_path(13), ancestor_state),
+            policy_from_buckets([
+                (db_path(), ancestor_policy),
+                (tenant_path(), ancestor_policy),
+                (graph_path(), ancestor_policy),
+                (branch_path(13), ancestor_policy),
                 (branch_path(17), constrained_target),
-            ],
+            ]),
         )
         .expect("constrained fixture contains every ancestor");
         let fill = transition(
@@ -2897,20 +3454,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_overflow_and_nonempty_genesis_fail_without_mutation() {
-        let nonempty = BucketState::try_new(
-            capacity(100),
-            capacity(10),
-            vector(1),
-            DurableChargeVector::ZERO,
-            DurableChargeVector::ZERO,
-        )
-        .expect("nonempty bucket is capacity-valid");
-        assert_eq!(
-            ResourceLedger::try_new(identity(), [(db_path(), nonempty)]),
-            Err(LedgerError::NonemptyGenesisBucket { path: db_path() })
-        );
-
+    fn generation_overflow_fails_without_mutation() {
         let mut ledger = ledger_with_limit(100, 10);
         ledger.generation = u64::MAX;
         let before = ledger.clone();

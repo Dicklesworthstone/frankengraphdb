@@ -1133,20 +1133,20 @@ impl DecisionPolicyEpoch {
         let window = envelope
             .calibration_window()
             .ok_or(DecisionPolicyEpochError::RegimeEvidenceWindowMissing)?;
-        if window.start_seq != expected_start || window.end_seq != expected_end {
+        if window.start_seq() != expected_start || window.end_seq() != expected_end {
             return Err(DecisionPolicyEpochError::RegimeEvidenceWindowMismatch {
                 expected_start,
                 expected_end,
-                actual_start: window.start_seq,
-                actual_end: window.end_seq,
+                actual_start: window.start_seq(),
+                actual_end: window.end_seq(),
             });
         }
-        if fallback_sequence < window.start_seq || fallback_sequence >= window.end_seq {
+        if fallback_sequence < window.start_seq() || fallback_sequence >= window.end_seq() {
             return Err(
                 DecisionPolicyEpochError::RegimeFallbackSequenceOutsideWindow {
                     fallback_sequence,
-                    window_start: window.start_seq,
-                    window_end: window.end_seq,
+                    window_start: window.start_seq(),
+                    window_end: window.end_seq(),
                 },
             );
         }
@@ -1542,7 +1542,7 @@ mod tests {
     };
     use asupersync::runtime::changepoint::ChangeDirection;
     use fgdb_claim::StatisticalErrorControl;
-    use fgdb_evidence::CalibrationWindow;
+    use fgdb_evidence::{CalibrationWindow, PropensitySupportIdentity, StrataIdentity};
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -1612,6 +1612,8 @@ mod tests {
             statistical_claim(),
             evidence_oid,
             table_oid,
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             None,
             7,
             FallbackBehavior::DeterministicPolicy {
@@ -1715,6 +1717,8 @@ mod tests {
             statistical_claim(),
             evidence_oid,
             fallback_oid,
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             Some(CalibrationWindow::new(60, 66)?),
             7,
             FallbackBehavior::DeterministicPolicy {
@@ -2194,6 +2198,8 @@ mod tests {
             },
             oid(10),
             oid(30),
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             None,
             7,
             FallbackBehavior::DeterministicPolicy {
@@ -2245,6 +2251,8 @@ mod tests {
             statistical_claim(),
             oid(10),
             oid(30),
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
             None,
             7,
             FallbackBehavior::FailClosed,

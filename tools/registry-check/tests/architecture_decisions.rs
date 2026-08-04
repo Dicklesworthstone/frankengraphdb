@@ -5,11 +5,12 @@
 //! and asserts that the public validator rejects the resulting graph.
 
 use registry_check::architecture::{
-    self, ALLOWED_RELATIONSHIP_KINDS, ArchitectureRegistry, PINNED_BEAD_BINDING_HASH,
-    PINNED_BEAD_COUNT, PINNED_BET_LABEL_COUNT, PINNED_BIBLIOGRAPHY_COUNT,
-    PINNED_BIBLIOGRAPHY_ID_HASH, PINNED_DECISION_COUNT, PINNED_DECISION_ID_HASH,
-    PINNED_DIRECT_OWNER_COUNT, PINNED_EXACT_OVERRIDE_COUNT, PINNED_EXTERNAL_REVIEW_DECISION_COUNT,
-    PINNED_EXTERNAL_REVIEW_HISTORY_HASH, PINNED_FAMILY_RULE_COUNT, PINNED_SEMANTIC_CONTRACT_HASH,
+    self, ALLOWED_RELATIONSHIP_KINDS, ArchitectureRegistry, PINNED_BEAD_COUNT_FLOOR,
+    PINNED_BET_LABEL_FLOOR, PINNED_BIBLIOGRAPHY_COUNT, PINNED_BIBLIOGRAPHY_ID_HASH,
+    PINNED_DECISION_COUNT, PINNED_DECISION_ID_HASH, PINNED_DIRECT_OWNER_FLOOR,
+    PINNED_EXACT_OVERRIDE_FLOOR, PINNED_EXTERNAL_REVIEW_DECISION_COUNT,
+    PINNED_EXTERNAL_REVIEW_HISTORY_HASH, PINNED_FAMILY_RULE_FLOOR, PINNED_RULE_BINDING_HASH,
+    PINNED_SEMANTIC_CONTRACT_HASH,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -161,7 +162,13 @@ fn architecture_bead_provenance_is_total_pinned_and_bidirectional() {
         first, second,
         "provenance order and contents must be stable"
     );
-    assert_eq!(first.len(), PINNED_BEAD_COUNT);
+    // A floor: another pane's `br create` may legitimately have grown the
+    // corpus since this pin was frozen, and that must not fail the suite.
+    assert!(
+        first.len() >= PINNED_BEAD_COUNT_FLOOR,
+        "resolved {} beads, floor is {PINNED_BEAD_COUNT_FLOOR}",
+        first.len()
+    );
     assert!(
         first
             .windows(2)
@@ -221,22 +228,31 @@ fn architecture_bead_provenance_is_total_pinned_and_bidirectional() {
             );
         }
     }
+    for (class, floor) in [
+        ("bet_label", PINNED_BET_LABEL_FLOOR),
+        ("direct_owner", PINNED_DIRECT_OWNER_FLOOR),
+        ("exact_override", PINNED_EXACT_OVERRIDE_FLOOR),
+        ("family_rule", PINNED_FAMILY_RULE_FLOOR),
+    ] {
+        let actual = class_counts.get(class).copied().unwrap_or(0);
+        assert!(
+            actual >= floor,
+            "resolution class {class:?} has {actual} rows, floor is {floor}"
+        );
+    }
+    // Keyed by rule, so this is an EQUALITY: no bead can move it, and a rule
+    // edit must. The corpus-wide binding hash below is a projection, not a pin.
     assert_eq!(
-        class_counts,
-        BTreeMap::from([
-            ("bet_label", PINNED_BET_LABEL_COUNT),
-            ("direct_owner", PINNED_DIRECT_OWNER_COUNT),
-            ("exact_override", PINNED_EXACT_OVERRIDE_COUNT),
-            ("family_rule", PINNED_FAMILY_RULE_COUNT),
-        ])
+        architecture::recompute_rule_binding_hash(&registry),
+        PINNED_RULE_BINDING_HASH
     );
     assert_eq!(
-        architecture::recompute_bead_binding_hash(&first),
-        PINNED_BEAD_BINDING_HASH
+        registry.bead_provenance.rule_binding_hash,
+        PINNED_RULE_BINDING_HASH
     );
-    assert_eq!(
-        registry.bead_provenance.binding_hash,
-        PINNED_BEAD_BINDING_HASH
+    assert!(
+        architecture::recompute_bead_binding_hash(&first).starts_with("fnv1a64:"),
+        "the corpus projection must still compute"
     );
 
     let entries: BTreeMap<&str, &architecture::BeadProvenanceEntry> = first
@@ -453,25 +469,51 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
         .decision_ids = vec!["FG-ADR-CON-02".into()];
     assert_eq!(
         violation_codes(&zero_match_rule),
-        BTreeSet::from(["semantic_contract_hash_mismatch".to_string()]),
-        "even currently zero-match routing rules are independently pinned"
+        BTreeSet::from([
+            "semantic_contract_hash_mismatch".to_string(),
+            "bead_rule_binding_hash_mismatch".to_string(),
+            "independent_bead_rule_binding_hash_mismatch".to_string(),
+        ]),
+        "even currently zero-match routing rules are independently pinned, and \
+         retargeting one now also moves the rule-keyed binding hash"
     );
 
     let mut binding = real_registry();
-    binding.bead_provenance.binding_hash = "fnv1a64:0000000000000000".into();
-    assert_code(&binding, "bead_binding_hash_mismatch");
+    binding.bead_provenance.rule_binding_hash = "fnv1a64:0000000000000000".into();
+    assert_code(&binding, "bead_rule_binding_hash_mismatch");
+
+    // Raising a floor ABOVE the observed corpus must still fire. This is the
+    // vacuity control for the floors: a bound nothing can violate protects
+    // nothing, and `<` would silently pass every one of these.
+    //
+    // Each mutation is derived from the OBSERVED count, not from the declared
+    // floor. Another pane's `br create` legitimately lifts the corpus above the
+    // floor, and `declared + 1` then lands at or under the actual — which is
+    // how this control first went vacuous the moment the corpus reached 402
+    // against a floor of 401.
+    let observed = architecture::bead_provenance_index(&real_registry(), &repo_root())
+        .expect("provenance resolves");
+    let observed_total = observed.len();
+    let observed_direct = observed
+        .iter()
+        .filter(|entry| entry.resolution_class == "direct_owner")
+        .count();
+    let observed_risk = observed
+        .iter()
+        .filter(|entry| entry.rule_id == "risk-governance")
+        .count();
 
     let mut count = real_registry();
-    count.bead_provenance.bead_count += 1;
+    count.bead_provenance.bead_count_floor = observed_total + 1;
     let codes = violation_codes(&count);
-    assert!(codes.contains("bead_count_pin"));
-    assert!(codes.contains("bead_source_count"));
+    assert!(codes.contains("bead_floor_pin"));
+    assert!(codes.contains("bead_source_count_below_floor"));
 
     let mut class_count = real_registry();
-    class_count.bead_provenance.direct_owner_count += 1;
+    class_count.bead_provenance.direct_owner_floor = observed_direct + 1;
     let codes = violation_codes(&class_count);
-    assert!(codes.contains("bead_count_pin"));
-    assert!(codes.contains("bead_resolution_class_count"));
+    assert!(codes.contains("bead_floor_pin"));
+    assert!(codes.contains("bead_resolution_class_count_below_floor"));
 
     let mut family_count = real_registry();
     family_count
@@ -479,8 +521,70 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
         .iter_mut()
         .find(|family| family.id == "risk-governance")
         .expect("risk family exists")
-        .expected_match_count += 1;
-    assert_code(&family_count, "bead_family_match_count");
+        .min_match_count = observed_risk + 1;
+    assert_code(&family_count, "bead_family_match_count_below_floor");
+}
+
+/// Positive control for the two floor-pin laws below.  An equality pin that
+/// never matches the shipped registry would make every negative below fire for
+/// the wrong reason.
+#[test]
+fn architecture_bead_family_floor_pins_match_the_shipped_registry() {
+    let codes = violation_codes(&real_registry());
+    assert!(!codes.contains("bead_family_floor_pin"), "{codes:?}");
+    assert!(!codes.contains("bead_family_floor_unpinned"), "{codes:?}");
+}
+
+/// The aggregate pins fix only the SUM of the per-family floors, so a
+/// sum-preserving rebalance moves one family's tripwire onto another with every
+/// aggregate law still green.  The corpus test `observed >= floor` is the only
+/// other objection, and it is silent whenever both families have slack —
+/// measured 2026-07-27, this exact mutation was accepted with ZERO violations
+/// on a corpus carrying slack 1 on each of these two families.
+#[test]
+fn architecture_neg_bead_family_floor_rebalance_is_pinned() {
+    let mut rebalanced = real_registry();
+    for (id, from, to) in [("risk-governance", 7, 6), ("workstream-w2", 1, 2)] {
+        let family = rebalanced
+            .bead_families
+            .iter_mut()
+            .find(|family| family.id == id)
+            .expect("family exists");
+        assert_eq!(
+            family.min_match_count, from,
+            "{id} floor moved; re-derive this mutation"
+        );
+        family.min_match_count = to;
+    }
+    let total: usize = rebalanced
+        .bead_families
+        .iter()
+        .map(|family| family.min_match_count)
+        .sum();
+    assert_eq!(
+        total, PINNED_FAMILY_RULE_FLOOR,
+        "the rebalance must preserve the pinned sum, or it proves the wrong law"
+    );
+    let codes = violation_codes(&rebalanced);
+    assert!(codes.contains("bead_family_floor_pin"), "{codes:?}");
+    assert!(
+        !codes.contains("bead_family_floor_total"),
+        "the aggregate law must stay green here, or this negative is redundant: {codes:?}"
+    );
+}
+
+/// Completeness guard.  Without it the pin fails OPEN: a family that is not
+/// named in `PINNED_BEAD_FAMILY_FLOORS` would simply be unconstrained.
+#[test]
+fn architecture_neg_bead_family_floor_table_must_cover_every_family() {
+    let mut renamed = real_registry();
+    renamed
+        .bead_families
+        .iter_mut()
+        .find(|family| family.id == "workstream-w9")
+        .expect("w9 family exists")
+        .id = "workstream-w9x".into();
+    assert_code(&renamed, "bead_family_floor_unpinned");
 }
 
 #[test]
@@ -828,4 +932,630 @@ fn architecture_neg_planned_and_governance_entrypoints_cannot_claim_implementati
         !implementation.contains(&"cargo-test:architecture_decisions".to_string()),
         "scope mismatch must fail closed rather than laundering governance as implementation"
     );
+}
+
+/// The concurrent-writer lock for fgdb-lzol.
+///
+/// `.beads/issues.jsonl` has N writers. Under the old equality pins, a bead
+/// created by ANY pane invalidated every other pane's just-frozen pins, so a
+/// correct pane racing another correct pane still went red. That defect only
+/// exists under N>1, so a single-writer test cannot see it.
+///
+/// The reachable states of "pane A freezes while pane B creates" are exactly
+/// the corpora that are supersets of what A read. This walks a prefix of that
+/// space with real files and the real validator, and the deletion control at
+/// the end proves the floors are not vacuously satisfied.
+#[cfg(unix)]
+#[test]
+fn concurrent_bead_creation_cannot_red_another_panes_tree() {
+    use std::fs;
+
+    let root = repo_root();
+    let corpus = fs::read_to_string(root.join(".beads/issues.jsonl")).expect("corpus reads");
+
+    // A pid-scoped fixture: a shared fixture name lets a concurrent pane's run
+    // delete this one's tree mid-test and fail a different assertion each time.
+    let fixture = std::env::temp_dir().join(format!(
+        "fgdb-lzol-concurrent-writers-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(fixture.join(".beads")).expect("fixture root");
+    for entry in fs::read_dir(&root).expect("repo root reads") {
+        let entry = entry.expect("entry");
+        if entry.file_name() == ".beads" {
+            continue;
+        }
+        let link = fixture.join(entry.file_name());
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(entry.path(), &link).ok();
+    }
+    let beads = fixture.join(".beads/issues.jsonl");
+
+    let write_and_validate = |text: &str| -> Vec<String> {
+        fs::write(&beads, text).expect("fixture corpus writes");
+        let registry = architecture::load_from_repo(&fixture).expect("fixture registry loads");
+        architecture::validate_architecture(&registry, &fixture)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect()
+    };
+
+    // Control: the fixture must reproduce the repo's own verdict. Without this,
+    // an empty violation set could mean the fixture is not being read at all.
+    //
+    // DIFFERENTIAL, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This
+    // asserted the mirror was EMPTY, which is the negation of the very condition the
+    // test detects: when an unlabelled bead redded the tree, this guard aborted here
+    // and could not warn anyone -- available exactly when nothing was wrong. Equality
+    // against the repo's own verdict keeps the whole protection (a fixture that is not
+    // being read produces a DIFFERENT set, not an empty one) while tolerating ambient
+    // red, and the property below is then asserted as "creation ADDS nothing".
+    let repo_verdict: Vec<String> = {
+        let repo_registry = architecture::load_from_repo(&root).expect("repo registry loads");
+        architecture::validate_architecture(&repo_registry, &root)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect()
+    };
+    let mirror_verdict = write_and_validate(&corpus);
+    assert_eq!(
+        mirror_verdict, repo_verdict,
+        "the unmodified fixture must reproduce the repo's own verdict, not merely be empty"
+    );
+
+    // Pane B creates k beads while pane A holds a freeze taken before any of
+    // them landed. Every k must leave pane A's tree green.
+    for k in 1..=5 {
+        let mut grown = corpus.clone();
+        for i in 0..k {
+            grown.push_str(&format!(
+                "{{\"id\":\"fgdb-lzolrace{i}\",\"title\":\"concurrent create\",\"status\":\"open\",\"labels\":[\"b1\"]}}\n"
+            ));
+        }
+        let codes = write_and_validate(&grown);
+        assert_eq!(
+            codes, repo_verdict,
+            "{k} concurrently created bead(s) changed pane A's verdict"
+        );
+    }
+
+    // Vacuity control. Floors that never fire would pass every assertion above
+    // while protecting nothing, so losing a record MUST still be caught.
+    let first_line_end = corpus.find('\n').expect("corpus has a first record") + 1;
+    let shrunk = corpus[first_line_end..].to_string();
+    let codes = write_and_validate(&shrunk);
+    assert!(
+        codes.iter().any(|code| code.ends_with("_below_floor")),
+        "deleting a bead must trip a floor, got {codes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The generated document (fgdb-adr-doc-prose-unchecked-and-drifted-uyt2)
+// ---------------------------------------------------------------------------
+//
+// Measured on main at 82e1a93, before any of this existed: the document had
+// taken exactly ONE commit in its life (f805ec7) while the registry it projects
+// had taken 48 and its validator 51. Of the 61 atomic checkable claims in its
+// unchecked prose, 58 were still true and 3 had drifted -- the bead-coverage
+// count (294, against a declared floor of 401), the sentence calling the class
+// counts "pinned" after 4a01ce8 made them floors, and the bibliography block's
+// plan line range (3120-3123, against 3196-3199 since bfdc44d). Four further
+// statements are not mechanically checkable by nature and are deliberately
+// left as prose that says so.
+
+/// Render a byte count the way the record renders one.
+fn thousands(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// Every registry fact the record is supposed to project, in its rendered form.
+///
+/// BOTH halves of this are pinned, because a generated document has a vacuity
+/// mode a byte-compare cannot see: if the generator quietly stops rendering the
+/// floors table, `--write` removes it from the document too and the comparison
+/// stays green forever. So the list is DERIVED from the registry -- adding a
+/// category or a source block moves its length -- and every element must be
+/// found in the rendered bytes.
+fn projected_facts(registry: &ArchitectureRegistry) -> Vec<String> {
+    let header = &registry.registry;
+    let provenance = &registry.bead_provenance;
+    let mut facts = vec![
+        format!("`{}*`", header.decision_id_prefix),
+        provenance.source_path.clone(),
+        provenance.rule_binding_hash.clone(),
+    ];
+    for category in &header.allowed_categories {
+        facts.push(format!("| `{category}` |"));
+    }
+    for relationship in &header.allowed_relationship_kinds {
+        facts.push(format!("| `{relationship}` |"));
+    }
+    for tier in &provenance.resolution_precedence {
+        facts.push(format!("| `{tier}` |"));
+    }
+    for label in &provenance.allowed_bet_labels {
+        facts.push(format!("`{label}`"));
+    }
+    for floor in [
+        provenance.bead_count_floor,
+        provenance.direct_owner_floor,
+        provenance.bet_label_floor,
+        provenance.exact_override_floor,
+        provenance.family_rule_floor,
+    ] {
+        facts.push(format!("≥ {floor}"));
+    }
+    for block in &registry.source_blocks {
+        facts.push(format!("| `{}` |", block.id));
+        facts.push(format!("| `{}` |", block.plan_path));
+        facts.push(format!(
+            "| {}–{} |",
+            block.plan_start_line, block.plan_end_line
+        ));
+        facts.push(format!("| {} |", block.line_count));
+        facts.push(format!("| {} |", thousands(block.byte_count)));
+        facts.push(format!("`{}`", block.fnv1a64));
+    }
+    facts
+}
+
+/// 3 identity, 12 categories, 6 relationships, 4 tiers, 6 bet labels, 5 floors,
+/// and 2 source blocks of 6 cells each. The plan-path cell repeats per block on
+/// purpose: each block asserts its own source independently.
+const PROJECTED_FACT_COUNT: usize = 48;
+
+#[test]
+fn architecture_document_matches_registry() {
+    let registry = real_registry();
+    assert!(
+        architecture::check_document(&registry, &repo_root()).expect("document regenerates"),
+        "{} differs from the regenerated bytes; run `{} --write`",
+        architecture::DOCUMENT_PATH,
+        architecture::REPLAY_COMMAND
+    );
+}
+
+#[test]
+fn architecture_document_generation_is_deterministic() {
+    let registry = real_registry();
+    let root = repo_root();
+    let first = architecture::generate_document(&registry, &root).expect("generate");
+    let second = architecture::generate_document(&registry, &root).expect("generate");
+    assert_eq!(first, second, "document generation must be deterministic");
+}
+
+#[test]
+fn architecture_document_projects_every_registry_fact() {
+    let registry = real_registry();
+    let document =
+        architecture::generate_document(&registry, &repo_root()).expect("document generates");
+
+    let facts = projected_facts(&registry);
+    assert_eq!(
+        facts.len(),
+        PROJECTED_FACT_COUNT,
+        "the registry now declares a different number of projectable facts; \
+         move PROJECTED_FACT_COUNT deliberately and render the new rows"
+    );
+    let missing: Vec<&String> = facts
+        .iter()
+        .filter(|fact| !document.contains(fact.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the record stopped projecting {} of {PROJECTED_FACT_COUNT} registry facts: {missing:?}",
+        missing.len()
+    );
+
+    // The control that must fire. Deleting the five floor rows is the exact
+    // shape of the vacuity hazard: the generator drops a fact, `--write` drops
+    // it from the document, and the byte-compare above is happy. The accounting
+    // has to see it, and has to see exactly five.
+    let stripped: String = document
+        .lines()
+        .filter(|line| !line.contains("≥ "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lost: Vec<&String> = facts
+        .iter()
+        .filter(|fact| !stripped.contains(fact.as_str()))
+        .collect();
+    assert_eq!(
+        lost.len(),
+        5,
+        "removing the floors table must cost exactly the five floor facts, lost {lost:?}"
+    );
+}
+
+#[test]
+fn architecture_document_numbers_are_derived_not_typed() {
+    let mut registry = real_registry();
+    let root = repo_root();
+    let before = architecture::generate_document(&registry, &root).expect("generate");
+    assert!(
+        before.contains("≥ 401") && !before.contains("≥ 402"),
+        "the record must render the declared record floor, 401"
+    );
+
+    // A typed number would survive this; a derived one cannot.
+    registry.bead_provenance.bead_count_floor = 402;
+    let after = architecture::generate_document(&registry, &root).expect("generate");
+    assert!(
+        after.contains("≥ 402") && !after.contains("≥ 401"),
+        "raising the declared floor to 402 must move the rendered bytes"
+    );
+
+    // Same law for the source-block table, whose bibliography range sat at
+    // 3120-3123 for 48 registry commits while the registry said 3196-3199.
+    assert!(
+        before.contains("| 3196–3199 |") && !before.contains("3120–3123"),
+        "the source-block table must render the registry's own line range"
+    );
+}
+
+#[test]
+fn architecture_neg_gloss_tables_cannot_fail_open() {
+    // A vocabulary member with no gloss would silently vanish from the rendered
+    // table while the document went on claiming to cover the whole vocabulary.
+    let mut registry = real_registry();
+    registry
+        .registry
+        .allowed_categories
+        .push("unglossed_category".into());
+    assert_code(&registry, "document_gloss_missing");
+
+    // And the reverse: a gloss for a member the registry no longer declares
+    // renders a row for a vocabulary that does not exist.
+    let mut registry = real_registry();
+    registry
+        .registry
+        .allowed_relationship_kinds
+        .retain(|kind| kind != "test_only_oracle");
+    assert_code(&registry, "document_gloss_orphan");
+}
+
+/// The three drifted statements, replayed against the on-disk comparison.
+///
+/// Each mutation is inside a region the generator owns, which is the question
+/// worth asking of a pinned document: an appended line lands where nothing
+/// looks, so it only proves the file is read at all. The truncation control at
+/// the end asks that weaker question too, so a reader that somehow stopped
+/// opening the file cannot pass by accident.
+#[cfg(unix)]
+#[test]
+fn architecture_neg_hand_edited_document_is_rejected() {
+    use std::fs;
+
+    let root = repo_root();
+    let registry = real_registry();
+    let generated = architecture::generate_document(&registry, &root).expect("generate");
+
+    // A pid-scoped fixture: a shared name lets a concurrent pane's run delete
+    // this one's tree mid-test and fail a different assertion each round.
+    let fixture = std::env::temp_dir().join(format!("fgdb-uyt2-adr-drift-{}", std::process::id()));
+    fs::create_dir_all(fixture.join("docs")).expect("fixture root");
+    for entry in fs::read_dir(&root).expect("repo root reads") {
+        let entry = entry.expect("entry");
+        if entry.file_name() == "docs" {
+            continue;
+        }
+        let link = fixture.join(entry.file_name());
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(entry.path(), &link).ok();
+    }
+    let document = fixture.join(architecture::DOCUMENT_PATH);
+
+    let accepts = |text: &str| -> bool {
+        fs::write(&document, text).expect("fixture document writes");
+        architecture::check_document(&registry, &fixture).expect("fixture document reads")
+    };
+
+    // Control: the fixture must reproduce the repo's own verdict. Without it an
+    // "it was rejected" result could mean the fixture is simply not the repo.
+    assert!(
+        accepts(&generated),
+        "the unmodified fixture must be as green as the repo it mirrors"
+    );
+
+    // D1 -- the coverage count. This exact sentence sat in the record from
+    // f805ec7 until this bead, stale by 107 against the declared floor.
+    let d1 = generated.replace(
+        "The provenance closure is **total**",
+        "The provenance closure covers all 294 Beads records",
+    );
+    assert_ne!(d1, generated, "D1 mutation must change the text");
+    assert!(!accepts(&d1), "a hand-restored bead count must be rejected");
+
+    // D2 -- "pinned" where 4a01ce8 made the class counts monotone floors.
+    let d2 = generated.replace("monotone **floors**, never equalities", "pinned");
+    assert_ne!(d2, generated, "D2 mutation must change the text");
+    assert!(
+        !accepts(&d2),
+        "calling the floors pins again must be rejected"
+    );
+
+    // D3 -- the bibliography block's plan line range, stale since bfdc44d.
+    let d3 = generated.replace("| 3196–3199 |", "| 3120–3123 |");
+    assert_ne!(d3, generated, "D3 mutation must change the text");
+    assert!(
+        !accepts(&d3),
+        "a stale source-block line range must be rejected"
+    );
+
+    // A one-character edit inside a frozen excerpt, to show the generator did
+    // not weaken what source_check already guaranteed.
+    let excerpt = generated.replace("six bets", "seven bets");
+    assert_ne!(excerpt, generated, "excerpt mutation must change the text");
+    assert!(!accepts(&excerpt), "an edited excerpt must be rejected");
+
+    // Weak control, asked last: destroy the content entirely. This only proves
+    // the file is opened, which is why it cannot stand in for the four above.
+    assert!(!accepts(""), "an emptied document must be rejected");
+
+    // The operator-facing half of the contract: the exact code the gate reports
+    // and the exact command that repairs it. `check_document` returning false is
+    // useless to whoever has to fix it if the diagnostic does not say which flag
+    // to run, so both are pinned here rather than left to the binary.
+    let drift = architecture::document_drift_violation();
+    assert_eq!(drift.code, "document_drift");
+    assert_eq!(drift.contradiction_class, "source_integrity");
+    assert!(
+        drift
+            .message
+            .contains(&format!("{} --write", architecture::REPLAY_COMMAND))
+            && drift.message.contains(architecture::DOCUMENT_PATH),
+        "the drift diagnostic must name the document and the repair command, got {:?}",
+        drift.message
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Orphan diagnosis (bead fgdb-bead-provenance-orphan-workstream-tag-7u5m)
+//
+// A bead that resolves by no mechanism used to be told only that it failed:
+//
+//     bead has no direct owner, bet label, exact override, or family rule
+//
+// which is one sentence for three structurally different faults needing three
+// different repairs. Measured on the 405-record corpus at 2326fe8: 232 records
+// carry a workstream/gate tag (239 label-instances over 16 tokens), 36 carry no
+// labels at all, and 16 carry only labels irrelevant to provenance. Diagnosing
+// a single orphan therefore cost a `git log -S` per record.
+//
+// The repair is diagnostic precision, NOT a prohibition. A workstream tag is a
+// legitimate, pervasive, orthogonal taxonomy — rejecting one would redden 232
+// records to catch the handful that are actually misfiled.
+// ---------------------------------------------------------------------------
+
+/// The real beads corpus plus planted records, under a scratch root.
+///
+/// `tag` must be unique per test: these run in parallel and the builder opens
+/// its fixture by destroying it.
+fn corpus_with(tag: &str, planted: &[(&str, &[&str])]) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("fgdb-orphan-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".beads")).expect("fixture .beads dir");
+    let mut text = std::fs::read_to_string(repo_root().join(".beads/issues.jsonl"))
+        .expect("real corpus reads");
+    for (id, labels) in planted {
+        let labels = labels
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        text.push_str(&format!(
+            "{{\"id\":\"fgdb-zz7u5m-{id}\",\"status\":\"open\",\"labels\":[{labels}]}}\n"
+        ));
+    }
+    std::fs::write(root.join(".beads/issues.jsonl"), text).expect("fixture corpus");
+    root
+}
+
+/// Issues about the planted records only.
+///
+/// The live corpus has six concurrent writers, so a global issue count is not a
+/// stable assertion; every test below quantifies over its own planted ids.
+fn planted_issues(registry: &ArchitectureRegistry, root: &Path) -> Vec<String> {
+    architecture::resolve_bead_provenance(registry, root)
+        .expect_err("planted orphans must make the index non-total")
+        .split("; ")
+        .filter(|issue| issue.contains("zz7u5m"))
+        .map(str::to_string)
+        .collect()
+}
+
+fn issues_naming<'a>(issues: &'a [String], bead_id: &str) -> Vec<&'a str> {
+    issues
+        .iter()
+        .filter(|issue| issue.contains(bead_id))
+        .map(String::as_str)
+        .collect()
+}
+
+#[test]
+fn architecture_orphan_names_the_workstream_tag_it_carries() {
+    // The real record this bead was filed about. `fgdb-zwhh` carries
+    // labels = ["w1"] and nothing else, and resolves today only because an
+    // exact override was added for it by hand. Drop that override and it
+    // orphans again — the one condition under which the checker is allowed to
+    // mention its label at all.
+    let mut registry = real_registry();
+    let before = registry.bead_overrides.len();
+    registry
+        .bead_overrides
+        .retain(|rule| rule.bead_id != "fgdb-zwhh");
+    assert_eq!(
+        registry.bead_overrides.len(),
+        before - 1,
+        "the fixture must remove exactly one override"
+    );
+
+    let error = architecture::resolve_bead_provenance(&registry, &repo_root())
+        .expect_err("dropping fgdb-zwhh's override must orphan it");
+    let issues: Vec<String> = error.split("; ").map(str::to_string).collect();
+    let mine = issues_naming(&issues, "fgdb-zwhh");
+    assert_eq!(mine.len(), 1, "one fault, one diagnosis: {error}");
+    assert!(
+        mine[0].starts_with("bead_workstream_label_in_bet_position fgdb-zwhh:"),
+        "the diagnosis must name its own code and bead: {:?}",
+        mine[0]
+    );
+    assert!(
+        mine[0].contains("[\"w1\"]"),
+        "the diagnosis must name the label that failed to resolve: {:?}",
+        mine[0]
+    );
+    assert!(
+        !mine[0].contains("bead_provenance_orphan"),
+        "a labelled record must not fall back to the undifferentiated message: {:?}",
+        mine[0]
+    );
+}
+
+#[test]
+fn architecture_orphan_diagnoses_each_shape_differently() {
+    // Three faults, three repairs, three messages. Collapse them back into one
+    // sentence and the pairwise-distinct assert below dies — which is this
+    // bead's defect, restated as a law.
+    let registry = real_registry();
+    let root = corpus_with(
+        "shapes",
+        &[
+            ("workstream", &["w1"]),
+            ("bare", &[]),
+            ("topical", &["performance", "verification"]),
+        ],
+    );
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(issues.len(), 3, "{issues:#?}");
+
+    let workstream = issues_naming(&issues, "zz7u5m-workstream");
+    assert_eq!(workstream.len(), 1, "{issues:#?}");
+    assert!(
+        workstream[0].starts_with("bead_workstream_label_in_bet_position")
+            && workstream[0].contains("[\"w1\"]"),
+        "{:?}",
+        workstream[0]
+    );
+
+    let bare = issues_naming(&issues, "zz7u5m-bare");
+    assert_eq!(bare.len(), 1, "{issues:#?}");
+    assert!(
+        bare[0].starts_with("bead_provenance_orphan")
+            && bare[0].contains("carries no labels at all"),
+        "{:?}",
+        bare[0]
+    );
+
+    let topical = issues_naming(&issues, "zz7u5m-topical");
+    assert_eq!(topical.len(), 1, "{issues:#?}");
+    assert!(
+        topical[0].starts_with("bead_provenance_orphan")
+            && topical[0].contains("[\"performance\", \"verification\"]"),
+        "{:?}",
+        topical[0]
+    );
+
+    let bodies: BTreeSet<&str> = issues
+        .iter()
+        .map(|issue| issue.split_once(": ").expect("issue has a body").1)
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        3,
+        "three different faults must not share one message: {issues:#?}"
+    );
+}
+
+#[test]
+fn architecture_neg_workstream_diagnostic_is_scoped_to_the_orphan_path() {
+    // THE CONTROL, and it fires in both directions. The tempting fix for this
+    // bead is to reject workstream tags outright; 232 corpus records carry one,
+    // so that fix reddens 232 rows to catch a handful. These three records all
+    // carry a workstream tag and differ only in whether they resolve some other
+    // way. Exactly ONE may be diagnosed: an implementation that validates the
+    // tag instead of explaining the orphan reports three here, and one that
+    // never fires reports zero.
+    let registry = real_registry();
+    let root = corpus_with(
+        "scoped",
+        &[
+            ("resolves-bet", &["w1", "b1"]),
+            ("resolves-gate", &["g0", "b3"]),
+            ("orphans", &["w9"]),
+        ],
+    );
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(
+        issues.len(),
+        1,
+        "a workstream tag is legitimate on a record that resolves: {issues:#?}"
+    );
+    assert!(
+        issues[0].starts_with("bead_workstream_label_in_bet_position fgdb-zz7u5m-orphans:")
+            && issues[0].contains("[\"w9\"]"),
+        "{:?}",
+        issues[0]
+    );
+}
+
+#[test]
+fn architecture_bet_label_unknown_survives_the_orphan_diagnostic() {
+    // The check that already worked must keep working, and must keep being the
+    // one that speaks for a bet-shaped label. `b9` is not a workstream tag, so
+    // it draws the undifferentiated orphan message plus its own vocabulary
+    // violation — two issues for one record, naming the label in both.
+    let registry = real_registry();
+    let root = corpus_with("unknown-bet", &[("b9", &["b9"])]);
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(issues.len(), 2, "{issues:#?}");
+    assert!(
+        issues[0].starts_with("bead_bet_label_unknown fgdb-zz7u5m-b9:")
+            && issues[0].contains("\"b9\""),
+        "{:?}",
+        issues[0]
+    );
+    assert!(
+        issues[1].starts_with("bead_provenance_orphan fgdb-zz7u5m-b9:")
+            && issues[1].contains("[\"b9\"]"),
+        "{:?}",
+        issues[1]
+    );
+}
+
+#[test]
+fn architecture_provenance_issue_messages_are_parseable() {
+    // `resolve_bead_provenance` joins its issues with "; ", so a message that
+    // contains that sequence silently splits into two and every caller counting
+    // issues gets a wrong number. Not hypothetical: the first draft of the
+    // workstream diagnosis contained a semicolon and made a one-orphan fixture
+    // report two. One law over every shape at once.
+    let registry = real_registry();
+    let root = corpus_with(
+        "parseable",
+        &[
+            ("workstream", &["w1"]),
+            ("bare", &[]),
+            ("topical", &["performance", "verification"]),
+            ("unknown-bet", &["b9"]),
+        ],
+    );
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(issues.len(), 5, "{issues:#?}");
+    for issue in &issues {
+        let body = issue.split_once(": ").expect("issue has a body").1;
+        assert!(
+            !body.contains("; "),
+            "an issue message may not contain the joiner separator: {issue:?}"
+        );
+    }
 }

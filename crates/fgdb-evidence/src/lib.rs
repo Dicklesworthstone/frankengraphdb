@@ -3,10 +3,11 @@
 //! An [`EvidenceEnvelope`] binds an [`EvidenceClaim`](fgdb_claim::EvidenceClaim)
 //! to an **immutable evidence identity**: the content address of the evidence
 //! body plus the declared context that makes the claim auditable —
-//! selection policy, calibration window, regime epoch, and the mandatory
-//! deterministic fallback. Per the adaptive-decision contract, every field
-//! here is an immutable declared identity: an envelope is never edited, only
-//! superseded by a new envelope with a new identity.
+//! selection policy, strata definition, propensity-support evidence,
+//! calibration window, regime epoch, and the mandatory deterministic fallback.
+//! Per the adaptive-decision contract, every field here is an immutable
+//! declared identity: an envelope is never edited, only superseded by a new
+//! envelope with a new identity.
 //!
 //! Interpretation (e-processes, conformal calibration, SPRT) belongs to
 //! Sextant (`fgdb-verif-sextant`); enforcement of the claim lattice is
@@ -154,6 +155,17 @@ impl ReplayClass {
             Self::VmJitCompilerArtifacts => "vm_jit_compiler_artifacts",
             Self::WallClock => "wall_clock",
         }
+    }
+
+    /// Decodes one exact version-1 canonical spelling.
+    ///
+    /// The lookup deliberately derives from [`Self::ALL`] and
+    /// [`Self::as_str`] instead of maintaining a third vocabulary table. An
+    /// omitted or aliased variant therefore cannot silently survive a
+    /// canonical round trip.
+    #[must_use]
+    pub fn from_canonical_str(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.as_str() == value)
     }
 
     /// Whether policy permits replay evidence of this class to be present.
@@ -666,10 +678,66 @@ impl ReplayCompleteness {
 
 /// Closed, half-open sample window the evidence was computed over, in commit
 /// sequences of the subject database (`[start_seq, end_seq)`).
+///
+/// The validated constructor is the sole public admission path, and the
+/// resulting bounds remain read-only:
+///
+/// ```
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{
+///     CalibrationWindow, EvidenceEnvelope, FallbackBehavior,
+///     PropensitySupportIdentity, StrataIdentity,
+/// };
+/// use fgdb_types::ObjectId;
+///
+/// let window = CalibrationWindow::new(2, 9).unwrap();
+/// let envelope = EvidenceEnvelope::new(
+///     EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     ObjectId([1; 32]),
+///     ObjectId([2; 32]),
+///     StrataIdentity::NotApplicable,
+///     PropensitySupportIdentity::NotApplicable,
+///     Some(window),
+///     1,
+///     FallbackBehavior::FailClosed,
+/// );
+/// assert_eq!(envelope.calibration_window(), Some(window));
+/// ```
+///
+/// Direct construction cannot bypass validation or feed an unchecked window
+/// to an [`EvidenceEnvelope`]:
+///
+/// ```compile_fail,E0451
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{
+///     CalibrationWindow, EvidenceEnvelope, FallbackBehavior,
+///     PropensitySupportIdentity, StrataIdentity,
+/// };
+/// use fgdb_types::ObjectId;
+///
+/// let window = CalibrationWindow {
+///     start_seq: 2,
+///     end_seq: 9,
+/// };
+/// let _ = EvidenceEnvelope::new(
+///     EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     ObjectId([1; 32]),
+///     ObjectId([2; 32]),
+///     StrataIdentity::NotApplicable,
+///     PropensitySupportIdentity::NotApplicable,
+///     Some(window),
+///     1,
+///     FallbackBehavior::FailClosed,
+/// );
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct CalibrationWindow {
-    pub start_seq: u64,
-    pub end_seq: u64,
+    start_seq: u64,
+    end_seq: u64,
 }
 
 impl CalibrationWindow {
@@ -679,6 +747,16 @@ impl CalibrationWindow {
             return Err(InvalidWindow { start_seq, end_seq });
         }
         Ok(CalibrationWindow { start_seq, end_seq })
+    }
+
+    /// First sequence included in the window.
+    pub const fn start_seq(&self) -> u64 {
+        self.start_seq
+    }
+
+    /// First sequence after the window.
+    pub const fn end_seq(&self) -> u64 {
+        self.end_seq
     }
 }
 
@@ -701,6 +779,60 @@ impl std::fmt::Display for InvalidWindow {
 
 impl std::error::Error for InvalidWindow {}
 
+/// Whether an evidence population is unstratified or bound to one immutable
+/// strata definition.
+///
+/// `NotApplicable` is an explicit semantic value, not a missing field or a
+/// sentinel [`ObjectId`]. A stratified claim must carry the content-addressed
+/// definition that fixes membership for the complete evidence window.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum StrataIdentity {
+    /// The claim does not partition its population into strata.
+    NotApplicable,
+    /// The exact content-addressed strata definition used by the claim.
+    Bound(ObjectId),
+}
+
+impl StrataIdentity {
+    /// Returns the bound definition, or `None` for explicitly unstratified
+    /// evidence.
+    #[must_use]
+    pub const fn oid(self) -> Option<ObjectId> {
+        match self {
+            Self::NotApplicable => None,
+            Self::Bound(oid) => Some(oid),
+        }
+    }
+}
+
+/// Whether propensity support is irrelevant to a claim or bound to one
+/// immutable, authority-issued evidence identity.
+///
+/// A `Bound` identity names the complete realized support evidence, including
+/// its logged action domain and zero-support exclusions. It is deliberately an
+/// [`ObjectId`], not an unkeyed transcript digest. The evidence producer remains
+/// responsible for proving that the named object covers the claim's declared
+/// selection policy and window.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PropensitySupportIdentity {
+    /// The claim does not use logged action propensities.
+    NotApplicable,
+    /// The authority-issued identity of the complete realized support evidence.
+    Bound(ObjectId),
+}
+
+impl PropensitySupportIdentity {
+    /// Returns the bound support evidence, or `None` when propensity support is
+    /// explicitly irrelevant to this claim.
+    #[must_use]
+    pub const fn oid(self) -> Option<ObjectId> {
+        match self {
+            Self::NotApplicable => None,
+            Self::Bound(oid) => Some(oid),
+        }
+    }
+}
+
 /// What consumers must do when this evidence is absent, stale, or its regime
 /// epoch has rolled: the deterministic fallback is part of the evidence
 /// identity, never an ambient runtime choice (adaptive-decision contract —
@@ -714,24 +846,322 @@ pub enum FallbackBehavior {
     FailClosed,
 }
 
+/// Version of the canonical transcript hashed to identify an evidence-envelope
+/// binding.
+pub const EVIDENCE_ENVELOPE_BINDING_VERSION: u16 = 2;
+
+const EVIDENCE_ENVELOPE_BINDING_DOMAIN: &[u8] = b"fgdb:evidence-envelope-binding:v2";
+const EVIDENCE_ENVELOPE_FIELD_COUNT: u8 = 8;
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_len(bytes: &mut Vec<u8>, value: usize) {
+    push_u64(
+        bytes,
+        u64::try_from(value).expect("Rust slice lengths fit in u64"),
+    );
+}
+
+fn push_sized_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
+    push_len(bytes, value.len());
+    bytes.extend_from_slice(value);
+}
+
+fn push_field(bytes: &mut Vec<u8>, tag: u8, value: &[u8]) {
+    bytes.push(tag);
+    push_sized_bytes(bytes, value);
+}
+
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    push_sized_bytes(&mut bytes, value.as_bytes());
+    bytes
+}
+
+fn encode_optional_string(value: Option<&str>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match value {
+        None => bytes.push(0),
+        Some(value) => {
+            bytes.push(1);
+            push_sized_bytes(&mut bytes, value.as_bytes());
+        }
+    }
+    bytes
+}
+
+fn encode_string_list(values: &[String]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    push_len(&mut bytes, values.len());
+    for value in values {
+        push_sized_bytes(&mut bytes, value.as_bytes());
+    }
+    bytes
+}
+
+fn encode_evidence_claim(claim: &EvidenceClaim) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match claim {
+        EvidenceClaim::SafetyInvariant { invariant_id } => {
+            bytes.extend_from_slice(&[0, 1]);
+            push_field(&mut bytes, 1, &encode_string(invariant_id));
+        }
+        EvidenceClaim::FormalModelClaim {
+            model_name,
+            abstraction_boundary,
+            checked_bounds,
+            refinement_status,
+        } => {
+            bytes.extend_from_slice(&[1, 4]);
+            push_field(&mut bytes, 1, &encode_string(model_name));
+            push_field(&mut bytes, 2, &encode_string(abstraction_boundary));
+            push_field(
+                &mut bytes,
+                3,
+                &encode_optional_string(checked_bounds.as_deref()),
+            );
+            let status = match refinement_status {
+                fgdb_claim::RefinementStatus::ModelOnly => 0,
+                fgdb_claim::RefinementStatus::RefinedToImplementation => 1,
+            };
+            push_field(&mut bytes, 4, &[status]);
+        }
+        EvidenceClaim::StatisticalClaim {
+            population,
+            sampling_rule,
+            error_control,
+            power_or_effective_sample_size,
+            assumptions,
+        } => {
+            bytes.extend_from_slice(&[2, 5]);
+            push_field(&mut bytes, 1, &encode_string(population));
+            push_field(&mut bytes, 2, &encode_string(sampling_rule));
+            let mut encoded_control = Vec::new();
+            match error_control {
+                fgdb_claim::StatisticalErrorControl::Alpha(alpha) => {
+                    encoded_control.push(1);
+                    push_u64(&mut encoded_control, alpha.get().to_bits());
+                }
+                fgdb_claim::StatisticalErrorControl::NotApplicable => {
+                    encoded_control.push(0);
+                }
+            }
+            push_field(&mut bytes, 3, &encoded_control);
+            push_field(
+                &mut bytes,
+                4,
+                &encode_string(power_or_effective_sample_size),
+            );
+            push_field(&mut bytes, 5, &encode_string_list(assumptions));
+        }
+        EvidenceClaim::ConfigurationModelClaim {
+            model_version,
+            fitted_inputs,
+            sensitivity,
+            validity_domain,
+        } => {
+            bytes.extend_from_slice(&[3, 4]);
+            push_field(&mut bytes, 1, &encode_string(model_version));
+            push_field(&mut bytes, 2, &encode_string_list(fitted_inputs));
+            push_field(&mut bytes, 3, &encode_string(sensitivity));
+            push_field(&mut bytes, 4, &encode_string(validity_domain));
+        }
+        EvidenceClaim::EmpiricalGate {
+            fixture,
+            machine_profile,
+            sample_count,
+            variance_budget,
+            comparison_rule,
+        } => {
+            bytes.extend_from_slice(&[4, 5]);
+            push_field(&mut bytes, 1, &encode_string(fixture));
+            push_field(&mut bytes, 2, &encode_string(machine_profile));
+            push_field(&mut bytes, 3, &sample_count.to_le_bytes());
+            push_field(&mut bytes, 4, &encode_string(variance_budget));
+            push_field(&mut bytes, 5, &encode_string(comparison_rule));
+        }
+    }
+    bytes
+}
+
+fn encode_calibration_window(window: Option<CalibrationWindow>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match window {
+        None => bytes.push(0),
+        Some(window) => {
+            bytes.push(1);
+            push_u64(&mut bytes, window.start_seq());
+            push_u64(&mut bytes, window.end_seq());
+        }
+    }
+    bytes
+}
+
+fn encode_strata_identity(identity: StrataIdentity) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match identity {
+        StrataIdentity::NotApplicable => bytes.push(0),
+        StrataIdentity::Bound(oid) => {
+            bytes.push(1);
+            bytes.extend_from_slice(oid.as_bytes());
+        }
+    }
+    bytes
+}
+
+fn encode_propensity_support_identity(identity: PropensitySupportIdentity) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match identity {
+        PropensitySupportIdentity::NotApplicable => bytes.push(0),
+        PropensitySupportIdentity::Bound(oid) => {
+            bytes.push(1);
+            bytes.extend_from_slice(oid.as_bytes());
+        }
+    }
+    bytes
+}
+
+fn encode_fallback(fallback: FallbackBehavior) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match fallback {
+        FallbackBehavior::DeterministicPolicy { policy_oid } => {
+            bytes.push(0);
+            bytes.extend_from_slice(policy_oid.as_bytes());
+        }
+        FallbackBehavior::FailClosed => bytes.push(1),
+    }
+    bytes
+}
+
 /// Immutable binding of one evidence claim to its identity and declared
 /// context. Fields are read-only after construction (no setters, no `mut`
 /// accessors) — supersession means a new envelope.
+///
+/// The binding itself is structural: callers cannot forge an envelope whose
+/// fields bypass [`EvidenceEnvelope::new`].
+///
+/// ```compile_fail,E0451
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{
+///     EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity,
+///     StrataIdentity,
+/// };
+/// use fgdb_types::ObjectId;
+///
+/// let _ = EvidenceEnvelope {
+///     claim: EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     evidence_oid: ObjectId([1; 32]),
+///     selection_policy_oid: ObjectId([2; 32]),
+///     strata_identity: StrataIdentity::NotApplicable,
+///     propensity_support_identity: PropensitySupportIdentity::NotApplicable,
+///     calibration_window: None,
+///     regime_epoch: 1,
+///     fallback: FallbackBehavior::FailClosed,
+/// };
+/// ```
+///
+/// Nor can a caller replace the claim after construction while retaining the
+/// old evidence identity.
+///
+/// ```compile_fail,E0616
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{
+///     EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity,
+///     StrataIdentity,
+/// };
+/// use fgdb_types::ObjectId;
+///
+/// let mut envelope = EvidenceEnvelope::new(
+///     EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     ObjectId([1; 32]),
+///     ObjectId([2; 32]),
+///     StrataIdentity::NotApplicable,
+///     PropensitySupportIdentity::NotApplicable,
+///     None,
+///     1,
+///     FallbackBehavior::FailClosed,
+/// );
+/// envelope.claim = EvidenceClaim::EmpiricalGate {
+///     fixture: "fixture".into(),
+///     machine_profile: "machine".into(),
+///     sample_count: 1,
+///     variance_budget: "zero".into(),
+///     comparison_rule: "equal".into(),
+/// };
+/// ```
 #[derive(Clone, PartialEq, Debug)]
 pub struct EvidenceEnvelope {
     claim: EvidenceClaim,
     evidence_oid: ObjectId,
     selection_policy_oid: ObjectId,
+    strata_identity: StrataIdentity,
+    propensity_support_identity: PropensitySupportIdentity,
     calibration_window: Option<CalibrationWindow>,
     regime_epoch: u64,
     fallback: FallbackBehavior,
 }
 
 impl EvidenceEnvelope {
+    /// Constructs a complete binding. The fallback is a required argument, not
+    /// an optional advisory input.
+    ///
+    /// Omitting it is a compile-time error:
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_claim::EvidenceClaim;
+    /// use fgdb_evidence::{EvidenceEnvelope, PropensitySupportIdentity, StrataIdentity};
+    /// use fgdb_types::ObjectId;
+    ///
+    /// let _ = EvidenceEnvelope::new(
+    ///     EvidenceClaim::SafetyInvariant {
+    ///         invariant_id: "FG-INV-01".into(),
+    ///     },
+    ///     ObjectId([1; 32]),
+    ///     ObjectId([2; 32]),
+    ///     StrataIdentity::NotApplicable,
+    ///     PropensitySupportIdentity::NotApplicable,
+    ///     None,
+    ///     1,
+    /// );
+    /// ```
+    ///
+    /// Strata and propensity-support identities are distinct roles and cannot
+    /// be transposed even though both may contain an [`ObjectId`]:
+    ///
+    /// ```compile_fail,E0308
+    /// use fgdb_claim::EvidenceClaim;
+    /// use fgdb_evidence::{
+    ///     EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity,
+    ///     StrataIdentity,
+    /// };
+    /// use fgdb_types::ObjectId;
+    ///
+    /// let _ = EvidenceEnvelope::new(
+    ///     EvidenceClaim::SafetyInvariant {
+    ///         invariant_id: "FG-INV-01".into(),
+    ///     },
+    ///     ObjectId([1; 32]),
+    ///     ObjectId([2; 32]),
+    ///     PropensitySupportIdentity::NotApplicable,
+    ///     StrataIdentity::NotApplicable,
+    ///     None,
+    ///     1,
+    ///     FallbackBehavior::FailClosed,
+    /// );
+    /// ```
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         claim: EvidenceClaim,
         evidence_oid: ObjectId,
         selection_policy_oid: ObjectId,
+        strata_identity: StrataIdentity,
+        propensity_support_identity: PropensitySupportIdentity,
         calibration_window: Option<CalibrationWindow>,
         regime_epoch: u64,
         fallback: FallbackBehavior,
@@ -740,6 +1170,8 @@ impl EvidenceEnvelope {
             claim,
             evidence_oid,
             selection_policy_oid,
+            strata_identity,
+            propensity_support_identity,
             calibration_window,
             regime_epoch,
             fallback,
@@ -755,6 +1187,12 @@ impl EvidenceEnvelope {
     pub fn selection_policy_oid(&self) -> ObjectId {
         self.selection_policy_oid
     }
+    pub fn strata_identity(&self) -> StrataIdentity {
+        self.strata_identity
+    }
+    pub fn propensity_support_identity(&self) -> PropensitySupportIdentity {
+        self.propensity_support_identity
+    }
     pub fn calibration_window(&self) -> Option<CalibrationWindow> {
         self.calibration_window
     }
@@ -765,9 +1203,99 @@ impl EvidenceEnvelope {
         self.fallback
     }
 
+    /// Encodes every bound field into the unique version-2 identity transcript.
+    ///
+    /// Variable-width values are length-delimited, sum types carry explicit
+    /// tags, and only logical contents are encoded: allocation capacity,
+    /// pointer identity, clocks, and entropy cannot affect the result.
+    #[must_use]
+    pub fn to_canonical_binding_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_sized_bytes(&mut bytes, EVIDENCE_ENVELOPE_BINDING_DOMAIN);
+        bytes.extend_from_slice(&EVIDENCE_ENVELOPE_BINDING_VERSION.to_le_bytes());
+        bytes.push(EVIDENCE_ENVELOPE_FIELD_COUNT);
+        push_field(&mut bytes, 1, &encode_evidence_claim(&self.claim));
+        push_field(&mut bytes, 2, self.evidence_oid.as_bytes());
+        push_field(&mut bytes, 3, self.selection_policy_oid.as_bytes());
+        push_field(&mut bytes, 4, &encode_strata_identity(self.strata_identity));
+        push_field(
+            &mut bytes,
+            5,
+            &encode_propensity_support_identity(self.propensity_support_identity),
+        );
+        push_field(
+            &mut bytes,
+            6,
+            &encode_calibration_window(self.calibration_window),
+        );
+        push_field(&mut bytes, 7, &self.regime_epoch.to_le_bytes());
+        push_field(&mut bytes, 8, &encode_fallback(self.fallback));
+        bytes
+    }
+
+    /// Hashes the canonical binding transcript with the caller's project-level
+    /// content-address function.
+    ///
+    /// `fgdb-evidence` deliberately does not duplicate the foundation hash
+    /// implementation or add another dependency. Consumers supply that one
+    /// deterministic hash kernel; this method guarantees that it receives the
+    /// complete, canonical envelope binding.
+    #[must_use]
+    pub fn binding_address_with(&self, content_hash: impl FnOnce(&[u8]) -> [u8; 32]) -> ObjectId {
+        ObjectId(content_hash(&self.to_canonical_binding_bytes()))
+    }
+
     /// The lattice at the envelope boundary: may this envelope back a
-    /// registry row of class `target`? Statistical/empirical envelopes can
-    /// never back invariants — a typed rejection, not a warning.
+    /// registry row of class `target`?
+    ///
+    /// This boundary is intentionally value-level because both the envelope's
+    /// [`EvidenceClaim`] variant and `target` can be selected at runtime.
+    /// Illegal pairs therefore return [`LatticeViolation`]; statically known
+    /// pairs use `fgdb_claim::justify` when compile-time rejection is required.
+    /// The successful proof token cannot be forged by constructing its private
+    /// fields.
+    ///
+    /// ```
+    /// use fgdb_claim::{EvidenceClaim, RegistryClaimClass};
+    /// use fgdb_evidence::{
+    ///     EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity,
+    ///     StrataIdentity,
+    /// };
+    /// use fgdb_types::ObjectId;
+    ///
+    /// let envelope = EvidenceEnvelope::new(
+    ///     EvidenceClaim::EmpiricalGate {
+    ///         fixture: "fixture".into(),
+    ///         machine_profile: "machine".into(),
+    ///         sample_count: 1,
+    ///         variance_budget: "zero".into(),
+    ///         comparison_rule: "equal".into(),
+    ///     },
+    ///     ObjectId([1; 32]),
+    ///     ObjectId([2; 32]),
+    ///     StrataIdentity::NotApplicable,
+    ///     PropensitySupportIdentity::NotApplicable,
+    ///     None,
+    ///     1,
+    ///     FallbackBehavior::FailClosed,
+    /// );
+    ///
+    /// let violation = envelope
+    ///     .justify(RegistryClaimClass::Statistical)
+    ///     .unwrap_err();
+    /// assert_eq!(violation.evidence, RegistryClaimClass::Benchmark);
+    /// assert_eq!(violation.target, RegistryClaimClass::Statistical);
+    /// assert!(envelope.justify(RegistryClaimClass::Benchmark).is_ok());
+    /// ```
+    ///
+    /// ```compile_fail,E0451
+    /// use fgdb_claim::{Justification, RegistryClaimClass};
+    ///
+    /// let _ = Justification {
+    ///     evidence: RegistryClaimClass::Benchmark,
+    ///     target: RegistryClaimClass::Invariant,
+    /// };
+    /// ```
     pub fn justify(&self, target: RegistryClaimClass) -> Result<Justification, LatticeViolation> {
         self.claim.max_registry_class().try_justify(target)
     }
@@ -777,6 +1305,15 @@ impl EvidenceEnvelope {
 mod tests {
     use super::*;
     use fgdb_claim::{RefinementStatus, StatisticalErrorControl};
+
+    const REGISTRY_CLASSES: [RegistryClaimClass; 6] = [
+        RegistryClaimClass::Invariant,
+        RegistryClaimClass::Proof,
+        RegistryClaimClass::BoundedModel,
+        RegistryClaimClass::Statistical,
+        RegistryClaimClass::Slo,
+        RegistryClaimClass::Benchmark,
+    ];
 
     fn oid(fill: u8) -> ObjectId {
         ObjectId([fill; 32])
@@ -1265,9 +1802,60 @@ mod tests {
         }
     }
 
+    fn envelope_claim_cases() -> [(EvidenceClaim, usize); 6] {
+        [
+            (
+                EvidenceClaim::SafetyInvariant {
+                    invariant_id: "FG-INV-01".into(),
+                },
+                0,
+            ),
+            (
+                EvidenceClaim::FormalModelClaim {
+                    model_name: "refined proof".into(),
+                    abstraction_boundary: "checked implementation".into(),
+                    checked_bounds: None,
+                    refinement_status: RefinementStatus::RefinedToImplementation,
+                },
+                1,
+            ),
+            (
+                EvidenceClaim::FormalModelClaim {
+                    model_name: "bounded model".into(),
+                    abstraction_boundary: "model only".into(),
+                    checked_bounds: Some("three actors".into()),
+                    refinement_status: RefinementStatus::ModelOnly,
+                },
+                2,
+            ),
+            (statistical_claim(), 3),
+            (
+                EvidenceClaim::ConfigurationModelClaim {
+                    model_version: "v1".into(),
+                    fitted_inputs: vec!["fixture L".into()],
+                    sensitivity: "bounded".into(),
+                    validity_domain: "epoch 7".into(),
+                },
+                3,
+            ),
+            (
+                EvidenceClaim::EmpiricalGate {
+                    fixture: "fixture L".into(),
+                    machine_profile: "machine P".into(),
+                    sample_count: 52_000,
+                    variance_budget: "1%".into(),
+                    comparison_rule: "not slower".into(),
+                },
+                5,
+            ),
+        ]
+    }
+
     #[test]
     fn windows_reject_empty_and_inverted() {
-        assert!(CalibrationWindow::new(10, 20).is_ok());
+        let window = CalibrationWindow::new(10, 20).unwrap();
+        assert_eq!(window.start_seq(), 10);
+        assert_eq!(window.end_seq(), 20);
         assert_eq!(
             CalibrationWindow::new(20, 10).unwrap_err(),
             InvalidWindow {
@@ -1283,19 +1871,71 @@ mod tests {
     }
 
     #[test]
+    fn invalid_window_cannot_reach_envelope_through_public_api() {
+        let rejected = CalibrationWindow::new(9, 2).map(|window| {
+            EvidenceEnvelope::new(
+                statistical_claim(),
+                oid(1),
+                oid(2),
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+                Some(window),
+                7,
+                FallbackBehavior::FailClosed,
+            )
+        });
+        assert_eq!(
+            rejected.unwrap_err(),
+            InvalidWindow {
+                start_seq: 9,
+                end_seq: 2
+            }
+        );
+
+        let window = CalibrationWindow::new(2, 9).unwrap();
+        let envelope = EvidenceEnvelope::new(
+            statistical_claim(),
+            oid(1),
+            oid(2),
+            StrataIdentity::NotApplicable,
+            PropensitySupportIdentity::NotApplicable,
+            Some(window),
+            7,
+            FallbackBehavior::FailClosed,
+        );
+        let stored = envelope.calibration_window().unwrap();
+        assert_eq!(stored, window);
+        assert!(stored.start_seq() < stored.end_seq());
+    }
+
+    #[test]
     fn envelope_binds_immutable_declared_context() {
+        assert_eq!(StrataIdentity::NotApplicable.oid(), None);
+        assert_eq!(PropensitySupportIdentity::NotApplicable.oid(), None);
+
         let window = CalibrationWindow::new(100, 42_000).unwrap();
         let env = EvidenceEnvelope::new(
             statistical_claim(),
             oid(1),
             oid(2),
+            StrataIdentity::Bound(oid(4)),
+            PropensitySupportIdentity::Bound(oid(5)),
             Some(window),
             7,
             FallbackBehavior::DeterministicPolicy { policy_oid: oid(3) },
         );
         assert_eq!(env.evidence_oid(), oid(1));
         assert_eq!(env.selection_policy_oid(), oid(2));
+        assert_eq!(env.strata_identity(), StrataIdentity::Bound(oid(4)));
+        assert_eq!(env.strata_identity().oid(), Some(oid(4)));
+        assert_eq!(
+            env.propensity_support_identity(),
+            PropensitySupportIdentity::Bound(oid(5))
+        );
+        assert_eq!(env.propensity_support_identity().oid(), Some(oid(5)));
         assert_eq!(env.calibration_window(), Some(window));
+        assert_eq!(env.calibration_window().unwrap().start_seq(), 100);
+        assert_eq!(env.calibration_window().unwrap().end_seq(), 42_000);
         assert_eq!(env.regime_epoch(), 7);
         assert_eq!(
             env.fallback(),
@@ -1304,40 +1944,39 @@ mod tests {
     }
 
     #[test]
-    fn statistical_envelope_cannot_back_an_invariant_row() {
-        let env = EvidenceEnvelope::new(
-            statistical_claim(),
-            oid(1),
-            oid(2),
-            None,
-            1,
-            FallbackBehavior::FailClosed,
-        );
-        // Fine at its own level and below…
-        assert!(env.justify(RegistryClaimClass::Statistical).is_ok());
-        assert!(env.justify(RegistryClaimClass::Slo).is_ok());
-        // …typed rejection above it.
-        let err = env.justify(RegistryClaimClass::Invariant).unwrap_err();
-        assert_eq!(err.evidence, RegistryClaimClass::Statistical);
-        assert_eq!(err.target, RegistryClaimClass::Invariant);
-    }
+    fn envelope_justification_exhausts_every_claim_kind_and_target() -> Result<(), LatticeViolation>
+    {
+        for (case_index, (claim, maximum_index)) in envelope_claim_cases().into_iter().enumerate() {
+            let env = EvidenceEnvelope::new(
+                claim,
+                oid(case_index as u8),
+                oid((case_index + 16) as u8),
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+                None,
+                1,
+                FallbackBehavior::FailClosed,
+            );
+            let expected_evidence = REGISTRY_CLASSES[maximum_index];
 
-    #[test]
-    fn refined_formal_envelope_backs_proof_but_not_invariant() {
-        let env = EvidenceEnvelope::new(
-            EvidenceClaim::FormalModelClaim {
-                model_name: "block-level SSI safety (Lean)".into(),
-                abstraction_boundary: "block granularity, no I/O model".into(),
-                checked_bounds: None,
-                refinement_status: RefinementStatus::RefinedToImplementation,
-            },
-            oid(4),
-            oid(5),
-            None,
-            1,
-            FallbackBehavior::FailClosed,
-        );
-        assert!(env.justify(RegistryClaimClass::Proof).is_ok());
-        assert!(env.justify(RegistryClaimClass::Invariant).is_err());
+            for (target_index, target) in REGISTRY_CLASSES.into_iter().enumerate() {
+                let result = env.justify(target);
+                if target_index >= maximum_index {
+                    let justification = result?;
+                    assert_eq!(justification.evidence(), expected_evidence);
+                    assert_eq!(justification.target(), target);
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(LatticeViolation {
+                            evidence: expected_evidence,
+                            target,
+                        }),
+                        "case={case_index} target={target:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }

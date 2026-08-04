@@ -72,14 +72,60 @@ pub const BEAD_RESOLUTION_PRECEDENCE: [&str; 4] =
     ["direct_owner", "bet_label", "exact_override", "family_rule"];
 pub const ALLOWED_BET_LABELS: [&str; 6] = ["b1", "b2", "b3", "b4", "b5", "b6"];
 pub const ALLOWED_FAMILY_MATCH_KINDS: [&str; 2] = ["prefix", "appendix_a"];
-pub const PINNED_BEAD_COUNT: usize = 301;
-pub const PINNED_DIRECT_OWNER_COUNT: usize = 98;
-pub const PINNED_BET_LABEL_COUNT: usize = 157;
-pub const PINNED_EXACT_OVERRIDE_COUNT: usize = 12;
-pub const PINNED_FAMILY_RULE_COUNT: usize = 34;
+/// Corpus-cardinality FLOORS, not equalities — see `validate_bead_resolution`.
+/// A `br create` in any pane can only raise the observed counts, so it never
+/// moves these; only records disappearing does.
+pub const PINNED_BEAD_COUNT_FLOOR: usize = 401;
+pub const PINNED_DIRECT_OWNER_FLOOR: usize = 98;
+pub const PINNED_BET_LABEL_FLOOR: usize = 245;
+pub const PINNED_EXACT_OVERRIDE_FLOOR: usize = 19;
+pub const PINNED_FAMILY_RULE_FLOOR: usize = 39;
 pub const PINNED_BEAD_FAMILY_TABLE_COUNT: usize = 14;
-pub const PINNED_BEAD_OVERRIDE_TABLE_COUNT: usize = 12;
-pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:0c3a16db9c78547c";
+pub const PINNED_BEAD_OVERRIDE_TABLE_COUNT: usize = 19;
+pub const PINNED_RULE_BINDING_HASH: &str = "fnv1a64:66a303ca1f79e606";
+/// The per-family floor SPLIT, pinned by equality.
+///
+/// `PINNED_FAMILY_RULE_FLOOR` pins only the SUM of these floors (the registry
+/// declares `family_rule_floor`, that value is pinned, and the floors must sum
+/// to it).  The split between families is a separate degree of freedom: a
+/// sum-preserving rebalance moves one family's tripwire onto another and every
+/// aggregate check stays green.  The only thing that can object is the
+/// per-family `observed >= floor` test, and it objects only when the receiving
+/// family has no slack.
+///
+/// Measured 2026-07-27: all 14 families currently sit at exactly zero slack
+/// (observed == floor), so the aggregate pins happen to be total — by
+/// coincidence of the corpus, not by construction.  Cloning two
+/// family-resolving beads (slack 1 each) made the rebalance
+/// `risk-governance 7->6, workstream-w2 1->2` pass with ZERO violations.  Two
+/// `br create`s are the whole exploit, so this table pins the split directly.
+///
+/// The floors are deliberately absent from `recompute_rule_binding_hash` (see
+/// the note there) and they stay absent: that hash answers "did the ADR
+/// semantic contract move", and folding corpus tripwire state back into it is
+/// what made 44 of its 45 movements bead churn.  This pin costs no re-freeze of
+/// its own — the six commits that ever changed a floor value
+/// (2cba0a8 4a6943d 5b76722 adc4abb b0c61f7 f805ec7) are exactly the six that
+/// already had to change `PINNED_FAMILY_RULE_FLOOR`.
+///
+/// The length is `PINNED_BEAD_FAMILY_TABLE_COUNT` on purpose: adding a family
+/// row is a compile error until both pins move together.
+pub const PINNED_BEAD_FAMILY_FLOORS: [(&str, usize); PINNED_BEAD_FAMILY_TABLE_COUNT] = [
+    ("appendix-a-catalog", 29),
+    ("risk-governance", 7),
+    ("workstream-w1", 0),
+    ("workstream-w2", 1),
+    ("workstream-w3", 0),
+    ("workstream-w4", 1),
+    ("workstream-w5", 0),
+    ("workstream-w6", 0),
+    ("workstream-w7", 0),
+    ("workstream-w8", 0),
+    ("workstream-w9", 0),
+    ("workstream-w10", 0),
+    ("workstream-w11", 0),
+    ("workstream-w12", 1),
+];
 
 pub const PLANNED_CRATES: [&str; 70] = [
     "fgdb-types",
@@ -163,7 +209,7 @@ pub const PINNED_EXTERNAL_REVIEW_DECISION_COUNT: usize = 64;
 pub const PINNED_DECISION_ID_HASH: &str = "fnv1a64:21402ba5834603dd";
 pub const PINNED_BIBLIOGRAPHY_ID_HASH: &str = "fnv1a64:212896d82dc8caf7";
 pub const PINNED_BIBLIOGRAPHY_ANCHOR_HASH: &str = "fnv1a64:35bc497bde8cd1d4";
-pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:77cc06b65cd827ea";
+pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:6a1d00e11b6f3f77";
 // Filled from the independently reviewed append-only source/review transcript.
 // This is intentionally separate from `PINNED_SEMANTIC_CONTRACT_HASH`.
 pub const PINNED_EXTERNAL_REVIEW_HISTORY_HASH: &str = "fnv1a64:5e15e3d99eec84ac";
@@ -310,12 +356,12 @@ pub struct BeadProvenanceConfig {
     pub source_path: String,
     pub resolution_precedence: Vec<String>,
     pub allowed_bet_labels: Vec<String>,
-    pub bead_count: usize,
-    pub direct_owner_count: usize,
-    pub bet_label_count: usize,
-    pub exact_override_count: usize,
-    pub family_rule_count: usize,
-    pub binding_hash: String,
+    pub bead_count_floor: usize,
+    pub direct_owner_floor: usize,
+    pub bet_label_floor: usize,
+    pub exact_override_floor: usize,
+    pub family_rule_floor: usize,
+    pub rule_binding_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,7 +370,7 @@ pub struct BeadFamily {
     pub match_kind: String,
     pub pattern: String,
     pub decision_ids: Vec<String>,
-    pub expected_match_count: usize,
+    pub min_match_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -678,12 +724,12 @@ fn bead_provenance_from(table: &Table) -> Result<BeadProvenanceConfig, ReadError
             "source_path",
             "resolution_precedence",
             "allowed_bet_labels",
-            "bead_count",
-            "direct_owner_count",
-            "bet_label_count",
-            "exact_override_count",
-            "family_rule_count",
-            "binding_hash",
+            "bead_count_floor",
+            "direct_owner_floor",
+            "bet_label_floor",
+            "exact_override_floor",
+            "family_rule_floor",
+            "rule_binding_hash",
         ],
         ctx,
     )?;
@@ -691,12 +737,12 @@ fn bead_provenance_from(table: &Table) -> Result<BeadProvenanceConfig, ReadError
         source_path: get_str(table, "source_path", ctx)?,
         resolution_precedence: get_str_array(table, "resolution_precedence", ctx)?,
         allowed_bet_labels: get_str_array(table, "allowed_bet_labels", ctx)?,
-        bead_count: usize_field(table, "bead_count", ctx)?,
-        direct_owner_count: usize_field(table, "direct_owner_count", ctx)?,
-        bet_label_count: usize_field(table, "bet_label_count", ctx)?,
-        exact_override_count: usize_field(table, "exact_override_count", ctx)?,
-        family_rule_count: usize_field(table, "family_rule_count", ctx)?,
-        binding_hash: get_str(table, "binding_hash", ctx)?,
+        bead_count_floor: usize_field(table, "bead_count_floor", ctx)?,
+        direct_owner_floor: usize_field(table, "direct_owner_floor", ctx)?,
+        bet_label_floor: usize_field(table, "bet_label_floor", ctx)?,
+        exact_override_floor: usize_field(table, "exact_override_floor", ctx)?,
+        family_rule_floor: usize_field(table, "family_rule_floor", ctx)?,
+        rule_binding_hash: get_str(table, "rule_binding_hash", ctx)?,
     })
 }
 
@@ -709,7 +755,7 @@ fn bead_family_from(table: &Table, index: usize) -> Result<BeadFamily, ReadError
             "match_kind",
             "pattern",
             "decision_ids",
-            "expected_match_count",
+            "min_match_count",
         ],
         &ctx,
     )?;
@@ -718,7 +764,7 @@ fn bead_family_from(table: &Table, index: usize) -> Result<BeadFamily, ReadError
         match_kind: get_str(table, "match_kind", &ctx)?,
         pattern: get_str(table, "pattern", &ctx)?,
         decision_ids: get_str_array(table, "decision_ids", &ctx)?,
-        expected_match_count: usize_field(table, "expected_match_count", &ctx)?,
+        min_match_count: usize_field(table, "min_match_count", &ctx)?,
     })
 }
 
@@ -2144,10 +2190,37 @@ fn family_matches(family: &BeadFamily, bead_id: &str) -> bool {
     }
 }
 
-fn looks_like_bet_label(label: &str) -> bool {
-    label.strip_prefix('b').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    })
+/// Which provenance taxonomy a Beads label belongs to.
+///
+/// `Bet` is `b` + digits (`b1`..`b6` resolve; any other `b<n>` is an unknown
+/// bet label). `WorkstreamOrGate` is `w`/`g` + digits — the §19 workstream and
+/// gate taxonomy, which is orthogonal to the bet taxonomy and does NOT resolve
+/// provenance. `Other` is every ordinary topic label (`performance`,
+/// `gate-review`, `risk`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabelKind {
+    Bet,
+    WorkstreamOrGate,
+    Other,
+}
+
+/// THE reader for what taxonomy a label belongs to. The unknown-bet-label check
+/// and the orphan diagnostic both consume it, so they cannot disagree about what
+/// `w1` or `b9` is — a disagreement between two such predicates is exactly how a
+/// record becomes invisible to the check that should have named it.
+fn label_kind(label: &str) -> LabelKind {
+    let digits_after = |prefix: char| {
+        label
+            .strip_prefix(prefix)
+            .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if digits_after('b').is_some() {
+        LabelKind::Bet
+    } else if digits_after('w').is_some() || digits_after('g').is_some() {
+        LabelKind::WorkstreamOrGate
+    } else {
+        LabelKind::Other
+    }
 }
 
 fn provenance_entry(
@@ -2232,7 +2305,8 @@ fn resolve_bead_records(registry: &ArchitectureRegistry, beads: &[BeadRecord]) -
         allowed_labels.sort();
         allowed_labels.dedup();
         for label in &bead.labels {
-            if looks_like_bet_label(label) && !ALLOWED_BET_LABELS.contains(&label.as_str()) {
+            if label_kind(label) == LabelKind::Bet && !ALLOWED_BET_LABELS.contains(&label.as_str())
+            {
                 result.issues.push(BeadResolutionIssue {
                     code: "bead_bet_label_unknown".into(),
                     bead_id: bead.id.clone(),
@@ -2295,13 +2369,57 @@ fn resolve_bead_records(registry: &ArchitectureRegistry, beads: &[BeadRecord]) -
                         family.decision_ids.iter().cloned().collect(),
                     ),
                     [] => {
-                        result.issues.push(BeadResolutionIssue {
-                        code: "bead_provenance_orphan".into(),
-                        bead_id: bead.id.clone(),
-                        message:
-                            "bead has no direct owner, bet label, exact override, or family rule"
-                                .into(),
-                    });
+                        // "It failed" is not a diagnosis. A record reaches here
+                        // for three structurally different reasons needing three
+                        // different repairs, and the message used to be the same
+                        // sentence for all of them — which is why diagnosing one
+                        // orphan cost a `git log -S` per record. Measured on the
+                        // 405-record corpus at 2326fe8: 232 records carry a
+                        // workstream/gate tag, 36 carry no labels at all, and 16
+                        // carry only labels irrelevant to provenance.
+                        let workstream: Vec<&str> = bead
+                            .labels
+                            .iter()
+                            .filter(|label| label_kind(label) == LabelKind::WorkstreamOrGate)
+                            .map(String::as_str)
+                            .collect();
+                        // NOTE: `resolve_bead_provenance` joins issues with
+                        // "; ", so no message below may contain that sequence or
+                        // the joined error stops being splittable. Asserted by
+                        // architecture_provenance_issue_messages_are_parseable.
+                        let issue = if !workstream.is_empty() {
+                            // The confusable case: the record IS labelled and the
+                            // label is the problem. A workstream tag is a
+                            // legitimate, pervasive, orthogonal taxonomy — it is
+                            // never rejected, it simply does not resolve
+                            // provenance, and only a record that would orphan
+                            // anyway is ever told so.
+                            BeadResolutionIssue {
+                                code: "bead_workstream_label_in_bet_position".into(),
+                                bead_id: bead.id.clone(),
+                                message: format!(
+                                    "carries workstream/gate label(s) {workstream:?} and no b1..b6 bet label. A workstream tag is orthogonal to the bet taxonomy and does not resolve provenance -- add a b1..b6 label, a [[bead_override]] row, or a bead family rule."
+                                ),
+                            }
+                        } else if bead.labels.is_empty() {
+                            BeadResolutionIssue {
+                                code: "bead_provenance_orphan".into(),
+                                bead_id: bead.id.clone(),
+                                message:
+                                    "bead has no direct owner, bet label, exact override, or family rule, and carries no labels at all"
+                                        .into(),
+                            }
+                        } else {
+                            BeadResolutionIssue {
+                                code: "bead_provenance_orphan".into(),
+                                bead_id: bead.id.clone(),
+                                message: format!(
+                                    "bead has no direct owner, bet label, exact override, or family rule -- its labels {:?} contain no b1..b6 bet label",
+                                    bead.labels
+                                ),
+                            }
+                        };
+                        result.issues.push(issue);
                         continue;
                     }
                     _ => {
@@ -2392,6 +2510,33 @@ pub fn resolve_bead_provenance(
     }
 }
 
+/// The set of beads that DO resolve, without requiring that every record in the
+/// file resolves.
+///
+/// [`bead_provenance_index`] is total by contract: one unresolvable record makes
+/// the whole call `Err`. That is the right contract for the architecture
+/// registry, which owns the claim that every bead maps to an ADR and reports
+/// `bead_provenance_orphan` / `bead_provenance_not_total` when it does not.
+///
+/// It is the wrong contract for a consumer that only needs MEMBERSHIP — "does
+/// the bead this row names resolve?" — because it couples that consumer to
+/// every unrelated record in the project. A bead filed about shell linting has
+/// no bearing on whether an Appendix A slice owner resolves, yet under the total
+/// contract it made the Appendix A loader fail, which blocked
+/// `appendix-regenerate` for every slice at once.
+///
+/// This accessor fails only when the beads file itself cannot be read or
+/// parsed, which is the genuine "unavailable" condition. Unresolvable records
+/// are simply absent from the returned set, so a membership test on them still
+/// fails — loudly, and attributed to the row that named them.
+pub fn bead_provenance_membership(
+    registry: &ArchitectureRegistry,
+    root: &Path,
+) -> Result<Vec<BeadProvenanceEntry>, String> {
+    let beads = load_bead_records(root, &registry.bead_provenance.source_path)?;
+    Ok(resolve_bead_records(registry, &beads).entries)
+}
+
 /// Public total provenance index named for robot/API consumers.
 pub fn bead_provenance_index(
     registry: &ArchitectureRegistry,
@@ -2400,9 +2545,66 @@ pub fn bead_provenance_index(
     resolve_bead_provenance(registry, root)
 }
 
+/// Canonical pin over the rules that decide provenance, keyed by RULE rather
+/// than by bead.  Every input is a registry field; `.beads/issues.jsonl` is
+/// never read, so no pane's `br create` can move it and a rule edit always
+/// does.  This is the pin that replaced the corpus-wide binding hash, which
+/// could not be stable across N writers whatever its form.
+pub fn recompute_rule_binding_hash(registry: &ArchitectureRegistry) -> String {
+    let mut transcript = Vec::new();
+    for (rule_id, decision_ids) in rule_decision_map(registry) {
+        transcript_field(&mut transcript, "rule.id", &rule_id);
+        transcript_array(&mut transcript, "rule.decision_ids", &decision_ids);
+    }
+    format!("fnv1a64:{:016x}", fnv1a64(&transcript))
+}
+
+/// Every provenance rule the resolver can select, with the decisions it binds
+/// to, in a canonical order.  A rule that gains, loses, or retargets a decision
+/// changes exactly one row here.
+fn rule_decision_map(registry: &ArchitectureRegistry) -> BTreeMap<String, Vec<String>> {
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (bead, decision_ids) in owner_decision_index(registry) {
+        let mut ids = decision_ids;
+        ids.sort();
+        ids.dedup();
+        map.insert(format!("direct_owner:{bead}"), ids);
+    }
+    for label in ALLOWED_BET_LABELS {
+        map.insert(
+            format!("label:{label}"),
+            vec![format!("FG-ADR-BET-B{}", &label[1..])],
+        );
+    }
+    for rule in &registry.bead_overrides {
+        let mut ids = rule.decision_ids.clone();
+        ids.sort();
+        ids.dedup();
+        map.insert(format!("exact_override:{}:{}", rule.id, rule.bead_id), ids);
+    }
+    for family in &registry.bead_families {
+        let mut ids = family.decision_ids.clone();
+        ids.sort();
+        ids.dedup();
+        map.insert(
+            format!(
+                "family:{}:{}:{}",
+                family.id, family.match_kind, family.pattern
+            ),
+            ids,
+        );
+    }
+    map
+}
+
 /// Canonical pin over total Beads-to-ADR resolution.  Bead lifecycle status
 /// and derived prose are intentionally excluded; the stable binding identity,
 /// rule, and sorted ADR targets are included.
+///
+/// Retained as a reporting/diagnostic projection of the resolved corpus.  It is
+/// deliberately NOT a gate: it quantifies over `.beads/issues.jsonl`, which
+/// every pane writes, so pinning it made a legal `br create` in any pane red
+/// every other pane's tree.  [`recompute_rule_binding_hash`] is the gate.
 pub fn recompute_bead_binding_hash(entries: &[BeadProvenanceEntry]) -> String {
     let mut entries: Vec<&BeadProvenanceEntry> = entries.iter().collect();
     entries.sort_by(|left, right| left.bead_id.cmp(&right.bead_id));
@@ -2718,48 +2920,52 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
         ));
     }
     for (field, actual, expected) in [
-        ("bead_count", policy.bead_count, PINNED_BEAD_COUNT),
         (
-            "direct_owner_count",
-            policy.direct_owner_count,
-            PINNED_DIRECT_OWNER_COUNT,
+            "bead_count_floor",
+            policy.bead_count_floor,
+            PINNED_BEAD_COUNT_FLOOR,
         ),
         (
-            "bet_label_count",
-            policy.bet_label_count,
-            PINNED_BET_LABEL_COUNT,
+            "direct_owner_floor",
+            policy.direct_owner_floor,
+            PINNED_DIRECT_OWNER_FLOOR,
         ),
         (
-            "exact_override_count",
-            policy.exact_override_count,
-            PINNED_EXACT_OVERRIDE_COUNT,
+            "bet_label_floor",
+            policy.bet_label_floor,
+            PINNED_BET_LABEL_FLOOR,
         ),
         (
-            "family_rule_count",
-            policy.family_rule_count,
-            PINNED_FAMILY_RULE_COUNT,
+            "exact_override_floor",
+            policy.exact_override_floor,
+            PINNED_EXACT_OVERRIDE_FLOOR,
+        ),
+        (
+            "family_rule_floor",
+            policy.family_rule_floor,
+            PINNED_FAMILY_RULE_FLOOR,
         ),
     ] {
         if actual != expected {
             violations.push(Violation::global(
-                "bead_count_pin",
+                "bead_floor_pin",
                 "bead_provenance",
                 format!("{field} is {actual}, independently pinned value is {expected}"),
             ));
         }
     }
     let declared_total = policy
-        .direct_owner_count
-        .saturating_add(policy.bet_label_count)
-        .saturating_add(policy.exact_override_count)
-        .saturating_add(policy.family_rule_count);
-    if declared_total != policy.bead_count {
+        .direct_owner_floor
+        .saturating_add(policy.bet_label_floor)
+        .saturating_add(policy.exact_override_floor)
+        .saturating_add(policy.family_rule_floor);
+    if declared_total != policy.bead_count_floor {
         violations.push(Violation::global(
             "bead_class_count_total",
             "bead_provenance",
             format!(
-                "declared resolution class counts sum to {declared_total}, bead_count is {}",
-                policy.bead_count
+                "declared resolution class floors sum to {declared_total}, bead_count_floor is {}",
+                policy.bead_count_floor
             ),
         ));
     }
@@ -2783,6 +2989,33 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             ),
         ));
     }
+    // Pin the per-family floor SPLIT, not just its sum.  `family_rule_floor` is
+    // pinned and the floors must sum to it, so a rebalance between two families
+    // passes every aggregate check; see `PINNED_BEAD_FAMILY_FLOORS`.
+    let pinned_floors: BTreeMap<&str, usize> = PINNED_BEAD_FAMILY_FLOORS.iter().copied().collect();
+    for family in &registry.bead_families {
+        match pinned_floors.get(family.id.as_str()) {
+            Some(&pinned) if pinned == family.min_match_count => {}
+            Some(&pinned) => violations.push(Violation::global(
+                "bead_family_floor_pin",
+                "bead_provenance",
+                format!(
+                    "bead family {:?} declares min_match_count {}, independently pinned floor is {pinned}",
+                    family.id, family.min_match_count
+                ),
+            )),
+            // Completeness guard.  Without it the law fails OPEN: a newly added
+            // family escapes the pin by being unknown to the table.
+            None => violations.push(Violation::global(
+                "bead_family_floor_unpinned",
+                "bead_provenance",
+                format!(
+                    "bead family {:?} has no row in PINNED_BEAD_FAMILY_FLOORS; every family floor must be independently pinned",
+                    family.id
+                ),
+            )),
+        }
+    }
 
     let decisions: BTreeMap<&str, &Decision> = registry
         .decisions
@@ -2791,7 +3024,7 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
         .collect();
     let mut family_ids = BTreeSet::new();
     let mut family_patterns = BTreeSet::new();
-    let mut expected_family_total = 0usize;
+    let mut declared_family_floor_total = 0usize;
     for family in &registry.bead_families {
         if family.id.trim().is_empty() || !family_ids.insert(family.id.as_str()) {
             violations.push(Violation::global(
@@ -2843,7 +3076,8 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             }
             _ => {}
         }
-        expected_family_total = expected_family_total.saturating_add(family.expected_match_count);
+        declared_family_floor_total =
+            declared_family_floor_total.saturating_add(family.min_match_count);
         if family.decision_ids.is_empty()
             || !blank_items(&family.decision_ids).is_empty()
             || !duplicates(&family.decision_ids).is_empty()
@@ -2881,13 +3115,13 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             }
         }
     }
-    if expected_family_total != policy.family_rule_count {
+    if declared_family_floor_total != policy.family_rule_floor {
         violations.push(Violation::global(
-            "bead_family_expected_total",
+            "bead_family_floor_total",
             "bead_provenance",
             format!(
-                "bead_family expected_match_count values sum to {expected_family_total}, declared family_rule_count is {}",
-                policy.family_rule_count
+                "bead_family min_match_count values sum to {declared_family_floor_total}, declared family_rule_floor is {}",
+                policy.family_rule_floor
             ),
         ));
     }
@@ -2964,15 +3198,27 @@ fn validate_bead_resolution(
             issue.message,
         ));
     }
-    if beads.len() != registry.bead_provenance.bead_count || beads.len() != PINNED_BEAD_COUNT {
+    // FLOOR, not equality. `.beads/issues.jsonl` has N writers, so a pin that
+    // asserts a corpus CARDINALITY cannot be stable under N>1: any pane's
+    // `br create` invalidates every other pane's just-frozen pins, and correct
+    // panes racing correctly still go red. Every state reachable from an
+    // interleaving of creates against a freeze is a SUPERSET of what the
+    // freezing pane read, so a lower bound is exactly the shape that survives
+    // the race while still catching the hazard the pin exists for: silent loss
+    // of records (`br sync --import-only` deletes DB rows absent from the
+    // JSONL). Raising a floor is a deliberate ratchet and is never required to
+    // make the tree green.
+    if beads.len() < registry.bead_provenance.bead_count_floor
+        || beads.len() < PINNED_BEAD_COUNT_FLOOR
+    {
         violations.push(Violation::global(
-            "bead_source_count",
+            "bead_source_count_below_floor",
             "bead_provenance",
             format!(
-                "{} has {} distinct records, declared count is {}, independently pinned count is {PINNED_BEAD_COUNT}",
+                "{} has {} distinct records, declared floor is {}, independently pinned floor is {PINNED_BEAD_COUNT_FLOOR}",
                 registry.bead_provenance.source_path,
                 beads.len(),
-                registry.bead_provenance.bead_count
+                registry.bead_provenance.bead_count_floor
             ),
         ));
     }
@@ -2990,32 +3236,32 @@ fn validate_bead_resolution(
     for (class, declared, pinned) in [
         (
             "direct_owner",
-            registry.bead_provenance.direct_owner_count,
-            PINNED_DIRECT_OWNER_COUNT,
+            registry.bead_provenance.direct_owner_floor,
+            PINNED_DIRECT_OWNER_FLOOR,
         ),
         (
             "bet_label",
-            registry.bead_provenance.bet_label_count,
-            PINNED_BET_LABEL_COUNT,
+            registry.bead_provenance.bet_label_floor,
+            PINNED_BET_LABEL_FLOOR,
         ),
         (
             "exact_override",
-            registry.bead_provenance.exact_override_count,
-            PINNED_EXACT_OVERRIDE_COUNT,
+            registry.bead_provenance.exact_override_floor,
+            PINNED_EXACT_OVERRIDE_FLOOR,
         ),
         (
             "family_rule",
-            registry.bead_provenance.family_rule_count,
-            PINNED_FAMILY_RULE_COUNT,
+            registry.bead_provenance.family_rule_floor,
+            PINNED_FAMILY_RULE_FLOOR,
         ),
     ] {
         let actual = resolution.class_counts.get(class).copied().unwrap_or(0);
-        if actual != declared || actual != pinned {
+        if actual < declared || actual < pinned {
             violations.push(Violation::global(
-                "bead_resolution_class_count",
+                "bead_resolution_class_count_below_floor",
                 "bead_provenance",
                 format!(
-                    "resolution class {class:?} has {actual} rows, declared {declared}, pinned {pinned}"
+                    "resolution class {class:?} has {actual} rows, declared floor {declared}, pinned floor {pinned}"
                 ),
             ));
         }
@@ -3026,34 +3272,41 @@ fn validate_bead_resolution(
             .get(&family.id)
             .copied()
             .unwrap_or(0);
-        if actual != family.expected_match_count {
+        if actual < family.min_match_count {
             violations.push(Violation::global(
-                "bead_family_match_count",
+                "bead_family_match_count_below_floor",
                 "bead_provenance",
                 format!(
-                    "family {:?} selected {actual} beads, expected {}",
-                    family.id, family.expected_match_count
+                    "family {:?} selected {actual} beads, floor is {}",
+                    family.id, family.min_match_count
                 ),
             ));
         }
     }
-    let binding_hash = recompute_bead_binding_hash(&resolution.entries);
-    if registry.bead_provenance.binding_hash != binding_hash {
+    // The corpus-wide binding hash is gone. Content-addressing was never the
+    // cure: a hash over every bead's binding is an EQUALITY over the same
+    // shared-mutable set as the counts, and broke on a legal `br create` just
+    // as hard. What it was actually protecting -- "the rules that decide
+    // provenance did not move" -- is a property of the REGISTRY, so it is
+    // pinned here as a function of the rules alone, keyed by rule rather than
+    // by bead. No pane's bead can move it; a rule edit still must.
+    let rule_hash = recompute_rule_binding_hash(registry);
+    if registry.bead_provenance.rule_binding_hash != rule_hash {
         violations.push(Violation::global(
-            "bead_binding_hash_mismatch",
+            "bead_rule_binding_hash_mismatch",
             "bead_provenance",
             format!(
-                "registry binding hash {:?}, recomputed {binding_hash:?}",
-                registry.bead_provenance.binding_hash
+                "registry rule-binding hash {:?}, recomputed {rule_hash:?}",
+                registry.bead_provenance.rule_binding_hash
             ),
         ));
     }
-    if binding_hash != PINNED_BEAD_BINDING_HASH {
+    if rule_hash != PINNED_RULE_BINDING_HASH {
         violations.push(Violation::global(
-            "independent_bead_binding_hash_mismatch",
+            "independent_bead_rule_binding_hash_mismatch",
             "bead_provenance",
             format!(
-                "recomputed binding hash {binding_hash:?} differs from code pin {PINNED_BEAD_BINDING_HASH:?}"
+                "recomputed rule-binding hash {rule_hash:?} differs from code pin {PINNED_RULE_BINDING_HASH:?}"
             ),
         ));
     }
@@ -3618,29 +3871,12 @@ pub fn recompute_semantic_contract_hash(registry: &ArchitectureRegistry) -> Stri
         "bead_provenance.source_path",
         &policy.source_path,
     );
-    for (name, value) in [
-        ("bead_provenance.bead_count", policy.bead_count),
-        (
-            "bead_provenance.direct_owner_count",
-            policy.direct_owner_count,
-        ),
-        ("bead_provenance.bet_label_count", policy.bet_label_count),
-        (
-            "bead_provenance.exact_override_count",
-            policy.exact_override_count,
-        ),
-        (
-            "bead_provenance.family_rule_count",
-            policy.family_rule_count,
-        ),
-    ] {
-        transcript_field(&mut transcript, name, &value.to_string());
-    }
-    transcript_field(
-        &mut transcript,
-        "bead_provenance.binding_hash",
-        &policy.binding_hash,
-    );
+    // The cardinality floors and the rule-binding hash are deliberately NOT in
+    // this transcript. This hash answers "did the ADR semantic contract move";
+    // the floors are operational tripwire state over a corpus every pane
+    // writes. Mixing them made 44 of this hash's 45 historical movements bead
+    // churn rather than a semantic edit, which is a change-detector with no
+    // signal left. The floors keep their own TOML-vs-const equality below.
     transcript_array(
         &mut transcript,
         "bead_provenance.resolution_precedence",
@@ -3661,11 +3897,6 @@ pub fn recompute_semantic_contract_hash(registry: &ArchitectureRegistry) -> Stri
         ] {
             transcript_field(&mut transcript, name, value);
         }
-        transcript_field(
-            &mut transcript,
-            "bead_family.expected_match_count",
-            &family.expected_match_count.to_string(),
-        );
         transcript_array(
             &mut transcript,
             "bead_family.decision_ids",
@@ -5621,6 +5852,7 @@ pub fn validate_architecture(registry: &ArchitectureRegistry, root: &Path) -> Ve
     validate_hash_and_ids(registry, &mut violations);
     let profiles = validate_profiles(registry, &mut violations);
     validate_sources(registry, root, &mut violations);
+    validate_document_glosses(registry, &mut violations);
     validate_external_review_contract_into(registry, &mut violations);
 
     let catalog = match load_reference_catalog(root) {
@@ -5754,4 +5986,425 @@ pub fn validate_architecture(registry: &ArchitectureRegistry, root: &Path) -> Ve
     violations.sort();
     violations.dedup();
     violations
+}
+
+// ---------------------------------------------------------------------------
+// The generated document
+// ---------------------------------------------------------------------------
+//
+// `validate_sources` above already reads `docs/ARCHITECTURE_DECISION_RECORD.md`
+// and verifies the two CHECKED-SOURCE excerpt regions byte-for-byte.  It is the
+// only reader of that file, and everything below extends it rather than adding
+// a second one: the rest of the document becomes a projection of this registry,
+// so a fact stated in the prose cannot disagree with the registry any more than
+// an excerpt can disagree with the plan.
+//
+// This closes a measured hole.  Between f805ec7 (the document's only commit)
+// and 82e1a93, `registries/architecture_decisions.toml` took 48 commits and
+// `architecture.rs` took 51, while the document took none — because nothing
+// asked it to move.  Its two byte-compared siblings track their registries
+// exactly (THREAT 1 commit / 1, TOPOLOGY 4 / 4); this one was 1 / 48.
+
+/// The one document this registry renders.
+pub const DOCUMENT_PATH: &str = "docs/ARCHITECTURE_DECISION_RECORD.md";
+
+/// Exact fail-closed mechanisms behind the document's checker-capability claim.
+///
+/// These are rendered into the ADR rather than hidden behind prose. The
+/// cross-validator mutation suite owns a paired control and one-defect witness
+/// for every code and asserts exact set equality with this list, so renaming or
+/// removing a mechanism cannot leave a plausible stale sentence behind.
+pub const DOCUMENT_ENFORCEMENT_VIOLATION_CODES: [&str; 7] = [
+    "source_bytes_mismatch",
+    "id_table_hash_mismatch",
+    "semantic_contract_hash_mismatch",
+    "owner_bead_unresolved",
+    "live_verification_checker_missing",
+    "research_dependency_promotion",
+    "document_drift",
+];
+
+/// Exact fail-closed mechanisms behind the document's Bead-resolution claim.
+///
+/// `bead_bet_label_set` pins the configured vocabulary and
+/// `bead_bet_label_unknown` rejects a live record outside it; both are needed
+/// for the prose's "unknown bet label" statement to be true in both directions.
+pub const DOCUMENT_FAILURE_VIOLATION_CODES: [&str; 6] = [
+    "bead_bet_label_set",
+    "bead_bet_label_unknown",
+    "bead_override_shadowed",
+    "bead_family_ambiguous",
+    "provenance_rationale_missing",
+    "bead_provenance_not_total",
+];
+
+/// One prose gloss per `allowed_categories` member.
+///
+/// The rendered vocabulary tables are how the document states what it binds
+/// without restating it: the phrases live here, the membership lives in the
+/// registry, and `validate_document_glosses` requires the two to be equal sets
+/// in BOTH directions.  Without that guard the table fails open — a newly
+/// declared category would simply not appear, and the document would go on
+/// claiming a coverage it no longer had.
+const CATEGORY_GLOSS: [(&str, &str); 12] = [
+    ("thesis_bet", "one of the six leapfrog bets of §0"),
+    ("constraint", "a constitutional non-negotiable of §1"),
+    (
+        "foundation_asupersync",
+        "an audited asupersync capability, consumed as-is",
+    ),
+    (
+        "foundation_fnx",
+        "an audited franken_networkx capability, consumed as-is",
+    ),
+    (
+        "foundation_frankensqlite",
+        "a frankensqlite design, re-instantiated and re-proved locally",
+    ),
+    (
+        "foundation_gap",
+        "a capability the foundations do not provide, so §18 builds it",
+    ),
+    ("sota_storage", "a dynamic-graph-storage lesson from §3.1"),
+    ("sota_query", "a query-processing lesson from §3.2"),
+    (
+        "sota_incremental",
+        "an incremental, temporal, or vector lesson from §3.3",
+    ),
+    (
+        "rejection",
+        "an alternative evaluated and rejected or deferred, with its recorded reason",
+    ),
+    (
+        "calibration",
+        "a calibration, control, or verifiability principle from §3.5",
+    ),
+    ("bibliography", "a distinct reviewed anchor from Appendix E"),
+];
+
+/// One prose gloss per `allowed_relationship_kinds` member.  Same both-direction
+/// guard: this table is the document's statement that the dependency universe is
+/// closed, so a relationship kind that escaped it would be an unnamed way to
+/// depend on something.
+const RELATIONSHIP_GLOSS: [(&str, &str); 6] = [
+    (
+        "consume_as_is",
+        "an audited foundation capability is linked directly",
+    ),
+    (
+        "design_donor",
+        "a design is re-instantiated and re-proved locally",
+    ),
+    (
+        "upstream_prerequisite",
+        "a feature stays absent until a named upstream capability exists",
+    ),
+    (
+        "build_in_house",
+        "graph-specific implementation is assigned to the §18 crate universe",
+    ),
+    (
+        "test_only_oracle",
+        "a dependency is permitted only in verification",
+    ),
+    (
+        "research_only_citation",
+        "provenance is recorded without authorizing any dependency",
+    ),
+];
+
+/// One prose gloss per `bead_provenance.resolution_precedence` tier.  The table
+/// renders the registry's own order, because the order is the law.
+const PRECEDENCE_GLOSS: [(&str, &str); 4] = [
+    (
+        "direct_owner",
+        "a decision names the Bead in its `owner_beads`",
+    ),
+    ("bet_label", "the Bead's own closed `b1`–`b6` label set"),
+    (
+        "exact_override",
+        "a named `[[bead_override]]` row for that exact Bead",
+    ),
+    (
+        "family_rule",
+        "exactly one disjoint `[[bead_family]]` prefix or Appendix-A rule",
+    ),
+];
+
+/// Every gloss table must be a total, exact cover of the registry vocabulary it
+/// renders.  A missing gloss drops a live row out of the document; an orphan
+/// gloss renders a row for a vocabulary member that no longer exists.
+fn validate_document_glosses(registry: &ArchitectureRegistry, violations: &mut Vec<Violation>) {
+    for (label, declared, gloss) in [
+        (
+            "category",
+            &registry.registry.allowed_categories,
+            &CATEGORY_GLOSS[..],
+        ),
+        (
+            "relationship_kind",
+            &registry.registry.allowed_relationship_kinds,
+            &RELATIONSHIP_GLOSS[..],
+        ),
+        (
+            "resolution_precedence",
+            &registry.bead_provenance.resolution_precedence,
+            &PRECEDENCE_GLOSS[..],
+        ),
+    ] {
+        let declared: BTreeSet<&str> = declared.iter().map(String::as_str).collect();
+        let glossed: BTreeSet<&str> = gloss.iter().map(|(key, _)| *key).collect();
+        for missing in declared.difference(&glossed) {
+            violations.push(Violation::global(
+                "document_gloss_missing",
+                "source_integrity",
+                format!(
+                    "{label} {missing:?} is declared by the registry but has no rendered gloss, so it would vanish from {DOCUMENT_PATH}"
+                ),
+            ));
+        }
+        for orphan in glossed.difference(&declared) {
+            violations.push(Violation::global(
+                "document_gloss_orphan",
+                "source_integrity",
+                format!(
+                    "{label} {orphan:?} has a rendered gloss but is not declared by the registry"
+                ),
+            ));
+        }
+    }
+}
+
+fn heading(out: &mut String, level: usize, text: &str) {
+    out.push('\n');
+    for _ in 0..level {
+        out.push('#');
+    }
+    out.push(' ');
+    out.push_str(text);
+    out.push_str("\n\n");
+}
+
+fn table_row(out: &mut String, cells: &[&str]) {
+    out.push('|');
+    for cell in cells {
+        out.push(' ');
+        out.push_str(cell);
+        out.push_str(" |");
+    }
+    out.push('\n');
+}
+
+fn table_head(out: &mut String, headers: &[&str]) {
+    table_row(out, headers);
+    out.push('|');
+    for _ in headers {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+}
+
+/// Render a byte count the way the document has always rendered one.
+fn thousands(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+fn gloss_table(out: &mut String, headers: &[&str], gloss: &[(&str, &str)], order: &[String]) {
+    table_head(out, headers);
+    for key in order {
+        if let Some((_, text)) = gloss.iter().find(|(candidate, _)| candidate == key) {
+            table_row(out, &[&format!("`{key}`"), text]);
+        }
+    }
+}
+
+fn inline_code_list(codes: &[&str]) -> String {
+    codes
+        .iter()
+        .map(|code| format!("`{code}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Generate the published architecture-decision record.  Deterministic: the same
+/// registry plus the same plan bytes produce the same document, byte for byte.
+pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result<String, String> {
+    let mut out = String::new();
+    out.push_str("<!-- GENERATED FILE — DO NOT EDIT BY HAND.\n");
+    out.push_str("     Source: registries/architecture_decisions.toml\n");
+    out.push_str("     Regenerate: ");
+    out.push_str(REPLAY_COMMAND);
+    out.push_str(" --write\n");
+    out.push_str("     Verify:     ");
+    out.push_str(REPLAY_COMMAND);
+    out.push_str("\n-->\n");
+
+    out.push_str("\n# FrankenGraphDB Architectural Decision Record\n\n");
+    out.push_str(
+        "This record freezes the reasoning that governs FrankenGraphDB's architecture. The exact audited source corpus is preserved below, while the normative, machine-readable decision and provenance matrix lives in [`registries/architecture_decisions.toml`](../registries/architecture_decisions.toml). The registry is the master and this document is its rendering: every count, vocabulary row, and table cell below is derived from the registry at render time, and the checker fails if the committed bytes differ from the regenerated ones. Together they bind every decision category listed below to a stable `",
+    );
+    out.push_str(&registry.registry.decision_id_prefix);
+    out.push_str(
+        "*` identity, an implementation owner, a verification route, and an explicit no-claim boundary.\n\n",
+    );
+    out.push_str(
+        "The source excerpts are historical evidence, not proof that an implementation or gate is complete. Time-sensitive market, foundation, and research statements retain their original review date; changing one requires a fresh external-source review rather than silently rewriting the frozen rationale. Neither of those two sentences is mechanically checked, and neither is written as if it were: no artifact can contradict a claim about what is *not* proven, and a checker can observe that an `[[external_review]]` row was added but never that a review happened.\n\n",
+    );
+    out.push_str(
+        "`architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, regenerates this document, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON. The exact fail-closed codes behind those enforcement claims are ",
+    );
+    out.push_str(&inline_code_list(&DOCUMENT_ENFORCEMENT_VIOLATION_CODES));
+    out.push_str(". Every cited code has a paired control-and-mutation witness. Run it from the repository root with `");
+    out.push_str(REPLAY_COMMAND);
+    out.push_str("`.\n");
+
+    heading(&mut out, 2, "Decision categories");
+    out.push_str(&format!(
+        "The closed category vocabulary — {} rows, exactly as `registry.allowed_categories` declares it. A category with no row here fails the gate rather than quietly leaving the document.\n\n",
+        registry.registry.allowed_categories.len()
+    ));
+    gloss_table(
+        &mut out,
+        &["Category", "What a row of it binds"],
+        &CATEGORY_GLOSS,
+        &registry.registry.allowed_categories,
+    );
+
+    heading(&mut out, 2, "Dependency-universe relationships");
+    out.push_str(&format!(
+        "The {} relationship kinds are closed: they are the complete set of ways a decision may relate this codebase to something outside it.\n\n",
+        registry.registry.allowed_relationship_kinds.len()
+    ));
+    gloss_table(
+        &mut out,
+        &["Relationship", "Meaning"],
+        &RELATIONSHIP_GLOSS,
+        &registry.registry.allowed_relationship_kinds,
+    );
+
+    let provenance = &registry.bead_provenance;
+    heading(&mut out, 2, "Bead-provenance closure");
+    out.push_str(&format!(
+        "The provenance closure is **total**: every record in [`{}`](../{}) resolves to a rationale, including closed historical work, and a record that does not resolve fails the architecture gate. Totality is the property the gate enforces — not a cardinality. The corpus is shared and multi-writer, so the declared counts below are monotone **floors**, never equalities: a `br create` in any pane can only raise the observed counts, so it never invalidates a floor, while a record disappearing still trips one. Raising a floor is a deliberate ratchet, and is never required to make the tree green.\n\n",
+        provenance.source_path, provenance.source_path,
+    ));
+    table_head(&mut out, &["Resolution floor", "Declared minimum"]);
+    table_row(
+        &mut out,
+        &["records", &format!("≥ {}", provenance.bead_count_floor)],
+    );
+    for (tier, floor) in [
+        ("direct_owner", provenance.direct_owner_floor),
+        ("bet_label", provenance.bet_label_floor),
+        ("exact_override", provenance.exact_override_floor),
+        ("family_rule", provenance.family_rule_floor),
+    ] {
+        table_row(&mut out, &[&format!("`{tier}`"), &format!("≥ {floor}")]);
+    }
+    out.push_str(
+        "\nEach issue resolves through exactly one precedence tier, tried in this order. Two tiers matching the same Bead is a shadowed override or an ambiguous rule, and both fail the gate.\n\n",
+    );
+    gloss_table(
+        &mut out,
+        &["Tier", "Resolves when"],
+        &PRECEDENCE_GLOSS,
+        &provenance.resolution_precedence,
+    );
+    out.push_str(&format!(
+        "\nThe bet-label vocabulary is closed to {}. The rule-binding table is pinned by exact equality at `{}` — keyed by rule rather than by Bead, so no Bead can move it and a rule edit must. An unknown bet label, a shadowed override, an ambiguous rule, a missing decision, profile, or rationale, or an unresolved Bead fails the architecture gate. The exact codes behind those failure claims are {}.\n",
+        provenance
+            .allowed_bet_labels
+            .iter()
+            .map(|label| format!("`{label}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        provenance.rule_binding_hash,
+        inline_code_list(&DOCUMENT_FAILURE_VIOLATION_CODES),
+    ));
+
+    heading(&mut out, 2, "Frozen source blocks");
+    out.push_str(
+        "Each block below is embedded verbatim from the master plan under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the frozen rationale.\n\n",
+    );
+    let mut blocks: Vec<&SourceBlock> = registry.source_blocks.iter().collect();
+    blocks.sort_by_key(|block| block.plan_start_line);
+    table_head(
+        &mut out,
+        &[
+            "Block ID",
+            "Repository-relative source",
+            "Inclusive lines",
+            "Lines",
+            "Bytes",
+            "FNV-1a-64",
+        ],
+    );
+    for block in &blocks {
+        table_row(
+            &mut out,
+            &[
+                &format!("`{}`", block.id),
+                &format!("`{}`", block.plan_path),
+                &format!("{}–{}", block.plan_start_line, block.plan_end_line),
+                &block.line_count.to_string(),
+                &thousands(block.byte_count),
+                &format!("`{}`", block.fnv1a64),
+            ],
+        );
+    }
+
+    for block in &blocks {
+        let plan = read_repo_bytes(root, &block.plan_path)?;
+        let excerpt = line_range(&plan, block.plan_start_line, block.plan_end_line)?;
+        let excerpt = std::str::from_utf8(excerpt)
+            .map_err(|error| format!("source block {:?} is not UTF-8: {error}", block.id))?;
+        out.push('\n');
+        out.push_str(&block.start_marker);
+        out.push('\n');
+        out.push_str(excerpt);
+        out.push_str(&block.end_marker);
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
+/// Compare the generated document against the committed one.
+pub fn check_document(registry: &ArchitectureRegistry, root: &Path) -> Result<bool, String> {
+    let generated = generate_document(registry, root)?;
+    let committed = fs::read_to_string(root.join(DOCUMENT_PATH))
+        .map_err(|error| format!("{DOCUMENT_PATH}: {error}"))?;
+    Ok(generated == committed)
+}
+
+/// The drift violation for the generated document.  The binary owns the
+/// `--write` decision, so it constructs this after regenerating.
+pub fn document_drift_violation() -> Violation {
+    Violation::global(
+        "document_drift",
+        "source_integrity",
+        format!(
+            "the committed {DOCUMENT_PATH} differs from the regenerated bytes; run `{REPLAY_COMMAND} --write`"
+        ),
+    )
+}
+
+/// A document that cannot be rendered is a registry defect, so it is reported
+/// as a violation (exit 1) rather than a load failure (exit 2).  Otherwise a
+/// registry mutation that happens to break rendering would change the gate's
+/// contract from "this registry is invalid" to "the checker could not run".
+pub fn document_generation_violation(error: &str) -> Violation {
+    Violation::global(
+        "document_generation_failed",
+        "source_integrity",
+        format!("{DOCUMENT_PATH} could not be rendered from the registry: {error}"),
+    )
 }

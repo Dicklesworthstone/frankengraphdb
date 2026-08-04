@@ -25,9 +25,9 @@ SECOND="$EVIDENCE_DIR/second.ndjson"
 EVIDENCE_ONLY="$EVIDENCE_DIR/evidence-only.ndjson"
 
 echo "==> verify direct dependencies stay inside fgdb and the pinned foundations"
-grep -Fqx 'asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb", default-features = false }' crates/fgdb-codec/Cargo.toml
+grep -Fqx 'asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "8ccae2fa8d15d780a9ab774aaf255a4ec7731a71", default-features = false }' crates/fgdb-codec/Cargo.toml
 grep -Fqx 'fnx-generators = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f" }' crates/fgdb-codec/Cargo.toml
-grep -Fq 'git+https://github.com/Dicklesworthstone/asupersync?rev=e464a484cb65c1a55be0d9c925e6e9c20318edcb#e464a484cb65c1a55be0d9c925e6e9c20318edcb' Cargo.lock
+grep -Fq 'git+https://github.com/Dicklesworthstone/asupersync?rev=8ccae2fa8d15d780a9ab774aaf255a4ec7731a71#8ccae2fa8d15d780a9ab774aaf255a4ec7731a71' Cargo.lock
 grep -Fq 'git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f#9d710b1c33e99412c94de7fa4de2f7ce4954110f' Cargo.lock
 DIRECT_METADATA="$(cargo metadata --locked --offline --no-deps --format-version 1 | jq -r '
   .packages[]
@@ -38,7 +38,7 @@ DIRECT_METADATA="$(cargo metadata --locked --offline --no-deps --format-version 
 ' | LC_ALL=C sort)"
 EXPECTED_DIRECT="$(
   printf '%s\t%s\t%s\t%s\n' \
-    'asupersync' 'dev' 'git+https://github.com/Dicklesworthstone/asupersync?rev=e464a484cb65c1a55be0d9c925e6e9c20318edcb' '' \
+    'asupersync' 'normal' 'git+https://github.com/Dicklesworthstone/asupersync?rev=8ccae2fa8d15d780a9ab774aaf255a4ec7731a71' '' \
     'fgdb-types' 'normal' 'path' "$ROOT/crates/fgdb-types" \
     'fnx-generators' 'dev' 'git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f' '' \
     | LC_ALL=C sort

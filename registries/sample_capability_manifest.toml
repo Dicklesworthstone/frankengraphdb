@@ -17,6 +17,20 @@
 # Pre-Genesis, the sample manifest is the spec-only surface: no runtime
 # features are active, so the closure is trivially satisfied. Workstream beads
 # grow this file (and add per-gate manifests) as capabilities land.
+#
+# `expected_reachable_clauses` is what keeps "trivially satisfied" from being
+# indistinguishable from "the closure compiler stopped working"
+# (bead fgdb-regcheck-closure-vacuous-no-control-hp0f). It is a POSITIVE claim:
+# this manifest asserts that it reaches exactly this many clauses, and
+# registry-check fails when reality differs in EITHER direction. Zero is
+# deliberate here and is licensed by the run's own control, which checks that a
+# manifest enabling every atom the spine names does reach clauses.
+#
+# It is zero and not more because all twenty spine clauses are still `stub`:
+# measured, enabling every atom yields reachable=20 absent=20. So no manifest
+# can be both non-empty and green today, and a per-gate manifest that enables
+# real atoms becomes possible only as clauses go live. Raise this number in the
+# same change that makes them live.
 # =============================================================================
 
 schema_version = 1
@@ -27,3 +41,4 @@ description = "Pre-Genesis sample capability manifest: spec-only surface, no run
 features = []
 postures = []
 roles = []
+expected_reachable_clauses = 0

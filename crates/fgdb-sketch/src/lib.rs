@@ -2,7 +2,8 @@
 //!
 //! Sketches are advisory summaries, never authoritative graph state. Every
 //! implementation fixes its merge and deletion behavior explicitly and exposes
-//! a canonical logical state for registry-generated durable encoders.
+//! a versioned, bounded canonical codec for its logical state. These codecs are
+//! embedded value encodings, not top-level Appendix A object-kind registrations.
 
 #![forbid(unsafe_code)]
 
@@ -11,6 +12,7 @@ pub mod count_min;
 pub mod degree_histogram;
 pub mod distinct;
 pub mod exact_quantiles;
+pub mod label_counts;
 pub mod maintenance_log;
 pub mod path_correlation;
 pub mod zone_map;
@@ -90,6 +92,8 @@ pub(crate) mod graph_accuracy_fixtures {
         } else {
             (right, left)
         };
+        // This is a test-only opaque observation key. Its byte order is part
+        // of the fixture identity, not a durable fixed-integer encoding.
         let mut bytes = [0_u8; 16];
         bytes[..8].copy_from_slice(&low.to_be_bytes());
         bytes[8..].copy_from_slice(&high.to_be_bytes());

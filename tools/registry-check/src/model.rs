@@ -78,6 +78,40 @@ pub struct InvariantRegistry {
     pub allowed_claim_classes: Vec<String>,
     pub waiver_policy: String,
     pub twenty_id_hash: String,
+    /// The closed vocabulary of capability atoms an `activation_predicate` or a
+    /// capability manifest may name.
+    ///
+    /// Without it the atom space is open, and an atom that is merely MISSPELLED
+    /// is indistinguishable from one whose capability has not landed yet: both
+    /// simply evaluate false. A clause whose predicate names `mvcc-visibilty`
+    /// is unreachable forever, silently escaping enforcement under a green
+    /// verdict, and no gate can ever say so. Closing the vocabulary is what
+    /// turns that permanent silence into a validation error.
+    pub capability_atoms: Vec<String>,
+    /// How many clauses this registry CLAIMS are enforced at the current gate.
+    ///
+    /// A positive claim, not an absence — the same instrument
+    /// [`Manifest::expected_reachable_clauses`] already is for the activation
+    /// closure, applied to the fact AGENTS.md rests its hardest rule on: "CI
+    /// cross-checks that every ID has a live checker". Every clause is `stub`
+    /// today, so that cross-check quantifies over an EMPTY SET and passes — the
+    /// purest form of the vacuous gate, and indistinguishable at the exit code
+    /// from a spine that is fully enforced.
+    ///
+    /// Declaring the number is what makes a zero mean "deliberately zero"
+    /// instead of "nothing was examined", and what fails the day a clause is
+    /// promoted without the gate review the doctrine requires — in EITHER
+    /// direction: too few means a clause silently regressed to stub, too many
+    /// means one was promoted unreviewed
+    /// (`fgdb-fginv-spine-zero-live-checkers-v05b`).
+    pub expected_enforced_clauses: i64,
+    /// How many of the twenty FG-INV IDs this registry CLAIMS are enforced.
+    ///
+    /// An ID is enforced only when EVERY clause under it is. Separate from
+    /// [`Self::expected_enforced_clauses`] because they are separate facts:
+    /// promoting one clause of a two-clause invariant moves the clause count and
+    /// not the ID count, and AGENTS.md's rule is stated over IDs.
+    pub expected_enforced_invariants: i64,
     pub invariants: Vec<Invariant>,
 }
 
@@ -121,6 +155,17 @@ pub struct Lane {
     pub model_scope: String,
     pub artifact: String,
     pub status: String,
+    /// The `checker_index` symbol of the gate that runs this lane's prover.
+    ///
+    /// Optional in the parser and REQUIRED on a `status = "checked"` row, for
+    /// the same reason [`Checker::unit`] is required on a live one: the
+    /// registry's own header says `checked` means the artifact "is CI-checked",
+    /// and nothing in a `.lean` or `.tla` file says which gate — if any — runs
+    /// it. Declared by the row, never guessed; [`crate::liveness`] then proves
+    /// the named gate is itself live rather than trusting the name.
+    ///
+    /// A `declared` lane names no gate because there is nothing to run yet.
+    pub checked_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,7 +174,47 @@ pub struct Checker {
     pub kind: String,
     pub artifact: String,
     pub status: String,
+    /// What `symbol` names: `"symbol"` for a code symbol inside `artifact`,
+    /// `"artifact"` for a law name covering the whole file.
+    ///
+    /// Optional in the parser and REQUIRED on a `status = "live"` row, which is
+    /// where [`crate::liveness`] demands it. Stub rows point at artifacts that
+    /// do not exist yet, so there is nothing for a unit declaration to resolve
+    /// against; promoting a stub to live is exactly when the declaration has to
+    /// be made. Without it a row's `symbol` cannot be checked at all — eight of
+    /// the live rows carry law names rather than code symbols and no spelling
+    /// rule separates them from a test function whose name has rotted.
+    pub unit: Option<String>,
 }
+
+/// A `scripts/**/*.sh` deliverable that is deliberately NOT a registered gate.
+///
+/// `checker_index.toml` closes row -> file (a `live` row's artifact must exist).
+/// It never closed file -> row, so a script could sit in `scripts/` carrying
+/// every signal of a gate — `set -euo pipefail`, pinned counts, PASS/FAIL
+/// counters — while no runner and no registry knew it existed
+/// (`fgdb-orphan-w1-e2e-gates-unregistered-unrun-vuq8`). This table is the other
+/// direction: a script is either a registered checker or it says here, out loud,
+/// why it is not one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptDisposition {
+    pub path: String,
+    pub role: String,
+    pub reason: String,
+}
+
+/// The roles a non-gate script may declare.
+///
+/// `candidate` is a bounded, visible debt, not an escape hatch: it means the
+/// script's own assertions have been measured to hold but promoting it to a
+/// registered gate would make `scripts/check.sh` execute it, which is a claim
+/// about the whole swarm's gate chain and needs its own evidence.
+///
+/// `library` is source-only code whose assertions belong to the registered
+/// scripts that source it. `hook` is invoked by an external lifecycle event
+/// rather than by the quality-gate runner. Executing either one as a checker
+/// would manufacture an UNRUN or exercise the wrong entry condition.
+pub const SCRIPT_ROLES: [&str; 5] = ["runner", "advisory", "candidate", "library", "hook"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
@@ -137,6 +222,16 @@ pub struct Manifest {
     pub features: Vec<String>,
     pub postures: Vec<String>,
     pub roles: Vec<String>,
+    /// How many clauses this manifest CLAIMS its activation closure reaches.
+    ///
+    /// A positive claim, not an absence. The pre-Genesis sample manifest
+    /// enables nothing, so its closure reaches zero clauses and the gate passes
+    /// — and would pass identically if the closure compiler had silently
+    /// stopped reaching anything at all. Declaring the number is what makes a
+    /// zero mean "deliberately zero" instead of "nothing was examined", and it
+    /// is what fails the day Genesis makes the first clause reachable without
+    /// anyone revisiting this file.
+    pub expected_reachable_clauses: i64,
 }
 
 /// The complete registry set the validator operates on.
@@ -148,6 +243,7 @@ pub struct Registries {
     pub slo: SloRegistry,
     pub proof_lanes: Vec<Lane>,
     pub checker_index: Vec<Checker>,
+    pub script_dispositions: Vec<ScriptDisposition>,
 }
 
 fn registry_name(root: &Table, expected: &str, file: &str) -> Result<(), ReadError> {
@@ -257,6 +353,17 @@ pub fn invariants_from(root: &Table) -> Result<InvariantRegistry, ReadError> {
         )?,
         waiver_policy: get_str(registry, "waiver_policy", "invariants.toml.registry")?,
         twenty_id_hash: get_str(registry, "twenty_id_hash", "invariants.toml.registry")?,
+        capability_atoms: get_str_array(registry, "capability_atoms", "invariants.toml.registry")?,
+        expected_enforced_clauses: get_int(
+            registry,
+            "expected_enforced_clauses",
+            "invariants.toml.registry",
+        )?,
+        expected_enforced_invariants: get_int(
+            registry,
+            "expected_enforced_invariants",
+            "invariants.toml.registry",
+        )?,
         invariants,
     })
 }
@@ -329,9 +436,37 @@ pub fn proof_lanes_from(root: &Table) -> Result<Vec<Lane>, ReadError> {
             model_scope: get_str(t, "model_scope", &ctx)?,
             artifact: get_str(t, "artifact", &ctx)?,
             status: get_str(t, "status", &ctx)?,
+            checked_by: get_opt_str(t, "checked_by", &ctx)?,
         });
     }
     Ok(lanes)
+}
+
+/// Read the `[[script_disposition]]` table from `checker_index.toml`.
+///
+/// Deliberately a separate reader from [`checker_index_from`]: it answers a
+/// different question (why is this script NOT a gate) over a different table.
+/// One reader per fact — nothing else in the tree derives script dispositions.
+pub fn script_dispositions_from(root: &Table) -> Result<Vec<ScriptDisposition>, ReadError> {
+    registry_name(root, "checker_index", "checker_index.toml")?;
+    let mut out = Vec::new();
+    // Deliberately REQUIRED, not optional. TOML has no empty array-of-tables
+    // syntax, so an optional read would make "someone deleted every row" and
+    // "there are legitimately none" the same observation — and the second is
+    // never true while scripts/check.sh itself is a non-gate script. A zero
+    // result must be licensed; here the license is that the table must exist.
+    for (i, t) in get_table_array(root, "script_disposition", "checker_index.toml")?
+        .iter()
+        .enumerate()
+    {
+        let ctx = format!("checker_index.toml.script_disposition[{i}]");
+        out.push(ScriptDisposition {
+            path: get_str(t, "path", &ctx)?,
+            role: get_str(t, "role", &ctx)?,
+            reason: get_str(t, "reason", &ctx)?,
+        });
+    }
+    Ok(out)
 }
 
 pub fn checker_index_from(root: &Table) -> Result<Vec<Checker>, ReadError> {
@@ -347,6 +482,7 @@ pub fn checker_index_from(root: &Table) -> Result<Vec<Checker>, ReadError> {
             kind: get_str(t, "kind", &ctx)?,
             artifact: get_str(t, "artifact", &ctx)?,
             status: get_str(t, "status", &ctx)?,
+            unit: get_opt_str(t, "unit", &ctx)?,
         });
     }
     Ok(checkers)
@@ -359,6 +495,7 @@ pub fn manifest_from(root: &Table) -> Result<Manifest, ReadError> {
         features: get_str_array(m, "features", "manifest")?,
         postures: get_str_array(m, "postures", "manifest")?,
         roles: get_str_array(m, "roles", "manifest")?,
+        expected_reachable_clauses: get_int(m, "expected_reachable_clauses", "manifest")?,
     })
 }
 
@@ -406,6 +543,8 @@ pub fn load_registries(dir: &Path) -> Result<Registries, LoadError> {
         proof_lanes: proof_lanes_from(&load_table(dir, "proof_lanes.toml")?)
             .map_err(|e| wrap("proof_lanes.toml", e))?,
         checker_index: checker_index_from(&load_table(dir, "checker_index.toml")?)
+            .map_err(|e| wrap("checker_index.toml", e))?,
+        script_dispositions: script_dispositions_from(&load_table(dir, "checker_index.toml")?)
             .map_err(|e| wrap("checker_index.toml", e))?,
     })
 }

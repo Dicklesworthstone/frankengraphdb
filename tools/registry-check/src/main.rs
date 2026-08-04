@@ -20,6 +20,7 @@ use registry_check::hash::id_table_hash;
 use registry_check::identity;
 use registry_check::jsonl::{JsonValue, arr, b, event, n, s};
 use registry_check::lint;
+use registry_check::liveness;
 use registry_check::model::{self, Registries};
 use registry_check::validate::{self, Violation, expected_invariant_ids};
 use std::fs::{self, File, OpenOptions};
@@ -86,7 +87,12 @@ fn appendix_violation_message(violation: &appendix_a::Violation) -> String {
         "catalog_read" => "cannot read the canonical Appendix A catalog".to_string(),
         "source_read" => "cannot read the canonical Appendix A plan source".to_string(),
         "projection_read" => "cannot read a checked-in Appendix A projection".to_string(),
-        _ => "Appendix A contract check failed".to_string(),
+        // Every other appendix violation carries its own measured message, and for
+        // the pin/count families that message is the ONLY place the recomputed value
+        // appears. Collapsing it to a fixed string made every appendix violation in
+        // the repo unreadable from the binary, and forced the pin cycle to re-derive
+        // by hand what the checker had already computed (fgdb-jkvc).
+        _ => violation.msg.clone(),
     }
 }
 
@@ -224,6 +230,7 @@ fn finish_appendix_load_failure(
                 ("reservations", n(0)),
                 ("source_dispositions", n(0)),
                 ("top_level_candidates", n(0)),
+                ("unclassified_candidates", n(0)),
                 ("targets", n(0)),
                 ("semantic_bindings", n(0)),
                 ("evidence_rows", n(0)),
@@ -406,10 +413,37 @@ fn emit_appendix_catalog(
                 "top_level_candidates",
                 n(catalog.top_level_candidates.len() as i64),
             ),
+            // The RESIDUE, reported next to the total because the total cannot
+            // show it. A candidate whose class the source does not force sits at
+            // `identity_class = "unclassified"`, and appendix_a.rs's fourth arm
+            // for that case is empty: no violation, no count, no pin. MEASURED
+            // 2026-07-27 at HEAD 525b314: 543 of 1237 candidates are
+            // unclassified — 44% — and no number anywhere in the tree said so.
+            // Classifying one leaves `top_level_candidates` unchanged and adding
+            // one raises it by a count that fgdb-su5y correctly made derived, so
+            // neither direction fired anything. This field is what the g0
+            // identity gate holds to a ceiling.
+            (
+                "unclassified_candidates",
+                n(catalog
+                    .top_level_candidates
+                    .iter()
+                    .filter(|row| row.identity_class == "unclassified")
+                    .count() as i64),
+            ),
             ("targets", n(catalog.targets.len() as i64)),
+            (
+                "completion_layer_schemas",
+                n(catalog.completion_layers.len() as i64),
+            ),
+            ("annotations", n(catalog.annotations.len() as i64)),
             (
                 "semantic_bindings",
                 n(catalog.semantic_bindings.len() as i64),
+            ),
+            (
+                "expansion_bindings",
+                n(catalog.expansion_bindings.len() as i64),
             ),
             ("evidence_rows", n(catalog.evidence.len() as i64)),
             (
@@ -489,8 +523,17 @@ fn run_appendix(root: &Path) -> Result<usize, String> {
             ),
             ("targets", n(catalog.targets.len() as i64)),
             (
+                "completion_layer_schemas",
+                n(catalog.completion_layers.len() as i64),
+            ),
+            ("annotations", n(catalog.annotations.len() as i64)),
+            (
                 "semantic_bindings",
                 n(catalog.semantic_bindings.len() as i64),
+            ),
+            (
+                "expansion_bindings",
+                n(catalog.expansion_bindings.len() as i64),
             ),
             ("evidence_rows", n(catalog.evidence.len() as i64)),
             (
@@ -1268,6 +1311,9 @@ fn run_identity(root: &Path) -> Result<usize, String> {
         if let Some(target_schema_id) = &field.target_schema_id {
             fields.push(("target_schema_id", s(target_schema_id)));
         }
+        if let Some(construction_relation) = &field.construction_relation {
+            fields.push(("construction_relation", s(construction_relation)));
+        }
         fields.extend([
             ("construction_order", n(field.construction_order)),
             ("role_predicate", s(&field.role_predicate)),
@@ -1510,6 +1556,39 @@ fn run_validate(r: &Registries, root: &Path) -> usize {
     let by_registry = |name: &str| -> Vec<&Violation> {
         violations.iter().filter(|v| v.registry == name).collect()
     };
+
+    // Reported explicitly, like `closure_self_test` and `unsafe-ledger-check`'s
+    // scanner self-test, and for the same reason: `status = "live"` is now
+    // proved by three source-text readers rather than `Path::is_file()`
+    // (`fgdb-checker-index-live-is-only-file-existence-tl0o`), and a reader that
+    // has stopped reading reports every row live. `live_rows` is the other half
+    // of the license — a registry that declares no live checker would otherwise
+    // produce the same green bar as one whose every gate is enforced.
+    let liveness_control = liveness::self_test();
+    println!(
+        "{}",
+        event(&[
+            ("event", s("checker_liveness_self_test")),
+            ("cases", n(liveness_control.cases as i64)),
+            ("failed_cases", n(liveness_control.failures.len() as i64)),
+            (
+                "live_rows",
+                n(r.checker_index
+                    .iter()
+                    .filter(|checker| checker.status == "live")
+                    .count() as i64)
+            ),
+            ("licensed", b(liveness_control.licensed())),
+            (
+                "outcome",
+                s(if liveness_control.licensed() {
+                    "pass"
+                } else {
+                    "fail"
+                })
+            ),
+        ])
+    );
     let row_counts: [(&str, i64); 6] = [
         (
             "constitution",
@@ -1625,28 +1704,40 @@ fn run_lint(r: &Registries, root: &Path) -> Result<usize, String> {
     let config =
         lint::load_config(&root.join("registries/claims_lint.toml")).map_err(|e| e.to_string())?;
     let registered = lint::registered_markers(r);
-    let hits = lint::run(root, &config, &registered).map_err(|e| e.to_string())?;
+    let (hits, census) = lint::run(root, &config, &registered).map_err(|e| e.to_string())?;
     for hit in &hits {
         println!(
             "{}",
             event(&[
                 ("event", s("lint_hit")),
+                ("kind", s(hit.kind.code())),
                 ("file", s(&hit.file)),
                 ("line", n(hit.line as i64)),
-                ("marker", s(&hit.marker)),
+                ("subject", s(&hit.subject)),
                 ("text", s(&hit.text)),
             ])
         );
         eprintln!(
-            "{}:{}: unregistered claim marker {} in: {}",
-            hit.file, hit.line, hit.marker, hit.text
+            "{}:{}: {}: {}: {}",
+            hit.file,
+            hit.line,
+            hit.kind.code(),
+            hit.subject,
+            hit.text
         );
     }
+    // The census is printed on pass as well as fail: a lint that examines
+    // nothing passes, so "green" must always say what it opened.
     println!(
         "{}",
         event(&[
             ("event", s("lint_completed")),
-            ("files_scanned", n(config.scan.len() as i64)),
+            ("files_scanned", n(census.files_scanned as i64)),
+            ("markers_seen", n(census.markers_seen as i64)),
+            ("prose_files_seen", n(census.prose_files_seen as i64)),
+            ("gate_rows_read", n(census.gate_rows_read as i64)),
+            ("gate_rows_marked", n(census.gate_rows_marked as i64)),
+            ("gate_rows_unmarked", n(census.gate_rows_unmarked as i64)),
             ("hits", n(hits.len() as i64)),
             ("outcome", s(if hits.is_empty() { "pass" } else { "fail" })),
         ])
@@ -1657,6 +1748,87 @@ fn run_lint(r: &Registries, root: &Path) -> Result<usize, String> {
 fn run_closure(r: &Registries, manifest_path: &Path) -> Result<usize, String> {
     let manifest = model::load_manifest(manifest_path).map_err(|e| e.to_string())?;
     let report = closure::compute(r, &manifest);
+
+    // The control is reported FIRST and explicitly, exactly as the unsafe
+    // scanner's self-test is, so a reader can tell whether an empty reachable
+    // set was PROVEN to mean "this manifest enables nothing" or merely assumed.
+    let mut failures = 0usize;
+    println!(
+        "{}",
+        event(&[
+            ("event", s("closure_self_test")),
+            ("spine_clauses", n(report.spine_clauses as i64)),
+            ("saturated_reachable", n(report.saturated_reachable as i64)),
+            ("licensed", b(report.licensed())),
+            (
+                "outcome",
+                s(if report.licensed() { "pass" } else { "fail" })
+            ),
+        ])
+    );
+    if !report.licensed() {
+        failures += 1;
+        println!(
+            "{}",
+            event(&[
+                ("event", s("closure_self_test_failed")),
+                ("spine_clauses", n(report.spine_clauses as i64)),
+                (
+                    "msg",
+                    s(
+                        "a manifest enabling every atom the spine names still reaches no clause, \
+                       so the closure compiler reaches nothing at all; every \"closure \
+                       satisfied\" conclusion in this run would be unlicensed"
+                    )
+                ),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+
+    // The manifest's own positive claim about how much it reaches. Silence is
+    // never the same as agreement: without this, a manifest that stopped
+    // reaching its clauses, and one that never reached any, produce the same
+    // green bar.
+    let reached = report.reachable.len() as i64;
+    if reached != manifest.expected_reachable_clauses {
+        failures += 1;
+        println!(
+            "{}",
+            event(&[
+                ("event", s("closure_reachable_count_unexpected")),
+                ("manifest", s(&report.manifest)),
+                ("expected", n(manifest.expected_reachable_clauses)),
+                ("actual", n(reached)),
+                (
+                    "msg",
+                    s(
+                        "the manifest declares how many clauses its closure reaches; reality \
+                       differs. Either a capability landed and the manifest was not revisited, \
+                       or the closure compiler changed what it reaches"
+                    )
+                ),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+
+    // A misspelled atom enables nothing and is otherwise invisible.
+    for violation in validate::validate_manifest_atoms(r, &manifest) {
+        failures += 1;
+        println!(
+            "{}",
+            event(&[
+                ("event", s("violation")),
+                ("code", s(&violation.code)),
+                ("registry", s(&violation.registry)),
+                ("id", s(&violation.row_id)),
+                ("msg", s(&violation.msg)),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+
     println!(
         "{}",
         event(&[
@@ -1666,7 +1838,14 @@ fn run_closure(r: &Registries, manifest_path: &Path) -> Result<usize, String> {
             ("live", n(report.live.len() as i64)),
             ("absent", n(report.absent.len() as i64)),
             ("absent_clauses", arr(report.absent.iter().cloned())),
-            ("outcome", s(if report.ok() { "pass" } else { "fail" })),
+            (
+                "outcome",
+                s(if report.ok() && failures == 0 {
+                    "pass"
+                } else {
+                    "fail"
+                })
+            ),
         ])
     );
     for (capability, clauses) in &report.absent_capabilities {
@@ -1684,7 +1863,10 @@ fn run_closure(r: &Registries, manifest_path: &Path) -> Result<usize, String> {
         );
         eprintln!("capability {capability:?} absent: non-live reachable clauses {clauses:?}");
     }
-    Ok(report.absent.len())
+    // An unlicensed run, a reachable count that does not match what the
+    // manifest claims, and an undeclared atom each fail the gate on their own.
+    // Returning only `absent.len()` would have exited 0 for all three.
+    Ok(report.absent.len() + failures)
 }
 
 fn run() -> Result<usize, String> {

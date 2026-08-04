@@ -1,0 +1,198 @@
+# =============================================================================
+# unsafe_verification_lanes.toml — per-tool unsafe-site verification posture
+# =============================================================================
+# Bead: fgdb-4s28
+#
+# This is the executable lane manifest for the seven sites enumerated by
+# unsafe_boundary_ledger.toml.  It is deliberately a full site x tool matrix:
+# Miri, AddressSanitizer, and ThreadSanitizer each own exactly one cell for
+# every ledger row.  Silence is not an exclusion and is not evidence.
+#
+# Dispositions:
+#   checked    — the named workload is a live gate for this exact site/tool cell
+#   candidate  — the tool can execute the site, but no checked lane is claimed
+#   excluded   — the tool cannot execute the site for the stated technical reason
+#
+# `unsafe-ledger-check` verifies this manifest against each site's structured
+# `tool_no_claim_boundaries` in both directions.  Removing a cell from either
+# file, changing a disposition, or changing its rationale is a hard failure.
+# A declared lane may carry candidates but no checked cells.  A checked lane
+# must carry at least one checked cell with a non-empty workload.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "unsafe_verification_lanes"
+bead = "fgdb-4s28"
+
+[[lane]]
+tool = "miri"
+status = "checked"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["miri", "rust-src"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "Miri checks only the manifest cells marked checked. Intrinsic and inline-assembly paths marked excluded are outside this lane, and a clean run is dynamic evidence for the exercised workload rather than a proof of memory safety."
+
+[[lane]]
+tool = "asan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "AddressSanitizer has no checked cell in this increment. Every site is an explicit candidate; declaration records that native instrumentation can execute the construct, not that the site has been run or cleared."
+
+[[lane]]
+tool = "tsan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "ThreadSanitizer has no checked cell in this increment. Every site is an explicit candidate; declaration records that native instrumentation can execute the construct, not that the site has been run or cleared."
+
+[[cell]]
+site_row_id = "simd-control-group-sse2"
+tool = "miri"
+disposition = "excluded"
+rationale = "Miri does not execute the core::arch x86 SSE2 intrinsics used by this site; the scalar differential remains its current evidence."
+workload = ""
+
+[[cell]]
+site_row_id = "simd-control-prefetch"
+tool = "miri"
+disposition = "excluded"
+rationale = "Miri does not execute the core::arch x86 prefetch intrinsic used by this site; the no-op differential remains its current evidence."
+workload = ""
+
+[[cell]]
+site_row_id = "arena-region-blocks-mut"
+tool = "miri"
+disposition = "checked"
+rationale = "Miri executes this Vec-backed pointer-arithmetic and slice-construction site; the fixed-seed differential is the complete checked workload for this cell."
+workload = "cargo miri test --locked -p fgdb-unsafe-arena --test edit_path_differential"
+
+[[cell]]
+site_row_id = "arena-region-vec-allocator"
+tool = "miri"
+disposition = "checked"
+rationale = "Miri executes the private Allocator callbacks, default Vec grow/copy/deallocate path, typed drop glue, ZST/alignment cases, refusal atomicity, and close/cancel audits in the fixed-seed RegionVec workload; the native forgotten-owner case is excluded because its asserted fail-closed outcome intentionally leaks retained storage."
+workload = "cargo miri test --locked -p fgdb-unsafe-arena --test edit_path_differential"
+
+[[cell]]
+site_row_id = "vfs-mmap-readonly"
+tool = "miri"
+disposition = "excluded"
+rationale = "Miri does not execute the inline-assembly mmap syscall path that owns this site; the buffered-path differential remains its current evidence."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mapping-view-bytes"
+tool = "miri"
+disposition = "excluded"
+rationale = "Miri cannot construct this mapping because its owning mmap path is inline assembly; the byte-view differential remains its current evidence."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mapping-munmap"
+tool = "miri"
+disposition = "excluded"
+rationale = "Miri does not execute the inline-assembly munmap syscall path that owns this site; the independent-view drop differential remains its current evidence."
+workload = ""
+
+[[cell]]
+site_row_id = "simd-control-group-sse2"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer instrumentation can execute x86 SSE2 intrinsics, but no checked ASAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "simd-control-prefetch"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer instrumentation can execute the x86 prefetch intrinsic, but no checked ASAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "arena-region-blocks-mut"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer instrumentation can execute this pointer-arithmetic site, but no checked ASAN workload is claimed for it today."
+workload = ""
+
+[[cell]]
+site_row_id = "arena-region-vec-allocator"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer can execute the private allocator and typed Vec workload, but no checked ASAN run is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mmap-readonly"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer instrumentation can execute inline assembly and the mmap syscall path, but no checked ASAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mapping-view-bytes"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer instrumentation can execute the mapping and slice path, but no checked ASAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mapping-munmap"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer instrumentation can execute inline assembly and the munmap syscall path, but no checked ASAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "simd-control-group-sse2"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer instrumentation can execute x86 SSE2 intrinsics, but no checked TSAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "simd-control-prefetch"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer instrumentation can execute the x86 prefetch intrinsic, but no checked TSAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "arena-region-blocks-mut"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer instrumentation can execute this pointer-arithmetic site, but no checked TSAN workload is claimed for it today."
+workload = ""
+
+[[cell]]
+site_row_id = "arena-region-vec-allocator"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer can execute this task-local allocator workload, but no checked TSAN run is claimed and no concurrency claim is made for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mmap-readonly"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer instrumentation can execute inline assembly and the mmap syscall path, but no checked TSAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mapping-view-bytes"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer instrumentation can execute the mapping and slice path, but no checked TSAN workload is claimed for this site today."
+workload = ""
+
+[[cell]]
+site_row_id = "vfs-mapping-munmap"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer instrumentation can execute inline assembly and the munmap syscall path, but no checked TSAN workload is claimed for this site today."
+workload = ""

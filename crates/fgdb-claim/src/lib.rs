@@ -151,8 +151,17 @@ impl std::error::Error for LatticeViolation {}
 /// [`AtLeastAsStrongAs`] relation is implemented for exactly the legal pairs,
 /// so an illegal [`justify`] call fails to *compile*.
 pub mod class {
+    mod sealed {
+        pub trait Class {}
+        pub trait AtLeastAsStrongAs<Target> {}
+    }
+
     /// Marker for one registry claim class.
-    pub trait Class {
+    ///
+    /// This trait is sealed: the six markers below are the entire claim-class
+    /// universe, so downstream code cannot invent a marker whose associated
+    /// value lies about its type-level strength.
+    pub trait Class: sealed::Class {
         const CLASS: super::RegistryClaimClass;
     }
 
@@ -161,6 +170,7 @@ pub mod class {
             $(
                 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
                 pub struct $ty;
+                impl sealed::Class for $ty {}
                 impl Class for $ty {
                     const CLASS: super::RegistryClaimClass =
                         super::RegistryClaimClass::$variant;
@@ -180,11 +190,17 @@ pub mod class {
 
     /// `E: AtLeastAsStrongAs<T>` holds exactly when evidence of class `E`
     /// may justify a claim of class `T` under the lattice law.
-    pub trait AtLeastAsStrongAs<Target: Class>: Class {}
+    ///
+    /// This relation is sealed as well: downstream crates cannot add an edge
+    /// to the closed lattice.
+    pub trait AtLeastAsStrongAs<Target: Class>: Class + sealed::AtLeastAsStrongAs<Target> {}
 
     macro_rules! justifies {
         ($e:ident => [$($t:ident),+ $(,)?]) => {
-            $(impl AtLeastAsStrongAs<$t> for $e {})+
+            $(
+                impl sealed::AtLeastAsStrongAs<$t> for $e {}
+                impl AtLeastAsStrongAs<$t> for $e {}
+            )+
         };
     }
 
@@ -198,18 +214,152 @@ pub mod class {
 
 /// A compile-time-legal justification edge.
 ///
-/// ```compile_fail
-/// // The lattice law as a compile error: statistical evidence can never
-/// // justify an invariant claim.
+/// Every weaker-to-stronger edge is rejected independently. Keeping each edge
+/// in its own compile-fail block matters: one failing call cannot mask a later
+/// illegal call that accidentally compiles.
+///
+/// Downstream code cannot forge a new marker whose associated value lies about
+/// its type-level strength.
+///
+/// ```compile_fail,E0277
+/// use fgdb_claim::{RegistryClaimClass, class};
+///
+/// struct ForgedBenchmark;
+///
+/// impl class::Class for ForgedBenchmark {
+///     const CLASS: RegistryClaimClass = RegistryClaimClass::Benchmark;
+/// }
+/// ```
+///
+/// Nor can a downstream crate add an illegal edge between the closed built-in
+/// markers.
+///
+/// ```compile_fail,E0117
+/// use fgdb_claim::class;
+///
+/// impl class::AtLeastAsStrongAs<class::Invariant> for class::Benchmark {}
+/// ```
+///
+/// ```compile_fail,E0277
+/// // proof cannot justify invariant
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Proof, class::Invariant>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // bounded_model cannot justify invariant
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::BoundedModel, class::Invariant>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // bounded_model cannot justify proof
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::BoundedModel, class::Proof>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // statistical cannot justify invariant
 /// use fgdb_claim::{class, justify};
 /// let _ = justify::<class::Statistical, class::Invariant>();
 /// ```
 ///
-/// ```
-/// // Equal or stronger evidence is fine.
+/// ```compile_fail,E0277
+/// // statistical cannot justify proof
 /// use fgdb_claim::{class, justify};
-/// let j = justify::<class::Proof, class::Statistical>();
-/// assert_eq!(j.evidence(), fgdb_claim::RegistryClaimClass::Proof);
+/// let _ = justify::<class::Statistical, class::Proof>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // statistical cannot justify bounded_model
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Statistical, class::BoundedModel>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // slo cannot justify invariant
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Slo, class::Invariant>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // slo cannot justify proof
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Slo, class::Proof>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // slo cannot justify bounded_model
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Slo, class::BoundedModel>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // slo cannot justify statistical
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Slo, class::Statistical>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // benchmark cannot justify invariant
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Benchmark, class::Invariant>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // benchmark cannot justify proof
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Benchmark, class::Proof>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // benchmark cannot justify bounded_model
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Benchmark, class::BoundedModel>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // benchmark cannot justify statistical
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Benchmark, class::Statistical>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // benchmark cannot justify slo
+/// use fgdb_claim::{class, justify};
+/// let _ = justify::<class::Benchmark, class::Slo>();
+/// ```
+///
+/// ```
+/// // All 21 equal-or-stronger edges compile.
+/// use fgdb_claim::{class, justify};
+///
+/// let _ = justify::<class::Invariant, class::Invariant>();
+/// let _ = justify::<class::Invariant, class::Proof>();
+/// let _ = justify::<class::Invariant, class::BoundedModel>();
+/// let _ = justify::<class::Invariant, class::Statistical>();
+/// let _ = justify::<class::Invariant, class::Slo>();
+/// let _ = justify::<class::Invariant, class::Benchmark>();
+///
+/// let _ = justify::<class::Proof, class::Proof>();
+/// let _ = justify::<class::Proof, class::BoundedModel>();
+/// let _ = justify::<class::Proof, class::Statistical>();
+/// let _ = justify::<class::Proof, class::Slo>();
+/// let _ = justify::<class::Proof, class::Benchmark>();
+///
+/// let _ = justify::<class::BoundedModel, class::BoundedModel>();
+/// let _ = justify::<class::BoundedModel, class::Statistical>();
+/// let _ = justify::<class::BoundedModel, class::Slo>();
+/// let _ = justify::<class::BoundedModel, class::Benchmark>();
+///
+/// let _ = justify::<class::Statistical, class::Statistical>();
+/// let _ = justify::<class::Statistical, class::Slo>();
+/// let _ = justify::<class::Statistical, class::Benchmark>();
+///
+/// let _ = justify::<class::Slo, class::Slo>();
+/// let _ = justify::<class::Slo, class::Benchmark>();
+///
+/// let _ = justify::<class::Benchmark, class::Benchmark>();
 /// ```
 pub fn justify<E, T>() -> Justification
 where
@@ -483,12 +633,44 @@ mod tests {
 
     #[test]
     fn type_level_lattice_agrees_with_value_level() {
-        // Spot-check the statically legal edges agree with try_justify.
-        let j = justify::<class::Invariant, class::Benchmark>();
-        assert_eq!(j.evidence(), RegistryClaimClass::Invariant);
-        assert_eq!(j.target(), RegistryClaimClass::Benchmark);
-        let j = justify::<class::Slo, class::Slo>();
-        assert!(j.evidence().try_justify(j.target()).is_ok());
+        macro_rules! assert_legal {
+            ($(($evidence:ty, $target:ty)),+ $(,)?) => {
+                $(
+                    let justification = justify::<$evidence, $target>();
+                    assert!(
+                        justification
+                            .evidence()
+                            .try_justify(justification.target())
+                            .is_ok()
+                    );
+                )+
+            };
+        }
+
+        // This is the complete 21-edge lower triangle, not a spot check.
+        assert_legal!(
+            (class::Invariant, class::Invariant),
+            (class::Invariant, class::Proof),
+            (class::Invariant, class::BoundedModel),
+            (class::Invariant, class::Statistical),
+            (class::Invariant, class::Slo),
+            (class::Invariant, class::Benchmark),
+            (class::Proof, class::Proof),
+            (class::Proof, class::BoundedModel),
+            (class::Proof, class::Statistical),
+            (class::Proof, class::Slo),
+            (class::Proof, class::Benchmark),
+            (class::BoundedModel, class::BoundedModel),
+            (class::BoundedModel, class::Statistical),
+            (class::BoundedModel, class::Slo),
+            (class::BoundedModel, class::Benchmark),
+            (class::Statistical, class::Statistical),
+            (class::Statistical, class::Slo),
+            (class::Statistical, class::Benchmark),
+            (class::Slo, class::Slo),
+            (class::Slo, class::Benchmark),
+            (class::Benchmark, class::Benchmark),
+        );
     }
 
     #[test]

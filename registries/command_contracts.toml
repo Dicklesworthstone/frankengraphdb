@@ -1,0 +1,709 @@
+# =============================================================================
+# command_contracts.toml — the role-valid command-arm contract registry (G0)
+# =============================================================================
+# Bead: fgdb-5uw2
+# Provenance: plan §5.1 (COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
+# line 294), verbatim: "Ordered transitions have one further normative registry,
+# `command_contracts.toml`; hand-written lists in this document are generated
+# readability projections and are never a second source of truth. One row exists
+# for every role-valid command arm."
+#
+# WHY THIS FILE WAS CREATED WITH ZERO ROWS. Plan line 296 makes this registry
+# half of a G0-enforced two-way total bijection — but the bijection quantifies
+# over LIVE rows and INHABITABLE command-union arms: "Every inhabitable Local,
+# Meta, or Shard command-union arm resolves to exactly one live command-contract
+# row; every live row resolves to exactly one union arm, one registered
+# canonical input, one exact body/result/applied-record triple, and one
+# exhaustive Rust apply handler." MEASURED 2026-07-28 at HEAD 5d42e28: the
+# SequenceNeutralSpec and GlobalSequenceNeutralSpec family unions carry zero
+# landed arms (registries/appendix_a_catalog.toml; see fgdb-5ekk), and no Rust
+# apply handler exists. Zero rows was therefore the only population this file
+# could honestly carry at creation, and it was bijection-consistent: both
+# quantification domains were empty.
+#
+# WHY THE FIRST ROW WAS NOT LANDED AT CREATION (the tag-permanence law). Plan
+# line 288 makes this registry the generation source for the SequenceNeutralSpec
+# / role-command wire inventories, so `outer_wire_tag` values minted here are
+# the authority, and plan line 290 makes released tags permanent. Assigning tags
+# to a PARTIAL row population risks colliding with the canonical order of the
+# full family expansion (plan lines 1916, 1918, 1770 name the families; each
+# family's exact inner tags are spelled at its own section of the plan). Rows
+# therefore waited for the complete expansion, tracked on fgdb-5uw2 (Phase B in
+# its notes).
+#
+# PHASE B OPENED (2026-08-02/03). The complete v1 family expansion was derived
+# (Local families F1-F16 in the L1916 sentence order, Meta from L1770; swarm
+# round-10 record) and the owner confirmed: the freeze of both unions' full
+# command-tag ORDER; the row-derivation conventions (contract id
+# "cc:{role-lower}:{kebab(member)}[:{kebab(inner-arm)}]", forward-declared
+# handler symbols "fgdb_apply::{role}::{snake(member)}", dag recipe ids
+# "dag:{contract-id}", tight-quoted sequence_effects from the member's apply
+# sentence, slot tags forward-declared against the absent
+# durable_state_slots.toml using the plan's own state-object names, "v1.."
+# epoch ranges, "always" posture default); and the input_wire_tag semantics
+# (= outer_wire_tag for armless members — one tag space per union;
+# inner_wire_tag covers family arms). outer_wire_tag is the dense ordinal
+# 0x0001 + position in the frozen order. Rows now land family-by-family in that
+# order, every row status = "reserved" until its arm, canonical input,
+# body/result/applied-record triple, and handler exist (the live-row bijection
+# enumerators are still unbuilt and the validator refuses "live"). This
+# increment lands the F1/F2 seed: frozen ordinals 1-3.
+#
+# Per-key derivation-authority marks used on the rows below:
+#   [S] source-forced (the plan spells it; the citation is beside the mark)
+#   [C] owner-confirmed convention (the 2026-08-02 template confirmation)
+#   [F] forward-declared (names an artifact/registry that does not exist yet;
+#       legal per the reserved-row doctrine, resolved when that artifact lands)
+#   [S-derived] forced by the source indirectly (the comment names the carrier)
+#
+# ROUND 12 CONVENTIONS (2026-08-03, confirmed with the F3 tranche):
+#   C-h AUTHORITY TIERS: authority_arm records the spelled authority/header
+#     member [S]; when the body is silent but a consumed/referenced record's
+#     lineage carries the header, "AuthorityBoundHeader<Local>" [S-derived]
+#     with the carrying ref named in the comment (the F1/F2 row-3 precedent);
+#     when the body is proof/evidence-authorized with no principal header in
+#     its lineage, the authorizing evidence schema is recorded as authority_arm
+#     and authority_evidence_target_schema_id names the same schema.
+#   SourceUnspelled SENTINEL: a body-dependent key of a member whose defining
+#     prose spells no struct body records "SourceUnspelled" — legal only on a
+#     reserved row, corrected in place when the plan spells the body.
+#   cpcr:{contract-id}: forward-declared cross-plane conservation recipe ids
+#     for AtomicProtocolDetach rows (symmetric to dag:). A conditional detach
+#     (spelled on one body disposition) records the detach capability, with the
+#     disposition scoped in the comment.
+#   INNER TAGS: an armed member's rows share its outer tag; inner_wire_tag is
+#     FORCED by an existing wire_types.toml union-variant reservation when one
+#     exists (reservation bijection), else minted at the closed binding's
+#     source order starting 0x0001.
+#   CLASSIFICATION FAMILY BINDING (T4): an armed member's classification row
+#     binds the member-root id; the classification validator resolves a root
+#     iff a contract row carries an id of the form "{root}:{arm}".
+#
+# SCOPE BOUNDARY. invariants.toml line 312 names this registry AND
+# `state_payload_fields.toml` ("roots every written state class"). That third
+# registry is NOT created by this increment; its absence is unchanged and its
+# construction needs its own bead.
+#
+# Row schema — verbatim from plan §5.1 line 294; a key marked `?` is optional,
+# every other key is required on every row. No row may carry a key outside this
+# set (the loader rejects unknown keys before reading any field).
+#
+#   [[contract]]
+#   command_contract_id                  = "..."   # stable, permanent, never reused
+#   role                                 = "Local" | "Meta" | "Shard"
+#   outer_command_union                  = "..."
+#   outer_wire_tag                       = 0x....  # u16; permanent once released
+#   input_schema_id                      = "..."
+#   input_wire_tag                       = 0x....  # u16
+#   inner_wire_tag                       = 0x....  # u16, optional
+#   body_schema_id                       = "..."
+#   result_schema_id                     = "..."
+#   applied_record_schema_id             = "..."
+#   handler_symbol                       = "..."
+#   transition_class                     = "Semantic" | "Maintenance" | "Scaffolding"
+#   sequence_effects                     = "..."
+#   expected_state_schema_id             = "..."
+#   authority_arm                        = "..."
+#   authority_evidence_target_schema_id  = "..."   # optional
+#   terminal_audit_freeze_arm            = "..."
+#   terminal_audit_gate_arm              = "..."
+#   payload_availability_rule            = "..."
+#   publication_mode                     = "SinglePlane" | "AtomicProtocolDetach{cross_plane_conservation_recipe_id}"
+#   construction_dag_recipe_id           = "..."
+#   consumed_state_slots                 = [ "plane|role|slot_tag", ... ]  # DurableStateSlotRef; plane in
+#   written_state_slots                  = [ "plane|role|slot_tag", ... ]  # SemanticPayload|Protocol|PreparedOwnership|Consensus|Bootstrap
+#   checkpoint_floor_classes             = [ "...", ... ]
+#   backup_restore_gc_classes            = [ "...", ... ]
+#   posture_feature_predicate            = "..."
+#   format_epoch_range                   = "..."
+#   status                               = "reserved" | "live" | "retired"
+#
+# "Rows are per concrete inner tag: an outer DpTransition, RemoteRetention,
+# configuration, delivery, GC, backup, restore, format, bulk, derived-build, or
+# audit-lifecycle family never hides an open subcommand." (plan line 294)
+#
+# registry_epoch changes only when rows are added or retired (plan line 290).
+registry_epoch = 3
+
+# =============================================================================
+# F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:recovery-bridge-spec"                     # [C] id convention
+role = "Local"                                                            # [S] the frozen Local table
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S] L1916; catalog spelling (a21 gate-union row)
+outer_wire_tag = 0x0001                                                   # [S] frozen dense ordinal 1
+input_schema_id = "RecoveryBridgeSpec<Local>"                             # [S] L340/L2561
+input_wire_tag = 0x0001                                                   # [C] = outer for armless members (owner-confirmed)
+body_schema_id = "RecoveryBridgeSpec<Local>"                              # [S] L2561: the spec IS "the exact role-specialized first-control body"
+result_schema_id = "LogicalCommandRecord"                                 # [S] L340: origin RecoveryBridge enters the LogicalCommandRecord
+applied_record_schema_id = "LogicalStateRoot"                             # [S] L340 first-root publication
+handler_symbol = "fgdb_apply::local::recovery_bridge_spec"                # [C][F] forward-declared handler path
+transition_class = "Semantic"                                             # [S] F1 semantic union member (L1916/L1918)
+sequence_effects = "sole legal first ordered command of a restored incarnation; creates the LocalCommandOrigin::RecoveryBridge origin; forbidden after any Prior-origin command exists"  # [S] L340 'only the first guarded restore command'
+expected_state_schema_id = "PendingRestoreCreationGuard<Local>"           # [S] L2563 sole consumer guard
+authority_arm = "RecoveryBridgeAuthority<Local>"                          # [S] L2561 authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze member spelled in the L2561 body
+terminal_audit_gate_arm = "StructurallyInapplicable{RecoverySystemAuthority}"  # [S] L2561 verbatim: terminal_audit_gate:StructurallyInapplicable{RecoverySystemAuthority}
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S] no detach spelled
+construction_dag_recipe_id = "dag:cc:local:recovery-bridge-spec"          # [C][F] dag convention
+consumed_state_slots = [ "Bootstrap|Local|pending_restore_creation_guard" ]         # [C][F] vs absent durable_state_slots.toml
+written_state_slots = [ "SemanticPayload|Local|logical_state_root", "Bootstrap|Local|restore_bridge_origin" ]  # [C][F]
+checkpoint_floor_classes = [ "genesis-or-restore-first-root" ]            # [C][F]
+backup_restore_gc_classes = [ "restore-bridge" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C] no posture gate spelled at the defining site
+format_epoch_range = "v1.."                                               # [C] open-ended from the v1 freeze
+status = "reserved"                                                       # [S] reserved until arm/input/triple/handler exist
+
+# =============================================================================
+# F2 begin-reservation-terminalization — frozen ordinals 2-3 (L1482 order)
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:local-begin-reservation-spec"             # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0002                                                   # [S] frozen dense ordinal 2
+input_schema_id = "LocalBeginReservationSpec"                             # [S] L1482 full body
+input_wire_tag = 0x0002                                                   # [C] = outer (armless)
+body_schema_id = "LocalBeginReservationSpec"                              # [S]
+result_schema_id = "LocalBeginReservationRecord"                          # [S] L1482: apply creates LocalBeginReservationRecord
+applied_record_schema_id = "LocalBeginIdempotencyIndex"                   # [S] L1482: apply installs Reserved in the index
+handler_symbol = "fgdb_apply::local::local_begin_reservation_spec"        # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "orders BEGIN; BEGIN_ACCEPTED only after Reserved plus TxnOutcomeRecord::BeginStaging are visible"  # [S] L403/L1482
+expected_state_schema_id = "WeakAbsenceProof"                             # [S] L1482 expected_index_absence member
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L1482 authority_bound_header member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] none spelled
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1482 verbatim: terminal_audit_gate:LifecycleScaffoldingNotRequired
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-begin-reservation-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]          # [C][F]
+written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_record" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-begin-terminal-spec"                # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0003                                                   # [S] frozen dense ordinal 3
+input_schema_id = "LocalBeginTerminalSpec"                                # [S] L1482
+input_wire_tag = 0x0003                                                   # [C] = outer (armless)
+body_schema_id = "LocalBeginTerminalSpec"                                 # [S]
+result_schema_id = "LocalNeverRegisteredRecord"                           # [S] L1482: 'alone consumes Reserved and creates LocalNeverRegisteredRecord'
+applied_record_schema_id = "LocalBeginIdempotencyIndex"                   # [S] L1482: plus the NeverRegisteredDetailed index arm
+handler_symbol = "fgdb_apply::local::local_begin_terminal_spec"           # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "alone consumes Reserved; terminalizes a never-registered begin"  # [S] L1482 'alone consumes Reserved'
+expected_state_schema_id = "LocalBeginReservationRecord"                  # [S] reservation_ref member
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] the L1482 body spells no header (source-silent); authority basis is inherited via reservation_ref -> LocalBeginReservationRecord.authority_bound_header
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] none spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] the L1482 body spells the bare union member: the arm is instance-chosen (Required resolves a PendingUnclaimed reservation admission); no arm is source-pinned, so the row records the whole union
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-begin-terminal-spec"     # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]          # [C][F]
+written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]           # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F3 attempt-lifecycle — frozen ordinals 4-17 (L1916 sentence order; C3 lands
+# LocalConflictCompactionSpec at ordinal 17, round 10). Armed members carry one
+# row per concrete inner tag sharing the member's outer tag (L294).
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:local-attempt-registration-spec:explicit-begin"  # [C] id; arm suffix per C-a
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0004                                                   # [S] frozen dense ordinal 4
+input_schema_id = "LocalAttemptRegistrationSpec"                          # [S] L1484 closed binding
+input_wire_tag = 0x0004                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] FORCED: wire_types.toml 0x004e LocalAttemptRegistrationSpec.explicit_begin wire_tag 0x0001
+body_schema_id = "LocalAttemptRegistrationSpec"                           # [S]
+result_schema_id = "LocalAttemptRegistration"                             # [S] L1484: apply constructs LocalAttemptRegistration
+applied_record_schema_id = "LocalBeginIdempotencyIndex"                   # [S] L1484: changes explicit Reserved -> BoundDetailed
+handler_symbol = "fgdb_apply::local::local_attempt_registration_spec::explicit_begin"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "binds the Reserved begin atomically with the operation-audit owner, workspace generation zero, and the succeeding TxnOutcomeRecord::Registered; no statement/storage observation may precede visible registration"  # [S] L1484
+expected_state_schema_id = "LocalBeginReservationRecord"                  # [S] L1484 reservation_ref + expected_index_value:Reserved
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L1484 shared body authority_bound_header
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the spelled body
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1484 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S] no detach spelled
+construction_dag_recipe_id = "dag:cc:local:local-attempt-registration-spec:explicit-begin"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]          # [C][F]
+written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_record", "SemanticPayload|Local|txn_workspace_generation" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-attempt-registration-spec:autocommit"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0004                                                   # [S] shared member outer tag
+input_schema_id = "LocalAttemptRegistrationSpec"                          # [S]
+input_wire_tag = 0x0004                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] FORCED: wire_types.toml 0x004f .autocommit wire_tag 0x0002
+body_schema_id = "LocalAttemptRegistrationSpec"                           # [S]
+result_schema_id = "LocalAttemptRegistration"                             # [S]
+applied_record_schema_id = "LocalBeginIdempotencyIndex"                   # [S] creates the autocommit BoundDetailed lineage
+handler_symbol = "fgdb_apply::local::local_attempt_registration_spec::autocommit"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "creates the autocommit BoundDetailed lineage under the scoped client key without emitting BEGIN frames; requires request_kind AutocommitExecute and a classification within the ceiling; exact retry joins, drift fails"  # [S] L1484
+expected_state_schema_id = "WeakAbsenceProof"                             # [S] L1484 expected_absence_proof
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] shared body
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1484 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-attempt-registration-spec:autocommit"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]          # [C][F]
+written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_record", "SemanticPayload|Local|txn_workspace_generation" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-autocommit-write-spec"              # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0005                                                   # [S] frozen dense ordinal 5
+input_schema_id = "LocalAutocommitWriteSpec"                              # [S] L403/L1484 (registered fused arm; struct body unspelled)
+input_wire_tag = 0x0005                                                   # [C]
+body_schema_id = "LocalAutocommitWriteSpec"                               # [S]
+result_schema_id = "TxnOutcomeRecord"                                     # [S] L403: constructs the compressed Registered -> PrepareAdmitted -> CommittedPendingPostconditions lineage
+applied_record_schema_id = "LocalBeginIdempotencyIndex"                   # [S-derived] autocommit idempotency-key CAS at apply
+handler_symbol = "fgdb_apply::local::local_autocommit_write_spec"         # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "one sequenced semantic command carrying attempt registration, prepare admission, the ordered final-certification reservation, and commit semantics; LocalTerminalCompletionSpec remains the second sequenced command (FG-INV-07); a pre-order crash leaves no durable record and the idempotency-key CAS guarantees at-most-once durable effect"  # [S] L403
+expected_state_schema_id = "WeakAbsenceProof"                             # [S-derived] the autocommit idempotency-key CAS absence expectation (L403)
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] carries registration semantics whose shared body spells the header (L1484)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere; corrected when the plan spells it
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L403 "one terminal audit gate" — arm profile-dependent, unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S-derived] result detachment lives on the completion command (L403/L1532)
+construction_dag_recipe_id = "dag:cc:local:local-autocommit-write-spec"   # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|begin_idempotency_index" ]          # [C][F]
+written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_record", "SemanticPayload|Local|txn_workspace_generation", "SemanticPayload|Local|logical_state_root" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:txn-ownership-transition-spec:reattach"   # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0006                                                   # [S] frozen dense ordinal 6
+input_schema_id = "TxnOwnershipTransitionSpec<Local>"                     # [S] L1006 closed union, no shared body
+input_wire_tag = 0x0006                                                   # [C]
+inner_wire_tag = 0x0001                                                   # [C] minted: no existing reservation anywhere; Reattach first in source order (L1006)
+body_schema_id = "TxnOwnershipTransitionSpec<Local>"                      # [S]
+result_schema_id = "TxnOwnershipLease<Local>"                             # [S] L1004/L1006: CASes one successor lease
+applied_record_schema_id = "TxnOwnershipLease<Local>"                     # [S] the lease CAS is the durable state change
+handler_symbol = "fgdb_apply::local::txn_ownership_transition_spec::reattach"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 "Required Local semantic rows include TxnOwnershipTransitionSpec<Local>"
+sequence_effects = "may change session only through one exact open-statement disposition; validates domain, principal, and generation and CASes one successor lease; PrepareFenced permits status only"  # [S] L1006
+expected_state_schema_id = "TxnOwnershipLease<Local>"                     # [S] expected_owned_lease_ref
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L1006 current_authority_bound_header (both arms)
+authority_evidence_target_schema_id = "DurableCapabilityValidationEvidence"  # [S] presented_capability_validation_ref must select the exact compatibility row
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the spelled arm
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare union member in the arm body — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:txn-ownership-transition-spec:reattach"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_ownership_lease" ]              # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_ownership_lease" ]               # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:txn-ownership-transition-spec:renew"      # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0006                                                   # [S] shared member outer tag
+input_schema_id = "TxnOwnershipTransitionSpec<Local>"                     # [S]
+input_wire_tag = 0x0006                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [C] minted: Renew second in source order (L1006)
+body_schema_id = "TxnOwnershipTransitionSpec<Local>"                      # [S]
+result_schema_id = "TxnOwnershipLease<Local>"                             # [S]
+applied_record_schema_id = "TxnOwnershipLease<Local>"                     # [S]
+handler_symbol = "fgdb_apply::local::txn_ownership_transition_spec::renew"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "cannot transfer session or control mode; requires Usable evidence for the exact successor window and action; validates domain, principal, and generation and CASes one successor lease"  # [S] L1006
+expected_state_schema_id = "TxnOwnershipLease<Local>"                     # [S]
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S]
+authority_evidence_target_schema_id = "DurableCapabilityValidationEvidence"  # [S] presented_current_capability_validation_ref; the separate time evidence cannot substitute for it (L1006)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare union member — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:txn-ownership-transition-spec:renew"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_ownership_lease" ]              # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_ownership_lease" ]               # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:txn-ownership-expiry-abort-spec"          # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0007                                                   # [S] frozen dense ordinal 7
+input_schema_id = "TxnOwnershipExpiryAbortSpec<Local>"                    # [S] L1008
+input_wire_tag = 0x0007                                                   # [C]
+body_schema_id = "TxnOwnershipExpiryAbortSpec<Local>"                     # [S]
+result_schema_id = "TxnOutcomeRecord"                                     # [S-derived] the expiry abort terminalizes the attempt (L1008 no-stranding)
+applied_record_schema_id = "TxnOwnershipLease<Local>"                     # [S-derived] retires the expired lease
+handler_symbol = "fgdb_apply::local::txn_ownership_expiry_abort_spec"     # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 names it in the required Local semantic rows
+sequence_effects = "requires the decoded time-evidence classification be Expired for the exact lease and action (a ref to an inline enum variant is illegal); requires complete structured cancellation, open-statement terminalization, result detachment, workspace-resource, and conflict evidence; legal only before PrepareFenced; lease expiry cannot strand an attempt"  # [S] L1008
+expected_state_schema_id = "TxnOwnershipLease<Local>"                     # [S-derived] the expired lease under abort
+authority_arm = "TimeValidationEvidence"                                  # C-h tier 3: evidence-authorized; no principal header in the spelled references
+authority_evidence_target_schema_id = "TimeValidationEvidence"            # [S] time_validation_evidence_ref (L1008)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: body only partially spelled at L1008
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:txn-ownership-expiry-abort-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_ownership_lease" ]              # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_ownership_lease", "SemanticPayload|Local|txn_outcome_record" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-statement-registration-spec"        # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0008                                                   # [S] frozen dense ordinal 8
+input_schema_id = "LocalStatementRegistrationSpec"                        # [S] L1486 full body
+input_wire_tag = 0x0008                                                   # [C]
+body_schema_id = "LocalStatementRegistrationSpec"                         # [S]
+result_schema_id = "LocalStatementRegistration"                           # [S] L1486: apply constructs it
+applied_record_schema_id = "LocalStatementIndex"                          # [S] L1486: inserts Open
+handler_symbol = "fgdb_apply::local::local_statement_registration_spec"   # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "byte-matches the current full binding, classification, bound query and parameters, attempt ceiling, and workspace relation; requires no Open statement; claims the distinct Local statement owner when required; inserts Open; exact retry joins, any drift fails"  # [S] L1486
+expected_state_schema_id = "LocalTxnWorkspaceGeneration"                  # [S] expected_workspace_generation_ref
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L1486 authority_bound_header member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1486 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-statement-registration-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|statement_index", "SemanticPayload|Local|txn_workspace_generation" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|statement_index" ]                   # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-statement-publication-spec"         # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0009                                                   # [S] frozen dense ordinal 9
+input_schema_id = "LocalStatementPublicationSpec"                         # [S] L1488 full body
+input_wire_tag = 0x0009                                                   # [C]
+body_schema_id = "LocalStatementPublicationSpec"                          # [S]
+result_schema_id = "LocalStatementPublishedOutput"                        # [S] L1488 published_output / the Published index arm's output (L1486)
+applied_record_schema_id = "LocalStatementIndex"                          # [S] Open -> Published
+handler_symbol = "fgdb_apply::local::local_statement_publication_spec"    # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "creates the role-valid applied publication reference, resource transfer, and independent-retention record; creates ActiveDeliverable only through a legal inline activation, otherwise PendingVisibility"  # [S] L1488
+expected_state_schema_id = "LocalStatementIndex"                          # [S] expected_index_value:Open
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: body spells no header; inherited via registration_ref -> LocalAttemptRegistration.authority_bound_header
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare member at the body tail — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S] no detach language at L1488 (the retention record is created in place)
+construction_dag_recipe_id = "dag:cc:local:local-statement-publication-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|statement_index", "SemanticPayload|Local|txn_workspace_generation" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|statement_index", "SemanticPayload|Local|txn_workspace_generation" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-statement-abort-spec"               # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x000a                                                   # [S] frozen dense ordinal 10
+input_schema_id = "LocalStatementAbortSpec"                               # [S] L1488 (apply sentence; struct body unspelled)
+input_wire_tag = 0x000a                                                   # [C]
+body_schema_id = "LocalStatementAbortSpec"                                # [S]
+result_schema_id = "LocalStatementIndex"                                  # [S-derived] the Failed|Abandoned terminal entry (arms spelled at L1486)
+applied_record_schema_id = "LocalStatementIndex"                          # [S] Open -> Failed|Abandoned
+handler_symbol = "fgdb_apply::local::local_statement_abort_spec"          # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "alone changes Open to Failed or Abandoned; resolves the statement ticket; proves no result or workspace effect; releases named resources; advances the no-result terminal frontier; applies the registration-pinned ContinueAttempt|AbortAttempt policy"  # [S] L1488
+expected_state_schema_id = "LocalStatementIndex"                          # [S-derived] the Open entry it terminalizes
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2 via the registration lineage
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-statement-abort-spec"    # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|statement_index" ]                  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|statement_index" ]                   # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-prepare-admission-spec"             # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x000b                                                   # [S] frozen dense ordinal 11
+input_schema_id = "LocalPrepareAdmissionSpec"                             # [S] L1528 full body
+input_wire_tag = 0x000b                                                   # [C]
+body_schema_id = "LocalPrepareAdmissionSpec"                              # [S]
+result_schema_id = "LocalTerminalAdmissionFence"                          # [S] L1528: constructs immutable ::Armed
+applied_record_schema_id = "TxnOutcomeRecord"                             # [S] the succeeding PrepareAdmitted is the unique canonical selector
+handler_symbol = "fgdb_apply::local::local_prepare_admission_spec"        # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "requires ReadWrite, no Open statement, contiguous terminal statement and delivery frontiers, exact workspace, witness, effect, SSI, and security bases, and no prior admission; constructs the immutable Armed fence with no future sequence or HLC and atomically replaces the token's Detailed entry"  # [S] L1528
+expected_state_schema_id = "TxnOutcomeRecord"                             # [S] expected_registered_outcome_ref
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: body spells no header; registration_ref-rooted
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1528 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-prepare-admission-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_outcome_record", "SemanticPayload|Local|statement_index", "SemanticPayload|Local|txn_workspace_generation", "SemanticPayload|Local|conflict_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_outcome_record", "SemanticPayload|Local|terminal_admission_fence" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-read-close-spec"                    # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x000c                                                   # [S] frozen dense ordinal 12
+input_schema_id = "LocalReadCloseSpec"                                    # [S] L1534 full body (mode:AutocommitResult|ExplicitClose is a body union, not command arms — the frozen order lists ReadClose armless)
+input_wire_tag = 0x000c                                                   # [C]
+body_schema_id = "LocalReadCloseSpec"                                     # [S]
+result_schema_id = "TxnOutcomeRecord"                                     # [S] L1534: creates ReadClosed
+applied_record_schema_id = "TxnOutcomeRecord"                             # [S-derived] the outcome lineage it appends
+handler_symbol = "fgdb_apply::local::local_read_close_spec"               # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "advances LogicalCommandSeq and HLC but never CommitSeq; creates ReadClosed; for autocommit atomically detaches the result under the pending/released/inline-active rule; semantic success waits for the later LocalTerminalCompletionSpec; never waits for activation or client ACK"  # [S] L1534
+expected_state_schema_id = "WeakStateIdentity"                            # [S] expected_conflict_index_basis (typed WeakStateIdentity at L1528)
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: body spells no header; inherited via registration_ref
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare member — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "AtomicProtocolDetach{cpcr:cc:local:local-read-close-spec}"  # [S]+T7: the AutocommitResult mode "atomically detaches the result" (L1534); ExplicitClose is single-plane; the row records the detach capability
+construction_dag_recipe_id = "dag:cc:local:local-read-close-spec"         # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_outcome_record", "SemanticPayload|Local|statement_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_outcome_record", "Protocol|Local|result_delivery_retention" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-terminal-completion-spec"           # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x000d                                                   # [S] frozen dense ordinal 13
+input_schema_id = "LocalTerminalCompletionSpec"                           # [S] L1532 full body
+input_wire_tag = 0x000d                                                   # [C]
+body_schema_id = "LocalTerminalCompletionSpec"                            # [S]
+result_schema_id = "TxnOutcomeRecord"                                     # [S] L1532: creates TerminalReady only when the required bitmap is exactly satisfied
+applied_record_schema_id = "TxnOutcomeRecord"                             # [S] CASes the exact pending predecessor
+handler_symbol = "fgdb_apply::local::local_terminal_completion_spec"      # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "monotonically adds verified bits; validates rather than manufactures the frozen public and capability artifacts; creates TerminalReady only when the required bitmap is exactly satisfied; cannot alter the semantic outcome; accepts its delta postcondition only when the visible payload's index contains the exact marker/batch and its frontier is at least the commit sequence"  # [S] L1532/L397
+expected_state_schema_id = "TxnOutcomeRecord"                             # [S] pending_outcome_ref (the exact pending predecessor)
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: inherited via terminal_public_projection_bundle_ref (the bundle carries authority_bound_header, L1047)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled Local body (the Meta analogue at L1790 spells one; Local does not)
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare member — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "AtomicProtocolDetach{cpcr:cc:local:local-terminal-completion-spec}"  # [S]+T7: "the autocommit-write arm uses AtomicProtocolDetach" (L1532), scoped to the AutocommitWriteReturning disposition
+construction_dag_recipe_id = "dag:cc:local:local-terminal-completion-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_outcome_record" ]               # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_outcome_record", "Protocol|Local|result_delivery_retention" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:txn-abort-spec"                           # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x000e                                                   # [S] frozen dense ordinal 14
+input_schema_id = "TxnAbortSpec"                                          # [S] L1536 full body
+input_wire_tag = 0x000e                                                   # [C]
+body_schema_id = "TxnAbortSpec"                                           # [S]
+result_schema_id = "TxnOutcomeRecord"                                     # [S-derived] terminalizes the active attempt as Aborted
+applied_record_schema_id = "TxnOutcomeRecord"                             # [S-derived]
+handler_symbol = "fgdb_apply::local::txn_abort_spec"                      # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "only the active/unadmitted lifecycle path; the terminal-abort authority must use the registered LifecycleOperation::RequestTerminalAbort{stage:Active}; can never consume a PrepareAdmitted fence or a final-certification reservation"  # [S] L1536
+expected_state_schema_id = "TxnOutcomeRecord"                             # [S] expected_prior:Registered{outcome_ref,state_digest}
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L1536 authority_bound_header member
+authority_evidence_target_schema_id = "TerminalAbortAuthority<Local>"     # [S] terminal_abort_authority_ref
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare member — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:txn-abort-spec"                # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_outcome_record", "SemanticPayload|Local|statement_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_outcome_record" ]                # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-outcome-compaction-spec:never-registered"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x000f                                                   # [S] frozen dense ordinal 15
+input_schema_id = "LocalOutcomeCompactionSpec"                            # [S] L1540 closed union
+input_wire_tag = 0x000f                                                   # [C]
+inner_wire_tag = 0x0001                                                   # [S] FORCED: wire_types.toml 0x0056 .never_registered wire_tag 0x0001
+body_schema_id = "LocalOutcomeCompactionSpec"                             # [S]
+result_schema_id = "LocalTxnOutcomeSummaryRoot"                           # [S-derived] writes the authenticated summary leaf under the root (L1540/L1482)
+applied_record_schema_id = "TxnOutcomeIndex"                              # [S] Detailed -> Compacted
+handler_symbol = "fgdb_apply::local::local_outcome_compaction_spec::never_registered"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "requires the summary leaf copy the exact frozen public bytes and receipt from the referenced detailed bundle; writes the authenticated leaf; atomically changes TxnOutcomeIndex Detailed to Compacted together with LocalBeginIdempotencyIndex NeverRegisteredDetailed to NeverRegisteredCompacted; retry bytes remain identical"  # [S] L1540
+expected_state_schema_id = "TxnOutcomeIndex"                              # [S] expected_outcome_index_entry:Detailed
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: inherited via detailed_outcome_ref / capability_replay_ref lineage
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from both spelled arms
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent from both spelled arms (unlike every gate-carrying sibling)
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-outcome-compaction-spec:never-registered"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_outcome_index", "SemanticPayload|Local|begin_idempotency_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_outcome_index", "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_summary" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-outcome-compaction-spec:terminal-ready"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x000f                                                   # [S] shared member outer tag
+input_schema_id = "LocalOutcomeCompactionSpec"                            # [S]
+input_wire_tag = 0x000f                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] FORCED: wire_types.toml 0x0057 .terminal_ready wire_tag 0x0002
+body_schema_id = "LocalOutcomeCompactionSpec"                             # [S]
+result_schema_id = "LocalTxnOutcomeSummaryRoot"                           # [S-derived]
+applied_record_schema_id = "TxnOutcomeIndex"                              # [S]
+handler_symbol = "fgdb_apply::local::local_outcome_compaction_spec::terminal_ready"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "requires the summary leaf copy the exact frozen public bytes and receipt from the referenced detailed bundle; writes the authenticated leaf; atomically changes TxnOutcomeIndex Detailed to Compacted together with LocalBeginIdempotencyIndex BoundDetailed to BoundCompacted; retry bytes remain identical"  # [S] L1540
+expected_state_schema_id = "TxnOutcomeIndex"                              # [S] expected_outcome_index_entry:Detailed
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-outcome-compaction-spec:terminal-ready"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_outcome_index", "SemanticPayload|Local|begin_idempotency_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_outcome_index", "SemanticPayload|Local|begin_idempotency_index", "SemanticPayload|Local|txn_outcome_summary" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-outcome-expiry-spec"                # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0010                                                   # [S] frozen dense ordinal 16
+input_schema_id = "LocalOutcomeExpirySpec"                                # [S] L1540 full body ("the distinct ordered transition")
+input_wire_tag = 0x0010                                                   # [C]
+body_schema_id = "LocalOutcomeExpirySpec"                                 # [S]
+result_schema_id = "TxnOutcomeIndex"                                      # [S-derived] the authenticated ExpiredTombstone values
+applied_record_schema_id = "LocalBeginIdempotencyIndex"                   # [S] both indexes change atomically; the begin index carries the tombstone the retry path reads
+handler_symbol = "fgdb_apply::local::local_outcome_expiry_spec"           # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "evidence must classify the replay record's exact window Expired for this action and every advertised retry and lookup floor must be closed; atomically changes both indexes to authenticated ExpiredTombstone values; drops the replay and bundle edges only there; permanently prevents key and token reuse"  # [S] L1540
+expected_state_schema_id = "TxnOutcomeIndex"                              # [S] expected_outcome_index_entry:Compacted
+authority_arm = "TimeValidationEvidence"                                  # C-h tier 3: evidence-authorized; no principal header in the spelled body
+authority_evidence_target_schema_id = "TimeValidationEvidence"            # [S] time_validation_evidence_ref
+terminal_audit_freeze_arm = "Required<LocalControl>"                      # [S] L1540 verbatim: terminal_audit_freeze:AuditFreezeField::Required<LocalControl> — the first spelled freeze member in the registry
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare member — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-outcome-expiry-spec"     # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|txn_outcome_index", "SemanticPayload|Local|begin_idempotency_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|txn_outcome_index", "SemanticPayload|Local|begin_idempotency_index" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:local-conflict-compaction-spec"           # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0011                                                   # [S] frozen dense ordinal 17 (C3 -> F3, round 10)
+input_schema_id = "LocalConflictCompactionSpec"                           # [S] L1480 full body
+input_wire_tag = 0x0011                                                   # [C]
+body_schema_id = "LocalConflictCompactionSpec"                            # [S]
+result_schema_id = "LocalConflictOverlapFloor"                            # [S-derived] the advanced overlap floor (defined immediately before the spec, L1480)
+applied_record_schema_id = "LocalConflictIndexBasis"                      # [S] expected_index_basis; the successor basis is the durable change
+handler_symbol = "fgdb_apply::local::local_conflict_compaction_spec"      # [C][F]
+transition_class = "Semantic"                                             # [S] C3 ruling: an ordered semantic transition in F3
+sequence_effects = "may replace detail only when every possible future transaction has a start and snapshot beyond the selected entry's closed overlap interval and no live witness can add an edge; never deletes the authenticated summary or changes public outcomes"  # [S] L1480
+expected_state_schema_id = "LocalConflictIndexBasis"                      # [S] expected_index_basis
+authority_arm = "LocalNoFutureConflictEdgeProof"                          # C-h tier 3: proof-authorized; no principal header exists in this body's lineage
+authority_evidence_target_schema_id = "LocalNoFutureConflictEdgeProof"    # [S] no_future_overlap_edge_proof_ref
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] bare member — unpinned
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-conflict-compaction-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|conflict_index" ]                   # [C][F]
+written_state_slots = [ "SemanticPayload|Local|conflict_index" ]                    # [C][F]
+checkpoint_floor_classes = [ "conflict-index" ]                           # [C][F]
+backup_restore_gc_classes = [ "conflict-index" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]

@@ -2572,6 +2572,103 @@ mod tests {
     }
 
     #[test]
+    fn downward_shift_fires_the_downward_cusum_and_not_its_opposite() -> TestResult {
+        // The downward detector is one of the three the combined signal
+        // declares, and a collapsing metric — throughput falling off, not
+        // spiking — is exactly the regime it exists to catch. Its opposite must
+        // stay silent, otherwise the direction carried on every receipt is
+        // decoration rather than information.
+        let mut value = monitor()?;
+        for (offset, units) in [10, 10, 10, -40, -40, -40].into_iter().enumerate() {
+            value.observe(input(100 + u64::try_from(offset)?, units)?)?;
+        }
+
+        let evidence = value.evidence();
+        let receipts = evidence.retained_receipts();
+        assert!(
+            !receipts.is_empty(),
+            "a sustained downward excursion produced no detection at all"
+        );
+
+        let downward = receipts
+            .iter()
+            .find(|receipt| receipt.detector() == RegimeDetectorKind::DownwardCusum)
+            .ok_or("no downward-cusum receipt for a sustained downward excursion")?;
+        assert_eq!(downward.direction(), RegimeDirection::Decrease);
+        assert_eq!(downward.series(), RuntimeMetricSeries::Custom(17));
+        assert!(downward.statistic() >= downward.threshold());
+
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.detector() != RegimeDetectorKind::UpwardCusum),
+            "the upward detector fired on a downward excursion"
+        );
+        // The signal is advisory evidence under its named model, never a
+        // safety fact — no receipt may claim otherwise.
+        assert!(receipts.iter().all(|receipt| !receipt.is_ground_truth()));
+        assert!(!evidence.status().is_ground_truth());
+        Ok(())
+    }
+
+    #[test]
+    fn each_reset_flag_survives_the_canonical_round_trip_independently() -> TestResult {
+        // Every existing fixture sets all three reset flags to `true`, so the
+        // canonical codec has never had to distinguish them: a decoder that
+        // read the three booleans in the wrong order, or read one twice, would
+        // round-trip an all-true profile perfectly. Distinct values are what
+        // make the field positions load-bearing.
+        let profile_oid = oid(9);
+        let mut page_hinkley = page_hinkley(10);
+        page_hinkley.reset_after_detection = true;
+        let mut upward = upward_cusum(100);
+        upward.reset_after_detection = false;
+        let mut downward = downward_cusum(100);
+        downward.reset_after_detection = true;
+
+        let profile = RegimeSignalProfile::try_new(
+            profile_oid,
+            RuntimeMetricSeries::Custom(17),
+            page_hinkley,
+            upward,
+            downward,
+            12,
+            4,
+        )?;
+        let identity = identity_with(
+            oid(1),
+            profile_oid,
+            COMBINED_REGIME_SIGNAL_ID,
+            COMBINED_REGIME_SIGNAL_VERSION,
+        )?;
+        assert!(profile.page_hinkley_resets_after_detection());
+        assert!(!profile.upward_cusum_resets_after_detection());
+        assert!(profile.downward_cusum_resets_after_detection());
+
+        let mut value = RegimeSignalMonitor::try_new(identity.clone(), profile.clone())?;
+        for (offset, units) in [10, 10, 10, 30].into_iter().enumerate() {
+            value.observe(SequencedRegimeSample::new(
+                identity.clone(),
+                profile.clone(),
+                100 + u64::try_from(offset)?,
+                MetricSample::from_units(units),
+            ))?;
+        }
+
+        let evidence = value.evidence();
+        let encoded = evidence.try_to_canonical_bytes()?;
+        let decoded = RegimeSignalEvidence::try_from_canonical_bytes(&encoded)?;
+        assert_eq!(decoded, evidence);
+
+        let decoded_profile = decoded.profile();
+        assert!(decoded_profile.page_hinkley_resets_after_detection());
+        assert!(!decoded_profile.upward_cusum_resets_after_detection());
+        assert!(decoded_profile.downward_cusum_resets_after_detection());
+        assert_eq!(decoded.try_to_canonical_bytes()?, encoded);
+        Ok(())
+    }
+
+    #[test]
     fn replay_produces_identical_integer_evidence() -> TestResult {
         fn run() -> TestResult<Vec<RegimeSignalEvidence>> {
             let mut value = monitor()?;

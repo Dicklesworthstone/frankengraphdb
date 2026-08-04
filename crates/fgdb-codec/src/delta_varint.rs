@@ -584,6 +584,57 @@ mod tests {
     }
 
     #[test]
+    fn every_truncation_and_declared_count_mismatch_is_rejected() {
+        let values = [
+            0,
+            127,
+            128,
+            255,
+            256,
+            16_383,
+            16_384,
+            u64::from(u32::MAX),
+            1_u64 << 63,
+            u64::MAX,
+        ];
+        let encoded = encode(&values).expect("strictly increasing width-boundary fixture");
+        assert_eq!(
+            decode(&encoded, values.len(), EntryLimit::new(values.len())),
+            Ok(values.to_vec())
+        );
+
+        for cut in 0..encoded.len() {
+            let truncated = &encoded[..cut];
+            let error = decode(truncated, values.len(), EntryLimit::new(values.len()))
+                .expect_err("every proper byte prefix must be rejected");
+            assert!(
+                matches!(error, DeltaVarintDecodeError::Value { .. }),
+                "truncation returned a non-input error: {error:?}"
+            );
+            let DeltaVarintDecodeError::Value { byte_offset, .. } = error else {
+                continue;
+            };
+            assert!(
+                byte_offset <= truncated.len(),
+                "cut={cut}, byte_offset={byte_offset}"
+            );
+        }
+
+        for declared_count in 0..=values.len() + 1 {
+            if declared_count == values.len() {
+                continue;
+            }
+            assert!(
+                matches!(
+                    decode(&encoded, declared_count, EntryLimit::new(declared_count)),
+                    Err(DeltaVarintDecodeError::Value { .. })
+                ),
+                "declared_count={declared_count}"
+            );
+        }
+    }
+
+    #[test]
     fn entry_limit_precedes_parsing_and_allocation() {
         assert_eq!(
             decode(&[0x80], 1, EntryLimit::new(0)),
