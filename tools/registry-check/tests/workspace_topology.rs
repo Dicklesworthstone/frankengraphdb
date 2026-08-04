@@ -38,7 +38,7 @@ const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
 // fgdb-strata). Derived from the gate's own drift message, never hand-computed.
 // The semantic contract covers activation_status, so activating a crate MUST
 // move this — a pin that survived the change would be pinning nothing.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:eccc01e5f817b073";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:860a110fc093d730";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -528,7 +528,7 @@ fn topology_neg_live_crate_declared_planned() {
 #[test]
 fn topology_neg_foundation_revision_drift() {
     let codes = codes_after(
-        "pinned_rev = \"8ccae2fa8d15d780a9ab774aaf255a4ec7731a71\"",
+        "pinned_rev = \"3e8d08efe6617e08635fa8705c62a2a531373f43\"",
         "pinned_rev = \"0000000000000000000000000000000000000000\"",
     );
     assert_reports(&codes, "foundation_rev_drift");

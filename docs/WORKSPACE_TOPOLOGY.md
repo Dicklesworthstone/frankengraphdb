@@ -196,7 +196,7 @@ A posture closure is the transitive dependency set of its entry crate over the L
 
 | Project | Linkage | Pinned revision | Package prefixes | Default features | Anchor |
 |---|---|---|---|---|---|
-| asupersync | linked | `8ccae2fa8d15d780a9ab774aaf255a4ec7731a71` | `asupersync` | must be disabled (workspace_convention_unanimous) | §2.1 |
+| asupersync | linked | `3e8d08efe6617e08635fa8705c62a2a531373f43` | `asupersync` | must be disabled (workspace_convention_unanimous) | §2.1 |
 | franken_networkx (fnx-*) | linked | `9d710b1c33e99412c94de7fa4de2f7ce4954110f` | `fnx-` | permitted (plan_permits_defaults: FG-CON-01 admits the fnx-* crates and, for the Python package, their already-pinned transitive binding runtime — the exact thing a blanket default-features=false rule would break) | §2.2 |
 | frankensqlite (design-level only) | design_only | — | `fsqlite-` | permitted (not_applicable: nothing links it) | §2.3 |
 
@@ -383,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:eccc01e5f817b073` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:860a110fc093d730` — every normative decision, prose excluded.
