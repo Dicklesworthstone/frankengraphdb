@@ -5,8 +5,9 @@
 #
 # Runs every mandatory core check and every unique live checker artifact
 # declared by registries/checker_index.toml. Registered cargo-test artifacts
-# are covered by the workspace cargo-test invocation. Registered scripts and
-# registry-check binaries are discovered and invoked from their artifact paths.
+# are covered by the workspace cargo-test invocation, except for the proven
+# catalog-only scope below. Registered scripts and registry-check binaries are
+# discovered and invoked from their artifact paths.
 #
 # topology-check and unsafe-ledger-check are load-bearing for the file-coverage
 # closure: the coverage table claims
@@ -103,6 +104,7 @@ REGISTERED_SEQ=0
 LAST_GATE_RC=0
 GATE_LOG_DIR=""
 CARGO_TEST_LOG=""
+CARGO_TEST_MODE="workspace"
 COV_TRACKED=0
 COV_INSPECTED=0
 COV_EXEMPT=0
@@ -127,6 +129,70 @@ CORE_GATE_ROSTER=(
   "$CORE_GATE_TEST"
   "$CORE_GATE_UBS"
 )
+
+# fgdb-fa3k: this is deliberately a positive, mechanical scope rather than a
+# heuristic about file extensions. workspace_topology.rs proves that crates/**
+# reaches registry content at compile time through exactly one edge:
+# fgdb-types/src/refs.rs -> registries/logical_object_kinds.toml. A catalog
+# increment outside that projection cannot change a crate build; changes to the
+# projection, an engine crate, or any other path retain the full workspace run.
+catalog_lane_test_scope_for_paths() {
+  [ "$#" -ne 0 ] || return 1
+
+  local path
+  for path in "$@"; do
+    case "$path" in
+      registries/logical_object_kinds.toml) return 1 ;;
+      registries/*|tools/registry-check/*)  ;;
+      *)                                    return 1 ;;
+    esac
+  done
+  return 0
+}
+
+catalog_lane_test_scope() {
+  local -a paths=()
+
+  mapfile -t paths < <(
+    {
+      git diff --no-renames --name-only HEAD
+      git ls-files --others --exclude-standard
+    } | sort -u
+  )
+  catalog_lane_test_scope_for_paths "${paths[@]}"
+}
+
+select_cargo_test_mode() {
+  if catalog_lane_test_scope; then
+    CARGO_TEST_MODE="catalog"
+    CORE_GATE_TEST="cargo test --catalog-lane (registry-check + registered codec target)"
+  fi
+}
+
+catalog_lane_test_scope_control() {
+  if ! catalog_lane_test_scope_for_paths \
+      registries/appendix_a_catalog.toml \
+      tools/registry-check/tests/identity.rs; then
+    echo "SELF-TEST RED: a non-logical catalog lane did not select the scoped test" >&2
+    return 1
+  fi
+  if catalog_lane_test_scope_for_paths; then
+    echo "SELF-TEST RED: an empty change set selected the scoped test" >&2
+    return 1
+  fi
+  if catalog_lane_test_scope_for_paths registries/logical_object_kinds.toml; then
+    echo "SELF-TEST RED: the crate-bound logical-object registry selected the scoped test" >&2
+    return 1
+  fi
+  if catalog_lane_test_scope_for_paths crates/fgdb-types/src/refs.rs; then
+    echo "SELF-TEST RED: a crate change selected the scoped test" >&2
+    return 1
+  fi
+  if catalog_lane_test_scope_for_paths scripts/check.sh; then
+    echo "SELF-TEST RED: a gate-driver change selected the scoped test" >&2
+    return 1
+  fi
+}
 
 # Per-result input-domain attribution (fgdb-41p3). The outer check.sh tripwire
 # still watches every tracked file for its whole run. These records let its final
@@ -1376,8 +1442,11 @@ cargo_test_retryable_missing_binary_race() { # log
   ' "$log"
 }
 
-# Run the workspace test gate and keep its output, because the registered
-# cargo-test artifacts below are attributed FROM it.
+# Run the selected test gate and keep its output, because the registered
+# cargo-test artifacts below are attributed FROM it. The catalog mode is safe
+# only for the mechanically selected shape above: registry-check owns the
+# registries, while the registered codec target transitively compiles fgdb-types
+# and therefore the sole crates-to-registry include edge.
 #
 # --no-fail-fast, MEASURED 2026-07-26 on `-p registry-check` with two planted
 # failures in two independent test targets:
@@ -1398,14 +1467,34 @@ cargo_test_retryable_missing_binary_race() { # log
 # and say so in the transcript. The first log remains in the gate-log directory;
 # registered cargo-test attribution uses only the retry log. A second ENOENT or
 # any real failure stays red, and there is never a third attempt.
+run_cargo_test_once() { # log
+  local log="$1"
+  local registry_check_rc
+  local codec_rc
+
+  if [ "$CARGO_TEST_MODE" = "catalog" ]; then
+    : >"$log" || return 1
+    cargo test -p registry-check --no-fail-fast 2>&1 | tee -a "$log"
+    registry_check_rc="${PIPESTATUS[0]}"
+    cargo test -p fgdb-codec --test generated_durable_roundtrip 2>&1 | tee -a "$log"
+    codec_rc="${PIPESTATUS[0]}"
+    if [ "$registry_check_rc" -ne 0 ]; then
+      return "$registry_check_rc"
+    fi
+    return "$codec_rc"
+  fi
+
+  cargo test --workspace --no-fail-fast 2>&1 | tee "$log"
+}
+
 run_cargo_test_workspace() {
   local first_log="$CARGO_TEST_LOG"
   local first_rc
   local retry_log
   local retry_rc
 
-  cargo test --workspace --no-fail-fast 2>&1 | tee "$first_log"
-  first_rc="${PIPESTATUS[0]}"
+  run_cargo_test_once "$first_log"
+  first_rc=$?
   if [ "$first_rc" -eq 0 ] ||
       [ "$first_rc" -ne 101 ] ||
       ! cargo_test_retryable_missing_binary_race "$first_log"; then
@@ -1415,8 +1504,8 @@ run_cargo_test_workspace() {
   retry_log="${first_log%.log}.retry-1.log"
   printf '    cargo-test retry 1/1: attempt 1 hit only the shared-target '\
 'never-executed ENOENT race; rerunning once (attempt log: %s)\n' "$first_log"
-  cargo test --workspace --no-fail-fast 2>&1 | tee "$retry_log"
-  retry_rc="${PIPESTATUS[0]}"
+  run_cargo_test_once "$retry_log"
+  retry_rc=$?
   CARGO_TEST_LOG="$retry_log"
   return "$retry_rc"
 }
@@ -2979,6 +3068,7 @@ EOF
   verdict_stream_control "$work" || return 1
   verdict_contract_control "$work" || return 1
   tree_scope_control "$work" || return 1
+  catalog_lane_test_scope_control || return 1
   landing_guidance_control "$work" || return 1
 
   echo "CHECK.SH MUTATION SELF-TEST PASS"
@@ -3000,6 +3090,8 @@ EOF
   echo "    correctly; missing declarations, live wiring, ledger records, and the"
   echo "    intersection each red under mutation; option-shaped paths stay hashed;"
   echo "    early checkpoints stop on UNRUN"
+  echo "  catalog test scoping: only a nonempty registry-check/catalog change set that"
+  echo "    excludes the crate-bound logical-object registry skips the workspace test"
   echo "  landing guidance: main-checkout edits warn before commit; scratch remedy pinned"
   echo "  evidence retained at $work"
 }
@@ -3018,6 +3110,7 @@ case "${1:-}" in
 esac
 
 cd "$ROOT" || exit 1
+select_cargo_test_mode
 # set -uo pipefail has no -e: an mktemp failure would leave this empty and
 # cascade into gate logs at "/core-ubs.log" — red, but unnamed and confusing.
 GATE_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-gates.XXXXXX")" || {
