@@ -338,6 +338,121 @@ fn tm_epoch_types_do_not_unify() {
     assert_eq!(decision.kind, "adaptive_epoch");
 }
 
+/// Collect every tracked Rust source under `crates/` into one buffer.
+fn workspace_rust_sources() -> String {
+    fn walk(dir: &Path, out: &mut String) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push_str(&text);
+                out.push('\n');
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(&repo_root().join("crates"), &mut out);
+    assert!(
+        out.len() > 100_000,
+        "the source sweep collected {} bytes, which is too little to be the workspace — \
+         a broken walk would make every assertion below vacuously pass",
+        out.len()
+    );
+    out
+}
+
+/// Does `name` occur in `haystack` as a whole Rust identifier?
+fn defines_identifier(haystack: &str, name: &str) -> bool {
+    let boundary = |c: char| !(c.is_alphanumeric() || c == '_');
+    haystack.match_indices(name).any(|(at, _)| {
+        let before = haystack[..at].chars().next_back().is_none_or(boundary);
+        let after = haystack[at + name.len()..]
+            .chars()
+            .next()
+            .is_none_or(boundary);
+        before && after
+    })
+}
+
+/// EVERY DECLARED `rust_newtype` NAMES A TYPE THE WORKSPACE ACTUALLY DEFINES.
+///
+/// The §12.1 block's header says the separation of these identities is "the one
+/// law in this block that a type system, not a reviewer, must enforce". The
+/// checker already refuses two identities that share a `rust_newtype`
+/// (`identity_newtype_collision`) — but that is uniqueness of the TOML STRINGS,
+/// and two names that exist only as strings are trivially distinct. It reads
+/// exactly like the separation law and is not one, so it passed at full strength
+/// through a period when SEVEN of the nine named types did not exist anywhere in
+/// `crates/` (fgdb-obs3, fixed by 45f5c56). Nothing was checking the direction
+/// that mattered: registry -> code.
+///
+/// **WHY THIS MATCHES AN IDENTIFIER RATHER THAN A DEFINITION KEYWORD.** The
+/// obvious spelling — grep for `pub struct {name}` — is wrong here, and wrong in
+/// the dangerous direction. `fgdb-types` mints most of these through the
+/// `u128_id!` / `u64_scalar!` macros, so the name appears bare inside the macro
+/// invocation and never beside the `pub struct` keyword. That census reports
+/// ABSENT for a type that is present, which manufactures a defect rather than
+/// missing one. It is the exact false negative this test would otherwise
+/// enshrine: I ran it that way while re-verifying obs3 and got ABSENT for seven
+/// types that had already landed.
+#[test]
+fn tm_every_identity_newtype_exists_in_the_workspace() {
+    let sources = workspace_rust_sources();
+    let registry = registry();
+    assert!(
+        !registry.identities.is_empty(),
+        "an empty identity set would make this test vacuous"
+    );
+
+    for identity in &registry.identities {
+        assert!(
+            defines_identifier(&sources, &identity.rust_newtype),
+            "identity {:?} declares rust_newtype {:?}, which no Rust source under crates/ \
+             defines. §12.1 makes the type system the enforcement mechanism for identity \
+             separation, so a declared newtype with no type leaves that law enforced by \
+             nothing — see fgdb-obs3",
+            identity.name,
+            identity.rust_newtype
+        );
+    }
+}
+
+/// CONTROL: the sweep above can actually fail.
+///
+/// Every assertion in it is a presence check against one big buffer, so a sweep
+/// that silently collected the wrong files — or a matcher that returns `true` for
+/// anything — would pass over all nine identities and report a law it never
+/// tested. This pins both halves: a name the workspace does not define is not
+/// found, and the boundary rule really is a boundary rule rather than a substring
+/// test.
+#[test]
+fn tm_identity_newtype_existence_check_can_fail() {
+    let sources = workspace_rust_sources();
+    assert!(
+        !defines_identifier(&sources, "TenantIdentifierThatIsNotDefinedAnywhere"),
+        "a fabricated newtype must not be found, or the existence check is vacuous"
+    );
+    // A real type resolves, so an all-absent answer means the sweep is broken
+    // rather than the registry being wrong.
+    assert!(
+        defines_identifier(&sources, "TenantId"),
+        "TenantId is defined by u128_id! in fgdb-types; failing here means the source \
+         sweep is broken, not that the identity is missing"
+    );
+    // And a substring of a real identifier must NOT count as a definition:
+    // `TenantI` occurs inside `TenantId` and names nothing.
+    assert!(
+        !defines_identifier(&sources, "TenantI"),
+        "a substring of a longer identifier must not satisfy the existence check"
+    );
+}
+
 #[test]
 fn tm_neg_epoch_domains_unified() {
     let codes = codes_after(
