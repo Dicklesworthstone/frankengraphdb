@@ -24,6 +24,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod vfs;
+
 use fgdb_chronicle::commit::{CommitCoordinator, CommitError};
 use fgdb_chronicle::identity::IdentifiedObject;
 use fgdb_chronicle::marker::{CommitMarker, EffectSource};

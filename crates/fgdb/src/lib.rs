@@ -98,6 +98,12 @@ use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 use std::path::{Path, PathBuf};
 
+/// Re-exported because [`Database::write_with_crash`] takes one: a caller
+/// driving the crash-point matrix needs to name the instants, and importing them
+/// from Chronicle directly would make the spine's own signature unusable without
+/// a second dependency.
+pub use fgdb_chronicle::commit::CrashPoint;
+
 /// Object kind for a committed effect capsule.
 ///
 /// `0x0274` is the Appendix A reservation for `CommittedEffectCapsule`. It is a
@@ -538,6 +544,27 @@ impl Database {
     /// is reported without pretending the commit did not happen — a reopen
     /// rebuilds the same partition from the stream.
     pub fn write(&mut self, cx: &CommitCx, batch: WriteBatch) -> Result<CommitSeq, WriteError> {
+        self.write_with_crash(cx, batch, None)
+    }
+
+    /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
+    ///
+    /// **Public rather than test-gated, and the reason is the crash-point
+    /// matrix** (§15). `fgdb-chronicle::CommitCoordinator::commit_with_crash` and
+    /// `fgdb-strata::BlockStore::put_with_crash` are public for the same reason:
+    /// the crash path must be the SAME code as the durable path up to the
+    /// stopping instant, and a `#[cfg(test)]` twin would be a second
+    /// implementation that no longer says anything about the real protocol.
+    ///
+    /// A crash point returns `Err` and does NOT republish the derived partition —
+    /// which is exactly right, because the process this models is not around to
+    /// republish anything. Drop the `Database` and reopen to see what survived.
+    pub fn write_with_crash(
+        &mut self,
+        cx: &CommitCx,
+        batch: WriteBatch,
+        crash_at: Option<CrashPoint>,
+    ) -> Result<CommitSeq, WriteError> {
         if batch.is_empty() {
             return Err(WriteError::EmptyBatch);
         }
@@ -584,9 +611,12 @@ impl Database {
         )?;
 
         let capsule = prepare_capsule(&self.keys, &template)?;
-        self.coordinator.commit(cx, &capsule.bytes, |seq, oid| {
-            marker_for_capsule(seq, oid, &capsule, Vec::new())
-        })?;
+        self.coordinator.commit_with_crash(
+            cx,
+            &capsule.bytes,
+            |seq, oid| marker_for_capsule(seq, oid, &capsule, Vec::new()),
+            crash_at,
+        )?;
 
         self.snapshot = rebuild(cx, &self.coordinator, &self.store, &self.keys)?;
         Ok(self.snapshot.frontier)

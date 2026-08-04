@@ -580,6 +580,7 @@ name = "fgdb-sim"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+ "fgdb",
  "fgdb-chronicle",
  "fgdb-crypto",
  "fgdb-delta-types",

@@ -7290,6 +7290,29 @@ struct CensusDagWaiver {
 /// population went to zero once arm-path references were excluded, because an arm
 /// payload member can never legally become an enforced field row.
 const CENSUS_DAG_WAIVERS: &[CensusDagWaiver] = &[
+    // These are recursive state links, not construction edges. Each has both
+    // endpoints at ReservationUseRecord@50, so its numeric window is [50, 50],
+    // but the graph still has the irreducible self-cycle `x -> x`. Re-ordering
+    // cannot repair it; treating either arm as a DAG edge would make the law
+    // reject a recursive union that its own order model cannot represent.
+    CensusDagWaiver {
+        owner: "ReservationUseRecord",
+        stable_name: "base_reserved_ref",
+        target: "ReservationUseRecord",
+        verdict: CensusDagVerdict::Exception,
+        evidence: "both directions resolve to ReservationUseRecord@50: the direct numeric window is [50, 50], but the source edge is x -> x and no construction-order assignment can make it acyclic",
+        repair: "",
+        owning_bead: "fgdb-arm-path-order-68-9eev",
+    },
+    CensusDagWaiver {
+        owner: "ReservationUseRecord",
+        stable_name: "applied_record_ref",
+        target: "ReservationUseRecord",
+        verdict: CensusDagVerdict::Exception,
+        evidence: "both directions resolve to ReservationUseRecord@50: the direct numeric window is [50, 50], but the source edge is x -> x and no construction-order assignment can make it acyclic",
+        repair: "",
+        owning_bead: "fgdb-arm-path-order-68-9eev",
+    },
     // The Erratum waiver that lived here — CommitCommand.capsule_ref ->
     // CommittedEffectCapsule — is RETIRED (fgdb-dbta). Its repair landed: the
     // target moved 30 -> 10, which is the single value its window admits.
@@ -7331,14 +7354,16 @@ const CENSUS_DAG_WAIVERS: &[CensusDagWaiver] = &[
 /// non-obligation rather than a silent skip:
 ///   * RETAINING only. Strength comes from `registered_reference_definition_semantics`
 ///     — the same table `identity::declared_field_reference_semantics` consults, so a
-///     wrapper cannot be retaining on one artifact and not the other. 13 of the 17
-///     registered `reference_wrapper` types are retaining (7 strong + 6 conditional);
+///     wrapper cannot be retaining on one artifact and not the other. 26 of the 30
+///     registered `reference_wrapper` types are retaining (20 strong + 6 conditional);
 ///     `locator` and the three `*Identity` wrappers impose no ordering obligation,
 ///     which is the a01 identity-is-not-reachability law used as an admission rule.
-///   * FLAT census paths only. A candidate deeper than `{Owner}.{stable_name}` is an
-///     arm PAYLOAD member; `validate_identity` accepts a `[[field]]` row on a union
-///     owner, so such a row can never legally land, and counting it here would report
-///     violations no correct modelling can produce (783 of 1950 are arm-path).
+///   * FLAT census paths are checked directly. An arm-payload candidate cannot become
+///     a `[[field]]` row, so it is admitted only when its target has no existing
+///     landed or flat-source retaining route. That target-scoped cut preserves the
+///     field-row boundary while covering the otherwise unbounded arm-only shape; at
+///     this HEAD, 846 of 2147 retaining source candidates are arm-path, of which 68
+///     targets have no other construction-order route.
 ///   * A bare wrapper with no concrete target in the source spelling names no target,
 ///     so no edge is derivable from it.
 ///   * An owner or target that is not a registered logical kind has no order to
@@ -7372,6 +7397,35 @@ fn verify_census_construction_dag(
                 identity::generic_free_family(&field.containing_schema),
                 field.stable_name.as_str(),
             )
+        })
+        .collect();
+    let landed_targets: BTreeSet<&str> = id
+        .fields
+        .iter()
+        .filter_map(|field| field.target_schema_id.as_deref())
+        .chain(
+            id.unions
+                .iter()
+                .flat_map(|union| union.arms.iter().map(|arm| arm.target_schema_id.as_str())),
+        )
+        .map(identity::generic_free_family)
+        .collect();
+    let flat_targets: BTreeSet<&str> = census
+        .slices
+        .iter()
+        .flat_map(|slice| &slice.fields)
+        .filter_map(|field| {
+            let exact = field.exact_types.first()?;
+            let (family, target) = census_reference_carrier(exact);
+            (wrapper_kind.get(family).copied() == Some("reference_wrapper")
+                && matches!(
+                    census_reference_strength(family),
+                    Some("strong" | "conditional" | "weak_digest")
+                )
+                && field.key.path
+                    == format!("{}.{}", field.key.schema_owner, field.key.stable_name))
+            .then(|| target.map(identity::generic_free_family))
+            .flatten()
         })
         .collect();
     let waived: BTreeSet<(&str, &str, &str)> = CENSUS_DAG_WAIVERS
@@ -7441,9 +7495,6 @@ fn verify_census_construction_dag(
             if !matches!(semantics, "strong" | "conditional" | "weak_digest") {
                 continue;
             }
-            if field.key.path != format!("{}.{}", field.key.schema_owner, field.key.stable_name) {
-                continue;
-            }
             let owner = identity::generic_free_family(&field.key.schema_owner);
             if landed.contains(&(owner, field.key.stable_name.as_str())) {
                 continue;
@@ -7451,6 +7502,11 @@ fn verify_census_construction_dag(
             let Some(target) = bracket_target.map(identity::generic_free_family) else {
                 continue;
             };
+            let is_flat =
+                field.key.path == format!("{}.{}", field.key.schema_owner, field.key.stable_name);
+            if !is_flat && (landed_targets.contains(target) || flat_targets.contains(target)) {
+                continue;
+            }
             let (Some(&owner_order), Some(&target_order)) = (order.get(owner), order.get(target))
             else {
                 continue;
@@ -15529,7 +15585,7 @@ name = "Probe"
     }
 
     #[test]
-    fn census_dag_names_a_self_edge_and_ignores_an_arm_path_one() {
+    fn census_dag_names_a_self_edge_and_skips_an_arm_path_with_an_existing_bound() {
         let flat = census_dag_codes(vec![typed_field_candidate(
             "CommitCommand",
             "CommitCommand.self_probe_ref",
@@ -15540,17 +15596,50 @@ name = "Probe"
             flat.contains(&"census_dag_self_edge".to_owned()),
             "a flat self-edge must be named, got {flat:?}"
         );
-        // An arm payload member can never legally become an enforced field row, so
-        // reporting it would be a violation no correct modelling could produce.
+        // A `CommitMarker` field already gives this target a row-level order bound, so
+        // the source-only arm route must not duplicate it.
         let arm = census_dag_codes(vec![typed_field_candidate(
             "CommitCommand",
-            "CommitCommand.state.Started.self_probe_ref",
-            "self_probe_ref",
-            "StrongRef<CommitCommand>",
+            "CommitCommand.state.Started.marker_ref",
+            "marker_ref",
+            "StrongRef<CommitMarker>",
         )]);
         assert!(
             arm.is_empty(),
-            "an arm-path reference must not be ruled on, got {arm:?}"
+            "an arm-path reference with an existing route must not duplicate it, got {arm:?}"
+        );
+    }
+
+    #[test]
+    fn census_dag_names_an_arm_only_future_result() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        catalog
+            .identity
+            .logical
+            .iter_mut()
+            .find(|kind| kind.name == "RestoreSourceLeaseAcquireReceipt")
+            .expect("the arm-only control target exists")
+            .construction_order = 40;
+        let census = census_with_slice(
+            "a16",
+            vec![typed_field_candidate(
+                "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>",
+                "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind.AcquireImported.receipt_ref",
+                "receipt_ref",
+                "StrongRef<RestoreSourceLeaseAcquireReceipt>",
+            )],
+            Vec::new(),
+        );
+        let mut violations = Vec::new();
+        verify_census_construction_dag(&catalog, &census, &mut violations);
+        let codes: Vec<&str> = violations
+            .iter()
+            .map(|violation| violation.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"census_dag_future_result"),
+            "an arm-only future result must be named, got {codes:?}"
         );
     }
 

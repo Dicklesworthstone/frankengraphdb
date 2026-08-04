@@ -23,7 +23,7 @@
 //!   vertex, and both must come back empty.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, OpenError, WriteBatch, WriteError};
+use fgdb::{CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError};
 use fgdb_delta_types::RelationId;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -294,6 +294,163 @@ fn an_empty_batch_is_refused() {
             db.frontier(),
             fgdb_types::CommitSeq(0),
             "and it must not have consumed a sequence"
+        );
+    });
+}
+
+/// **THE CRASH-POINT MATRIX: all or nothing, at every instant of the protocol.**
+///
+/// A crash between a write and the reopen must leave the WHOLE batch or NONE of
+/// it. The second batch therefore carries TWO edges, which is what makes
+/// partiality detectable at all: with one edge, "all" and "nothing" are the only
+/// reachable answers and the law would hold for free. With two, a protocol that
+/// made half a batch durable answers `[2, 3]` or `[2, 4]`, and both are refused
+/// below.
+///
+/// Every crash point Chronicle defines is exercised, not a sample — the whole
+/// value of a crash matrix is that no instant is left unasked.
+///
+/// **ONE INSTANT DOES NOT EXIST ON THIS PATH, AND THE LAW SAYS SO EXACTLY
+/// RATHER THAN TOLERATING IT.** `AfterCapsuleDirectorySyncBeforeParentDirectorySync`
+/// is guarded by `capsule_directory_parent_sync_pending`
+/// (`fgdb-chronicle/src/commit.rs:615`), which is set only when the capsule
+/// directory was newly created — the FIRST commit into a fresh database. The
+/// second batch is not that, so injecting there is a no-op and the write
+/// completes. Discovered by this law failing, then read in the source rather
+/// than assumed.
+///
+/// The fired set is therefore PINNED as an exact set, not waved through with an
+/// `if err`. A blanket "either outcome is fine" would keep passing if crash
+/// injection silently became a no-op everywhere, which is the one regression a
+/// crash matrix exists to catch. `a_crash_on_the_first_commit_covers_the_parent_directory_instant`
+/// below covers the remaining instant where it does exist, so the matrix is total.
+#[test]
+fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
+    let points = [
+        CrashPoint::BeforeCapsule,
+        CrashPoint::AfterCapsuleBeforeD1,
+        CrashPoint::AfterCapsuleFileSyncBeforeDirectorySync,
+        CrashPoint::AfterCapsuleDirectorySyncBeforeParentDirectorySync,
+        CrashPoint::AfterD1,
+        CrashPoint::AfterMarkerBeforeD2,
+        CrashPoint::AfterMarkerFileSyncBeforeDirectorySync,
+    ];
+    let mut fired = Vec::new();
+    for (index, point) in points.into_iter().enumerate() {
+        let dir = scratch(&format!("crash-{index}"));
+        fired.push((point, under_lab(80 + index as u64, move |cx| {
+            let crashed;
+            // A durable first batch, so the law is about the SECOND one and a
+            // reopen that lost everything cannot pass by accident.
+            {
+                let mut db = Database::create(cx, &dir, keys()).expect("creates");
+                let mut first = WriteBatch::new(KNOWS);
+                first.create_vertex(VId(1), vec![], vec![]);
+                first.create_vertex(VId(2), vec![], vec![]);
+                first.add_edge(EId(10), VId(1), VId(2), vec![]);
+                db.write(cx, first).expect("the first batch commits");
+                assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(2)]);
+
+                let mut second = WriteBatch::new(KNOWS);
+                second.create_vertex(VId(3), vec![], vec![]);
+                second.create_vertex(VId(4), vec![], vec![]);
+                second.add_edge(EId(11), VId(1), VId(3), vec![]);
+                second.add_edge(EId(12), VId(1), VId(4), vec![]);
+                crashed = db.write_with_crash(cx, second, Some(point)).is_err();
+                // The process dies here. Nothing republishes, nothing cleans up.
+            }
+
+            let reopened = Database::open(cx, &dir, keys());
+            assert!(
+                reopened.is_ok(),
+                "{point:?}: a crashed database must still reopen: {reopened:?}"
+            );
+            let db = reopened.expect("reopens");
+            let after = db.neighbours(VId(1), KNOWS).expect("reads");
+            assert!(
+                after == vec![VId(2)] || after == vec![VId(2), VId(3), VId(4)],
+                "{point:?}: the second batch must be wholly absent or wholly present, got {after:?}"
+            );
+            // The first batch is durable at every instant of the second's
+            // protocol: a crash may lose the batch in flight and must never
+            // damage what was already acknowledged.
+            assert!(
+                after.contains(&VId(2)),
+                "{point:?}: the previously acknowledged batch must survive, got {after:?}"
+            );
+            // A write that reported success must be wholly present: "all or
+            // nothing" allows nothing only when the write did not complete.
+            if !crashed {
+                assert_eq!(
+                    after,
+                    vec![VId(2), VId(3), VId(4)],
+                    "{point:?}: this instant did not fire, so the completed write must be whole"
+                );
+            }
+            crashed
+        })));
+    }
+
+    let actually_fired: Vec<CrashPoint> = fired
+        .iter()
+        .filter(|(_, crashed)| *crashed)
+        .map(|(point, _)| *point)
+        .collect();
+    assert_eq!(
+        actually_fired,
+        vec![
+            CrashPoint::BeforeCapsule,
+            CrashPoint::AfterCapsuleBeforeD1,
+            CrashPoint::AfterCapsuleFileSyncBeforeDirectorySync,
+            CrashPoint::AfterD1,
+            CrashPoint::AfterMarkerBeforeD2,
+            CrashPoint::AfterMarkerFileSyncBeforeDirectorySync,
+        ],
+        "exactly six of the seven instants exist on a NON-first commit; \
+         AfterCapsuleDirectorySyncBeforeParentDirectorySync is guarded by \
+         capsule_directory_parent_sync_pending. If this set shrinks, crash \
+         injection has silently become a no-op and every law above went vacuous \
+         with it"
+    );
+}
+
+/// The instant the matrix above cannot reach: the capsule directory is created
+/// by the FIRST commit, so only that commit can crash between making it durable
+/// and making its entry in the database directory durable.
+///
+/// Nothing was written before it, so the all-or-nothing law here is "nothing" —
+/// and the database must still open afterwards rather than being left in a state
+/// only a repair tool could read.
+#[test]
+fn a_crash_on_the_first_commit_covers_the_parent_directory_instant() {
+    let dir = scratch("crash-first-commit");
+    under_lab(90, move |cx| {
+        {
+            let mut db = Database::create(cx, &dir, keys()).expect("creates");
+            let mut only = WriteBatch::new(KNOWS);
+            only.create_vertex(VId(1), vec![], vec![]);
+            only.create_vertex(VId(2), vec![], vec![]);
+            only.add_edge(EId(10), VId(1), VId(2), vec![]);
+            let crashed = db.write_with_crash(
+                cx,
+                only,
+                Some(CrashPoint::AfterCapsuleDirectorySyncBeforeParentDirectorySync),
+            );
+            assert!(
+                crashed.is_err(),
+                "on the FIRST commit this instant exists and must fire: {crashed:?}"
+            );
+        }
+
+        let reopened = Database::open(cx, &dir, keys());
+        assert!(
+            reopened.is_ok(),
+            "a database crashed on its first commit must still reopen: {reopened:?}"
+        );
+        let db = reopened.expect("reopens");
+        assert!(
+            db.neighbours(VId(1), KNOWS).expect("reads").is_empty(),
+            "the crash was before D2, so no commit is in the stream and the graph is empty"
         );
     });
 }

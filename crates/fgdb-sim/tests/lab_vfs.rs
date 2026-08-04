@@ -1,0 +1,488 @@
+//! The lab VFS fault model (plan §15, bead fgdb-1xtp).
+//!
+//! Every fault test here is paired with a control, because a fault harness that
+//! is only ever exercised with faults on cannot tell "the fault fired" from
+//! "the harness is broken". The controls are:
+//!
+//! * `a_faultless_plan_injects_nothing` — the whole model with every trigger
+//!   off must be byte-transparent;
+//! * `a_torn_write_needs_an_interior_sector_to_lose` — the eligibility rule
+//!   itself, so `Trigger::Always` firing zero times is a *checked* outcome
+//!   rather than a silent one;
+//! * `a_different_seed_injects_a_different_schedule` — without it, the
+//!   determinism test would pass just as well against a generator that always
+//!   returned the same answer.
+
+use asupersync::fs::{OpenOptions, Vfs};
+use asupersync::io::AsyncWrite;
+use asupersync::runtime::{Runtime, RuntimeBuilder};
+use fgdb_sim::vfs::{DEFAULT_SECTOR_BYTES, FaultKind, FaultPlan, FaultVfs, Trigger};
+use std::future::poll_fn;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+
+const SECTOR: usize = DEFAULT_SECTOR_BYTES as usize;
+
+fn runtime() -> Runtime {
+    RuntimeBuilder::new().build().expect("lab runtime builds")
+}
+
+fn scratch_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("fgdb-lab-vfs-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+/// A distinct non-zero pattern per sector, so a hole reads as zeros and is
+/// distinguishable from "the right bytes landed".
+fn sector_pattern(sectors: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(sectors * SECTOR);
+    for sector in 0..sectors {
+        bytes.extend(std::iter::repeat_n(
+            u8::try_from(sector + 1).unwrap_or(0xff),
+            SECTOR,
+        ));
+    }
+    bytes
+}
+
+/// Writes `bytes` at offset 0 through a handle and syncs, returning the sync's
+/// result so a test can assert on a refused flush.
+async fn write_and_sync<V: Vfs>(
+    vfs: &FaultVfs<V>,
+    path: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut file = vfs
+        .open(
+            path,
+            &OpenOptions::new().write(true).create(true).truncate(true),
+        )
+        .await?;
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let n = poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &bytes[written..])).await?;
+        assert!(n > 0, "a lab write must make progress");
+        written += n;
+    }
+    asupersync::fs::VfsFile::sync_all(&file).await
+}
+
+// ---------------------------------------------------------------------------
+// Control
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_faultless_plan_injects_nothing() {
+    let dir = scratch_dir("faultless");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan::faultless());
+
+    runtime().block_on(async {
+        let bytes = sector_pattern(4);
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        vfs.crash();
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(durable, bytes, "a faultless plan must be byte-transparent");
+    });
+
+    assert!(
+        vfs.events().is_empty(),
+        "a faultless plan injected: {:?}",
+        vfs.events()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The fsync lie
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_lying_sync_reports_success_and_persists_nothing() {
+    let dir = scratch_dir("fsync-lie");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        fsync_lie: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let bytes = sector_pattern(2);
+        // The caller is told the data is durable.
+        write_and_sync(&vfs, &path, &bytes)
+            .await
+            .expect("the lie reports success");
+        vfs.crash();
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert!(
+            durable.is_empty(),
+            "the lie persisted {} bytes; it must persist none",
+            durable.len()
+        );
+    });
+
+    let events = vfs.events();
+    assert_eq!(events.len(), 1, "expected exactly one lie: {events:?}");
+    assert_eq!(
+        events[0].kind,
+        FaultKind::FsyncLie {
+            unflushed_bytes: (2 * SECTOR) as u64
+        }
+    );
+    assert_eq!(events[0].path, path);
+    assert_eq!(
+        vfs.flushed_bytes(),
+        0,
+        "a lie must not count against the space budget"
+    );
+}
+
+#[test]
+fn a_later_honest_sync_writes_what_the_lie_left_dirty() {
+    let dir = scratch_dir("lie-then-honest");
+    let path = dir.join("log");
+    // Fires on every 2nd eligible sync: #1 is honest, #2 lies, #3 is honest.
+    let vfs = FaultVfs::unix(FaultPlan {
+        fsync_lie: Trigger::Nth(2),
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let mut file = vfs
+            .open(&path, &OpenOptions::new().write(true).create(true))
+            .await
+            .expect("open");
+
+        let first = vec![0xaa; SECTOR];
+        poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &first))
+            .await
+            .expect("write 1");
+        asupersync::fs::VfsFile::sync_all(&file)
+            .await
+            .expect("honest sync");
+
+        let second = vec![0xbb; SECTOR];
+        poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &second))
+            .await
+            .expect("write 2");
+        asupersync::fs::VfsFile::sync_all(&file)
+            .await
+            .expect("lying sync reports success");
+        assert_eq!(
+            file.dirty_sectors().expect("handle alive"),
+            vec![1],
+            "the lie must leave the bytes dirty, exactly as a write-back cache does"
+        );
+
+        // The third sync is honest again and must write what the lie left.
+        asupersync::fs::VfsFile::sync_all(&file)
+            .await
+            .expect("honest sync");
+        vfs.crash();
+
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(durable.len(), 2 * SECTOR);
+        assert_eq!(&durable[..SECTOR], &first[..]);
+        assert_eq!(
+            &durable[SECTOR..],
+            &second[..],
+            "the honest sync after the lie must persist the still-dirty bytes"
+        );
+    });
+
+    let events = vfs.events();
+    assert_eq!(events.len(), 1, "expected exactly one lie: {events:?}");
+    assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// Torn writes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_torn_write_loses_an_interior_sector_and_keeps_the_bytes_after_it() {
+    let dir = scratch_dir("torn");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        seed: seed_1xtp(),
+        torn_write: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    let bytes = sector_pattern(5);
+    runtime().block_on(async {
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        vfs.crash();
+
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "expected exactly one tear: {events:?}");
+        let FaultKind::TornWrite { start, end } = events[0].kind else {
+            panic!("expected a torn write, got {:?}", events[0].kind);
+        };
+        assert_eq!(end - start, DEFAULT_SECTOR_BYTES);
+        assert!(
+            start >= DEFAULT_SECTOR_BYTES && end <= 4 * DEFAULT_SECTOR_BYTES,
+            "the lost sector must be interior, got [{start}, {end})"
+        );
+
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(
+            durable.len(),
+            bytes.len(),
+            "sectors after the hole landed, so the file keeps its length"
+        );
+        let hole = &durable[start as usize..end as usize];
+        assert!(
+            hole.iter().all(|&b| b == 0),
+            "the torn sector must be missing bytes, not stale ones"
+        );
+        // THE DISCRIMINATION a truncating tear cannot produce: valid bytes on
+        // BOTH sides of the hole.
+        assert_eq!(
+            &durable[..SECTOR],
+            &bytes[..SECTOR],
+            "the first sector landed"
+        );
+        assert_eq!(
+            &durable[4 * SECTOR..],
+            &bytes[4 * SECTOR..],
+            "the sector AFTER the hole landed — this is what a truncating tear cannot model"
+        );
+    });
+}
+
+#[test]
+fn a_torn_write_needs_an_interior_sector_to_lose() {
+    let dir = scratch_dir("torn-ineligible");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        torn_write: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    // Two dirty sectors have no interior: dropping either is a truncation, not
+    // a tear, so the class is ineligible and must inject nothing.
+    let bytes = sector_pattern(2);
+    runtime().block_on(async {
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        vfs.crash();
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(durable, bytes);
+    });
+
+    assert!(
+        vfs.events().is_empty(),
+        "an ineligible tear injected anyway: {:?}",
+        vfs.events()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bit flips
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_bit_flip_damages_exactly_one_bit_of_durable_data() {
+    let dir = scratch_dir("bit-flip");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        seed: 7,
+        bit_flip: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    let bytes = sector_pattern(2);
+    runtime().block_on(async {
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        vfs.crash();
+
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "expected exactly one flip: {events:?}");
+        let FaultKind::BitFlip { offset, bit } = events[0].kind else {
+            panic!("expected a bit flip, got {:?}", events[0].kind);
+        };
+        assert!(bit < 8);
+
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(durable.len(), bytes.len());
+        let differing: Vec<usize> = (0..bytes.len())
+            .filter(|&i| durable[i] != bytes[i])
+            .collect();
+        assert_eq!(
+            differing,
+            vec![offset as usize],
+            "exactly the reported byte must differ"
+        );
+        assert_eq!(
+            durable[offset as usize] ^ bytes[offset as usize],
+            1u8 << bit,
+            "exactly the reported bit must differ"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// ENOSPC
+// ---------------------------------------------------------------------------
+
+#[test]
+fn out_of_space_refuses_the_flush_and_leaves_the_bytes_dirty() {
+    let dir = scratch_dir("enospc");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        space_budget: Some(DEFAULT_SECTOR_BYTES),
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let mut file = vfs
+            .open(&path, &OpenOptions::new().write(true).create(true))
+            .await
+            .expect("open");
+        let bytes = sector_pattern(2);
+        poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &bytes))
+            .await
+            .expect("write");
+
+        let error = asupersync::fs::VfsFile::sync_all(&file)
+            .await
+            .expect_err("a flush past the budget must fail");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(28),
+            "a full filesystem must surface as ENOSPC, not an opaque error"
+        );
+        assert_eq!(
+            file.dirty_sectors().expect("handle alive"),
+            vec![0, 1],
+            "a refused flush must leave every byte dirty"
+        );
+
+        vfs.crash();
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert!(
+            durable.is_empty(),
+            "nothing reached the backing store, so nothing survives"
+        );
+    });
+
+    let events = vfs.events();
+    assert_eq!(events.len(), 1, "expected one ENOSPC: {events:?}");
+    assert_eq!(
+        events[0].kind,
+        FaultKind::OutOfSpace {
+            requested: (2 * SECTOR) as u64,
+            remaining: DEFAULT_SECTOR_BYTES,
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Crash semantics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_handle_does_not_survive_a_crash() {
+    let dir = scratch_dir("crash-handle");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan::faultless());
+
+    runtime().block_on(async {
+        let mut file = vfs
+            .open(&path, &OpenOptions::new().write(true).create(true))
+            .await
+            .expect("open");
+        poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &[1, 2, 3]))
+            .await
+            .expect("write");
+
+        assert_eq!(vfs.generation(), 0);
+        vfs.crash();
+        assert_eq!(vfs.generation(), 1);
+
+        // The pre-crash handle is gone: its unsynced bytes cannot leak across
+        // the crash through a caller that kept the file open.
+        poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &[4]))
+            .await
+            .expect_err("a pre-crash handle must refuse writes");
+        asupersync::fs::VfsFile::sync_all(&file)
+            .await
+            .expect_err("a pre-crash handle must refuse syncs");
+        file.image()
+            .expect_err("a pre-crash handle exposes nothing");
+
+        // A fresh open works and sees only durable bytes.
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert!(durable.is_empty());
+        let reopened = vfs
+            .open(&path, &OpenOptions::new().write(true))
+            .await
+            .expect("reopen after crash");
+        assert!(reopened.image().expect("fresh handle").is_empty());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Determinism — and its control
+// ---------------------------------------------------------------------------
+
+/// Sixteen write+sync rounds under a coin-flip lie schedule.
+fn coin_flip_schedule(seed: u64, name: &str) -> Vec<FaultKind> {
+    let dir = scratch_dir(name);
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        seed,
+        fsync_lie: Trigger::PerMille(500),
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let mut file = vfs
+            .open(
+                &path,
+                &OpenOptions::new().write(true).create(true).truncate(true),
+            )
+            .await
+            .expect("open");
+        for round in 0..16u8 {
+            poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &[round; 8]))
+                .await
+                .expect("write");
+            asupersync::fs::VfsFile::sync_all(&file)
+                .await
+                .expect("sync");
+        }
+    });
+
+    vfs.events().into_iter().map(|event| event.kind).collect()
+}
+
+#[test]
+fn the_same_seed_injects_the_same_schedule() {
+    let first = coin_flip_schedule(seed_1xtp(), "determinism-a");
+    let second = coin_flip_schedule(seed_1xtp(), "determinism-b");
+    assert!(
+        !first.is_empty(),
+        "a coin-flip schedule that injected nothing cannot witness determinism"
+    );
+    assert_eq!(
+        first, second,
+        "the same seed must inject the same faults — this is the replay claim"
+    );
+}
+
+#[test]
+fn a_different_seed_injects_a_different_schedule() {
+    let first = coin_flip_schedule(seed_1xtp(), "divergence-a");
+    let second = coin_flip_schedule(seed_1xtp() ^ 0xffff, "divergence-b");
+    assert_ne!(
+        first, second,
+        "two seeds produced identical schedules; the seed is not driving the stream"
+    );
+}
+
+/// A fixed, arbitrary seed. Named so a reader knows the constant is a choice
+/// and not a magic number derived from anything.
+const fn seed_1xtp() -> u64 {
+    0x1774_7000_0000_0001
+}
