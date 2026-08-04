@@ -13158,6 +13158,20 @@ max_size_bytes = 2
 
 [[field]]
 containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0002
+stable_name = "schema_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 2; the u16 schema version of the selected sequence-neutral body, embedded by value and retained and cut with SequenceNeutralSpec<Tag>, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "SequenceNeutralSpec<Tag>"
 field_tag = 0x0004
 stable_name = "terminal_audit_freeze"
 exact_wire_type = "AuditFreezeField<Tag>"

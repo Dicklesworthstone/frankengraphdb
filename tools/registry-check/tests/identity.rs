@@ -11970,7 +11970,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // GlobalRestoreServiceCompletionSpec.expected_restore_registry_state is the
         // Meta-phase twin. It is claimed by post_erratum_a20_field; the current field
         // count carries it and frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 795,
+        // 795 -> 796 (fgdb-5ekk): SequenceNeutralSpec<Tag>.schema_version is
+        // now source-spelled u16 at wrapper ordinal 0x0002 and claimed by the
+        // existing post_erratum_a10_wrapper_field cohort.
+        pre_erratum.fields.len() + 796,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

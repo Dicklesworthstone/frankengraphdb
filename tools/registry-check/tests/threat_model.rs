@@ -314,13 +314,8 @@ fn tm_neg_admissible_cell_unowned() {
 // tm_epoch_types_do_not_unify
 // -----------------------------------------------------------------------------
 
-/// G0 proves what G0 can prove: distinct registry identities, distinct wire
-/// tags, distinct Rust symbols, and distinct epoch domains for the security and
-/// adaptive epoch types. The literal compile-fail fixture for
-/// `SecurityPolicyEpoch`/`DecisionPolicyEpoch` substitution belongs to the
-/// downstream crate that owns the real newtypes (fgdb-w1-authz-policy-10y);
-/// asserting it here would require inventing the types this bead deliberately
-/// does not define.
+/// G0 proves distinct registry identities, wire tags, Rust declarations, and
+/// epoch domains for the security and adaptive epoch types.
 #[test]
 fn tm_epoch_types_do_not_unify() {
     let registry = registry();
@@ -351,6 +346,15 @@ fn tm_neg_epoch_domains_unified() {
     );
     assert_code(&codes, "identity_newtype_collision");
     assert_code(&codes, "epoch_identities_unify");
+}
+
+#[test]
+fn tm_neg_identity_rust_newtype_missing() {
+    let codes = codes_after(
+        "rust_newtype = \"TenantId\"",
+        "rust_newtype = \"MissingTenantId\"",
+    );
+    assert_code(&codes, "identity_rust_newtype_missing");
 }
 
 // -----------------------------------------------------------------------------

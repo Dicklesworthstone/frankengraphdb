@@ -2170,6 +2170,109 @@ fn validate_authority_lattice(registry: &ThreatRegistry, violations: &mut Vec<Vi
     }
 }
 
+/// The sources which own the §12.1 identity newtypes. The registry is an
+/// executable claim about these declarations, not a second type system.
+const IDENTITY_NEWTYPE_SOURCE_PATHS: &[&str] = &[
+    "crates/fgdb-types/src/ids.rs",
+    "crates/fgdb-calibrate/src/policy_epoch.rs",
+];
+
+fn rust_tokens(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor..].starts_with(b"//") {
+            cursor += 2;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
+        } else if bytes[cursor..].starts_with(b"/*") {
+            cursor += 2;
+            let mut depth = 1;
+            while cursor < bytes.len() && depth > 0 {
+                if bytes[cursor..].starts_with(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes[cursor..].starts_with(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+        } else if bytes[cursor] == b'\"' {
+            cursor += 1;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'\\' {
+                    cursor += 2;
+                } else if bytes[cursor] == b'\"' {
+                    cursor += 1;
+                    break;
+                } else {
+                    cursor += 1;
+                }
+            }
+        } else if bytes[cursor].is_ascii_alphabetic() || bytes[cursor] == b'_' {
+            let start = cursor;
+            cursor += 1;
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+            {
+                cursor += 1;
+            }
+            tokens.push(&source[start..cursor]);
+        } else {
+            cursor += 1;
+        }
+    }
+    tokens
+}
+
+fn source_declares_rust_newtype(source: &str, expected: &str) -> bool {
+    let tokens = rust_tokens(source);
+    tokens.windows(3).any(|window| {
+        window[0] == "pub"
+            && (window[1] == "struct" || window[1] == "enum")
+            && window[2] == expected
+    }) || tokens.windows(2).any(|window| {
+        (window[0] == "u128_id" || window[0] == "u64_scalar") && window[1] == expected
+    })
+}
+
+fn validate_identity_newtype_declarations(
+    registry: &ThreatRegistry,
+    root: &Path,
+    violations: &mut Vec<Violation>,
+) {
+    let sources: Vec<(String, String)> = IDENTITY_NEWTYPE_SOURCE_PATHS
+        .iter()
+        .filter_map(|relative| {
+            std::fs::read_to_string(root.join(relative))
+                .ok()
+                .map(|source| ((*relative).to_string(), source))
+        })
+        .collect();
+    for identity in &registry.identities {
+        if sources
+            .iter()
+            .any(|(_, source)| source_declares_rust_newtype(source, &identity.rust_newtype))
+        {
+            continue;
+        }
+        let searched = IDENTITY_NEWTYPE_SOURCE_PATHS.join(", ");
+        violations.push(Violation::new(
+            "identity_rust_newtype_missing",
+            &identity.name,
+            "§12.1",
+            format!(
+                "rust_newtype {:?} has no declaration in the audited identity sources: {searched}",
+                identity.rust_newtype
+            ),
+        ));
+    }
+}
+
 /// Law 3 — posture product-space closure.
 fn validate_postures(registry: &ThreatRegistry, violations: &mut Vec<Violation>) {
     let space = &registry.product_space;
@@ -2669,6 +2772,7 @@ pub fn validate_threat(registry: &ThreatRegistry, root: &Path) -> Vec<Violation>
     validate_actors_assets(registry, &mut violations);
     validate_exposures(registry, &mut violations);
     validate_authority_lattice(registry, &mut violations);
+    validate_identity_newtype_declarations(registry, root, &mut violations);
     validate_postures(registry, &mut violations);
     validate_footprint(registry, &mut violations);
     validate_source_blocks(registry, root, &mut violations);

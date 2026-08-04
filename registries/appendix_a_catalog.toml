@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3727
+target_count = 3728
 projection_fallback_count = 141
-target_source_assignment_sha256 = "653e5b43fb4ae23a5350ee67d535fc707dcab634ea6b13c3c6e671b412ff1787"
+target_source_assignment_sha256 = "8c0b31086f70036b4c699e0b71536e95757cd90df6fc92c3fe7b286b2850c9f2"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -112494,6 +112494,22 @@ max_size_bytes = 2
 
 [[field]]
 slice_id = "a10"
+row_id = "a10:field:sequence-neutral-spec-tag-schema-version"
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0002
+stable_name = "schema_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 2; the u16 schema version of the selected sequence-neutral body, embedded by value and retained and cut with SequenceNeutralSpec<Tag>, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a10"
 row_id = "a10:field:sequence-neutral-spec-tag-terminal-audit-freeze"
 containing_schema = "SequenceNeutralSpec<Tag>"
 field_tag = 0x0004
@@ -112553,6 +112569,14 @@ row_id = "a10:target:field-sequence-neutral-spec-tag-wire-tag"
 target_row_id = "a10:field:sequence-neutral-spec-tag-wire-tag"
 slice_id = "a10"
 source_key = "field|SequenceNeutralSpec<Tag>|SequenceNeutralSpec<Tag>.wire_tag|wire_tag"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-sequence-neutral-spec-tag-schema-version"
+target_row_id = "a10:field:sequence-neutral-spec-tag-schema-version"
+slice_id = "a10"
+source_key = "field|SequenceNeutralSpec<Tag>|SequenceNeutralSpec<Tag>.schema_version|schema_version"
 target_kind = "field"
 definition_status = "declared"
 
