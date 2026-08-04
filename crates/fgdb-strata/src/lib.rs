@@ -50,6 +50,36 @@ use fgdb_types::{CommitSeq, EId, VId};
 pub const BLOCK_MAGIC: [u8; 4] = *b"FGSB";
 /// Format version. Durable formats are versioned from day one (§16.6):
 /// additive-minor, breaking-major.
+///
+/// **THESE BYTES ARE DELIBERATELY UNREGISTERED, WHICH IS AN EXPOSURE RATHER THAN
+/// AN OVERSIGHT.** Appendix A is the normative on-disk contract, and no row in it
+/// describes this format or the partition root beside it: `DeltaBlockVersion`
+/// holds a code RESERVATION only (`plan:reservation:delta-block-version`,
+/// `0x04d4`, disposition `reserved`) and `PartitionRoot` has no code anywhere —
+/// not a kind, not a wire type, not a reservation. So every format law this
+/// crate enforces, it enforces on its own authority; none of the catalog's
+/// cross-cutting machinery — identity class, construction order, retention and
+/// cut rules, golden corpora, GC reachability under FG-INV-14 — reaches the only
+/// place graph data actually lives.
+///
+/// **REGISTERING IT TODAY WOULD BE WORSE THAN LEAVING IT OUT**, which is why the
+/// row is absent on purpose rather than merely missing. A catalog row FREEZES the
+/// normative contract, and §6.2's unit is `DeltaBlockVersion {format,
+/// partition_id, descriptor_key, stripe_range, sorted_entries[],
+/// visibility_intervals[], property_patch_refs[], predecessor,
+/// canonical_logical_digest}`. Six of those nine fields are absent here, and the
+/// entry encoding is the one §6.2 names as wrong: raw 128-bit identities, where
+/// the registered identity-column codec (`w3-identity-encoding`, <=16 B/entry) is
+/// required. Freezing this shape would enshrine that density regression as the
+/// normative contract, and undoing it later costs a breaking-major format change
+/// plus a catalog re-pin cycle.
+///
+/// The gap is MEASURED, not asserted — see the byte-economy witnesses in
+/// `tests/delta_block_format.rs`, which encode real blocks and publish the bad
+/// numbers. Registration is sequenced behind `fgdb-w3-tier-d-ctj` (bring the
+/// block to its normative field set and the identity-column codec) and then
+/// `fgdb-ge6a` (register both formats, and root the partition binding that makes
+/// a database reopenable from its `manifest.root` alone).
 pub const BLOCK_FORMAT_V2: u16 = 2;
 
 /// The content identity of one immutable Tier-D block version.

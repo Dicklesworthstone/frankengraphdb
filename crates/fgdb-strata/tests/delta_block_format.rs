@@ -549,3 +549,143 @@ fn a_matching_identity_does_not_excuse_a_malformed_block() {
         "identity is not a substitute for the decoder's laws"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Byte economy — §6.2's 4 KiB / 256-entry law, and the distance to it
+// ---------------------------------------------------------------------------
+//
+// **THESE WITNESSES PUBLISH BAD NUMBERS ON PURPOSE**, the same discipline
+// `complexity_witness.rs` applies to the read path. §6.2 is normative about this
+// format's economics: a Tier-D block is "about 4 KiB" and holds "at most 256"
+// entries, and that sizing "presumes this encoding at <=16 B per entry — raw
+// 128-bit identities would cap a 4 KiB block near 95 entries". This format stores
+// raw 128-bit identities. So the law is missed, and it is missed by an amount
+// nobody had ever measured: the gap lived in a bead comment, not in the tree.
+//
+// **WHY MEASURE INSTEAD OF READING THE CONSTANT.** `ENTRY_LEN` is private, and a
+// witness that restated it would only prove the crate agrees with itself. These
+// encode real blocks and difference their lengths, so they measure what a disk
+// would actually receive — and they keep working if the layout is restructured
+// rather than merely re-tuned.
+//
+// **THEY SHOULD FAIL WHEN `fgdb-w3-tier-d-ctj` LANDS THE IDENTITY-COLUMN CODEC**,
+// and failing is the correct outcome: it is the signal to re-derive these numbers
+// downward toward the law. Until then they hold the line in the other direction —
+// the format cannot silently get FATTER, which is the regression nobody would
+// otherwise notice. This is also the measurement that keeps the format out of
+// Appendix A: registering it would freeze the number below as normative.
+
+/// §6.2: a Tier-D block is "about 4 KiB".
+const NORMATIVE_BLOCK_BYTES: usize = 4096;
+/// §6.2: that block holds "at most 256" entries.
+const NORMATIVE_ENTRIES_PER_BLOCK: usize = 256;
+/// §6.2: the sizing "presumes this encoding at <=16 B per entry".
+const NORMATIVE_BYTES_PER_ENTRY: usize = 16;
+
+/// `count` strictly ascending, distinct entries out of one source.
+///
+/// Ascending `dst` gives ascending `(src, relation, dst, eid)` because `entry`
+/// derives the `EId` from both endpoints, so this is a shape the ENCODER accepts
+/// rather than one it would refuse — a refused encode would make every
+/// measurement below vacuous.
+fn run_of(count: usize) -> Vec<AdjacencyEntry> {
+    (0..count)
+        .map(|i| entry(1, (i + 2) as u128, 1, None))
+        .collect()
+}
+
+/// The marginal on-disk cost of one entry, measured by difference so the header
+/// cancels and no private constant is restated.
+fn measured_bytes_per_entry() -> usize {
+    let short = encode_block(&run_of(8)).expect("encodes eight entries");
+    let long = encode_block(&run_of(9)).expect("encodes nine entries");
+    long.len() - short.len()
+}
+
+/// WITNESS, AND IT RECORDS A BAD NUMBER ON PURPOSE: an entry costs 72 bytes where
+/// §6.2's law allows 16.
+///
+/// The 72 is `src(16) + relation(8) + dst(16) + eid(16) + created(8) + retired(8)`,
+/// of which 48 bytes are three RAW 128-bit identities — precisely the layout the
+/// §6.2 sentence exists to forbid. The registered identity-column codec
+/// (`w3-identity-encoding`) carries those columns under a shared block-header
+/// prefix dictionary with a fixed-width or delta/FOR-coded slot suffix; it already
+/// exists in `fgdb-codec::identity` and this crate does not yet call it.
+#[test]
+fn an_entry_costs_seventy_two_bytes_where_the_law_allows_sixteen() {
+    let measured = measured_bytes_per_entry();
+    assert_eq!(
+        measured, 72,
+        "an entry costs {measured} B on disk; §6.2 allows {NORMATIVE_BYTES_PER_ENTRY} B under the \
+         registered identity-column codec. Changing this number is the POINT of \
+         fgdb-w3-tier-d-ctj — re-derive it downward here when the codec lands, and \
+         never let it rise"
+    );
+    assert!(
+        measured > NORMATIVE_BYTES_PER_ENTRY,
+        "if this stopped being true the codec has landed: replace these witnesses with the law"
+    );
+}
+
+/// WITNESS, AND IT RECORDS A BAD NUMBER ON PURPOSE: 4 KiB holds 56 entries where
+/// §6.2's law wants 256.
+///
+/// Measured by encoding until the budget is exceeded rather than by arithmetic on
+/// a constant, so it stays true across a header change. A 4.5x density shortfall
+/// is what "registering this format would enshrine a regression" means in
+/// numbers, and it is the whole reason `BLOCK_FORMAT_V2` carries no Appendix A
+/// row (see the note on that constant).
+#[test]
+fn four_kibibytes_hold_fifty_six_entries_where_the_law_wants_two_hundred_fifty_six() {
+    let mut fits = 0usize;
+    for count in 1..=NORMATIVE_ENTRIES_PER_BLOCK {
+        let encoded = encode_block(&run_of(count)).expect("encodes");
+        if encoded.len() > NORMATIVE_BLOCK_BYTES {
+            break;
+        }
+        fits = count;
+    }
+    assert_eq!(
+        fits, 56,
+        "a {NORMATIVE_BLOCK_BYTES} B block holds {fits} entries; §6.2 wants \
+         {NORMATIVE_ENTRIES_PER_BLOCK}. The shortfall is the identity-column encoding, \
+         not the header"
+    );
+    assert!(
+        fits < NORMATIVE_ENTRIES_PER_BLOCK,
+        "if this stopped being true the codec has landed: replace these witnesses with the law"
+    );
+}
+
+/// CONTROL: the two witnesses above can actually fail.
+///
+/// Both measure a difference between encoder outputs, so a fixture that silently
+/// built degenerate input — an empty run, or one the encoder refuses — would make
+/// them measure nothing while still reporting a number. This pins the fixture: the
+/// run is the length asked for, strictly ascending, and accepted by the encoder,
+/// and a block of `n` entries really does grow with `n`.
+#[test]
+fn the_fixture_builds_the_run_the_byte_economy_witnesses_assume() {
+    let run = run_of(8);
+    assert_eq!(run.len(), 8, "run_of(8) must build eight entries");
+    for pair in run.windows(2) {
+        assert!(
+            (pair[0].src, pair[0].relation, pair[0].dst, pair[0].eid)
+                < (pair[1].src, pair[1].relation, pair[1].dst, pair[1].eid),
+            "the run must be strictly ascending or the encoder would refuse it"
+        );
+    }
+    let eight = encode_block(&run).expect("the encoder must accept the fixture");
+    let nine = encode_block(&run_of(9)).expect("the encoder must accept the fixture");
+    assert!(
+        nine.len() > eight.len(),
+        "a longer run must encode to more bytes, or the measurement is vacuous"
+    );
+    // And the decoder agrees the fixture is a lawful block, so the bytes measured
+    // above are bytes a reader would actually accept.
+    assert_eq!(
+        decode_block(&eight).expect("the fixture must decode"),
+        run,
+        "the measured bytes must round-trip to the fixture"
+    );
+}
