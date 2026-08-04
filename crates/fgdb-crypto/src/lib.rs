@@ -15,11 +15,13 @@
 #![forbid(unsafe_code)]
 
 pub mod aead;
+pub mod blake2b;
 pub mod blake3;
 pub mod chacha20;
 pub mod poly1305;
 
 pub use aead::{AeadError, object_aead_aad, xchacha20poly1305_open, xchacha20poly1305_seal};
+pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
 pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
 
 /// The §5.1 logical-identity domain string (plan L278).
