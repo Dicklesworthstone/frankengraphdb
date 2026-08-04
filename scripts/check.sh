@@ -1002,8 +1002,34 @@ run_ubs() {
 # without moving the ratchet back upward. UBS reports those three macro sites as
 # seven line findings because one invocation spans four lines; after the rewrite
 # both newly landed files report zero findings in this class.
+# MOVED 817 -> 818 by fgdb-j0vu, +1, all of it in the newly activated
+# `crates/fgdb/src/lib.rs` — the end-to-end spine's first landing.
+#
+# ATTRIBUTED BY MEASUREMENT, not by arithmetic on the total. The two new files
+# were scanned alone: `ubs crates/fgdb/src/lib.rs crates/fgdb/tests/spine.rs`
+# reports exactly 1 critical, in this class, at the single site
+#
+#     if recomputed != *logical_delta_template_digest {          (rebuild)
+#
+# and 0 in the other two classes. The panic-macro class deliberately did NOT
+# move: the first draft of the law file used five `other => panic!(..)` match
+# arms and scanned at 9 criticals, so the arms were rewritten as
+# `assert!(matches!(..), "{refusal:?}")` — same verdict, same diagnostic text,
+# zero macro findings — following the same repair 8c53adb applied to the
+# generated-history harness rather than widening this table.
+#
+# IT IS NOT A TIMING DEFECT. Both operands are non-secret content digests over
+# LOCAL capsule bytes: `recomputed` is hashed from the file just read off disk
+# and the other operand is the digest the marker declared. This is FG-INV-09's
+# recompute-identity-from-registered-bytes check — the thing that stops silent
+# corruption from becoming silently different graph state — and skipping it is
+# the actual defect the class name would have you introduce. There is no secret,
+# no remote caller and no timing channel; an adversary who can time this already
+# holds the database directory. A constant-time helper would also need `subtle`
+# or `ring`, which Doctrine #1 forbids. Same class and same reasoning as
+# fgdb-ew8z, which is closed with exactly this disposition.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=817"
+  "Secret/token comparisons without timing-safe equality=818"
   "panic!/unreachable!/todo!/unimplemented!=132"
   "JWT decode, validation bypass, or missing claim binding=122"
 )

@@ -34,11 +34,12 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
-// Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim, then
-// fgdb-strata). Derived from the gate's own drift message, never hand-computed.
-// The semantic contract covers activation_status, so activating a crate MUST
-// move this — a pin that survived the change would be pinning nothing.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:860a110fc093d730";
+// Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
+// fgdb-strata, then fgdb by fgdb-j0vu). Derived from the gate's own drift
+// message, never hand-computed. The semantic contract covers activation_status
+// AND posture status, so activating a crate MUST move this — a pin that
+// survived the change would be pinning nothing.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:1b7bb6b5baacc93b";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -164,14 +165,16 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        18,
-        "fifteen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's BLAKE3/AEAD \
+        19,
+        "sixteen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's BLAKE3/AEAD \
          kernel, fgdb-chronicle by fgdb-w2-object-identity-t0f's §5.1 identity \
          pipeline, fgdb-reference by fgdb-w2-delta-batches-og6n's semantics \
          oracle, fgdb-sim by fgdb-verif-sim-q97e's durability/semantics \
          differential, fgdb-strata by fgdb-w3-tier-d-ctj's tier-one \
-         delta-block format) plus all three landed islands: fgdb-unsafe-simd, \
-         fgdb-unsafe-arena and fgdb-unsafe-vfs"
+         delta-block format, and fgdb itself by fgdb-j0vu's end-to-end spine — \
+         the first COMPOSITION-layer crate to activate, which is also what turns \
+         the embedded posture from deferred to live) plus all three landed \
+         islands: fgdb-unsafe-simd, fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(
         registry

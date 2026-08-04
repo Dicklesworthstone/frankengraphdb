@@ -13,6 +13,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/fgdb",
     "crates/fgdb-bigint",
     "crates/fgdb-calibrate",
     "crates/fgdb-chronicle",

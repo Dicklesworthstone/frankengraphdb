@@ -1,0 +1,19 @@
+[package]
+name = "fgdb"
+version = "0.0.1"
+edition = "2024"
+description = "The embedded FrankenGraphDB library (plan §1 constraint 5(a), §13.1). This increment lands THE SPINE: the first composition of Chronicle's durable commit stream and Strata's tier-D adjacency behind a surface a person can run — open, write, read neighbours, drop, reopen. Deliberately a SUBSET of the full embedded API; bead fgdb-j0vu."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgdb-chronicle = { path = "../fgdb-chronicle" }
+fgdb-crypto = { path = "../fgdb-crypto" }
+fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-strata = { path = "../fgdb-strata" }
+fgdb-types = { path = "../fgdb-types" }
+
+[dev-dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "3e8d08efe6617e08635fa8705c62a2a531373f43", default-features = false }
