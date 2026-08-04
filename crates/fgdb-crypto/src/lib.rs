@@ -20,6 +20,7 @@ pub mod blake2b;
 pub mod blake3;
 pub mod chacha20;
 pub mod poly1305;
+pub mod zeroize;
 
 pub use aead::{AeadError, object_aead_aad, xchacha20poly1305_open, xchacha20poly1305_seal};
 pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
