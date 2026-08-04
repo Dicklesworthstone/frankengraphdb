@@ -109,10 +109,13 @@ fn g(v: &mut [u64; 16], a: usize, b: usize, c: usize, d: usize, x: u64, y: u64) 
 /// because BLAKE2b's last-block rule is a streaming property, not a block one.
 fn compress(h: &mut [u64; 8], block: &[u8; BLOCK_LEN], counter: u128, last: bool) {
     let mut m = [0u64; 16];
-    for (word, chunk) in m.iter_mut().zip(block.chunks_exact(8)) {
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(chunk);
-        *word = u64::from_le_bytes(bytes);
+    let (words, remainder) = block.as_chunks::<8>();
+    debug_assert!(
+        remainder.is_empty(),
+        "the block length is a multiple of the word width"
+    );
+    for (word, bytes) in m.iter_mut().zip(words) {
+        *word = u64::from_le_bytes(*bytes);
     }
 
     let mut v = [0u64; 16];
@@ -256,11 +259,7 @@ pub fn blake2b(digest_len: usize, input: &[u8]) -> Result<Vec<u8>, Blake2bError>
 }
 
 /// One-shot keyed BLAKE2b.
-pub fn blake2b_keyed(
-    digest_len: usize,
-    key: &[u8],
-    input: &[u8],
-) -> Result<Vec<u8>, Blake2bError> {
+pub fn blake2b_keyed(digest_len: usize, key: &[u8], input: &[u8]) -> Result<Vec<u8>, Blake2bError> {
     let mut state = Blake2b::new_keyed(digest_len, key)?;
     state.update(input);
     Ok(state.finalize())
