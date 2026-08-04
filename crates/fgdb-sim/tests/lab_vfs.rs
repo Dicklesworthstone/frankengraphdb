@@ -46,6 +46,30 @@ fn sector_pattern(sectors: usize) -> Vec<u8> {
     bytes
 }
 
+/// The lost byte range of a torn write, or `None` for any other fault.
+///
+/// This and [`flip_site`] exist so a test can assert a fault's SHAPE with
+/// `assert!(matches!(..))` — the 8c53adb precedent, and a real assertion with a
+/// real message — and then read the fields out of a *total* function. The
+/// obvious spelling, `let FaultKind::TornWrite { .. } = k else { panic!(..) }`,
+/// puts a panic-class token in the file for what is only a destructure; UBS
+/// counts those as critical and the ratchet is at zero. Splitting the check
+/// from the extraction keeps both properties.
+fn torn_range(kind: FaultKind) -> Option<(u64, u64)> {
+    match kind {
+        FaultKind::TornWrite { start, end } => Some((start, end)),
+        _ => None,
+    }
+}
+
+/// The damaged offset and bit of a bit flip, or `None` for any other fault.
+fn flip_site(kind: FaultKind) -> Option<(u64, u8)> {
+    match kind {
+        FaultKind::BitFlip { offset, bit } => Some((offset, bit)),
+        _ => None,
+    }
+}
+
 /// Writes `bytes` at offset 0 through a handle and syncs, returning the sync's
 /// result so a test can assert on a refused flush.
 async fn write_and_sync<V: Vfs>(
@@ -232,11 +256,7 @@ fn nth_zero_never_fires() {
         );
     });
 
-    assert!(
-        vfs.events().is_empty(),
-        "Nth(0) fired: {:?}",
-        vfs.events()
-    );
+    assert!(vfs.events().is_empty(), "Nth(0) fired: {:?}", vfs.events());
 }
 
 // ---------------------------------------------------------------------------
@@ -260,9 +280,12 @@ fn a_torn_write_loses_an_interior_sector_and_keeps_the_bytes_after_it() {
 
         let events = vfs.events();
         assert_eq!(events.len(), 1, "expected exactly one tear: {events:?}");
-        let FaultKind::TornWrite { start, end } = events[0].kind else {
-            panic!("expected a torn write, got {:?}", events[0].kind);
-        };
+        assert!(
+            matches!(events[0].kind, FaultKind::TornWrite { .. }),
+            "expected a torn write, got {:?}",
+            events[0].kind
+        );
+        let (start, end) = torn_range(events[0].kind).expect("shape asserted above");
         assert_eq!(end - start, DEFAULT_SECTOR_BYTES);
         assert!(
             start >= DEFAULT_SECTOR_BYTES && end <= 4 * DEFAULT_SECTOR_BYTES,
@@ -342,9 +365,12 @@ fn a_bit_flip_damages_exactly_one_bit_of_durable_data() {
 
         let events = vfs.events();
         assert_eq!(events.len(), 1, "expected exactly one flip: {events:?}");
-        let FaultKind::BitFlip { offset, bit } = events[0].kind else {
-            panic!("expected a bit flip, got {:?}", events[0].kind);
-        };
+        assert!(
+            matches!(events[0].kind, FaultKind::BitFlip { .. }),
+            "expected a bit flip, got {:?}",
+            events[0].kind
+        );
+        let (offset, bit) = flip_site(events[0].kind).expect("shape asserted above");
         assert!(bit < 8);
 
         let durable = vfs.read(&path).await.expect("read after crash");

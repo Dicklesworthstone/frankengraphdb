@@ -20,9 +20,7 @@
 //! The control is `an_artifact_is_emitted_only_for_a_failing_run`. Without it
 //! an emitter that emitted unconditionally would pass everything above.
 
-use fgdb_sim::artifact::{
-    ARTIFACT_REPLAY_ENV, Absence, CONTRACT_FIELDS, FailureArtifact, Field, Replay, Scenario,
-};
+use fgdb_sim::artifact::{ARTIFACT_REPLAY_ENV, Absence, CONTRACT_FIELDS, Field, Replay, Scenario};
 use fgdb_sim::vfs::{FaultPlan, Trigger};
 use std::path::PathBuf;
 
@@ -268,7 +266,10 @@ fn an_artifact_is_emitted_only_for_a_failing_run() {
         passing.artifact.is_none(),
         "a passing run emitted an artifact; line 1138 binds it to a FAILING run"
     );
-    assert!(passing.events.is_empty(), "a faultless plan injected faults");
+    assert!(
+        passing.events.is_empty(),
+        "a faultless plan injected faults"
+    );
 
     // And the inverse expectation under the same faultless plan DOES fail —
     // so the control above is a property of the run's outcome, not of a plan
@@ -299,7 +300,10 @@ fn a_malformed_replay_string_is_rejected_field_by_field() {
     assert!(Replay::decode(&good).is_ok(), "the control must parse");
 
     for (mutated, what) in [
-        (good.replace("durable-append", "no-such-scenario"), "scenario"),
+        (
+            good.replace("durable-append", "no-such-scenario"),
+            "scenario",
+        ),
         (good.replace("0x", ""), "seed prefix"),
         (good.replacen("always", "sometimes", 1), "trigger"),
         (format!("{good}:extra"), "field count"),

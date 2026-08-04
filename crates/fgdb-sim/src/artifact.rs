@@ -354,11 +354,7 @@ pub struct RunOutcome {
 
 /// Writes four sectors through one handle, syncs, crashes, and checks the
 /// durable bytes against `expect_durable`.
-async fn durable_append(
-    vfs: &FaultVfs,
-    dir: &Path,
-    expect_durable: bool,
-) -> Result<(), String> {
+async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Result<(), String> {
     let path = dir.join("append.log");
     let mut written = Vec::new();
     for sector in 0u8..4 {
@@ -461,7 +457,10 @@ impl FailureArtifact {
                 Field::Present(schedule)
             },
         );
-        set("crashpoint", Field::Present(replay.scenario.id().to_string()));
+        set(
+            "crashpoint",
+            Field::Present(replay.scenario.id().to_string()),
+        );
 
         set(
             "role",
@@ -475,10 +474,7 @@ impl FailureArtifact {
                 because: "single-process lab run; there is no group",
             }),
         );
-        set(
-            "configuration",
-            Field::Present(replay.encode()),
-        );
+        set("configuration", Field::Present(replay.encode()));
         set("topology", not_yet("W12 topology", "fgdb-verif-sim-q97e"));
         set("incarnation", not_yet("restore incarnations", "fgdb-1xtp"));
         set(
@@ -531,9 +527,7 @@ impl FailureArtifact {
         set(
             "expected",
             Field::Present(match replay.scenario {
-                Scenario::DurableAppend => {
-                    "every acknowledged byte survives the crash".to_string()
-                }
+                Scenario::DurableAppend => "every acknowledged byte survives the crash".to_string(),
                 Scenario::LostAppend => "nothing survives the crash".to_string(),
             }),
         );
