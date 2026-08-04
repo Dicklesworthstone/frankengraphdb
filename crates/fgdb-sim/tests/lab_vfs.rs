@@ -195,6 +195,50 @@ fn a_later_honest_sync_writes_what_the_lie_left_dirty() {
     assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
 }
 
+/// `Trigger::Nth(0)` is a degenerate schedule with no natural reading — "every
+/// zeroth operation" is not a thing — so the code decides it never fires, and
+/// this witnesses that decision.
+///
+/// It is not a formality. Under the `count % n == 0` spelling the explicit
+/// `Nth(0)` arm was the only thing standing between this trigger and a
+/// divide-by-zero panic; under `count.is_multiple_of(n)` the arm is redundant
+/// because `is_multiple_of(0)` is `count == 0`. Without a test, that behaviour
+/// silently changed owner from our code to the standard library's definition,
+/// and nothing would have failed if a later edit dropped the arm and the
+/// standard library's answer had been different.
+#[test]
+fn nth_zero_never_fires() {
+    let dir = scratch_dir("nth-zero");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        fsync_lie: Trigger::Nth(0),
+        torn_write: Trigger::Nth(0),
+        bit_flip: Trigger::Nth(0),
+        ..FaultPlan::faultless()
+    });
+
+    // Five sectors, so the torn write is ELIGIBLE (it needs an interior
+    // sector) and its trigger is genuinely consulted rather than skipped.
+    let bytes = sector_pattern(5);
+    runtime().block_on(async {
+        write_and_sync(&vfs, &path, &bytes)
+            .await
+            .expect("an Nth(0) plan must not lie, tear, or fail the sync");
+        vfs.crash();
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(
+            durable, bytes,
+            "Nth(0) injected something; it must be inert on every class"
+        );
+    });
+
+    assert!(
+        vfs.events().is_empty(),
+        "Nth(0) fired: {:?}",
+        vfs.events()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Torn writes
 // ---------------------------------------------------------------------------

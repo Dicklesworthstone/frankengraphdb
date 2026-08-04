@@ -282,8 +282,15 @@ impl LabState {
         match self.trigger(class) {
             Trigger::Never => false,
             Trigger::Always => true,
+            // Kept explicit rather than folded into the arm below. Under `%`
+            // this arm was load-bearing against a divide-by-zero panic; under
+            // `is_multiple_of` it is merely redundant (`n.is_multiple_of(0)`
+            // is `n == 0`, and `count` is always >= 1 here). Deleting it would
+            // make "Nth(0) never fires" an accident of the standard library
+            // rather than a decision, so it stays — and
+            // `nth_zero_never_fires` in tests/lab_vfs.rs witnesses it.
             Trigger::Nth(0) => false,
-            Trigger::Nth(n) => count % u64::from(n) == 0,
+            Trigger::Nth(n) => count.is_multiple_of(u64::from(n)),
             Trigger::PerMille(p) => self.next_u64() % 1000 < u64::from(p),
         }
     }
