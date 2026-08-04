@@ -753,6 +753,15 @@ fn rebuild(
         }
         let bytes = coordinator.read_capsule(cx, *capsule_ref)?;
         let recomputed = template_digest(&bytes);
+        // FG-INV-09's recompute-from-registered-bytes check. Skipping it would
+        // turn silent corruption into silently different graph state, which is
+        // the whole failure a content-addressed store exists to prevent.
+        //
+        // The annotation below must stay on the line IMMEDIATELY above the
+        // comparison: UBS anchors it to the next line, so prose between the two
+        // silently un-suppresses the finding (measured — a four-line comment
+        // with the annotation on top still reported the critical).
+        // ubs:ignore -- non-secret content digest over local capsule bytes, not authentication material.
         if recomputed != *logical_delta_template_digest {
             return Err(RebuildError::TemplateDigestMismatch {
                 commit_seq: commit_seq.0,

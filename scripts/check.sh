@@ -1002,34 +1002,37 @@ run_ubs() {
 # without moving the ratchet back upward. UBS reports those three macro sites as
 # seven line findings because one invocation spans four lines; after the rewrite
 # both newly landed files report zero findings in this class.
-# MOVED 817 -> 818 by fgdb-j0vu, +1, all of it in the newly activated
-# `crates/fgdb/src/lib.rs` — the end-to-end spine's first landing.
+# UNMOVED by fgdb-j0vu, and the "unmoved" is the measurement rather than an
+# assumption. Activating `crates/fgdb` (the end-to-end spine) added two tracked
+# Rust files. Scanned alone they report ZERO criticals in all three classes:
+#     ubs crates/fgdb/src/lib.rs crates/fgdb/tests/spine.rs   -> exit 0, 0 critical
+# Both classes it could have moved were held flat deliberately:
+#   * TIMING-SAFE. `rebuild` compares the recomputed template digest with the one
+#     its marker declared — FG-INV-09's recompute-from-registered-bytes check, and
+#     the thing that stops silent corruption from becoming silently different graph
+#     state. Both operands are non-secret content fingerprints over LOCAL capsule
+#     bytes; there is no secret, no remote caller and no timing channel, and the
+#     `subtle`/`ring` helpers the scanner recommends are forbidden by doctrine #1.
+#     Disposed at the exact line with `ubs:ignore`, same shape and same reasoning
+#     as fgdb-ew8z and as the pre-existing dispositions in fgdb-chronicle.
+#   * PANIC MACROS. The first draft of the law file used five
+#     `other => panic!(..)` match arms and scanned at 9 criticals. They were
+#     rewritten as `assert!(matches!(..), "{refusal:?}")` — same verdict, same
+#     diagnostic text, zero macro findings — following the repair 8c53adb already
+#     applied to the generated-history harness, rather than widening this table.
 #
-# ATTRIBUTED BY MEASUREMENT, not by arithmetic on the total. The two new files
-# were scanned alone: `ubs crates/fgdb/src/lib.rs crates/fgdb/tests/spine.rs`
-# reports exactly 1 critical, in this class, at the single site
-#
-#     if recomputed != *logical_delta_template_digest {          (rebuild)
-#
-# and 0 in the other two classes. The panic-macro class deliberately did NOT
-# move: the first draft of the law file used five `other => panic!(..)` match
-# arms and scanned at 9 criticals, so the arms were rewritten as
-# `assert!(matches!(..), "{refusal:?}")` — same verdict, same diagnostic text,
-# zero macro findings — following the same repair 8c53adb applied to the
-# generated-history harness rather than widening this table.
-#
-# IT IS NOT A TIMING DEFECT. Both operands are non-secret content digests over
-# LOCAL capsule bytes: `recomputed` is hashed from the file just read off disk
-# and the other operand is the digest the marker declared. This is FG-INV-09's
-# recompute-identity-from-registered-bytes check — the thing that stops silent
-# corruption from becoming silently different graph state — and skipping it is
-# the actual defect the class name would have you introduce. There is no secret,
-# no remote caller and no timing channel; an adversary who can time this already
-# holds the database directory. A constant-time helper would also need `subtle`
-# or `ring`, which Doctrine #1 forbids. Same class and same reasoning as
-# fgdb-ew8z, which is closed with exactly this disposition.
+# MEASURED HAZARD IN THE `ubs:ignore` CONVENTION ITSELF, recorded here because it
+# silently costs a disposition and every future one is exposed to it: UBS anchors
+# the annotation to the IMMEDIATELY FOLLOWING line. A disposition written as a
+# multi-line comment with `ubs:ignore` on the FIRST line does not suppress
+# anything. Measured both ways on the same comparison — annotation four lines
+# above the `if`: still 1 critical; annotation on the line directly above it:
+# 0 criticals, exit 0. Control: `ubs crates/fgdb-chronicle/src/commit.rs` scans at
+# 0 criticals, and its dispositions are all single lines directly above their
+# comparisons. So a disposition that reads correctly to a human can be inert, and
+# the only way to know is to re-scan the file after writing it.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=818"
+  "Secret/token comparisons without timing-safe equality=817"
   "panic!/unreachable!/todo!/unimplemented!=132"
   "JWT decode, validation bypass, or missing claim binding=122"
 )
