@@ -7458,6 +7458,7 @@ fn verify_census_construction_dag(
                 // a record `{...}`), whose references live in member/arm payloads
                 // that are their own census candidates at deeper paths -- 81 of
                 // them today, already covered by the arm-payload narrowing.
+                // ubs:ignore -- schema-path string identity, not secret material, fgdb-ew8z class
                 if field.key.path == format!("{}.{}", field.key.schema_owner, field.key.stable_name)
                     && !exact.contains('|')
                     && !exact.contains('{')
