@@ -611,11 +611,7 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
         ),
         (
             "unknown projection epoch key",
-            source.replacen(
-                "registry_epoch = 1\n",
-                "registry_epoch = 1\nunknown_projection_epoch_key = true\n",
-                1,
-            ),
+            unknown_projection_epoch_key_fixture(&source),
             "catalog_unknown_key",
             "unknown_projection_epoch_key",
         ),
@@ -645,6 +641,37 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
             "{name} did not produce {expected_code}/{expected_detail}: {violations:?}"
         );
     }
+}
+
+/// Keep this fixture anchored to a named projection table, never to whichever
+/// released epoch happens to have a particular value.
+fn unknown_projection_epoch_key_fixture(source: &str) -> String {
+    source.replacen(
+        "[[projection_epoch]]\nregistry = \"logical_object_kinds\"\n",
+        "[[projection_epoch]]\nregistry = \"logical_object_kinds\"\nunknown_projection_epoch_key = true\n",
+        1,
+    )
+}
+
+#[test]
+fn appendix_a_unknown_projection_epoch_fixture_survives_epoch_bumps() {
+    let source =
+        real_appendix_catalog_text().replace("registry_epoch = 1\n", "registry_epoch = 2\n");
+    assert!(
+        !source.contains("registry_epoch = 1\n"),
+        "control fixture must contain no released epoch 1"
+    );
+
+    let violations = appendix_a::parse_catalog(&unknown_projection_epoch_key_fixture(&source))
+        .expect_err("unknown projection epoch key must fail closed after every epoch bump");
+    assert!(
+        has_violation(
+            &violations,
+            "catalog_unknown_key",
+            "unknown_projection_epoch_key"
+        ),
+        "epoch-robust fixture did not reject its unknown key: {violations:?}"
+    );
 }
 
 #[test]
