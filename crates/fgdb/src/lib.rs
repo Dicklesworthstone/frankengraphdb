@@ -9,7 +9,28 @@
 //! every integration defect was scheduled to surface in W10 against forty crates
 //! instead of today against four.
 //!
-//! ```ignore
+//! This example RUNS — it is not `ignore`d prose. The lab-runtime scaffolding and
+//! the scratch path are hidden so the rendered docs show the surface and not the
+//! harness, but every hidden line executes: the doctest opens a real database in a
+//! temporary directory, commits through the real two-fsync protocol, drops it, and
+//! reopens it.
+//!
+//! ```
+//! # use asupersync::lab::run_async_under_lab;
+//! # use fgdb::{Database, DatabaseKeys, WriteBatch};
+//! # use fgdb_delta_types::RelationId;
+//! # use fgdb_types::context::PurposeContexts;
+//! # use fgdb_types::ids::DatabaseSecurityNamespaceId;
+//! # use fgdb_types::{EId, VId};
+//! # let path = std::env::temp_dir().join(format!("fgdb-doctest-{}", std::process::id()));
+//! # let keys = DatabaseKeys {
+//! #     k_oid: [0x5a; 32],
+//! #     namespace: DatabaseSecurityNamespaceId([0x77; 32]),
+//! #     dek: [0x3c; 32],
+//! # };
+//! # let (outcome, report) = run_async_under_lab(7, move |root| async move {
+//! # let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
+//! # let path = &path;
 //! let mut db = Database::create(cx, path, keys)?;
 //! let mut batch = WriteBatch::new(RelationId(1));
 //! batch.create_vertex(VId(1), vec![], vec![]);
@@ -20,6 +41,10 @@
 //! drop(db);
 //! let db = Database::open(cx, path, keys)?;   // nothing carried but the path and the keys
 //! assert_eq!(db.neighbours(VId(1), RelationId(1))?, vec![VId(2)]);
+//! # Ok::<(), Box<dyn core::error::Error + Send + Sync>>(())
+//! # });
+//! # outcome.expect("the documented example must actually run");
+//! # assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 //! ```
 //!
 //! # This is a SUBSET of the embedded API, never a substitute for it
