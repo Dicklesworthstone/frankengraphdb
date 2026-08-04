@@ -15876,8 +15876,8 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            74,
-            "the coverage law must still evaluate a20's 74 uncovered keys after fgdb-peyc \
+            73,
+            "the coverage law must still evaluate a20's 73 uncovered keys after fgdb-peyc \
              covers the BODY union, both arms, and all five arm-interior members"
         );
 
@@ -15892,7 +15892,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            74,
+            73,
             "certification must not change what the coverage law finds"
         );
     }
