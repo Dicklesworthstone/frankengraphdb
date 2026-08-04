@@ -3736,9 +3736,11 @@ impl ScheduleCoverage {
     }
 }
 
-/// Build a small, seed-stable family of overlapping transactions. Every case
-/// contains a first-committer-wins race; the remaining operations vary the
-/// observation shape without duplicating the broad transaction generator.
+/// Build a small, seed-stable family of overlapping transactions. The rotation
+/// covers all three transaction terminal paths that are meaningful at this
+/// scheduler seam: first-committer-wins conflict, read-only close, and a
+/// statement-directed abort. The remaining operations vary the observation
+/// shape without duplicating the broad transaction generator.
 fn generate_scheduled_case(seed: u64) -> ScheduledTxnCase {
     let mut rng = SplitMix64(seed ^ 0x6470_6f72_5f73_6368);
     let contested = TXN_VERTICES[rng.below(TXN_VERTICES.len())];
@@ -3750,38 +3752,79 @@ fn generate_scheduled_case(seed: u64) -> ScheduledTxnCase {
     let left_value = i64::try_from(2 + rng.below(20)).expect("small value fits i64");
     let right_value = i64::try_from(30 + rng.below(20)).expect("small value fits i64");
 
-    let mut left = vec![TxnAction::Read {
-        tx: 1,
-        vid: witness,
-    }];
-    let mut right = vec![TxnAction::Guard {
-        tx: 2,
-        vid: witness,
-        expected: 1,
-    }];
-    if seed % 3 == 0 {
-        left.push(TxnAction::Guard {
-            tx: 1,
-            vid: contested,
-            expected: 1,
-        });
-    }
-    if seed % 5 == 0 {
-        right.push(TxnAction::Read {
-            tx: 2,
-            vid: contested,
-        });
-    }
-    left.push(TxnAction::Write {
-        tx: 1,
-        vid: contested,
-        value: left_value,
-    });
-    right.push(TxnAction::Write {
-        tx: 2,
-        vid: contested,
-        value: right_value,
-    });
+    let (left, right) = match seed % 3 {
+        // Both snapshots write the same element, so the lab-selected commit
+        // order must make exactly one transaction lose first-committer-wins.
+        0 => {
+            let mut left = vec![TxnAction::Read {
+                tx: 1,
+                vid: witness,
+            }];
+            let mut right = vec![TxnAction::Guard {
+                tx: 2,
+                vid: witness,
+                expected: 1,
+            }];
+            if seed % 5 == 0 {
+                left.push(TxnAction::Guard {
+                    tx: 1,
+                    vid: contested,
+                    expected: 1,
+                });
+            }
+            left.push(TxnAction::Write {
+                tx: 1,
+                vid: contested,
+                value: left_value,
+            });
+            right.push(TxnAction::Write {
+                tx: 2,
+                vid: contested,
+                value: right_value,
+            });
+            (left, right)
+        }
+        // The reader must remain read-only even when the scheduler places the
+        // writer before its snapshot. This checks a real terminal path rather
+        // than inferring it from an empty effect set in the test harness.
+        1 => (
+            vec![
+                TxnAction::Read {
+                    tx: 1,
+                    vid: contested,
+                },
+                TxnAction::Read {
+                    tx: 1,
+                    vid: witness,
+                },
+            ],
+            vec![TxnAction::Write {
+                tx: 2,
+                vid: contested,
+                value: right_value,
+            }],
+        ),
+        // The failed TxnAbort guard follows a write. Its terminal outcome must
+        // discard that private write and leave the peer free to commit.
+        _ => (
+            vec![
+                TxnAction::Write {
+                    tx: 1,
+                    vid: contested,
+                    value: left_value,
+                },
+                TxnAction::Abort {
+                    tx: 1,
+                    guard_vid: witness,
+                },
+            ],
+            vec![TxnAction::Write {
+                tx: 2,
+                vid: contested,
+                value: right_value,
+            }],
+        ),
+    };
 
     ScheduledTxnCase {
         programs: vec![
@@ -4136,6 +4179,14 @@ fn generated_transaction_schedules_match_the_independent_si_model_under_dpor() -
     assert!(
         coverage.write_conflicts > 0,
         "DPOR never reached a first-committer-wins conflict: {coverage:?}"
+    );
+    assert!(
+        coverage.read_closes > 0,
+        "DPOR never reached a read-only close: {coverage:?}"
+    );
+    assert!(
+        coverage.aborted > 0,
+        "DPOR never reached a statement-directed abort: {coverage:?}"
     );
     Ok(())
 }
