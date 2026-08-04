@@ -35,7 +35,9 @@ pub use decimal::{
 };
 pub use ids::{
     BranchId, CommitSeq, CommitSeqExhausted, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId,
-    LogicalCommandSeq, ObjectId, ServiceVisibilityEpoch, VId, WriterFenceEpoch,
+    IssuerId, KeyEpoch, LogicalCommandSeq, ObjectId, PrincipalId, RevocationIndex,
+    SecurityPolicyEpoch, SecurityPolicyEpochExhausted, ServiceVisibilityEpoch, TenantId, TokenId,
+    VId, WriterFenceEpoch,
 };
 pub use refs::{
     CommandRef, ConditionalCoordinateRef, ConditionalMarkerAxis, ConditionalMarkerRef,
