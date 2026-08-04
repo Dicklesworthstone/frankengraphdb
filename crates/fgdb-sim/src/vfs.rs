@@ -131,7 +131,12 @@ pub enum Trigger {
 }
 
 /// A declarative, seeded fault model.
-#[derive(Clone, Copy, Debug)]
+///
+/// `Eq` is load-bearing, not a convenience: a replay descriptor round-trips a
+/// plan through a string, and the contract test asserts the decoded plan is
+/// *equal* to the emitted one. Without that, a replay command could name a
+/// different run than the one it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FaultPlan {
     /// Seed for every probabilistic decision and every choice of which sector
     /// or bit to damage.
