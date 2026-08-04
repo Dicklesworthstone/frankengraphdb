@@ -37,6 +37,10 @@
 
 mod common;
 
+use asupersync::lab::explorer::{DporExplorer, ExplorerConfig};
+use asupersync::runtime::yield_now;
+use asupersync::sync::Mutex as AsyncMutex;
+use asupersync::{Budget, Cx, LabRuntime};
 use common::{BRANCH, GRAPH, LABEL, PROP, REL, Step, check_agrees, try_build};
 use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, PropertyKeyId, SchemaEpoch,
@@ -48,6 +52,7 @@ use fgdb_reference::txn::{Transaction, TxnOutcome};
 use fgdb_reference::{BranchOrigin, ConflictKey, ReferenceDatabase, ReferenceGraph};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, LogicalCommandSeq, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // A deterministic PRNG, in-house because the dependency universe is closed.
@@ -3663,5 +3668,536 @@ fn transaction_shrinker_preserves_failure_kind_and_removes_unrelated_work() {
     assert!(
         report.contains("actions: vec!["),
         "the reproduction must construct the Vec it prints: {report}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DPOR schedules: real transaction calls under the lab scheduler.
+// ---------------------------------------------------------------------------
+
+/// One transaction task in a schedule-generated SI history.
+///
+/// The transaction axis above deliberately owns arbitrary action histories and
+/// their bespoke shrinker. This smaller language owns only the *schedule* seam:
+/// each task captures a real snapshot, yields to the lab, then commits through
+/// the same `Transaction` API. Keeping the axes separate prevents a scheduler
+/// wrapper from silently becoming a second transaction generator.
+#[derive(Clone, Debug)]
+struct ScheduledTxnProgram {
+    tx: u8,
+    actions: Vec<TxnAction>,
+}
+
+/// The generated workload run under every explored schedule.
+#[derive(Clone, Debug)]
+struct ScheduledTxnCase {
+    programs: Vec<ScheduledTxnProgram>,
+}
+
+/// A concrete observation of the scheduler's ordering. Begin owns the
+/// transaction's synchronous statement phase; the explicit yield immediately
+/// after it is the interleaving point whose ordering DPOR varies.
+#[derive(Clone, Debug)]
+enum ScheduledEvent {
+    Begin {
+        tx: u8,
+        snapshot_high: u64,
+        actions: Vec<TxnAction>,
+        reads: Vec<(u128, Option<i64>)>,
+    },
+    Commit {
+        tx: u8,
+        outcome: TxnOutcome,
+    },
+}
+
+struct ScheduledState {
+    database: ReferenceDatabase,
+    events: Vec<ScheduledEvent>,
+    errors: Vec<String>,
+}
+
+#[derive(Default, Debug)]
+struct ScheduleCoverage {
+    runs: usize,
+    overlapping_snapshots: usize,
+    write_conflicts: usize,
+    read_closes: usize,
+    aborted: usize,
+}
+
+impl ScheduleCoverage {
+    fn merge(&mut self, other: &Self) {
+        self.runs += other.runs;
+        self.overlapping_snapshots += other.overlapping_snapshots;
+        self.write_conflicts += other.write_conflicts;
+        self.read_closes += other.read_closes;
+        self.aborted += other.aborted;
+    }
+}
+
+/// Build a small, seed-stable family of overlapping transactions. Every case
+/// contains a first-committer-wins race; the remaining operations vary the
+/// observation shape without duplicating the broad transaction generator.
+fn generate_scheduled_case(seed: u64) -> ScheduledTxnCase {
+    let mut rng = SplitMix64(seed ^ 0x6470_6f72_5f73_6368);
+    let contested = TXN_VERTICES[rng.below(TXN_VERTICES.len())];
+    let witness = TXN_VERTICES
+        .iter()
+        .copied()
+        .find(|vertex| *vertex != contested)
+        .expect("three fixed vertices always leave a witness");
+    let left_value = i64::try_from(2 + rng.below(20)).expect("small value fits i64");
+    let right_value = i64::try_from(30 + rng.below(20)).expect("small value fits i64");
+
+    let mut left = vec![TxnAction::Read {
+        tx: 1,
+        vid: witness,
+    }];
+    let mut right = vec![TxnAction::Guard {
+        tx: 2,
+        vid: witness,
+        expected: 1,
+    }];
+    if seed % 3 == 0 {
+        left.push(TxnAction::Guard {
+            tx: 1,
+            vid: contested,
+            expected: 1,
+        });
+    }
+    if seed % 5 == 0 {
+        right.push(TxnAction::Read {
+            tx: 2,
+            vid: contested,
+        });
+    }
+    left.push(TxnAction::Write {
+        tx: 1,
+        vid: contested,
+        value: left_value,
+    });
+    right.push(TxnAction::Write {
+        tx: 2,
+        vid: contested,
+        value: right_value,
+    });
+
+    ScheduledTxnCase {
+        programs: vec![
+            ScheduledTxnProgram {
+                tx: 1,
+                actions: left,
+            },
+            ScheduledTxnProgram {
+                tx: 2,
+                actions: right,
+            },
+        ],
+    }
+}
+
+fn execute_scheduled_actions(
+    transaction: &mut Transaction,
+    tx: u8,
+    actions: &[TxnAction],
+) -> Result<Vec<(u128, Option<i64>)>, String> {
+    let mut reads = Vec::new();
+    for action in actions.iter().copied() {
+        if action.transaction() != tx {
+            return Err(format!(
+                "scheduled transaction {tx} received action owned by {}: {action:?}",
+                action.transaction()
+            ));
+        }
+        match action {
+            TxnAction::Read { vid, .. } => {
+                let value =
+                    scalar_int(transaction.read_property(ElementId::Vertex(VId(vid)), PROP))?;
+                reads.push((vid, value));
+            }
+            TxnAction::Guard { vid, expected, .. } => transaction
+                .execute(&[txn_guard_statement(
+                    vid,
+                    expected,
+                    MismatchPolicy::StatementError,
+                )])
+                .map_err(|error| format!("scheduled guard: {error}"))?,
+            TxnAction::Write { vid, value, .. } => transaction
+                .execute(&[txn_write_statement(vid, value)])
+                .map_err(|error| format!("scheduled write: {error}"))?,
+            TxnAction::Abort { guard_vid, .. } => transaction
+                .execute(&[txn_guard_statement(
+                    guard_vid,
+                    ABORT_GUARD_VALUE,
+                    MismatchPolicy::TxnAbort,
+                )])
+                .map_err(|error| format!("scheduled abort: {error}"))?,
+            TxnAction::Begin { .. } | TxnAction::Commit { .. } => {
+                return Err(format!(
+                    "scheduled transaction program must not contain lifecycle action: {action:?}"
+                ));
+            }
+        }
+    }
+    Ok(reads)
+}
+
+async fn run_scheduled_transaction(
+    program: ScheduledTxnProgram,
+    state: Arc<AsyncMutex<ScheduledState>>,
+) {
+    let Some(cx) = Cx::current() else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        let mut transaction = {
+            let state = state
+                .lock(&cx)
+                .await
+                .map_err(|error| format!("scheduled begin lock: {error}"))?;
+            Transaction::begin(&state.database, GRAPH, BRANCH)
+                .map_err(|error| format!("scheduled begin: {error}"))?
+        };
+        let snapshot_high = transaction.snapshot().high().0;
+        let reads = execute_scheduled_actions(&mut transaction, program.tx, &program.actions)?;
+        {
+            let mut state = state
+                .lock(&cx)
+                .await
+                .map_err(|error| format!("scheduled observation lock: {error}"))?;
+            state.events.push(ScheduledEvent::Begin {
+                tx: program.tx,
+                snapshot_high,
+                actions: program.actions.clone(),
+                reads,
+            });
+        }
+
+        // This is deliberately between snapshot capture and certification. A
+        // yield outside the transaction would exercise only lab bookkeeping;
+        // this one changes whether the peer is visible to FCW at commit.
+        yield_now().await;
+
+        let mut state = state
+            .lock(&cx)
+            .await
+            .map_err(|error| format!("scheduled commit lock: {error}"))?;
+        let next_commit = state
+            .database
+            .snapshot(GRAPH, BRANCH)
+            .map_err(|error| format!("scheduled commit snapshot: {error}"))?
+            .high()
+            .0
+            .checked_add(1)
+            .ok_or_else(|| "scheduled commit sequence exhausted".to_string())?;
+        let next_logical = state
+            .database
+            .logical_command_frontier()
+            .0
+            .checked_add(1)
+            .ok_or_else(|| "scheduled logical sequence exhausted".to_string())?;
+        let outcome = transaction
+            .commit(
+                &mut state.database,
+                REL,
+                TXN_SEMANTICS,
+                CommitSeq(next_commit),
+                LogicalCommandSeq(next_logical),
+            )
+            .map_err(|error| format!("scheduled commit: {error}"))?;
+        state.events.push(ScheduledEvent::Commit {
+            tx: program.tx,
+            outcome,
+        });
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        if let Ok(mut state) = state.lock(&cx).await {
+            state.errors.push(error);
+        }
+    }
+}
+
+/// Replay the observed schedule against the independent SI model. The model
+/// receives exactly the begin/commit order the lab chose, but never calls the
+/// reference transaction implementation.
+fn replay_scheduled_events(
+    events: &[ScheduledEvent],
+) -> Result<(NaiveTxnDatabase, ScheduleCoverage), String> {
+    let mut model = NaiveTxnDatabase::seeded();
+    let mut coverage = ScheduleCoverage::default();
+    let mut active = BTreeSet::new();
+
+    for event in events {
+        match event {
+            ScheduledEvent::Begin {
+                tx,
+                snapshot_high,
+                actions,
+                reads,
+            } => {
+                coverage.overlapping_snapshots += usize::from(!active.is_empty());
+                let begun = model
+                    .apply(TxnAction::Begin { tx: *tx })
+                    .map_err(|error| format!("model scheduled begin {tx}: {error}"))?;
+                if begun != TxnModelEvent::Began {
+                    return Err(format!("model scheduled begin {tx} had event {begun:?}"));
+                }
+                let modeled = model
+                    .active
+                    .get(tx)
+                    .ok_or_else(|| format!("model lost scheduled transaction {tx}"))?;
+                if modeled.snapshot_high != *snapshot_high {
+                    return Err(format!(
+                        "scheduled snapshot {tx} differs: subject {snapshot_high} vs model {}",
+                        modeled.snapshot_high
+                    ));
+                }
+                active.insert(*tx);
+
+                let mut expected_reads = Vec::new();
+                for action in actions.iter().copied() {
+                    let expected = model
+                        .apply(action)
+                        .map_err(|error| format!("model scheduled action {action:?}: {error}"))?;
+                    if let TxnModelEvent::Read(value) = expected {
+                        let TxnAction::Read { vid, .. } = action else {
+                            return Err(format!(
+                                "model read event from non-read action {action:?}"
+                            ));
+                        };
+                        expected_reads.push((vid, value));
+                    }
+                }
+                if expected_reads != *reads {
+                    return Err(format!(
+                        "scheduled reads for transaction {tx} differ: subject {reads:?} vs model {expected_reads:?}"
+                    ));
+                }
+            }
+            ScheduledEvent::Commit { tx, outcome } => {
+                let expected = model
+                    .apply(TxnAction::Commit { tx: *tx })
+                    .map_err(|error| format!("model scheduled commit {tx}: {error}"))?;
+                let TxnModelEvent::Terminal(expected) = expected else {
+                    return Err(format!(
+                        "model scheduled commit {tx} had non-terminal event {expected:?}"
+                    ));
+                };
+                if &expected != outcome {
+                    return Err(format!(
+                        "scheduled terminal {tx} differs: subject {outcome:?} vs model {expected:?}"
+                    ));
+                }
+                match outcome {
+                    TxnOutcome::Conflicted { .. } => coverage.write_conflicts += 1,
+                    TxnOutcome::ReadClosed { .. } => coverage.read_closes += 1,
+                    TxnOutcome::Aborted { .. } => coverage.aborted += 1,
+                    TxnOutcome::WriteCommitted { .. } => {}
+                }
+                if !active.remove(tx) {
+                    return Err(format!("scheduled commit {tx} had no matching begin"));
+                }
+            }
+        }
+    }
+    if !active.is_empty() {
+        return Err(format!(
+            "scheduled model retained active transactions: {active:?}"
+        ));
+    }
+    coverage.runs = 1;
+    Ok((model, coverage))
+}
+
+fn verify_scheduled_state(state: &ScheduledState) -> Result<ScheduleCoverage, String> {
+    if !state.errors.is_empty() {
+        return Err(format!("scheduled task errors: {:?}", state.errors));
+    }
+    let (model, coverage) = replay_scheduled_events(&state.events)?;
+    let snapshot = state
+        .database
+        .snapshot(GRAPH, BRANCH)
+        .map_err(|error| format!("scheduled final snapshot: {error}"))?;
+    if snapshot.high().0 != model.frontier {
+        return Err(format!(
+            "scheduled final frontier differs: subject {} vs model {}",
+            snapshot.high().0,
+            model.frontier
+        ));
+    }
+    let graph = state
+        .database
+        .graph(GRAPH, BRANCH)
+        .ok_or_else(|| "scheduled subject lost its coordinate".to_string())?;
+    for vid in TXN_VERTICES {
+        let actual = graph_property(graph, vid)?;
+        let expected = model.committed.get(&vid).copied();
+        if actual != expected {
+            return Err(format!(
+                "scheduled final vertex {vid} differs: subject {actual:?} vs model {expected:?}"
+            ));
+        }
+    }
+    Ok(coverage)
+}
+
+fn run_scheduled_case(
+    runtime: &mut LabRuntime,
+    case: &ScheduledTxnCase,
+) -> Result<ScheduleCoverage, String> {
+    let state = Arc::new(AsyncMutex::with_name(
+        "fgdb_generated_history_schedule",
+        ScheduledState {
+            database: seeded_transaction_subject()?,
+            events: Vec::new(),
+            errors: Vec::new(),
+        },
+    ));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    for program in &case.programs {
+        let program = program.clone();
+        let task_state = Arc::clone(&state);
+        let (task, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                run_scheduled_transaction(program, task_state).await;
+            })
+            .map_err(|error| format!("create scheduled task: {error}"))?;
+        runtime.scheduler.lock().schedule(task, 0);
+    }
+    let report = runtime.run_until_quiescent_with_report();
+    if !report.lab_test_passed() {
+        return Err(format!(
+            "scheduled lab run did not pass: quiescent={} invariants={:?}",
+            report.quiescent, report.invariant_violations
+        ));
+    }
+    let state = state
+        .try_lock()
+        .map_err(|error| format!("scheduled final state lock: {error}"))?;
+    verify_scheduled_state(&state)
+}
+
+#[test]
+fn generated_transaction_schedules_match_the_independent_si_model_under_dpor() -> Result<(), String>
+{
+    let mut coverage = ScheduleCoverage::default();
+    for history_seed in 0..16u64 {
+        let case = generate_scheduled_case(history_seed);
+        let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&results);
+        let mut explorer = DporExplorer::new(
+            ExplorerConfig::new(history_seed, 24)
+                .worker_count(2)
+                .max_steps(2_000),
+        );
+        let report = explorer.explore(|runtime| {
+            let result = run_scheduled_case(runtime, &case);
+            captured
+                .lock()
+                .expect("schedule results mutex is not poisoned")
+                .push(result);
+        });
+        if report.has_violations() {
+            return Err(format!(
+                "DPOR runtime invariant violation for history seed {history_seed}: {:?}",
+                report.violations
+            ));
+        }
+        let dpor = explorer.dpor_coverage();
+        if report.total_runs < 2 {
+            return Err(format!(
+                "DPOR explored fewer than two schedules for history seed {history_seed}"
+            ));
+        }
+        if dpor.total_backtrack_points == 0 {
+            return Err(format!(
+                "DPOR found no backtrack point for history seed {history_seed}"
+            ));
+        }
+        let results = results
+            .lock()
+            .map_err(|error| format!("schedule results mutex poisoned: {error}"))?;
+        for result in results.iter() {
+            coverage.merge(result.as_ref().map_err(|error| {
+                format!("history seed {history_seed} schedule differential: {error}")
+            })?);
+        }
+    }
+    assert!(coverage.runs > 0, "DPOR did not execute a schedule");
+    assert!(
+        coverage.overlapping_snapshots > 0,
+        "DPOR never overlapped two transaction snapshots: {coverage:?}"
+    );
+    assert!(
+        coverage.write_conflicts > 0,
+        "DPOR never reached a first-committer-wins conflict: {coverage:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn scheduled_differential_rejects_a_tampered_conflict_outcome() {
+    let case = ScheduledTxnCase {
+        programs: vec![
+            ScheduledTxnProgram {
+                tx: 1,
+                actions: vec![TxnAction::Write {
+                    tx: 1,
+                    vid: 1,
+                    value: 2,
+                }],
+            },
+            ScheduledTxnProgram {
+                tx: 2,
+                actions: vec![TxnAction::Write {
+                    tx: 2,
+                    vid: 1,
+                    value: 3,
+                }],
+            },
+        ],
+    };
+    let events = vec![
+        ScheduledEvent::Begin {
+            tx: 1,
+            snapshot_high: 1,
+            actions: case.programs[0].actions.clone(),
+            reads: vec![],
+        },
+        ScheduledEvent::Begin {
+            tx: 2,
+            snapshot_high: 1,
+            actions: case.programs[1].actions.clone(),
+            reads: vec![],
+        },
+        ScheduledEvent::Commit {
+            tx: 1,
+            outcome: TxnOutcome::WriteCommitted {
+                commit_seq: CommitSeq(2),
+                effects: 1,
+                statement_failures: 0,
+            },
+        },
+        // MUTATION CONTROL: the second writer began at the same snapshot and
+        // must conflict. A fabricated commit is rejected by the independent
+        // replay before this test can pass.
+        ScheduledEvent::Commit {
+            tx: 2,
+            outcome: TxnOutcome::WriteCommitted {
+                commit_seq: CommitSeq(3),
+                effects: 1,
+                statement_failures: 0,
+            },
+        },
+    ];
+    let error = replay_scheduled_events(&events).expect_err("tampered terminal must be red");
+    assert!(
+        error.contains("scheduled terminal 2 differs"),
+        "unexpected schedule-differential failure: {error}"
     );
 }
