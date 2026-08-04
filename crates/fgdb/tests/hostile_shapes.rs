@@ -206,6 +206,118 @@ fn bytes_per_live_edge_under_power_law_skew() {
     );
 }
 
+/// WITNESS (§17 law 2, distributions not averages): bytes per live edge swept
+/// across scale, not sampled at one convenient size.
+///
+/// **ONE NUMBER IS AN AVERAGE WEARING A BOUND.** The headline 298 B/edge above
+/// is a single point on a curve, and which point matters enormously here: the
+/// durable directory carries fixed overhead — a manifest, a root — that one edge
+/// pays in full and a thousand edges share. Reporting only the small-graph
+/// figure overstates the steady-state cost; reporting only the large-graph
+/// figure hides what a small database actually costs. §17 asks for the
+/// distribution, so this sweeps it and asserts both ends.
+///
+/// The shape of the curve is itself the finding: if bytes/edge does NOT fall as
+/// the graph grows, fixed overhead is not the story and the per-edge encoding
+/// is, which points the optimisation somewhere completely different.
+#[test]
+fn bytes_per_live_edge_swept_across_scale() {
+    const SIZES: [u128; 5] = [1, 4, 16, 64, 256];
+
+    let measured: Vec<(u128, u64)> = under_lab(44, move |cx| {
+        SIZES
+            .iter()
+            .map(|edges| {
+                let dir = scratch(&format!("sweep-{edges}"));
+                let mut db = Database::create(cx, &dir, keys()).expect("creates");
+                let mut batch = WriteBatch::new(KNOWS);
+                batch.create_vertex(VId(1), vec![], vec![]);
+                for k in 0..*edges {
+                    batch.create_vertex(VId(1000 + k), vec![], vec![]);
+                    batch.add_edge(EId(k + 1), VId(1), VId(1000 + k), vec![]);
+                }
+                db.write(cx, batch).expect("commits");
+                drop(db);
+
+                // Cold reopen, and assert the answer, so a cheap directory is
+                // never mistaken for an efficient one.
+                let db = Database::open(cx, &dir, keys()).expect("reopens");
+                let found = db.neighbours(VId(1), KNOWS).expect("reads");
+                assert_eq!(
+                    found.len() as u128,
+                    *edges,
+                    "the {edges}-edge database lost neighbours across the reopen"
+                );
+
+                (*edges, bytes_on_disk(&dir) / *edges as u64)
+            })
+            .collect()
+    });
+
+    let worst = measured
+        .iter()
+        .map(|(_, per_edge)| *per_edge)
+        .max()
+        .expect("the sweep is nonempty");
+    let best = measured
+        .iter()
+        .map(|(_, per_edge)| *per_edge)
+        .min()
+        .expect("the sweep is nonempty");
+
+    // MEASURED 2026-08-04, (edges, bytes/edge):
+    //   1 -> 4992,  4 -> 1408,  16 -> 539,  64 -> 328,  256 -> 277
+    //
+    // BOTH ENDS ARE PUBLISHED because they say different things. 4,992 B for a
+    // one-edge database is the honest cost of a manifest plus a root plus a
+    // block — what a small database actually costs, which a steady-state figure
+    // would hide. 277 B/edge at 256 edges is the closest thing to a steady state
+    // this engine has, and it is still ~69x §17's effective 4 B/edge target for
+    // sealed runs.
+    //
+    // THE CURVE IS FLATTENING, and that is the load-bearing observation. The
+    // fall is 18x across the sweep, but only 1.18x from 64 to 256 — fixed
+    // overhead is nearly amortised by 256 edges, so ~277 B/edge is close to the
+    // real per-edge encoding cost rather than a small-graph artefact. Anyone
+    // optimising this should target the per-edge encoding (fgdb-by2l), NOT the
+    // per-database overhead: the latter is already amortised away at any
+    // interesting size, and a fix there would move the headline number while
+    // changing nothing that matters.
+    //
+    // Ceilings sit ~1.4-1.6x above measured: tight enough to catch a real
+    // regression, loose enough not to red on an unrelated format change.
+    const WORST_CASE_CEILING: u64 = 8192;
+    const STEADY_STATE_CEILING: u64 = 384;
+
+    assert!(
+        worst <= WORST_CASE_CEILING,
+        "worst-case durable cost is {worst} B/edge, above the \
+         {WORST_CASE_CEILING} B ceiling; full distribution {measured:?}"
+    );
+    assert!(
+        best <= STEADY_STATE_CEILING,
+        "best-case (largest graph) durable cost is {best} B/edge, above the \
+         {STEADY_STATE_CEILING} B steady-state ceiling; full distribution \
+         {measured:?}"
+    );
+
+    // THE SHAPE OF THE CURVE, pinned as a property rather than left implied:
+    // cost per edge must fall monotonically as the graph grows. If it ever
+    // rises, per-edge cost is growing with graph size — superlinear durable
+    // growth, which is a far more serious defect than a bad constant and would
+    // otherwise hide inside a ceiling that only checks the endpoints.
+    for pair in measured.windows(2) {
+        let (small, small_cost) = pair[0];
+        let (large, large_cost) = pair[1];
+        assert!(
+            large_cost <= small_cost,
+            "cost per edge ROSE from {small_cost} B at {small} edges to \
+             {large_cost} B at {large} edges — durable size is growing \
+             superlinearly in the graph; distribution {measured:?}"
+        );
+    }
+}
+
 /// CONTROL: the byte measurement actually tracks the graph.
 ///
 /// Without this, `bytes_per_live_edge_under_power_law_skew` could be reading a
