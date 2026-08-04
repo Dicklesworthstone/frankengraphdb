@@ -42,6 +42,10 @@ pub mod root;
 pub mod store;
 pub mod writer;
 
+use fgdb_codec::identity::{
+    ElementIdentity, IdentityColumn, IdentityColumnDescriptor, IdentityColumnError,
+    IdentityColumnLimits, IdentityRepresentation,
+};
 use fgdb_delta_types::RelationId;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, EId, VId};
@@ -80,7 +84,12 @@ pub const BLOCK_MAGIC: [u8; 4] = *b"FGSB";
 /// block to its normative field set and the identity-column codec) and then
 /// `fgdb-ge6a` (register both formats, and root the partition binding that makes
 /// a database reopenable from its `manifest.root` alone).
-pub const BLOCK_FORMAT_V2: u16 = 2;
+pub const BLOCK_FORMAT_V3: u16 = 3;
+
+/// The V3 framing ID for the §6.2 identity-column scalar codec.  The scalar
+/// codec deliberately has no durable envelope; this caller owns its ID,
+/// descriptor, exact count, and payload framing.
+pub const IDENTITY_COLUMN_CODEC_ID: u16 = 1;
 
 /// The content identity of one immutable Tier-D block version.
 ///
@@ -120,10 +129,36 @@ pub struct DeltaBlockVersion(pub ObjectId);
 #[repr(transparent)]
 pub struct PartitionRootVersion(pub ObjectId);
 
-/// Header: magic + format + entry count.
-const HEADER_LEN: usize = 4 + 2 + 4;
-/// src(16) + relation(8) + dst(16) + eid(16) + created(8) + retired(8)
-const ENTRY_LEN: usize = 16 + 8 + 16 + 16 + 8 + 8;
+/// Header: magic + format + rows + `(src, relation, direction)` + span count.
+const HEADER_LEN: usize = 4 + 2 + 4 + 16 + 8 + 1 + 4;
+const COLUMN_FRAME_LEN: usize = 2 + 1 + 4 + 4;
+const VISIBILITY_SPAN_LEN: usize = 4 + 4 + 8 + 8;
+const MAX_IDENTITY_COLUMN_BYTES: usize = 4096;
+
+/// The §6.2 descriptor fields shared by every row in one block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DescriptorKey {
+    pub src: VId,
+    pub relation: RelationId,
+    pub direction: Direction,
+}
+
+/// V3 writes source-grouped blocks.  The tag is durable so reverse-family
+/// blocks cannot be confused with this layout in a later format version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Direction {
+    Outbound = 0,
+}
+
+/// A canonical `[start_row, end_row)` run with one half-open visibility value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibilityInterval {
+    pub start_row: u32,
+    pub end_row: u32,
+    pub created_at: CommitSeq,
+    pub retired_at: Option<CommitSeq>,
+}
 
 /// One versioned adjacency entry: an edge slot and the interval it is visible in.
 ///
@@ -144,13 +179,6 @@ pub struct AdjacencyEntry {
 }
 
 impl AdjacencyEntry {
-    /// The sort key. Ordering is by identity alone — NOT by sequence — because a
-    /// block is an adjacency index first: a scan for one `(src, relation)` must be
-    /// able to find its entries contiguously, whatever order they were created in.
-    fn key(&self) -> (VId, RelationId, VId, EId) {
-        (self.src, self.relation, self.dst, self.eid)
-    }
-
     /// Is this entry visible to a reader at `as_of`?
     ///
     /// `created_at <= as_of < retired_at`. Exposed because the visibility rule is
@@ -169,18 +197,27 @@ pub enum BlockError {
     /// A format version this build does not implement. Named rather than
     /// collapsed into `NotABlock`: "this is not our file" and "this is a newer
     /// version of our file" call for completely different operator responses.
-    UnsupportedFormat { format: u16 },
+    UnsupportedFormat {
+        format: u16,
+    },
     /// The bytes end before the declared entries do.
-    Truncated { expected: usize, found: usize },
+    Truncated {
+        expected: usize,
+        found: usize,
+    },
     /// Bytes remain after the declared entries. Refused rather than ignored: a
     /// trailing region is either a second block someone concatenated or damage,
     /// and both are wrong to read past.
-    TrailingBytes { extra: usize },
+    TrailingBytes {
+        extra: usize,
+    },
     /// Entries are not strictly ascending by `(src, relation, dst, eid)`.
     ///
     /// Carries the position so a diagnostic can name the pair, since "this block
     /// is unsorted" is not actionable on a block with thousands of entries.
-    NonCanonicalOrder { at: usize },
+    NonCanonicalOrder {
+        at: usize,
+    },
     /// An entry claims to have been retired at or before it was created.
     RetiredBeforeCreated {
         at: usize,
@@ -189,9 +226,30 @@ pub enum BlockError {
     },
     /// An entry was created at sequence zero, which names the empty stream and
     /// can therefore never have created anything.
-    CreatedAtZero { at: usize },
+    CreatedAtZero {
+        at: usize,
+    },
     /// More entries than this build will materialize from one block.
-    ImplausibleEntryCount { declared: u32 },
+    ImplausibleEntryCount {
+        declared: u32,
+    },
+    MixedDescriptor {
+        at: usize,
+    },
+    UnsupportedDirection {
+        direction: u8,
+    },
+    UnsupportedIdentityCodec {
+        column: u8,
+        codec_id: u16,
+    },
+    IdentityColumn {
+        column: u8,
+        error: IdentityColumnError,
+    },
+    InvalidVisibilityInterval {
+        at: usize,
+    },
     /// The bytes are not the block that was asked for.
     ///
     /// Distinct from every other arm here: those say the bytes are malformed,
@@ -242,6 +300,23 @@ impl core::fmt::Display for BlockError {
                     "a block declaring {declared} entries is not readable here"
                 )
             }
+            Self::MixedDescriptor { at } => {
+                write!(f, "entry {at} differs from the block descriptor")
+            }
+            Self::UnsupportedDirection { direction } => {
+                write!(f, "block direction {direction} is not implemented")
+            }
+            Self::UnsupportedIdentityCodec { column, codec_id } => write!(
+                f,
+                "identity column {column} names unsupported codec {codec_id:#06x}"
+            ),
+            Self::IdentityColumn { column, error } => {
+                write!(f, "identity column {column}: {error}")
+            }
+            Self::InvalidVisibilityInterval { at } => write!(
+                f,
+                "visibility span {at} does not canonically cover the block rows"
+            ),
         }
     }
 }
@@ -253,7 +328,7 @@ impl core::error::Error for BlockError {}
 /// A length prefix read from possibly-damaged bytes must be bounded before it is
 /// used to size anything — the same rule the commit log's `MAX_ENTRY_BODY`
 /// applies. Without it a corrupted count is an allocation request.
-pub const MAX_BLOCK_ENTRIES: u32 = 1 << 24;
+pub const MAX_BLOCK_ENTRIES: u32 = 256;
 
 /// Encode `entries` into a canonical block.
 ///
@@ -266,30 +341,120 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
             declared: MAX_BLOCK_ENTRIES,
         });
     }
+    let descriptor = entries.first().map(|entry| DescriptorKey {
+        src: entry.src,
+        relation: entry.relation,
+        direction: Direction::Outbound,
+    });
     for (index, entry) in entries.iter().enumerate() {
         validate_entry(index, entry)?;
-        if index > 0 && entries[index - 1].key() >= entry.key() {
+        if let Some(descriptor) = descriptor
+            && (entry.src != descriptor.src || entry.relation != descriptor.relation)
+        {
+            return Err(BlockError::MixedDescriptor { at: index });
+        }
+        if index > 0 && (entries[index - 1].dst, entries[index - 1].eid) >= (entry.dst, entry.eid) {
             return Err(BlockError::NonCanonicalOrder { at: index });
         }
     }
 
-    let mut out = Vec::with_capacity(HEADER_LEN + entries.len() * ENTRY_LEN);
+    let limits = IdentityColumnLimits::new(
+        entries.len(),
+        MAX_BLOCK_ENTRIES as usize,
+        MAX_IDENTITY_COLUMN_BYTES,
+    );
+    let destinations: Vec<VId> = entries.iter().map(|entry| entry.dst).collect();
+    let edge_ids: Vec<EId> = entries.iter().map(|entry| entry.eid).collect();
+    let destinations = IdentityColumn::try_new(&destinations, limits)
+        .map_err(|error| BlockError::IdentityColumn { column: 0, error })?;
+    let edge_ids = IdentityColumn::try_new(&edge_ids, limits)
+        .map_err(|error| BlockError::IdentityColumn { column: 1, error })?;
+    let destination_payload = destinations
+        .try_scalar_payload(MAX_IDENTITY_COLUMN_BYTES)
+        .map_err(|error| BlockError::IdentityColumn { column: 0, error })?;
+    let edge_id_payload = edge_ids
+        .try_scalar_payload(MAX_IDENTITY_COLUMN_BYTES)
+        .map_err(|error| BlockError::IdentityColumn { column: 1, error })?;
+    let spans = visibility_spans(entries);
+
+    let mut out = Vec::with_capacity(
+        HEADER_LEN
+            + 2 * COLUMN_FRAME_LEN
+            + destination_payload.len()
+            + edge_id_payload.len()
+            + spans.len() * VISIBILITY_SPAN_LEN,
+    );
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V2.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V3.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-    for entry in entries {
-        out.extend_from_slice(&entry.src.0.to_be_bytes());
-        out.extend_from_slice(&entry.relation.0.to_be_bytes());
-        out.extend_from_slice(&entry.dst.0.to_be_bytes());
-        out.extend_from_slice(&entry.eid.0.to_be_bytes());
-        out.extend_from_slice(&entry.created_at.0.to_be_bytes());
-        // Zero encodes "live". Unambiguous because sequence zero is the empty
-        // stream and can never retire anything — the same fact `CreatedAtZero`
-        // refuses on the other side. A presence flag would give `None` two
-        // spellings and break canonicality.
-        out.extend_from_slice(&entry.retired_at.map_or(0, |r| r.0).to_be_bytes());
+    let descriptor = descriptor.unwrap_or(DescriptorKey {
+        src: VId(0),
+        relation: RelationId(0),
+        direction: Direction::Outbound,
+    });
+    out.extend_from_slice(&descriptor.src.0.to_be_bytes());
+    out.extend_from_slice(&descriptor.relation.0.to_be_bytes());
+    out.push(descriptor.direction as u8);
+    out.extend_from_slice(&(spans.len() as u32).to_be_bytes());
+    append_identity_column(&mut out, destinations.descriptor(), &destination_payload);
+    append_identity_column(&mut out, edge_ids.descriptor(), &edge_id_payload);
+    for span in spans {
+        out.extend_from_slice(&span.start_row.to_be_bytes());
+        out.extend_from_slice(&span.end_row.to_be_bytes());
+        out.extend_from_slice(&span.created_at.0.to_be_bytes());
+        out.extend_from_slice(&span.retired_at.map_or(0, |seq| seq.0).to_be_bytes());
     }
     Ok(out)
+}
+
+fn visibility_spans(entries: &[AdjacencyEntry]) -> Vec<VisibilityInterval> {
+    let mut spans = Vec::new();
+    let mut start = 0usize;
+    while start < entries.len() {
+        let first = entries[start];
+        let mut end = start + 1;
+        while end < entries.len()
+            && entries[end].created_at == first.created_at
+            && entries[end].retired_at == first.retired_at
+        {
+            end += 1;
+        }
+        spans.push(VisibilityInterval {
+            start_row: start as u32,
+            end_row: end as u32,
+            created_at: first.created_at,
+            retired_at: first.retired_at,
+        });
+        start = end;
+    }
+    spans
+}
+
+fn representation_tag(representation: IdentityRepresentation) -> u8 {
+    match representation {
+        IdentityRepresentation::Raw128 => 0,
+        IdentityRepresentation::SharedPrefixFixed => 1,
+        IdentityRepresentation::SharedPrefixFor => 2,
+        IdentityRepresentation::SharedPrefixDeltaFor => 3,
+    }
+}
+
+fn representation_from_tag(tag: u8) -> Option<IdentityRepresentation> {
+    match tag {
+        0 => Some(IdentityRepresentation::Raw128),
+        1 => Some(IdentityRepresentation::SharedPrefixFixed),
+        2 => Some(IdentityRepresentation::SharedPrefixFor),
+        3 => Some(IdentityRepresentation::SharedPrefixDeltaFor),
+        _ => None,
+    }
+}
+
+fn append_identity_column(out: &mut Vec<u8>, descriptor: IdentityColumnDescriptor, payload: &[u8]) {
+    out.extend_from_slice(&IDENTITY_COLUMN_CODEC_ID.to_be_bytes());
+    out.push(representation_tag(descriptor.representation()));
+    out.extend_from_slice(&(descriptor.prefixes() as u32).to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
 }
 
 pub(crate) fn validate_entry(index: usize, entry: &AdjacencyEntry) -> Result<(), BlockError> {
@@ -308,20 +473,56 @@ pub(crate) fn validate_entry(index: usize, entry: &AdjacencyEntry) -> Result<(),
     Ok(())
 }
 
-/// Read a block's header, returning the declared entry count.
-fn read_header(bytes: &[u8]) -> Result<u32, BlockError> {
+struct DecodedFrame {
+    descriptor: DescriptorKey,
+    destinations: IdentityColumn<VId>,
+    edge_ids: IdentityColumn<EId>,
+    spans: Vec<VisibilityInterval>,
+}
+
+/// Read the V3 framing and reconstruct its two codec columns.  Counts live in
+/// the enclosing frame, never in the scalar payload, so truncation is checked
+/// before either codec sees a slice.
+fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
     if bytes.len() < HEADER_LEN || bytes[..4] != BLOCK_MAGIC {
         return Err(BlockError::NotABlock);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != BLOCK_FORMAT_V2 {
+    if format != BLOCK_FORMAT_V3 {
         return Err(BlockError::UnsupportedFormat { format });
     }
-    let count = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
+    let count = u32::from_be_bytes(bytes[6..10].try_into().expect("fixed header"));
     if count > MAX_BLOCK_ENTRIES {
         return Err(BlockError::ImplausibleEntryCount { declared: count });
     }
-    let expected = HEADER_LEN + count as usize * ENTRY_LEN;
+    let descriptor = DescriptorKey {
+        src: VId(u128::from_be_bytes(
+            bytes[10..26].try_into().expect("fixed header"),
+        )),
+        relation: RelationId(u64::from_be_bytes(
+            bytes[26..34].try_into().expect("fixed header"),
+        )),
+        direction: match bytes[34] {
+            0 => Direction::Outbound,
+            direction => return Err(BlockError::UnsupportedDirection { direction }),
+        },
+    };
+    let span_count = u32::from_be_bytes(bytes[35..39].try_into().expect("fixed header")) as usize;
+    let mut offset = HEADER_LEN;
+    let destinations = read_identity_column::<VId>(bytes, &mut offset, count as usize, 0)?;
+    let edge_ids = read_identity_column::<EId>(bytes, &mut offset, count as usize, 1)?;
+    let expected =
+        offset
+            .checked_add(span_count.checked_mul(VISIBILITY_SPAN_LEN).ok_or(
+                BlockError::Truncated {
+                    expected: usize::MAX,
+                    found: bytes.len(),
+                },
+            )?)
+            .ok_or(BlockError::Truncated {
+                expected: usize::MAX,
+                found: bytes.len(),
+            })?;
     if bytes.len() < expected {
         return Err(BlockError::Truncated {
             expected,
@@ -333,33 +534,146 @@ fn read_header(bytes: &[u8]) -> Result<u32, BlockError> {
             extra: bytes.len() - expected,
         });
     }
-    Ok(count)
+    let mut spans = Vec::with_capacity(span_count);
+    for _ in 0..span_count {
+        spans.push(VisibilityInterval {
+            start_row: u32::from_be_bytes(
+                bytes[offset..offset + 4].try_into().expect("bounded span"),
+            ),
+            end_row: u32::from_be_bytes(
+                bytes[offset + 4..offset + 8]
+                    .try_into()
+                    .expect("bounded span"),
+            ),
+            created_at: CommitSeq(u64::from_be_bytes(
+                bytes[offset + 8..offset + 16]
+                    .try_into()
+                    .expect("bounded span"),
+            )),
+            retired_at: {
+                let retired = u64::from_be_bytes(
+                    bytes[offset + 16..offset + 24]
+                        .try_into()
+                        .expect("bounded span"),
+                );
+                (retired != 0).then_some(CommitSeq(retired))
+            },
+        });
+        offset += VISIBILITY_SPAN_LEN;
+    }
+    validate_spans(&spans, count as usize)?;
+    Ok(DecodedFrame {
+        descriptor,
+        destinations,
+        edge_ids,
+        spans,
+    })
 }
 
-fn read_entry(bytes: &[u8], index: usize) -> AdjacencyEntry {
-    let at = HEADER_LEN + index * ENTRY_LEN;
-    let u128_at = |off: usize| -> u128 {
-        let mut buf = [0u8; 16];
-        buf.copy_from_slice(&bytes[at + off..at + off + 16]);
-        u128::from_be_bytes(buf)
-    };
-    let u64_at = |off: usize| -> u64 {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(&bytes[at + off..at + off + 8]);
-        u64::from_be_bytes(buf)
-    };
-    // Offsets: src 0..16, relation 16..24, dst 24..40, eid 40..56,
-    // created 56..64, retired 64..72. Written out because the first version of this function had
-    // created_at at 32 — it treated `dst` as eight bytes rather than sixteen, and
-    // the round-trip law caught it on the first run.
-    let retired = u64_at(64);
+fn read_identity_column<T: ElementIdentity>(
+    bytes: &[u8],
+    offset: &mut usize,
+    rows: usize,
+    column: u8,
+) -> Result<IdentityColumn<T>, BlockError> {
+    let frame_end = offset
+        .checked_add(COLUMN_FRAME_LEN)
+        .ok_or(BlockError::Truncated {
+            expected: usize::MAX,
+            found: bytes.len(),
+        })?;
+    if frame_end > bytes.len() {
+        return Err(BlockError::Truncated {
+            expected: frame_end,
+            found: bytes.len(),
+        });
+    }
+    let codec_id = u16::from_be_bytes(
+        bytes[*offset..*offset + 2]
+            .try_into()
+            .expect("bounded column"),
+    );
+    if codec_id != IDENTITY_COLUMN_CODEC_ID {
+        return Err(BlockError::UnsupportedIdentityCodec { column, codec_id });
+    }
+    let representation = representation_from_tag(bytes[*offset + 2])
+        .ok_or(BlockError::InvalidVisibilityInterval { at: *offset + 2 })?;
+    let prefixes = u32::from_be_bytes(
+        bytes[*offset + 3..*offset + 7]
+            .try_into()
+            .expect("bounded column"),
+    ) as usize;
+    let payload_len = u32::from_be_bytes(
+        bytes[*offset + 7..*offset + 11]
+            .try_into()
+            .expect("bounded column"),
+    ) as usize;
+    *offset = frame_end;
+    let payload_end = offset
+        .checked_add(payload_len)
+        .ok_or(BlockError::Truncated {
+            expected: usize::MAX,
+            found: bytes.len(),
+        })?;
+    if payload_end > bytes.len() {
+        return Err(BlockError::Truncated {
+            expected: payload_end,
+            found: bytes.len(),
+        });
+    }
+    let limits =
+        IdentityColumnLimits::new(rows, MAX_BLOCK_ENTRIES as usize, MAX_IDENTITY_COLUMN_BYTES);
+    let column_value = IdentityColumn::try_from_scalar_payload(
+        &bytes[*offset..payload_end],
+        IdentityColumnDescriptor::new(representation, rows, prefixes),
+        limits,
+    )
+    .map_err(|error| BlockError::IdentityColumn { column, error })?;
+    *offset = payload_end;
+    Ok(column_value)
+}
+
+fn validate_spans(spans: &[VisibilityInterval], rows: usize) -> Result<(), BlockError> {
+    let mut next = 0u32;
+    for (at, span) in spans.iter().enumerate() {
+        if span.start_row != next || span.end_row <= span.start_row || span.end_row as usize > rows
+        {
+            return Err(BlockError::InvalidVisibilityInterval { at });
+        }
+        if span.created_at.0 == 0
+            || span
+                .retired_at
+                .is_some_and(|retired| retired <= span.created_at)
+        {
+            return Err(BlockError::InvalidVisibilityInterval { at });
+        }
+        next = span.end_row;
+    }
+    if next as usize != rows {
+        return Err(BlockError::InvalidVisibilityInterval { at: spans.len() });
+    }
+    Ok(())
+}
+
+fn read_entry(frame: &DecodedFrame, index: usize) -> AdjacencyEntry {
+    let span = frame
+        .spans
+        .iter()
+        .find(|span| span.start_row as usize <= index && index < span.end_row as usize)
+        .expect("validated spans cover every framed row");
     AdjacencyEntry {
-        src: VId(u128_at(0)),
-        relation: RelationId(u64_at(16)),
-        dst: VId(u128_at(24)),
-        eid: EId(u128_at(40)),
-        created_at: CommitSeq(u64_at(56)),
-        retired_at: (retired != 0).then_some(CommitSeq(retired)),
+        src: frame.descriptor.src,
+        relation: frame.descriptor.relation,
+        dst: frame
+            .destinations
+            .get(index)
+            .expect("codec descriptor frames exact row count"),
+        eid: frame
+            .edge_ids
+            .get(index)
+            .expect("codec descriptor frames exact row count"),
+        created_at: span.created_at,
+        retired_at: span.retired_at,
     }
 }
 
@@ -371,13 +685,14 @@ fn read_entry(bytes: &[u8], index: usize) -> AdjacencyEntry {
 /// same reason the chain's `verify` replays through `validate`: one law, checked
 /// wherever a value can enter.
 pub fn decode_block(bytes: &[u8]) -> Result<Vec<AdjacencyEntry>, BlockError> {
-    let count = read_header(bytes)? as usize;
-    let mut out = Vec::with_capacity(count);
+    let frame = read_header(bytes)?;
+    let count = frame.destinations.len();
+    let mut out: Vec<AdjacencyEntry> = Vec::with_capacity(count);
     for index in 0..count {
-        let entry = read_entry(bytes, index);
+        let entry = read_entry(&frame, index);
         validate_entry(index, &entry)?;
         if let Some(previous) = out.last()
-            && AdjacencyEntry::key(previous) >= entry.key()
+            && (previous.dst, previous.eid) >= (entry.dst, entry.eid)
         {
             return Err(BlockError::NonCanonicalOrder { at: index });
         }
@@ -403,20 +718,24 @@ pub fn scan_neighbours(
     relation: RelationId,
     as_of: CommitSeq,
 ) -> Result<Vec<VId>, BlockError> {
-    let count = read_header(bytes)? as usize;
+    let frame = read_header(bytes)?;
+    if frame.descriptor.src != src || frame.descriptor.relation != relation {
+        return Ok(Vec::new());
+    }
+    let count = frame.destinations.len();
     let mut out = Vec::new();
-    let mut previous: Option<(VId, RelationId, VId, EId)> = None;
+    let mut previous: Option<(VId, EId)> = None;
     for index in 0..count {
-        let entry = read_entry(bytes, index);
+        let entry = read_entry(&frame, index);
         validate_entry(index, &entry)?;
         if let Some(prev) = previous
-            && prev >= entry.key()
+            && prev >= (entry.dst, entry.eid)
         {
             return Err(BlockError::NonCanonicalOrder { at: index });
         }
-        previous = Some(entry.key());
+        previous = Some((entry.dst, entry.eid));
 
-        if entry.src == src && entry.relation == relation && entry.visible_at(as_of) {
+        if entry.visible_at(as_of) {
             // Neighbour semantics are set-valued: parallel EIds prove distinct
             // edges without repeating their common destination in the answer.
             if out.last() != Some(&entry.dst) {

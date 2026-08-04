@@ -383,7 +383,10 @@ impl BlockWriter {
         Ok(())
     }
 
-    /// Seal the pending entries into a block. A no-op when nothing is pending.
+    /// Seal pending rows into their descriptor-local V3 blocks.  The writer is
+    /// partition-local, while §6.2 blocks are descriptor-local, so this is the
+    /// boundary where one replay fold fans into immutable blocks; no descriptor
+    /// field may be smuggled back into an entry to avoid that split.
     pub fn seal(
         &mut self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
@@ -391,18 +394,31 @@ impl BlockWriter {
         if self.pending.is_empty() {
             return Ok(None);
         }
-        let entries: Vec<AdjacencyEntry> = self.pending.values().copied().collect();
-        let bytes = encode_block(&entries).map_err(WriteError::Block)?;
-        let (first_seq, last_seq) = span_of(&entries).expect("non-empty");
-        let sealed = SealedBlock {
-            block_id: block_id(keys.0, keys.1, &bytes),
-            bytes,
-            first_seq,
-            last_seq,
-        };
+        let mut by_descriptor: BTreeMap<(VId, RelationId), Vec<AdjacencyEntry>> = BTreeMap::new();
+        for entry in self.pending.values().copied() {
+            by_descriptor
+                .entry((entry.src, entry.relation))
+                .or_default()
+                .push(entry);
+        }
+        let mut sealed = Vec::with_capacity(by_descriptor.len());
+        for entries in by_descriptor.into_values() {
+            let bytes = encode_block(&entries).map_err(WriteError::Block)?;
+            let (first_seq, last_seq) = span_of(&entries).expect("non-empty");
+            sealed.push(SealedBlock {
+                block_id: block_id(keys.0, keys.1, &bytes),
+                bytes,
+                first_seq,
+                last_seq,
+            });
+        }
+        // Roots publish in nondecreasing frontier order even when descriptor
+        // keys sort differently from the commit stream that populated them.
+        sealed.sort_by_key(|block| (block.last_seq, block.first_seq, block.block_id));
+        let first = sealed.first().cloned();
         self.pending.clear();
-        self.sealed.push(sealed.clone());
-        Ok(Some(sealed))
+        self.sealed.extend(sealed);
+        Ok(first)
     }
 
     /// Seal whatever remains and publish a root over every block.

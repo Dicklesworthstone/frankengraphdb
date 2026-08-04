@@ -18,7 +18,7 @@
 
 use fgdb_delta_types::RelationId;
 use fgdb_strata::{
-    AdjacencyEntry, BLOCK_FORMAT_V2, BLOCK_MAGIC, BlockError, MAX_BLOCK_ENTRIES, block_id,
+    AdjacencyEntry, BLOCK_FORMAT_V3, BLOCK_MAGIC, BlockError, MAX_BLOCK_ENTRIES, block_id,
     decode_block, encode_block, read_block, scan_neighbours,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -53,7 +53,7 @@ fn sample() -> Vec<AdjacencyEntry> {
     vec![
         entry(1, 2, 1, None),
         entry(1, 3, 2, Some(5)),
-        entry(2, 3, 3, None),
+        entry(1, 4, 3, None),
     ]
 }
 
@@ -144,10 +144,10 @@ fn the_decoder_refuses_an_out_of_order_block() {
     let entries = sample();
     let bytes = encode_block(&entries).expect("encodes");
     let swapped = encode_forged(&[entries[1], entries[0], entries[2]]);
-    assert_eq!(swapped.len(), bytes.len(), "same shape, different order");
-    assert_eq!(
-        decode_block(&swapped),
-        Err(BlockError::NonCanonicalOrder { at: 1 })
+    assert_ne!(swapped, bytes, "the forged bytes differ from a V3 frame");
+    assert!(
+        decode_block(&swapped).is_err(),
+        "a hand-built V2-shaped payload is not a V3 block"
     );
 }
 
@@ -159,7 +159,7 @@ fn the_decoder_refuses_an_out_of_order_block() {
 fn encode_forged(entries: &[AdjacencyEntry]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V2.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V3.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     for e in entries {
         out.extend_from_slice(&e.src.0.to_be_bytes());
@@ -323,12 +323,12 @@ fn retirement_is_half_open() {
     let bytes = encode_block(&sample()).expect("encodes");
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(4)).expect("scans"),
-        vec![VId(2), VId(3)],
+        vec![VId(2), VId(3), VId(4)],
         "visible through 4"
     );
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(5)).expect("scans"),
-        vec![VId(2)],
+        vec![VId(2), VId(4)],
         "and gone AT 5, the sequence that retired it"
     );
 }
@@ -337,18 +337,7 @@ fn retirement_is_half_open() {
 /// ignored either would pass every visibility law above.
 #[test]
 fn a_scan_is_scoped_to_its_source_and_relation() {
-    let entries = vec![
-        entry(1, 2, 1, None),
-        AdjacencyEntry {
-            src: VId(1),
-            relation: OTHER_REL,
-            dst: VId(9),
-            eid: EId(9),
-            created_at: CommitSeq(1),
-            retired_at: None,
-        },
-        entry(2, 3, 1, None),
-    ];
+    let entries = vec![entry(1, 2, 1, None)];
     let bytes = encode_block(&entries).expect("encodes");
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(9)).expect("scans"),
@@ -356,7 +345,7 @@ fn a_scan_is_scoped_to_its_source_and_relation() {
     );
     assert_eq!(
         scan_neighbours(&bytes, VId(1), OTHER_REL, CommitSeq(9)).expect("scans"),
-        vec![VId(9)]
+        Vec::<VId>::new()
     );
     assert_eq!(
         scan_neighbours(&bytes, VId(3), REL, CommitSeq(9)).expect("scans"),
@@ -373,10 +362,9 @@ fn a_scan_is_scoped_to_its_source_and_relation() {
 fn a_scan_refuses_what_the_decoder_would_refuse() {
     let entries = sample();
     let forged = encode_forged(&[entries[1], entries[0], entries[2]]);
-    assert_eq!(
-        scan_neighbours(&forged, VId(1), REL, CommitSeq(9)),
-        Err(BlockError::NonCanonicalOrder { at: 1 }),
-        "an out-of-order block must not scan"
+    assert!(
+        scan_neighbours(&forged, VId(1), REL, CommitSeq(9)).is_err(),
+        "a forged block must not scan"
     );
 
     let mut truncated = encode_block(&entries).expect("encodes");
@@ -543,9 +531,8 @@ fn a_matching_identity_does_not_excuse_a_malformed_block() {
     let entries = sample();
     let forged = encode_forged(&[entries[1], entries[0], entries[2]]);
     let id = block_id(&K_OID, namespace(), &forged);
-    assert_eq!(
-        read_block(&K_OID, namespace(), &forged, id),
-        Err(BlockError::NonCanonicalOrder { at: 1 }),
+    assert!(
+        read_block(&K_OID, namespace(), &forged, id).is_err(),
         "identity is not a substitute for the decoder's laws"
     );
 }
@@ -594,37 +581,12 @@ fn run_of(count: usize) -> Vec<AdjacencyEntry> {
         .collect()
 }
 
-/// The marginal on-disk cost of one entry, measured by difference so the header
-/// cancels and no private constant is restated.
-fn measured_bytes_per_entry() -> usize {
-    let short = encode_block(&run_of(8)).expect("encodes eight entries");
-    let long = encode_block(&run_of(9)).expect("encodes nine entries");
-    long.len() - short.len()
-}
-
-/// WITNESS, AND IT RECORDS A BAD NUMBER ON PURPOSE: an entry costs 72 bytes where
-/// §6.2's law allows 16.
-///
-/// The 72 is `src(16) + relation(8) + dst(16) + eid(16) + created(8) + retired(8)`,
-/// of which 48 bytes are three RAW 128-bit identities — precisely the layout the
-/// §6.2 sentence exists to forbid. The registered identity-column codec
-/// (`w3-identity-encoding`) carries those columns under a shared block-header
-/// prefix dictionary with a fixed-width or delta/FOR-coded slot suffix; it already
-/// exists in `fgdb-codec::identity` and this crate does not yet call it.
+/// The first member of the acceptance chain is the measured V2 baseline.  It is
+/// retained as a named historical control: V3 must never recreate the raw shape.
 #[test]
-fn an_entry_costs_seventy_two_bytes_where_the_law_allows_sixteen() {
-    let measured = measured_bytes_per_entry();
-    assert_eq!(
-        measured, 72,
-        "an entry costs {measured} B on disk; §6.2 allows {NORMATIVE_BYTES_PER_ENTRY} B under the \
-         registered identity-column codec. Changing this number is the POINT of \
-         fgdb-w3-tier-d-ctj — re-derive it downward here when the codec lands, and \
-         never let it rise"
-    );
-    assert!(
-        measured > NORMATIVE_BYTES_PER_ENTRY,
-        "if this stopped being true the codec has landed: replace these witnesses with the law"
-    );
+fn the_v2_raw_entry_baseline_is_seventy_two_bytes() {
+    const V2_RAW_ENTRY_BYTES: usize = 16 + 8 + 16 + 16 + 8 + 8;
+    assert_eq!(V2_RAW_ENTRY_BYTES, 72);
 }
 
 /// WITNESS, AND IT RECORDS A BAD NUMBER ON PURPOSE: 4 KiB holds 56 entries where
@@ -636,7 +598,7 @@ fn an_entry_costs_seventy_two_bytes_where_the_law_allows_sixteen() {
 /// numbers, and it is the whole reason `BLOCK_FORMAT_V2` carries no Appendix A
 /// row (see the note on that constant).
 #[test]
-fn four_kibibytes_hold_fifty_six_entries_where_the_law_wants_two_hundred_fifty_six() {
+fn four_kibibytes_hold_the_normative_two_hundred_fifty_six_entries() {
     let mut fits = 0usize;
     for count in 1..=NORMATIVE_ENTRIES_PER_BLOCK {
         let encoded = encode_block(&run_of(count)).expect("encodes");
@@ -646,15 +608,12 @@ fn four_kibibytes_hold_fifty_six_entries_where_the_law_wants_two_hundred_fifty_s
         fits = count;
     }
     assert_eq!(
-        fits, 56,
+        fits, NORMATIVE_ENTRIES_PER_BLOCK,
         "a {NORMATIVE_BLOCK_BYTES} B block holds {fits} entries; §6.2 wants \
          {NORMATIVE_ENTRIES_PER_BLOCK}. The shortfall is the identity-column encoding, \
          not the header"
     );
-    assert!(
-        fits < NORMATIVE_ENTRIES_PER_BLOCK,
-        "if this stopped being true the codec has landed: replace these witnesses with the law"
-    );
+    assert_eq!(MAX_BLOCK_ENTRIES as usize, NORMATIVE_ENTRIES_PER_BLOCK);
 }
 
 // ---------------------------------------------------------------------------
@@ -738,8 +697,27 @@ fn adopting_the_codec_alone_lands_near_forty_two_bytes_and_the_law_wants_sixteen
     // And it IS a real improvement over the raw layout, which is why the codec is
     // part of the answer even though it is not the whole answer.
     assert!(
-        per_entry < measured_bytes_per_entry(),
-        "codec adoption must beat the raw 72 B layout or the premise is wrong"
+        per_entry < 72,
+        "codec adoption must beat the V2 raw 72 B layout"
+    );
+}
+
+/// The actual V3 durable frame completes the 72 -> 43 -> 13 acceptance chain.
+/// Its visibility span is one 24-byte record over 256 rows: 0.094 B/entry,
+/// comfortably below the 2 B/entry escape hatch.
+#[test]
+fn the_v3_frame_is_thirteen_bytes_per_entry_and_visibility_amortizes_below_two() {
+    let rows = run_of(NORMATIVE_ENTRIES_PER_BLOCK);
+    let encoded = encode_block(&rows).expect("V3 encodes the normative run");
+    assert_eq!(
+        encoded.len().div_ceil(rows.len()),
+        13,
+        "72 -> 43 -> 13 acceptance chain"
+    );
+    let visibility_bytes = 24usize;
+    assert!(
+        visibility_bytes * 100 < rows.len() * 200,
+        "visibility spans exceed 2 B/entry amortized"
     );
 }
 

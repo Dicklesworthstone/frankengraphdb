@@ -118,9 +118,9 @@ fn assert_blocks_are_lawful(blocks: &[Vec<AdjacencyEntry>]) {
     encode_root(&root).expect("compacted blocks form a lawful ordered root");
 }
 
-/// Blocks with DISJOINT keys collapse into one, and the answers do not move.
+/// Blocks with disjoint descriptors remain descriptor-local, and answers do not move.
 #[test]
-fn disjoint_blocks_collapse_into_one() {
+fn disjoint_descriptors_remain_separate_blocks() {
     let before = vec![
         vec![entry(1, 2, 1, None)],
         vec![entry(1, 3, 2, None)],
@@ -129,8 +129,8 @@ fn disjoint_blocks_collapse_into_one() {
     let result = compact(&before, CommitSeq(1)).expect("valid history compacts");
     assert_eq!(
         result.blocks.len(),
-        1,
-        "no key repeats, so one block suffices"
+        2,
+        "the V3 descriptor boundary is stronger than spare block capacity"
     );
     assert_eq!(result.dropped, 0);
     assert_blocks_are_lawful(&result.blocks);
@@ -434,8 +434,8 @@ fn compacted_entries_have_a_rootable_publication_order() {
     let result = compact(&before, CommitSeq(1)).expect("valid history compacts");
     assert_eq!(
         result.blocks.len(),
-        1,
-        "five immutable identities fit below the durable capacity"
+        2,
+        "five identities span two V3 descriptors"
     );
     assert_blocks_are_lawful(&result.blocks);
 

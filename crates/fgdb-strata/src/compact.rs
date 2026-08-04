@@ -26,6 +26,7 @@
 use crate::AdjacencyEntry;
 use crate::root::{RootError, collapse_edge_history};
 use fgdb_types::CommitSeq;
+use std::collections::BTreeMap;
 
 /// The result of compacting a partition's blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,14 +111,21 @@ fn pack_retained(
     }
     debug_assert!(max_entries > 0, "the durable block capacity is nonzero");
 
-    // One EId has exactly one immutable birth after collapse, so the durable
-    // capacity is the only lower bound on block count. Canonical key order makes
-    // each chunk directly encodable, and `div_ceil` chunks attain that bound.
-    retained.sort_by_key(|entry| (entry.src, entry.relation, entry.dst, entry.eid));
-    let mut packed = retained
-        .chunks(max_entries)
-        .map(<[AdjacencyEntry]>::to_vec)
-        .collect::<Vec<_>>();
+    // V3's durable unit is per descriptor.  Capacity is therefore a lower
+    // bound within each `(src, relation)` family, never permission to merge two
+    // descriptors merely because a block has spare rows.
+    let mut by_descriptor: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for entry in retained.drain(..) {
+        by_descriptor
+            .entry((entry.src, entry.relation))
+            .or_default()
+            .push(entry);
+    }
+    let mut packed = Vec::new();
+    for entries in by_descriptor.values_mut() {
+        entries.sort_by_key(|entry| (entry.dst, entry.eid));
+        packed.extend(entries.chunks(max_entries).map(<[AdjacencyEntry]>::to_vec));
+    }
 
     // A root's list is publication order, witnessed by nondecreasing `last_seq`.
     // Canonical key packing does not necessarily preserve publication order.

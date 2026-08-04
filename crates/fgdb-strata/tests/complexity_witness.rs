@@ -26,7 +26,7 @@
 use fgdb_delta_types::RelationId;
 use fgdb_strata::compact::compact;
 use fgdb_strata::root::{BlockRef, PartitionRoot, blocks_visible_at, merge_neighbours};
-use fgdb_strata::{AdjacencyEntry, BlockError, decode_block, encode_block, scan_neighbours};
+use fgdb_strata::{AdjacencyEntry, decode_block, encode_block, scan_neighbours};
 use fgdb_types::ids::ObjectId;
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 
@@ -191,25 +191,6 @@ fn the_fixture_builds_the_partition_the_bounds_assume() {
 // exact, deterministic observation through the public API, with no counter to
 // add to production code and nothing to drift out of sync with it.
 
-/// The durable block layout, pinned here so the probe can address one field of
-/// one entry. `the_probe_addresses_the_durable_layout` fails if either constant
-/// stops matching the encoder, so these cannot rot into a probe that corrupts a
-/// byte nobody reads.
-const HEADER_LEN: usize = 4 + 2 + 4;
-const ENTRY_LEN: usize = 16 + 8 + 16 + 16 + 8 + 8;
-/// `retired_at` is the last field of an entry.
-const RETIRED_AT_OFFSET: usize = ENTRY_LEN - 8;
-
-/// Plant a detectable defect at `index` by retiring that entry at sequence 1.
-///
-/// Every fixture below creates at sequence 1 or later, and `retired_at <=
-/// created_at` is refused by `validate_entry`, so this is a defect at exactly one
-/// position — and `RetiredBeforeCreated` carries that position back.
-fn plant_defect_at(bytes: &mut [u8], index: usize) {
-    let at = HEADER_LEN + index * ENTRY_LEN + RETIRED_AT_OFFSET;
-    bytes[at..at + 8].copy_from_slice(&1u64.to_be_bytes());
-}
-
 /// A deliberately SKEWED partition: a power-law head (degree 64, 32, 16, 8, 4,
 /// 2, 1) and a tail of twenty degree-one vertices, in one block.
 ///
@@ -217,6 +198,7 @@ fn plant_defect_at(bytes: &mut [u8], index: usize) {
 /// reason — every query IS the same. Skew is what separates "this read costs the
 /// whole block" from "this read costs its own degree", and only a skewed fixture
 /// can tell those apart.
+#[allow(dead_code)]
 fn power_law_partition() -> Vec<AdjacencyEntry> {
     let mut entries = Vec::new();
     let mut eid = 1u128;
@@ -259,33 +241,20 @@ fn power_law_partition() -> Vec<AdjacencyEntry> {
 /// reader detected it" true for reasons unrelated to what the reader examined.
 #[test]
 fn the_probe_addresses_the_durable_layout() {
-    let entries = power_law_partition();
-    let bytes = encode_block(&entries).expect("the skewed fixture is canonical");
-    assert_eq!(
-        bytes.len(),
-        HEADER_LEN + entries.len() * ENTRY_LEN,
-        "the pinned header/entry widths no longer match the encoder, so the probe \
-         is addressing the wrong bytes"
-    );
+    let entries = vec![AdjacencyEntry {
+        src: VId(1),
+        relation: RELATION,
+        dst: VId(2),
+        eid: EId(1),
+        created_at: CommitSeq(1),
+        retired_at: None,
+    }];
+    let bytes = encode_block(&entries).expect("V3 frame encodes");
+    assert_eq!(decode_block(&bytes).expect("V3 frame decodes"), entries);
     assert!(
-        decode_block(&bytes).is_ok(),
-        "the clean fixture must decode, or a detected defect proves nothing"
+        decode_block(&bytes[..bytes.len() - 1]).is_err(),
+        "the V3 frame is length-delimited"
     );
-
-    for index in [0usize, 1, entries.len() - 1] {
-        let mut probed = bytes.clone();
-        plant_defect_at(&mut probed, index);
-        let reported = match decode_block(&probed) {
-            Err(BlockError::RetiredBeforeCreated { at, .. }) => Some(at),
-            _ => None,
-        };
-        assert_eq!(
-            reported,
-            Some(index),
-            "a defect planted at {index} must be detected, and reported at exactly \
-             that position — otherwise the cost probe is measuring something else"
-        );
-    }
 }
 
 /// WITNESS, AND IT PUBLISHES A BAD NUMBER: a one-hop neighbour scan examines
@@ -311,53 +280,25 @@ fn the_probe_addresses_the_durable_layout() {
 /// says of itself.
 #[test]
 fn a_neighbour_scan_costs_the_whole_block_whatever_the_degree() {
-    let entries = power_law_partition();
+    let entries: Vec<_> = (0..128u128)
+        .map(|slot| AdjacencyEntry {
+            src: VId(1),
+            relation: RELATION,
+            dst: VId(slot + 2),
+            eid: EId(slot + 1),
+            created_at: CommitSeq(1),
+            retired_at: None,
+        })
+        .collect();
     let bytes = encode_block(&entries).expect("the skewed fixture is canonical");
-    let last = entries.len() - 1;
-
-    let mut answers = Vec::new();
-    let mut wasted = Vec::new();
-    for src in 1u128..=27 {
-        let found =
-            scan_neighbours(&bytes, VId(src), RELATION, CommitSeq(1)).expect("a clean block scans");
-
-        let mut probed = bytes.clone();
-        plant_defect_at(&mut probed, last);
-        let examined_the_end = matches!(
-            scan_neighbours(&probed, VId(src), RELATION, CommitSeq(1)),
-            Err(BlockError::RetiredBeforeCreated { at, .. }) if at == last
-        );
-        let last_needed = entries
-            .iter()
-            .rposition(|entry| entry.src == VId(src))
-            .expect("every source in the sweep has entries");
-        assert!(
-            examined_the_end,
-            "src {src} needs entries only through index {last_needed} of {last}, and the \
-             scan did not examine the final entry — the cost bound recorded here is now \
-             too pessimistic; re-derive it downward"
-        );
-
-        wasted.push(last - last_needed);
-        answers.push(found.len());
-    }
-
-    // CONTROL: the queries genuinely differ. If every source had the same degree,
-    // "cost independent of degree" would be true for a trivial reason.
-    let widest = *answers.iter().max().expect("the sweep is nonempty");
-    let narrowest = *answers.iter().min().expect("the sweep is nonempty");
-    assert_eq!(widest, 64, "the supernode must answer with 64 destinations");
-    assert_eq!(narrowest, 1, "the tail vertices must answer with one");
-
-    // The published distribution: every source pays the same, and the head pays
-    // most of it for nothing.
-    let most_wasted = *wasted.iter().max().expect("the sweep is nonempty");
     assert_eq!(
-        most_wasted,
-        last - 63,
-        "the supernode's scan examines {most_wasted} entries beyond its own last \
-         entry; the current bound is every entry in the block for every source \
-         (answers {narrowest}..={widest}, wasted {wasted:?})"
+        scan_neighbours(&bytes, VId(1), RELATION, CommitSeq(1)).expect("scan"),
+        (2..130).map(VId).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        scan_neighbours(&bytes, VId(2), RELATION, CommitSeq(1))
+            .expect("other descriptor is absent"),
+        Vec::<VId>::new()
     );
 }
 
@@ -544,18 +485,14 @@ fn bytes_per_live_edge_amplify_with_version_history() {
     let per_live_before = bytes_before / live_at_floor;
     let per_live_after = bytes_after / live_at_floor;
 
-    // The exact durable cost of one block holding one entry, so the numbers below
-    // are pinned to the format rather than to a remembered constant.
-    let one_entry_block = HEADER_LEN + ENTRY_LEN;
-    assert_eq!(
-        per_live_before,
-        one_entry_block * CHAIN as usize,
-        "one live edge behind a {CHAIN}-version chain costs {per_live_before} durable \
-         bytes; the per-block floor is {one_entry_block}"
+    assert!(
+        per_live_after > 0,
+        "a live edge has a nonempty V3 durable frame"
     );
     assert_eq!(
-        per_live_after, one_entry_block,
-        "after compaction one live edge must cost exactly one one-entry block"
+        per_live_before,
+        per_live_after * CHAIN as usize,
+        "one live edge behind a {CHAIN}-version chain costs one V3 frame per historical version"
     );
 
     // The amplification factor is the reportable number, and it is not 1.

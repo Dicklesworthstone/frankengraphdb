@@ -260,8 +260,14 @@ fn a_vertex_deletion_retires_its_declared_cascade() {
     )
     .expect("cascades");
 
-    let sealed = w.seal(keys()).expect("seals").expect("a block");
-    let entries = decode_block(&sealed.bytes).expect("decodes");
+    w.seal(keys())
+        .expect("seals")
+        .expect("at least one descriptor block");
+    let entries: Vec<_> = w
+        .sealed()
+        .iter()
+        .flat_map(|sealed| decode_block(&sealed.bytes).expect("decodes"))
+        .collect();
     let retired: Vec<_> = entries.iter().filter(|e| e.retired_at.is_some()).collect();
     assert_eq!(retired.len(), 2, "both named edges are retired");
     assert!(
@@ -343,8 +349,14 @@ fn a_cascade_folds_its_same_commit_members_and_retires_the_rest() {
     )
     .expect("the same-commit member folds instead of poisoning the cascade");
 
-    let sealed = w.seal(keys()).expect("seals").expect("a block");
-    let entries = decode_block(&sealed.bytes).expect("decodes");
+    w.seal(keys())
+        .expect("seals")
+        .expect("at least one descriptor block");
+    let entries: Vec<_> = w
+        .sealed()
+        .iter()
+        .flat_map(|sealed| decode_block(&sealed.bytes).expect("decodes"))
+        .collect();
     assert_eq!(entries.len(), 1, "only the older edge stages a tombstone");
     assert_eq!(entries[0].dst, VId(2));
     assert_eq!(entries[0].created_at, CommitSeq(1));
@@ -563,8 +575,14 @@ fn a_same_commit_create_and_delete_folds_to_no_entry() {
         .expect("fresh identity in the same commit");
     w.apply(keys(), CommitSeq(6), &create(12, 2, 3))
         .expect("creates");
-    let sealed = w.seal(keys()).expect("seals").expect("a block");
-    let entries = decode_block(&sealed.bytes).expect("decodes");
+    w.seal(keys())
+        .expect("seals")
+        .expect("at least one descriptor block");
+    let entries: Vec<_> = w
+        .sealed()
+        .iter()
+        .flat_map(|sealed| decode_block(&sealed.bytes).expect("decodes"))
+        .collect();
     assert_eq!(entries.len(), 2, "the folded pair left nothing behind");
     assert!(
         entries.iter().all(|e| e.retired_at.is_none()),
