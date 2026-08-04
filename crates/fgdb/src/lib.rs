@@ -635,7 +635,7 @@ impl Database {
             }],
         )?;
 
-        let capsule = prepare_capsule(&self.keys, &template)?;
+        let capsule = prepare_capsule(&self.keys.k_oid, self.keys.namespace, &template)?;
         self.coordinator.commit_with_crash(
             cx,
             &capsule.bytes,
@@ -710,8 +710,14 @@ pub fn template_digest(bytes: &[u8]) -> Digest {
 }
 
 /// Prepare a template for commit: encode it, identify it, digest it.
+///
+/// Takes the two key primitives rather than a [`DatabaseKeys`] because that is
+/// all it needs, and because the verification layer calls this too. Coupling a
+/// shared helper to the embedded API's key struct would force every caller to
+/// build one just to hash some bytes.
 pub fn prepare_capsule(
-    keys: &DatabaseKeys,
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
     template: &LogicalDeltaTemplate,
 ) -> Result<PreparedCapsule, CanonicalError> {
     let bytes = template.canonical_bytes()?;
@@ -719,13 +725,7 @@ pub fn prepare_capsule(
     // header is empty because the canonical bytes ARE the whole object — the
     // transcript concatenates header and payload, so passing the bytes as the
     // payload reproduces exactly the intended stream.
-    let identified = IdentifiedObject::new(
-        &keys.k_oid,
-        keys.namespace,
-        CAPSULE_OBJECT_KIND,
-        &[],
-        &bytes,
-    );
+    let identified = IdentifiedObject::new(k_oid, namespace, CAPSULE_OBJECT_KIND, &[], &bytes);
     Ok(PreparedCapsule {
         object_id: identified.object_id(),
         template_digest: template_digest(&bytes),

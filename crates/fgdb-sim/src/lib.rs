@@ -30,8 +30,7 @@ pub mod shrink;
 pub mod vfs;
 
 use fgdb_chronicle::commit::{CommitCoordinator, CommitError};
-use fgdb_chronicle::identity::IdentifiedObject;
-use fgdb_chronicle::marker::{CommitMarker, EffectSource};
+use fgdb_chronicle::marker::EffectSource;
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
     CanonicalError, CommittedMarker, IndexError, LocalDeltaBatchIndex, LogicalDeltaBatch,
@@ -40,30 +39,29 @@ use fgdb_delta_types::{
 use fgdb_reference::{ApplyError, ReferenceDatabase};
 use fgdb_types::MarkerRef;
 use fgdb_types::context::CommitCx;
-use fgdb_types::ids::{DatabaseId, DatabaseSecurityNamespaceId, ObjectId};
+use fgdb_types::ids::{DatabaseId, ObjectId};
 
-/// Object kind for a committed effect capsule. `0x0274` is the Appendix A
-/// reservation for `CommittedEffectCapsule`; it is spelled here as a constant
-/// rather than a typed kind because that kind is `reserved`, not `active`, so
-/// naming it in the type system would not compile (see the subset note on
-/// `CoordinateEntry`).
-pub const CAPSULE_OBJECT_KIND: u16 = 0x0274;
+/// **The capsule-commit vocabulary lives in `fgdb`, not here** (`fgdb-khec`).
+///
+/// These six items were defined in BOTH crates for a while: `fgdb` needed them
+/// for the spine's real commit path, and this crate had defined them first. Two
+/// definitions of "what bytes is a capsule, and what digest does its marker
+/// declare" is exactly the disagreement content-addressing exists to prevent —
+/// one of them would eventually drift and the failure would look like corruption.
+///
+/// `fgdb` is the right home rather than `fgdb-chronicle`: `prepare_capsule` takes
+/// a `LogicalDeltaTemplate`, and Chronicle does not depend on `fgdb-delta-types`.
+/// The glue bridges the delta vocabulary and the durability substrate, which is
+/// the composition layer's job. Re-exported here so the five test files that
+/// drive them keep one import path, and because this crate's own `replay` needs
+/// `template_digest` to verify what a marker committed to.
+pub use fgdb::{
+    CAPSULE_OBJECT_KIND, PreparedCapsule, TEMPLATE_DIGEST_DOMAIN, marker_for_capsule,
+    prepare_capsule, template_digest,
+};
 
 /// Domain for the verification-layer stand-in for `RootSlot.database_id`.
 const REFERENCE_DATABASE_ID_DOMAIN: &[u8] = b"fgdb.reference.replay-database-id.v1";
-
-/// A template prepared for commit: its canonical bytes, the identity those
-/// bytes have, and the digest the marker will declare.
-///
-/// Built in one place so the three can never disagree. A caller that computed
-/// the oid from one byte string and the digest from another would produce a
-/// commit that passes every check at write time and fails to recover.
-#[derive(Debug, Clone)]
-pub struct PreparedCapsule {
-    pub bytes: Vec<u8>,
-    pub object_id: ObjectId,
-    pub template_digest: Digest,
-}
 
 /// Why replaying a durable commit stream into graph state failed.
 #[derive(Debug)]
@@ -147,74 +145,13 @@ impl From<CommitError> for ReplayError {
     }
 }
 
-/// The digest a marker declares for its template — a plain hash of the exact
-/// canonical bytes the capsule holds.
-pub fn template_digest(bytes: &[u8]) -> Digest {
-    let mut hasher = fgdb_crypto::Hasher::new();
-    hasher.update(TEMPLATE_DIGEST_DOMAIN);
-    hasher.update(bytes);
-    hasher.finalize()
-}
-
-/// Domain separator, so a template digest can never collide with any other
-/// digest in the system by hashing the same bytes under a different meaning.
-pub const TEMPLATE_DIGEST_DOMAIN: &[u8] = b"fgdb:logical-delta-template:v1";
-
-/// Prepare a template for commit: encode it, identify it, digest it.
-pub fn prepare_capsule(
-    k_oid: &[u8; 32],
-    namespace: DatabaseSecurityNamespaceId,
-    template: &LogicalDeltaTemplate,
-) -> Result<PreparedCapsule, CanonicalError> {
-    let bytes = template.canonical_bytes()?;
-    // The §5.1 keyed identity over the same bytes the capsule will hold. The
-    // header is empty because the canonical bytes ARE the whole object — the
-    // transcript concatenates header and payload, so passing the bytes as the
-    // payload reproduces exactly the intended stream.
-    let identified = IdentifiedObject::new(k_oid, namespace, CAPSULE_OBJECT_KIND, &[], &bytes);
-    Ok(PreparedCapsule {
-        object_id: identified.object_id(),
-        template_digest: template_digest(&bytes),
-        bytes,
-    })
-}
-
-/// Build the marker for a prepared capsule at an allocated sequence.
-///
-/// The marker's `capsule_ref` and `logical_delta_template_digest` both come
-/// from the same `PreparedCapsule`, so the write-time cross-check and the
-/// recovery-time cross-check are asking about the same object by construction.
-pub fn marker_for_capsule(
-    commit_seq: u64,
-    capsule_oid: ObjectId,
-    capsule: &PreparedCapsule,
-    head_updates: Vec<fgdb_chronicle::marker::HeadUpdate>,
-) -> CommitMarker {
-    CommitMarker {
-        logical_command_seq: commit_seq,
-        commit_seq,
-        effect_source: EffectSource::Local {
-            capsule_ref: capsule_oid,
-            logical_delta_template_digest: capsule.template_digest,
-        },
-        prev_global: None,
-        head_updates,
-        merge_record_oid: None,
-        coordinate_schema_transition_digest: Digest([0u8; 32]),
-        topology_epoch: 1,
-        policy_epoch: 1,
-        revocation_index: 0,
-        txn_token: [0u8; 16],
-        commit_hlc: commit_seq,
-        final_effect_digest: capsule.template_digest,
-        authorization_decision_digest: Digest([0u8; 32]),
-        resource_effect_digest: Digest([0u8; 32]),
-        payload_availability_certificate_oid: None,
-        flags: 0,
-    }
-}
-
 /// Commit a prepared capsule.
+///
+/// Stays here rather than moving to `fgdb` with the rest: the spine calls
+/// `CommitCoordinator::commit_with_crash` directly because it must thread its
+/// own crash point through, so this wrapper has exactly one consumer — the
+/// verification suites — and moving it would put an unused function in the
+/// engine's public surface.
 pub fn commit_capsule(
     coordinator: &mut CommitCoordinator,
     cx: &CommitCx,

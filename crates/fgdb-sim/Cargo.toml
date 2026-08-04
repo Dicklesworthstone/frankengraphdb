@@ -8,17 +8,20 @@ publish = false
 [lints]
 workspace = true
 
-[dev-dependencies]
-# The composition-layer engine, for the spine differential ONLY (fgdb-j0vu).
-#
-# A DEV-dependency, deliberately. This crate's job is to hold the engine and the
-# oracle apart and make them agree; a normal dependency would put `fgdb` in
-# fgdb-sim's own dependency closure and invite the code sharing §15.2 exists to
-# prevent. Layer direction permits it either way — composition is 13 and
-# verification is 14 — so the restriction here is a choice, not an accident.
-fgdb = { path = "../fgdb" }
-
 [dependencies]
+# The composition-layer engine (fgdb-j0vu, then fgdb-khec).
+#
+# PROMOTED from a dev-dependency to a normal one, deliberately. It began as a
+# dev-dep so only the spine differential could see it; then fgdb-khec moved the
+# capsule-commit vocabulary to its real home in `fgdb`, and this crate's own
+# `replay` needs `template_digest` to verify what a marker committed to. A lib
+# cannot use a dev-dependency, so the edge has to be real.
+#
+# This does NOT weaken §15.2. That rule constrains `fgdb-reference` — the oracle
+# must not import the engine — and it is untouched. This crate is explicitly the
+# one place the plan says both may be visible. Layer direction permits it:
+# composition is 13, verification is 14.
+fgdb = { path = "../fgdb" }
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "3e8d08efe6617e08635fa8705c62a2a531373f43", default-features = false }
 fgdb-chronicle = { path = "../fgdb-chronicle" }
 fgdb-crypto = { path = "../fgdb-crypto" }
