@@ -183,6 +183,12 @@ pub fn encode_object(
     repair_symbols: u32,
     dek: &[u8; 32],
 ) -> Result<Vec<Vec<u8>>, SymbolizeError> {
+    // The encoded stage is the sole authority for durable symbol identity.
+    // Keep this caller-facing cross-check while callers still carry an object
+    // kind for their own contracts, but never pass it into `SymbolRecord`.
+    if object_kind != encoding.cipher_descriptor().object_kind {
+        return Err(SymbolizeError::InvalidParameters);
+    }
     // asupersync's parameter builder accepts k = 1..=56403 and PANICS outside
     // it (k == 0 is precluded by ValidatedSourceBlock's own checks); the RFC
     // 6330 systematic table itself starts at 4, and asupersync accepts down to
@@ -213,8 +219,7 @@ pub fn encode_object(
     // the RFC's own numbering, so the decoder needs no side channel.
     for (index, symbol) in source.iter().enumerate() {
         let esi = u32::try_from(index).map_err(|_| SymbolizeError::InvalidParameters)?;
-        let record =
-            SymbolRecord::for_encoding(encoding, object_kind, source_block, esi, 0, symbol.clone());
+        let record = SymbolRecord::for_encoding(encoding, source_block, esi, 0, symbol.clone());
         records.push(record.serialize(&k_symbol));
     }
     for offset in 0..repair_symbols {
@@ -224,8 +229,7 @@ pub fn encode_object(
         let payload = encoder
             .try_repair_symbol(esi)
             .map_err(|_| SymbolizeError::InvalidParameters)?;
-        let record =
-            SymbolRecord::for_encoding(encoding, object_kind, source_block, esi, 0, payload);
+        let record = SymbolRecord::for_encoding(encoding, source_block, esi, 0, payload);
         records.push(record.serialize(&k_symbol));
     }
     Ok(records)
@@ -365,8 +369,11 @@ pub fn decode_object(
     // Layer 2, and the one FG-INV-09 names: the recovered plaintext must
     // recompute the requested identity. The AEAD proves the bytes are the ones
     // that were sealed; this proves they are the object we asked for.
+    let mut identity_header = Vec::with_capacity(2 + canonical_header.len());
+    identity_header.extend_from_slice(&encoding.cipher_descriptor().object_kind.to_le_bytes());
+    identity_header.extend_from_slice(canonical_header);
     let recomputed =
-        fgdb_crypto::logical_object_id(k_oid, &namespace.0, canonical_header, &compressed);
+        fgdb_crypto::logical_object_id(k_oid, &namespace.0, &identity_header, &compressed);
     if ObjectId(recomputed.0) != expected_object_id {
         return Err(SymbolizeError::IdentityMismatch);
     }

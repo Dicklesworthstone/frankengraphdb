@@ -63,7 +63,7 @@ fn symbol_payload() -> Vec<u8> {
 }
 
 fn record(encoding: &fgdb_chronicle::EncodedObject) -> SymbolRecord {
-    SymbolRecord::for_encoding(encoding, 0x0002, 1, 42, 0, symbol_payload())
+    SymbolRecord::for_encoding(encoding, 1, 42, 0, symbol_payload())
 }
 
 #[test]
@@ -78,6 +78,19 @@ fn round_trips_through_serialize_and_verify() {
     assert_eq!(parsed.payload, symbol_payload());
 }
 
+#[test]
+fn symbol_record_fixed_width_fields_are_little_endian() {
+    let encoding = encoded(1);
+    let bytes = record(&encoding).serialize(&encoding.symbol_auth_key(&dek()));
+
+    assert_eq!(&bytes[4..6], &1u16.to_le_bytes());
+    assert_eq!(&bytes[6..8], &HEADER_LEN_V1.to_le_bytes());
+    assert_eq!(&bytes[8..12], &(bytes.len() as u32).to_le_bytes());
+    assert_eq!(&bytes[108..110], &0x0002u16.to_le_bytes());
+    assert_eq!(&bytes[110..114], &1u32.to_le_bytes());
+    assert_eq!(&bytes[114..118], &42u32.to_le_bytes());
+}
+
 /// THE WIRE-SHAPE LAW. Every symbol on the wire is exactly `symbol_size` —
 /// the encoder zero-pads to it and asupersync's decoder refuses anything
 /// else wholesale — so a SHORT-but-authentic payload must be rejected here
@@ -85,7 +98,7 @@ fn round_trips_through_serialize_and_verify() {
 #[test]
 fn a_short_payload_is_refused_even_when_authentic() {
     let encoding = encoded(1);
-    let short = SymbolRecord::for_encoding(&encoding, 0x0002, 1, 42, 0, vec![0u8; 1279]);
+    let short = SymbolRecord::for_encoding(&encoding, 1, 42, 0, vec![0u8; 1279]);
     let bytes = short.serialize(&encoding.symbol_auth_key(&dek()));
     assert_eq!(
         SymbolRecord::verify(&bytes, &encoding, &dek()),
@@ -151,6 +164,22 @@ fn a_record_from_another_encoding_is_rejected_as_foreign() {
     );
 }
 
+/// `SymbolRecord::for_encoding` derives its kind from the authenticated
+/// cipher descriptor. A record with a deliberately changed-but-re-MACed kind
+/// is therefore still foreign to that encoding.
+#[test]
+fn a_mac_valid_wrong_kind_record_is_rejected_as_foreign() {
+    let encoding = encoded(1);
+    let mut wrong_kind = record(&encoding);
+    wrong_kind.object_kind ^= 0x0001;
+    let bytes = wrong_kind.serialize(&encoding.symbol_auth_key(&dek()));
+
+    assert_eq!(
+        SymbolRecord::verify(&bytes, &encoding, &dek()),
+        Err(SymbolError::ForeignEncoding)
+    );
+}
+
 /// The per-encoding key is what makes the previous law cryptographic rather
 /// than merely a field comparison: the same bytes under the other encoding's
 /// key do not authenticate.
@@ -200,7 +229,7 @@ fn truncated_and_inconsistent_records_fail_closed() {
 
     // record_len that does not match header + payload + MAC.
     let mut lying = bytes.clone();
-    let bad_len = (bytes.len() as u32 + 64).to_be_bytes();
+    let bad_len = (bytes.len() as u32 + 64).to_le_bytes();
     lying[8..12].copy_from_slice(&bad_len);
     assert_eq!(
         SymbolRecord::verify(&lying, &encoding, &dek()),
@@ -242,7 +271,7 @@ fn unknown_framing_is_rejected_not_ignored() {
     );
 
     let mut future_version = bytes.clone();
-    future_version[4..6].copy_from_slice(&2u16.to_be_bytes());
+    future_version[4..6].copy_from_slice(&2u16.to_le_bytes());
     assert_eq!(
         SymbolRecord::verify(&future_version, &encoding, &dek()),
         Err(SymbolError::UnsupportedFraming)
@@ -250,7 +279,7 @@ fn unknown_framing_is_rejected_not_ignored() {
 
     let mut wrong_mac_profile = bytes.clone();
     let profile_offset = usize::from(HEADER_LEN_V1) - 4;
-    wrong_mac_profile[profile_offset..profile_offset + 2].copy_from_slice(&9u16.to_be_bytes());
+    wrong_mac_profile[profile_offset..profile_offset + 2].copy_from_slice(&9u16.to_le_bytes());
     assert_eq!(
         SymbolRecord::verify(&wrong_mac_profile, &encoding, &dek()),
         Err(SymbolError::UnsupportedFraming)
@@ -258,7 +287,7 @@ fn unknown_framing_is_rejected_not_ignored() {
 
     let mut wrong_mac_len = bytes.clone();
     let len_offset = usize::from(HEADER_LEN_V1) - 2;
-    wrong_mac_len[len_offset..len_offset + 2].copy_from_slice(&32u16.to_be_bytes());
+    wrong_mac_len[len_offset..len_offset + 2].copy_from_slice(&32u16.to_le_bytes());
     assert_eq!(
         SymbolRecord::verify(&wrong_mac_len, &encoding, &dek()),
         Err(SymbolError::UnsupportedFraming)

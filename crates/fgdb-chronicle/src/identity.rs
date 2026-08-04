@@ -39,19 +39,19 @@ pub struct CipherDescriptor {
 }
 
 impl CipherDescriptor {
-    /// Canonical bytes: fixed-width big-endian fields in declaration order.
+    /// Canonical bytes: fixed-width little-endian fields in declaration order.
     /// The logical OID is bound separately by the AAD transcript, so it is
     /// deliberately not repeated here.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(2 + 8 + 2 + 8 + 2 + 16 + 24 + 2);
-        out.extend_from_slice(&self.object_kind.to_be_bytes());
-        out.extend_from_slice(&self.canonical_plaintext_len.to_be_bytes());
-        out.extend_from_slice(&self.codec_profile.to_be_bytes());
-        out.extend_from_slice(&self.compressed_len.to_be_bytes());
-        out.extend_from_slice(&self.data_crypto_profile.to_be_bytes());
+        out.extend_from_slice(&self.object_kind.to_le_bytes());
+        out.extend_from_slice(&self.canonical_plaintext_len.to_le_bytes());
+        out.extend_from_slice(&self.codec_profile.to_le_bytes());
+        out.extend_from_slice(&self.compressed_len.to_le_bytes());
+        out.extend_from_slice(&self.data_crypto_profile.to_le_bytes());
         out.extend_from_slice(&self.dek_id);
         out.extend_from_slice(&self.object_nonce);
-        out.extend_from_slice(&self.object_tag_len.to_be_bytes());
+        out.extend_from_slice(&self.object_tag_len.to_le_bytes());
         out
     }
 }
@@ -79,14 +79,22 @@ impl IdentifiedObject {
         canonical_header: &[u8],
         canonical_payload: &[u8],
     ) -> Self {
+        // `object_kind` is a canonical-logical-header field, not merely a
+        // collision-bucket discriminator. Hash it before the caller's header
+        // so identical payloads from two schema kinds cannot share an
+        // `ObjectId` in the first place.
+        let mut identity_header = Vec::with_capacity(2 + canonical_header.len());
+        identity_header.extend_from_slice(&object_kind.to_le_bytes());
+        identity_header.extend_from_slice(canonical_header);
         let digest = fgdb_crypto::logical_object_id(
             k_oid,
             &namespace.0,
-            canonical_header,
+            &identity_header,
             canonical_payload,
         );
         let mut canonical_plaintext =
-            Vec::with_capacity(canonical_header.len() + canonical_payload.len());
+            Vec::with_capacity(2 + canonical_header.len() + canonical_payload.len());
+        canonical_plaintext.extend_from_slice(&object_kind.to_le_bytes());
         canonical_plaintext.extend_from_slice(canonical_header);
         canonical_plaintext.extend_from_slice(canonical_payload);
         Self {
@@ -251,13 +259,13 @@ impl EncodingDescriptor {
     pub(crate) fn canonical_bytes(&self, ciphertext_id: Digest) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + 2 + 8 + 8 + 4 + 2 + 2 + 2);
         out.extend_from_slice(&ciphertext_id.0);
-        out.extend_from_slice(&self.fec_profile.to_be_bytes());
-        out.extend_from_slice(&self.transfer_length.to_be_bytes());
-        out.extend_from_slice(&self.oti_common.to_be_bytes());
-        out.extend_from_slice(&self.oti_scheme.to_be_bytes());
-        out.extend_from_slice(&self.symbol_size.to_be_bytes());
-        out.extend_from_slice(&self.source_block_count.to_be_bytes());
-        out.extend_from_slice(&self.symbol_auth_profile.to_be_bytes());
+        out.extend_from_slice(&self.fec_profile.to_le_bytes());
+        out.extend_from_slice(&self.transfer_length.to_le_bytes());
+        out.extend_from_slice(&self.oti_common.to_le_bytes());
+        out.extend_from_slice(&self.oti_scheme.to_le_bytes());
+        out.extend_from_slice(&self.symbol_size.to_le_bytes());
+        out.extend_from_slice(&self.source_block_count.to_le_bytes());
+        out.extend_from_slice(&self.symbol_auth_profile.to_le_bytes());
         out
     }
 }
@@ -442,10 +450,10 @@ impl LocationForm {
                 symbol_inventory_digest,
             } => {
                 out.push(0x01);
-                out.extend_from_slice(&failure_domain_id.to_be_bytes());
-                out.extend_from_slice(&segment_id.to_be_bytes());
-                out.extend_from_slice(&offset.to_be_bytes());
-                out.extend_from_slice(&encoded_len.to_be_bytes());
+                out.extend_from_slice(&failure_domain_id.to_le_bytes());
+                out.extend_from_slice(&segment_id.to_le_bytes());
+                out.extend_from_slice(&offset.to_le_bytes());
+                out.extend_from_slice(&encoded_len.to_le_bytes());
                 out.extend_from_slice(&symbol_inventory_digest.0);
             }
             Self::Explicit {
@@ -453,11 +461,11 @@ impl LocationForm {
                 failure_domains,
             } => {
                 out.push(0x02);
-                out.extend_from_slice(&(sorted_symbol_inventory.len() as u64).to_be_bytes());
+                out.extend_from_slice(&(sorted_symbol_inventory.len() as u64).to_le_bytes());
                 out.extend_from_slice(sorted_symbol_inventory);
-                out.extend_from_slice(&(failure_domains.len() as u64).to_be_bytes());
+                out.extend_from_slice(&(failure_domains.len() as u64).to_le_bytes());
                 for domain in failure_domains {
-                    out.extend_from_slice(&domain.to_be_bytes());
+                    out.extend_from_slice(&domain.to_le_bytes());
                 }
             }
         }
@@ -477,8 +485,8 @@ impl PlacementDescriptor {
     pub(crate) fn canonical_bytes(&self, encoding_id: Digest) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&encoding_id.0);
-        out.extend_from_slice(&self.placement_epoch.to_be_bytes());
-        out.extend_from_slice(&self.failure_domain_policy.to_be_bytes());
+        out.extend_from_slice(&self.placement_epoch.to_le_bytes());
+        out.extend_from_slice(&self.failure_domain_policy.to_le_bytes());
         out.extend_from_slice(&self.location_form.canonical_bytes());
         out
     }

@@ -200,8 +200,10 @@ fn the_pack_nonce_and_descriptor_facts_are_derived() {
 
     let descriptor = first.protected().descriptor();
     assert_eq!(descriptor.object_kind, PACK_REALIZATION_KIND);
-    assert_eq!(descriptor.canonical_plaintext_len, 344);
-    assert_eq!(descriptor.compressed_len, 344);
+    // Each of the four members carries its little-endian `object_kind` in
+    // the canonical logical header as well as its payload.
+    assert_eq!(descriptor.canonical_plaintext_len, 344 + 4 * 2);
+    assert_eq!(descriptor.compressed_len, 344 + 4 * 2);
     assert_eq!(descriptor.object_tag_len, 16);
 }
 

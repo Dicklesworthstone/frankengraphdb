@@ -66,6 +66,28 @@ fn header() -> &'static [u8] {
     b"canonical-header"
 }
 
+#[test]
+fn cipher_descriptor_fixed_width_fields_are_little_endian() {
+    let descriptor = CipherDescriptor {
+        object_kind: 0x1234,
+        canonical_plaintext_len: 0x0102_0304_0506_0708,
+        codec_profile: 0x1122,
+        compressed_len: 0x2122_2324_2526_2728,
+        data_crypto_profile: 0x3344,
+        dek_id: [0x55; 16],
+        object_nonce: [0x66; 24],
+        object_tag_len: 0x7788,
+    };
+
+    let bytes = descriptor.canonical_bytes();
+    assert_eq!(&bytes[0..2], &0x1234u16.to_le_bytes());
+    assert_eq!(&bytes[2..10], &0x0102_0304_0506_0708u64.to_le_bytes());
+    assert_eq!(&bytes[10..12], &0x1122u16.to_le_bytes());
+    assert_eq!(&bytes[12..20], &0x2122_2324_2526_2728u64.to_le_bytes());
+    assert_eq!(&bytes[20..22], &0x3344u16.to_le_bytes());
+    assert_eq!(&bytes[62..64], &0x7788u16.to_le_bytes());
+}
+
 fn payload() -> Vec<u8> {
     (0..512u32).map(|i| (i % 251) as u8).collect()
 }
@@ -264,10 +286,14 @@ fn dedup_does_not_cross_namespaces_or_keys() {
 fn collision_verification_checks_kind_and_length_not_just_the_digest() {
     let a = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
     let b = IdentifiedObject::new(&k_oid(), namespace(), 0x0003, header(), &payload());
-    assert!(
-        !a.verifies_as_same_object(&b),
-        "a kind difference must defeat substitution"
+    assert_ne!(
+        a.object_id(),
+        b.object_id(),
+        "object kind is inside the keyed logical-identity transcript"
     );
+    assert_eq!(&a.canonical_plaintext()[..2], &0x0002u16.to_le_bytes());
+    assert_eq!(&b.canonical_plaintext()[..2], &0x0003u16.to_le_bytes());
+    assert!(!a.verifies_as_same_object(&b));
 
     let short: Vec<u8> = payload().into_iter().take(256).collect();
     let c = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &short);

@@ -113,26 +113,26 @@ impl SymbolRecord {
     fn serialize_header(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(usize::from(HEADER_LEN_V1));
         out.extend_from_slice(&SYMBOL_MAGIC);
-        out.extend_from_slice(&self.format_version.to_be_bytes());
-        out.extend_from_slice(&HEADER_LEN_V1.to_be_bytes());
-        out.extend_from_slice(&self.record_len().to_be_bytes());
+        out.extend_from_slice(&self.format_version.to_le_bytes());
+        out.extend_from_slice(&HEADER_LEN_V1.to_le_bytes());
+        out.extend_from_slice(&self.record_len().to_le_bytes());
         out.extend_from_slice(&self.logical_oid.0);
         out.extend_from_slice(&self.ciphertext_id.0);
         out.extend_from_slice(&self.encoding_id.0);
-        out.extend_from_slice(&self.object_kind.to_be_bytes());
-        out.extend_from_slice(&self.source_block.to_be_bytes());
-        out.extend_from_slice(&self.esi.to_be_bytes());
+        out.extend_from_slice(&self.object_kind.to_le_bytes());
+        out.extend_from_slice(&self.source_block.to_le_bytes());
+        out.extend_from_slice(&self.esi.to_le_bytes());
         out.extend_from_slice(
             &u32::try_from(self.payload.len())
                 .expect("symbol payload fits u32")
-                .to_be_bytes(),
+                .to_le_bytes(),
         );
-        out.extend_from_slice(&self.transfer_length.to_be_bytes());
-        out.extend_from_slice(&self.oti_common.to_be_bytes());
-        out.extend_from_slice(&self.oti_scheme.to_be_bytes());
-        out.extend_from_slice(&self.flags.to_be_bytes());
-        out.extend_from_slice(&self.symbol_mac_profile.to_be_bytes());
-        out.extend_from_slice(&SYMBOL_MAC_LEN_V1.to_be_bytes());
+        out.extend_from_slice(&self.transfer_length.to_le_bytes());
+        out.extend_from_slice(&self.oti_common.to_le_bytes());
+        out.extend_from_slice(&self.oti_scheme.to_le_bytes());
+        out.extend_from_slice(&self.flags.to_le_bytes());
+        out.extend_from_slice(&self.symbol_mac_profile.to_le_bytes());
+        out.extend_from_slice(&SYMBOL_MAC_LEN_V1.to_le_bytes());
         debug_assert_eq!(out.len(), usize::from(HEADER_LEN_V1));
         out
     }
@@ -145,7 +145,7 @@ impl SymbolRecord {
         let mut transcript =
             Vec::with_capacity(SYMBOL_MAC_DOMAIN.len() + 2 + header.len() + self.payload.len());
         transcript.extend_from_slice(SYMBOL_MAC_DOMAIN);
-        transcript.extend_from_slice(&self.format_version.to_be_bytes());
+        transcript.extend_from_slice(&self.format_version.to_le_bytes());
         transcript.extend_from_slice(&header);
         transcript.extend_from_slice(&self.payload);
         transcript
@@ -179,7 +179,7 @@ impl SymbolRecord {
         }
         let mut cursor = 4usize;
         let take_u16 = |cursor: &mut usize| {
-            let value = u16::from_be_bytes([bytes[*cursor], bytes[*cursor + 1]]);
+            let value = u16::from_le_bytes([bytes[*cursor], bytes[*cursor + 1]]);
             *cursor += 2;
             value
         };
@@ -189,7 +189,7 @@ impl SymbolRecord {
             return Err(SymbolError::UnsupportedFraming);
         }
 
-        let record_len = u32::from_be_bytes([
+        let record_len = u32::from_le_bytes([
             bytes[cursor],
             bytes[cursor + 1],
             bytes[cursor + 2],
@@ -207,10 +207,10 @@ impl SymbolRecord {
         let ciphertext_id = Digest(take_32(&mut cursor));
         let encoding_id = Digest(take_32(&mut cursor));
 
-        let object_kind = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]);
+        let object_kind = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
         cursor += 2;
         let take_u32 = |cursor: &mut usize| {
-            let value = u32::from_be_bytes([
+            let value = u32::from_le_bytes([
                 bytes[*cursor],
                 bytes[*cursor + 1],
                 bytes[*cursor + 2],
@@ -226,15 +226,15 @@ impl SymbolRecord {
             let mut value = [0u8; 8];
             value.copy_from_slice(&bytes[*cursor..*cursor + 8]);
             *cursor += 8;
-            u64::from_be_bytes(value)
+            u64::from_le_bytes(value)
         };
         let transfer_length = take_u64(&mut cursor);
         let oti_common = take_u64(&mut cursor);
         let oti_scheme = take_u32(&mut cursor);
         let flags = take_u32(&mut cursor);
-        let symbol_mac_profile = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]);
+        let symbol_mac_profile = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
         cursor += 2;
-        let symbol_mac_len = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]);
+        let symbol_mac_len = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
         cursor += 2;
 
         // ubs:ignore — public wire-profile discriminator, not secret material.
@@ -308,6 +308,7 @@ impl SymbolRecord {
             // ubs:ignore — public ciphertext identity, not authentication material.
             || record.ciphertext_id != encoding.ciphertext_id()
             || record.logical_oid != encoding.object_id()
+            || record.object_kind != encoding.cipher_descriptor().object_kind
         {
             return Err(SymbolError::ForeignEncoding);
         }
@@ -350,7 +351,6 @@ impl SymbolRecord {
     /// from the encoding, so a caller cannot mislabel a symbol.
     pub fn for_encoding(
         encoding: &EncodedObject,
-        object_kind: u16,
         source_block: u32,
         esi: u32,
         flags: u32,
@@ -362,7 +362,7 @@ impl SymbolRecord {
             logical_oid: encoding.object_id(),
             ciphertext_id: encoding.ciphertext_id(),
             encoding_id: encoding.encoding_id(),
-            object_kind,
+            object_kind: encoding.cipher_descriptor().object_kind,
             source_block,
             esi,
             transfer_length: descriptor.transfer_length,
