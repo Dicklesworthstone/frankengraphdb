@@ -9,13 +9,14 @@
 //! story starts here: an admission path that accounts work through these
 //! types cannot silently exceed a budget.
 //!
-//! The *durable* charge-vector and ledger-transition schemas (Appendix A
-//! a12 slice: `DurableChargeVector`, `EphemeralResourceBudget`,
-//! `ResourceLedgerTransition<Role>`) are owned by
-//! `fgdb-w1-resource-ledger-contract` — this crate is the arithmetic they
-//! and the runtime share, not those formats.
+//! The [`ledger`] module owns the durable-accounting semantic algebra:
+//! fixed charge vectors, quota paths, buckets, ownership entries, and atomic
+//! transitions. Registry-generated field tags, durable bytes, and keyed object
+//! identities remain in their separately owned format/identity layers.
 
 #![forbid(unsafe_code)]
+
+pub mod ledger;
 
 /// The five accounting axes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

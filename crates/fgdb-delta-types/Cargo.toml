@@ -8,7 +8,7 @@ publish = false
 [dependencies.fgdb-types]
 path = "../fgdb-types"
 
-[dev-dependencies.fgdb-bigint]
+[dependencies.fgdb-bigint]
 path = "../fgdb-bigint"
 
 [dev-dependencies.fgdb-claim]

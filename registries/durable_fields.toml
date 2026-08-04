@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 8
+registry_epoch = 9
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -2928,6 +2928,17 @@ version_status = "reserved"
 max_size_bytes = 65536
 
 [[union]]
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ExternalKeyDestructionOperationRecord", "KeyDestructionOperationPlan", "ShardKeyDestroyApplySpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
 union_name = "NewDatabaseIdentityTargetCreationCommitment"
 containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
 union_path = "NewDatabaseIdentityTargetCreationCommitment"
@@ -3034,6 +3045,45 @@ source_arm_name = "Configuration"
 stable_name = "Configuration"
 payload_kind = "inline-record"
 payload_sha256 = "dd6892393874a249fd01e86d8722760a8a2ec9ac1b27d6ce1b8dc610769404fa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+arm_tag = 0x0001
+source_arm_name = "KmsKeyVersion"
+stable_name = "KmsKeyVersion"
+payload_kind = "inline-record"
+payload_sha256 = "828a349880c984f958e2cbe942803d87d63e92d20c04d16535308b1546bfed9d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+arm_tag = 0x0002
+source_arm_name = "HsmObject"
+stable_name = "HsmObject"
+payload_kind = "inline-record"
+payload_sha256 = "e6c3e53289c517cff9b734083b1d0a098d86a6490363d8fd50d86a0b1b43cb48"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+arm_tag = 0x0003
+source_arm_name = "StorageMemberReplica"
+stable_name = "StorageMemberReplica"
+payload_kind = "inline-record"
+payload_sha256 = "f32a84e2865c970ee0bee0b991fe7297b8fd768f7c93200dbf165de2b67914a5"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536

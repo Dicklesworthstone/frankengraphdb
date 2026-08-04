@@ -2,8 +2,11 @@
 name = "fgdb-resource"
 version = "0.0.1"
 edition = "2024"
-description = "Typed resource vectors and ceilings: checked, axis-explicit accounting consumed later by permits, FrameLimits, and W10 admission control (bead fgdb-w1-foundation-types-tjk)."
+description = "Typed resource vectors, ceilings, and atomic durable-accounting algebra for FrankenGraphDB."
 publish = false
+
+[dependencies]
+fgdb-types = { path = "../fgdb-types" }
 
 [lints]
 workspace = true

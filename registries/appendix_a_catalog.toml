@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 349
+target_count = 357
 projection_fallback_count = 83
-target_source_assignment_sha256 = "878ac35ac5df37458749ea1d3729df8d3220826abeb852359d010e3b281d7bc1"
+target_source_assignment_sha256 = "7543f2d271f86683f61c3724968496f62b337a21bf89aa0f93e68d80a8b9602c"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,11 +596,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 7
+registry_epoch = 8
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 8
+registry_epoch = 9
 
 [[logical_kind]]
 slice_id = "a03"
@@ -1672,6 +1672,56 @@ containing_union = "KeyDestroyExternalAckRef"
 wire_tag = 0x0003
 encoding_context = "reserved inline-record payload; exact ack_ref field registration and bound proof remain required before activation"
 allowed_containing_schemas = ["KeyDestroyExternalAckRef"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-target"
+wire_type_id = 0x0036
+name = "KeyDestructionTarget"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union; a15:2057 confirms KmsKeyVersion, HsmObject, and StorageMemberReplica inline-record arms, while exact arm field rows and a source-derived bound proof remain required before activation"
+allowed_containing_schemas = ["ExternalKeyDestructionOperationRecord", "KeyDestructionOperationPlan", "ShardKeyDestroyApplySpec"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-target-kms-key-version"
+wire_type_id = 0x0037
+name = "KeyDestructionTarget.KmsKeyVersion"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestructionTarget"
+wire_tag = 0x0001
+encoding_context = "reserved inline-record payload; exact kms_authority_id, key_uri, and key_version field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestructionTarget"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-target-hsm-object"
+wire_type_id = 0x0038
+name = "KeyDestructionTarget.HsmObject"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestructionTarget"
+wire_tag = 0x0002
+encoding_context = "reserved inline-record payload; exact hsm_cluster_id, slot_id, and object_handle_digest field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestructionTarget"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-target-storage-member-replica"
+wire_type_id = 0x0039
+name = "KeyDestructionTarget.StorageMemberReplica"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestructionTarget"
+wire_tag = 0x0003
+encoding_context = "reserved inline-record payload; exact consensus_domain, member_id, material_class, and material_identity_digest field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestructionTarget"]
 max_size_bytes = 65536
 
 [[wire_type]]
@@ -5571,6 +5621,64 @@ source_arm_name = "RemoteConsumer"
 stable_name = "RemoteConsumer"
 payload_kind = "inline-record"
 payload_sha256 = "9173544b408ec4201373b1227160c6ae768b69351628159383d5b313b4b458a0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
+slice_id = "a15"
+row_id = "a15:union:key-destruction-target-5f0a21271211908f"
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ExternalKeyDestructionOperationRecord", "KeyDestructionOperationPlan", "ShardKeyDestroyApplySpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destruction-target-kms-key-version-d5b3100676a4b5ef"
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+arm_tag = 0x0001
+source_arm_name = "KmsKeyVersion"
+stable_name = "KmsKeyVersion"
+payload_kind = "inline-record"
+payload_sha256 = "828a349880c984f958e2cbe942803d87d63e92d20c04d16535308b1546bfed9d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destruction-target-hsm-object-c3f6db3fad7e5547"
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+arm_tag = 0x0002
+source_arm_name = "HsmObject"
+stable_name = "HsmObject"
+payload_kind = "inline-record"
+payload_sha256 = "e6c3e53289c517cff9b734083b1d0a098d86a6490363d8fd50d86a0b1b43cb48"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destruction-target-storage-member-replica-b7b87fefd2f28cf1"
+union_name = "KeyDestructionTarget"
+containing_schema = "KeyDestructionTarget"
+union_path = "KeyDestructionTarget"
+arm_tag = 0x0003
+source_arm_name = "StorageMemberReplica"
+stable_name = "StorageMemberReplica"
+payload_kind = "inline-record"
+payload_sha256 = "f32a84e2865c970ee0bee0b991fe7297b8fd768f7c93200dbf165de2b67914a5"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
@@ -17391,7 +17499,7 @@ symbol = "KeyDestructionTarget"
 generic_signature = ""
 source_key = "top|KeyDestructionTarget"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a15:2057"]
 
 [[top_level_candidate]]
@@ -26371,6 +26479,70 @@ row_id = "a15:target:wire-type-key-destroy-floor-ref-configuration"
 target_row_id = "a15:wire-type:key-destroy-floor-ref-configuration"
 slice_id = "a15"
 source_key = "arm|KeyDestroyFloorRef|KeyDestroyFloorRef|Configuration"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destruction-target-hsm-object-c3f6db3fad7e5547"
+target_row_id = "a15:union-arm:key-destruction-target-hsm-object-c3f6db3fad7e5547"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|HsmObject"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destruction-target-kms-key-version-d5b3100676a4b5ef"
+target_row_id = "a15:union-arm:key-destruction-target-kms-key-version-d5b3100676a4b5ef"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|KmsKeyVersion"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destruction-target-storage-member-replica-b7b87fefd2f28cf1"
+target_row_id = "a15:union-arm:key-destruction-target-storage-member-replica-b7b87fefd2f28cf1"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|StorageMemberReplica"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-key-destruction-target-5f0a21271211908f"
+target_row_id = "a15:union:key-destruction-target-5f0a21271211908f"
+slice_id = "a15"
+source_key = "union|KeyDestructionTarget|KeyDestructionTarget"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-target"
+target_row_id = "a15:wire-type:key-destruction-target"
+slice_id = "a15"
+source_key = "top|KeyDestructionTarget"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-target-hsm-object"
+target_row_id = "a15:wire-type:key-destruction-target-hsm-object"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|HsmObject"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-target-kms-key-version"
+target_row_id = "a15:wire-type:key-destruction-target-kms-key-version"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|KmsKeyVersion"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-target-storage-member-replica"
+target_row_id = "a15:wire-type:key-destruction-target-storage-member-replica"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|StorageMemberReplica"
 target_kind = "wire-type"
 definition_status = "declared"
 

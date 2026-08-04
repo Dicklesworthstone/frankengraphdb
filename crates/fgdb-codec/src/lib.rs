@@ -22,4 +22,5 @@ pub mod kernel;
 pub mod logical;
 pub mod neighbor;
 pub mod roaring;
+pub mod run;
 pub mod varint;

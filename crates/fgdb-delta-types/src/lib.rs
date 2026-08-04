@@ -25,7 +25,12 @@
 
 #![forbid(unsafe_code)]
 
+mod zweight;
+
 use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, MarkerRef, ObjectId, VId};
+
+pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
+pub use zweight::{ZWeight, ZWeightError};
 
 /// Catalog-interned label ordinal (durable pinning: `fgdb-w4-schema-catalog`).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
