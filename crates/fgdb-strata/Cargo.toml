@@ -22,6 +22,16 @@ workspace = true
 [dev-dependencies.fgdb-delta-types]
 path = "../fgdb-delta-types"
 
+# TESTS ONLY, AND DELIBERATELY NOT A REAL DEPENDENCY YET. `fgdb-codec::identity`
+# is the registered identity-column codec §6.2 requires for block entries, and
+# this crate does not use it — the byte-economy witnesses in
+# tests/delta_block_format.rs measure what adopting it would actually buy, by
+# running the real codec rather than by arithmetic. The production dependency
+# lands with the format change itself (fgdb-by2l), not before: a dev-dependency
+# cannot be mistaken for adoption.
+[dev-dependencies.fgdb-codec]
+path = "../fgdb-codec"
+
 # The lab runtime, for tests only: the block store is the first thing in this
 # crate that touches a disk, so its laws must run under the runtime that can
 # inject fsync lies and torn writes at that boundary.

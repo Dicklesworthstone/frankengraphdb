@@ -657,6 +657,135 @@ fn four_kibibytes_hold_fifty_six_entries_where_the_law_wants_two_hundred_fifty_s
     );
 }
 
+// ---------------------------------------------------------------------------
+// What adopting the codec would actually buy — measured, not projected
+// ---------------------------------------------------------------------------
+//
+// **THIS ANSWERS A SCOPING QUESTION WITH THE REAL CODEC INSTEAD OF ARITHMETIC.**
+// `fgdb-codec::identity` already implements §6.2's registered identity-column
+// layout, and this crate does not call it (fgdb-by2l). The obvious next increment
+// is "adopt the codec for the block's identity columns" — and the numbers below
+// say that increment CANNOT reach §6.2's <=16 B/entry law, because the law is not
+// really about the codec.
+//
+// The measurement runs the actual encoder over the actual entries a block holds,
+// so it is not a size model that can drift from the code it predicts. It is a
+// dev-dependency: measuring what adoption buys is not adoption.
+//
+// **WHY THE LAW NEEDS MORE THAN A CODEC.** §6.2's entry is
+// `(dst_VId, EId, user_key_ref?, prop_row_ref, flags)` — it carries NO `src`, no
+// `relation`, and no inline `created_at`/`retired_at`, because a normative block
+// is per `(partition_id, descriptor_key)` and visibility lives in the block's own
+// `visibility_intervals[]`. Those four fields are hoisted OUT of the entry. This
+// format keeps all four in every entry, and no encoding of the three identity
+// columns can pay for a `relation` and two sequence numbers that should not be
+// there at all. Two identity columns at ~6 B is how 16 B is reached; six columns
+// is not.
+
+use fgdb_codec::identity::{IdentityColumn, IdentityColumnLimits};
+
+/// Encode one identity column of `values` through the real codec and return its
+/// exact payload length.
+fn codec_payload_len<T: fgdb_codec::identity::ElementIdentity>(values: &[T]) -> usize {
+    let limits = IdentityColumnLimits::new(values.len().max(1), 256, 1 << 20);
+    let column =
+        IdentityColumn::try_new(values, limits).expect("the codec accepts block identities");
+    column.encoded_payload_len()
+}
+
+/// WITNESS: adopting the identity-column codec for this entry shape gets to
+/// roughly 42 B/entry — a real 1.7x, and still 2.6x above §6.2's law.
+///
+/// Measured over a 256-entry run, the size §6.2 actually talks about. The three
+/// identity columns are handed to the codec exactly as a block holds them; the
+/// `relation`/`created_at`/`retired_at` columns keep their present fixed width,
+/// because nothing in the identity codec addresses them.
+///
+/// **THE POINT IS THE SHORTFALL, NOT THE SAVING.** A format change that lands
+/// this and stops would still miss the law, so it would still not let
+/// `DeltaBlockVersion` into Appendix A — which is the entire purpose of the
+/// exercise (fgdb-ge6a). Read this as: adopt the codec AND hoist the four
+/// non-entry fields in the same breaking change, or the block gets rewritten
+/// twice for one outcome.
+#[test]
+fn adopting_the_codec_alone_lands_near_forty_two_bytes_and_the_law_wants_sixteen() {
+    let entries = run_of(NORMATIVE_ENTRIES_PER_BLOCK);
+    let rows = entries.len();
+
+    let srcs: Vec<_> = entries.iter().map(|e| e.src).collect();
+    let dsts: Vec<_> = entries.iter().map(|e| e.dst).collect();
+    let eids: Vec<_> = entries.iter().map(|e| e.eid).collect();
+
+    let identity_bytes =
+        codec_payload_len(&srcs) + codec_payload_len(&dsts) + codec_payload_len(&eids);
+    // relation(8) + created_at(8) + retired_at(8), untouched by an identity codec.
+    let fixed_bytes = rows * (8 + 8 + 8);
+    let per_entry = (identity_bytes + fixed_bytes).div_ceil(rows);
+
+    assert!(
+        (40..=44).contains(&per_entry),
+        "codec-adopted entry cost measured {per_entry} B; expected ~42 B \
+         (three identity columns at ~6 B plus 24 B of fixed columns). If this moved, \
+         the codec's representation chooser changed and the fgdb-by2l scoping \
+         argument must be re-derived"
+    );
+    assert!(
+        per_entry > NORMATIVE_BYTES_PER_ENTRY,
+        "codec adoption alone still misses §6.2's {NORMATIVE_BYTES_PER_ENTRY} B law: \
+         the four hoisted fields, not the encoding, are what stands between this \
+         format and registration"
+    );
+    // And it IS a real improvement over the raw layout, which is why the codec is
+    // part of the answer even though it is not the whole answer.
+    assert!(
+        per_entry < measured_bytes_per_entry(),
+        "codec adoption must beat the raw 72 B layout or the premise is wrong"
+    );
+}
+
+/// WITNESS: §6.2's OWN entry shape reaches the law with the same codec — 13 B for
+/// two identity columns, inside the 16 B ceiling.
+///
+/// This is the control that proves the shortfall above is the ENTRY SHAPE and not
+/// the codec: hand the identical codec only the two columns §6.2's entry actually
+/// carries, and the law is met. §6.2's ceiling is not arbitrary — it is close to
+/// what two shared-prefix identity columns cost, which is why the normative entry
+/// has exactly two of them.
+///
+/// The 13 is 6 B of slot per row per column, plus one 11-byte prefix dictionary
+/// per column amortized over 256 rows. The dictionaries are why this is 13 and not
+/// the 12 the per-row arithmetic alone suggests — a detail worth pinning, because
+/// the 3 B of remaining headroom is what `user_key_ref?`, `prop_row_ref` and
+/// `flags` have to fit into, and that is tight rather than comfortable.
+#[test]
+fn the_normative_entry_shape_reaches_the_law_with_the_same_codec() {
+    let entries = run_of(NORMATIVE_ENTRIES_PER_BLOCK);
+    let rows = entries.len();
+
+    let dsts: Vec<_> = entries.iter().map(|e| e.dst).collect();
+    let eids: Vec<_> = entries.iter().map(|e| e.eid).collect();
+    let per_entry = (codec_payload_len(&dsts) + codec_payload_len(&eids)).div_ceil(rows);
+
+    assert!(
+        per_entry <= NORMATIVE_BYTES_PER_ENTRY,
+        "the normative two-column entry measured {per_entry} B against §6.2's \
+         {NORMATIVE_BYTES_PER_ENTRY} B ceiling; if this ever exceeds it, §6.2's \
+         4 KiB/256 sizing is not achievable as written and that is a plan-level finding"
+    );
+    // Pinned exactly, because the margin is the interesting part: §6.2's entry
+    // also carries user_key_ref?, prop_row_ref and flags, and they have to fit in
+    // what is left under the same ceiling.
+    assert_eq!(
+        per_entry,
+        13,
+        "two identity columns measured {per_entry} B/entry (6 B slot per row per \
+         column, plus an 11 B prefix dictionary each amortized over {rows} rows). \
+         That leaves {} B under §6.2's {NORMATIVE_BYTES_PER_ENTRY} B ceiling for \
+         user_key_ref?/prop_row_ref/flags",
+        NORMATIVE_BYTES_PER_ENTRY - per_entry
+    );
+}
+
 /// CONTROL: the two witnesses above can actually fail.
 ///
 /// Both measure a difference between encoder outputs, so a fixture that silently
