@@ -123,6 +123,16 @@ fn candidates(plan: FaultPlan) -> Vec<(&'static str, FaultPlan)> {
             },
         ));
     }
+    if plan.latency != Trigger::Never {
+        out.push((
+            "dropped the latency class",
+            FaultPlan {
+                latency: Trigger::Never,
+                latency_micros: 0,
+                ..plan
+            },
+        ));
+    }
 
     // 2. Drop the space budget.
     if plan.space_budget.is_some() {
@@ -177,6 +187,15 @@ fn candidates(plan: FaultPlan) -> Vec<(&'static str, FaultPlan)> {
             "weakened the dirent loss to fire once",
             FaultPlan {
                 dirent_loss: Trigger::Nth(1),
+                ..plan
+            },
+        ));
+    }
+    if plan.latency == Trigger::Always {
+        out.push((
+            "weakened the latency to fire once",
+            FaultPlan {
+                latency: Trigger::Nth(1),
                 ..plan
             },
         ));

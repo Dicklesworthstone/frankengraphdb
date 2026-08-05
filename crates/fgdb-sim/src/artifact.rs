@@ -372,7 +372,7 @@ impl Replay {
             None => "none".to_string(),
         };
         format!(
-            "{}:{:#x}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{:#x}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.scenario.id(),
             self.plan.seed,
             self.plan.sector_bytes,
@@ -381,6 +381,8 @@ impl Replay {
             encode_trigger(self.plan.bit_flip),
             encode_trigger(self.plan.dirent_lie),
             encode_trigger(self.plan.dirent_loss),
+            encode_trigger(self.plan.latency),
+            self.plan.latency_micros,
             budget,
         )
     }
@@ -392,8 +394,9 @@ impl Replay {
     /// Returns a message naming the first field that did not parse.
     //
     // Not a JWT decode. This parses our own replay descriptor —
-    // "scenario:seed:sector:lie:torn:flip:dirent-lie:dirent-loss:budget",
-    // nine colon-separated fields — and there is no token, signature, key, claim set or expiry
+    // "scenario:seed:sector:lie:torn:flip:dirent-lie:dirent-loss:latency:
+    // latency-micros:budget", eleven colon-separated fields — and there is
+    // no token, signature, key, claim set or expiry
     // anywhere in it. MEASURED: zero occurrences of `jsonwebtoken` in any
     // manifest in this workspace, and doctrine 1's closed dependency universe
     // forbids adding one, so a JWT finding here is a false positive BY
@@ -412,11 +415,13 @@ impl Replay {
             flip,
             dirent_lie,
             dirent_loss,
+            latency,
+            latency_micros,
             budget,
         ] = parts.as_slice()
         else {
             return Err(format!(
-                "expected 9 colon-separated fields, got {}",
+                "expected 11 colon-separated fields, got {}",
                 parts.len()
             ));
         };
@@ -438,6 +443,10 @@ impl Replay {
                 bit_flip: decode_trigger(flip)?,
                 dirent_lie: decode_trigger(dirent_lie)?,
                 dirent_loss: decode_trigger(dirent_loss)?,
+                latency: decode_trigger(latency)?,
+                latency_micros: latency_micros
+                    .parse()
+                    .map_err(|_| format!("bad latency_micros {latency_micros:?}"))?,
                 space_budget: if *budget == "none" {
                     None
                 } else {

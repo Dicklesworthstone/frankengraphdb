@@ -800,3 +800,162 @@ fn a_synced_rename_and_removal_stay_applied_across_a_crash() {
         assert_eq!(also_gone.kind(), std::io::ErrorKind::NotFound);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Injectable latency (fgdb-milt)
+// ---------------------------------------------------------------------------
+
+use asupersync::lab::{AutoAdvanceTermination, LabConfig, LabRuntime};
+use asupersync::types::Budget;
+
+/// THE WITNESS THE BEAD EXISTS FOR: the delay is AWAITED, not recorded-and-
+/// skipped. Under the lab runtime the virtual clock advances only when the
+/// scheduler drives an awaited timer, so "elapsed virtual time equals the
+/// injected delay" is exactly the property a placebo cannot fake — a latency
+/// knob that returns without awaiting leaves the clock untouched and this
+/// test red.
+#[test]
+fn an_injected_latency_is_awaited_in_virtual_time() {
+    let dir = scratch_dir("latency-awaited");
+    let path = dir.join("log");
+    let (elapsed_nanos, events) = run_and_expect_lab_green(0x717a, move |root| async move {
+        let vfs = FaultVfs::unix_with_clock(
+            FaultPlan {
+                latency: Trigger::Always,
+                latency_micros: 2_500,
+                ..FaultPlan::faultless()
+            },
+            root.clone(),
+        );
+        let before = root.now();
+        write_and_sync(&vfs, &path, &sector_pattern(1))
+            .await
+            .expect("delayed sync still succeeds");
+        let after = root.now();
+        (after.as_nanos() - before.as_nanos(), vfs.events())
+    });
+    assert_eq!(
+        elapsed_nanos, 2_500_000,
+        "the sync must advance virtual time by exactly the injected delay; \
+         zero means the delay was recorded but never awaited (the placebo)"
+    );
+    assert_eq!(events.len(), 1, "exactly the awaited delay: {events:?}");
+    assert_eq!(events[0].kind, FaultKind::Latency { micros: 2_500 });
+    assert_eq!(events[0].kind.class(), "latency");
+}
+
+/// The control: a plan without latency must be timing-transparent — same
+/// workload, same clock, zero virtual time consumed.
+#[test]
+fn a_faultless_plan_is_timing_transparent() {
+    let dir = scratch_dir("latency-control");
+    let path = dir.join("log");
+    let (elapsed_nanos, events) = run_and_expect_lab_green(0x717b, move |root| async move {
+        let vfs = FaultVfs::unix_with_clock(FaultPlan::faultless(), root.clone());
+        let before = root.now();
+        write_and_sync(&vfs, &path, &sector_pattern(1))
+            .await
+            .expect("sync");
+        let after = root.now();
+        (after.as_nanos() - before.as_nanos(), vfs.events())
+    });
+    assert_eq!(
+        elapsed_nanos, 0,
+        "a faultless plan consumed virtual time; the harness is delaying \
+         when it was not asked to"
+    );
+    assert!(events.is_empty(), "faultless plan injected: {events:?}");
+}
+
+/// A latency delay composes with a fault at the same sync: slow first, then
+/// the lie — and the event order records exactly that.
+#[test]
+fn a_slow_sync_can_still_lie() {
+    let dir = scratch_dir("latency-then-lie");
+    let path = dir.join("log");
+    let (elapsed_nanos, events, durable_len) =
+        run_and_expect_lab_green(0x717c, move |root| async move {
+            let vfs = FaultVfs::unix_with_clock(
+                FaultPlan {
+                    latency: Trigger::Always,
+                    latency_micros: 1_000,
+                    fsync_lie: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+                root.clone(),
+            );
+            let before = root.now();
+            write_and_sync(&vfs, &path, &sector_pattern(1))
+                .await
+                .expect("slow lying sync still reports success");
+            let after = root.now();
+            let durable = vfs.read(&path).await.expect("durable read");
+            (
+                after.as_nanos() - before.as_nanos(),
+                vfs.events(),
+                durable.len(),
+            )
+        });
+    assert_eq!(elapsed_nanos, 1_000_000, "the delay must still be awaited");
+    assert_eq!(events.len(), 2, "the delay, then the lie: {events:?}");
+    assert_eq!(events[0].kind, FaultKind::Latency { micros: 1_000 });
+    assert!(matches!(events[1].kind, FaultKind::FsyncLie { .. }));
+    assert_eq!(durable_len, 0, "the lie must still persist nothing");
+}
+
+/// The hard-error rule: a latency-enabled plan without a clock is refused at
+/// construction, because degrading to no-delay is the placebo.
+#[test]
+#[should_panic(expected = "needs a clock")]
+fn a_latency_enabled_plan_without_a_clock_is_refused() {
+    let _ = FaultVfs::unix(FaultPlan {
+        latency: Trigger::Always,
+        latency_micros: 100,
+        ..FaultPlan::faultless()
+    });
+}
+
+/// Runs `test` under a lab runtime whose loop AUTO-ADVANCES virtual time to
+/// the next timer deadline whenever the scheduler idles.
+///
+/// `run_async_under_lab` deliberately cannot be used here: its
+/// `run_until_quiescent` loop never advances virtual time, so a task parked
+/// on a timer spins to the step budget and reports a stall — measured before
+/// this helper existed. Timer-bearing lab tests need the auto-advance loop,
+/// and this is the public-API spelling of it.
+fn run_and_expect_lab_green<T, Fut>(
+    seed: u64,
+    test: impl FnOnce(asupersync::Cx<asupersync::cx::cap::All>) -> Fut + Send + 'static,
+) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).with_auto_advance());
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let (task_id, mut handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = asupersync::Cx::current().expect("lab task runs with an ambient Cx");
+            test(cx).await
+        })
+        .expect("lab task spawns");
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, Budget::INFINITE.priority);
+    let report = runtime.run_with_auto_advance();
+    assert!(
+        matches!(report.termination, AutoAdvanceTermination::Quiescent),
+        "lab run did not quiesce: {report:?}"
+    );
+    let lab_report = runtime.report();
+    assert!(
+        lab_report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {lab_report:?}"
+    );
+    handle
+        .try_join()
+        .expect("lab task joined")
+        .expect("lab task finished")
+}

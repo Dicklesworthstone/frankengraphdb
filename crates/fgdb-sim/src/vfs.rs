@@ -58,12 +58,27 @@
 //! recorded as a [`FaultEvent`] with the exact byte range it touched, so a
 //! failure names its own cause instead of leaving a reader to guess.
 //!
-//! # What this increment deliberately does not model
+//! # Injectable latency (fgdb-milt)
 //!
-//! * **Injectable latency.** Real latency needs a timer the lab runtime can
-//!   advance in virtual time; recording an intended delay without awaiting one
-//!   would be a placebo, so it is left out rather than faked. Tracked
-//!   separately.
+//! The fifth §15 fault class. A delay that is recorded but not awaited is a
+//! placebo — every test passes and none is stronger — so the model only
+//! ships it *awaited*: an eligible sync (a file flush with dirty sectors, or
+//! a directory sync with pending dirent operations) that
+//! [`FaultPlan::latency`] selects awaits [`FaultPlan::latency_micros`] of
+//! timer time **before** the sync's fault-or-write logic runs, and the
+//! [`FaultKind::Latency`] event records the delay actually awaited.
+//!
+//! The clock question is answered by construction, not ambience: a plan with
+//! latency enabled must be built with [`FaultVfs::with_clock`] /
+//! [`FaultVfs::unix_with_clock`], which hold a `Cx` whose timer driver
+//! supplies `now` — virtual under the lab runtime (where the scheduler
+//! advances it), real under a live one. The plain constructors refuse a
+//! latency-enabled plan outright rather than degrading to no-delay, which
+//! would be the placebo again. Reads and writes are served from the
+//! in-memory image and stay undelayed: they are `poll` implementations that
+//! cannot await a timer, and pretending otherwise is the same placebo.
+//!
+//! # What this increment deliberately does not model
 //! * **`OpenOptions::append`.** The cursor starts at 0 on every open. Callers
 //!   that append must seek; an append-mode handle would silently write at the
 //!   wrong offset, so this is stated rather than approximated.
@@ -139,6 +154,8 @@
 //! }
 //! ```
 
+use asupersync::Cx;
+use asupersync::cx::cap;
 use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, UnixVfs, Vfs, VfsFile};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use std::collections::BTreeSet;
@@ -213,6 +230,13 @@ pub struct FaultPlan {
     /// plan namespace-transparent. An operation an honest directory sync
     /// settled is immune: durable names cannot be lost.
     pub dirent_loss: Trigger,
+    /// An eligible sync delayed by [`FaultPlan::latency_micros`] of awaited
+    /// timer time before its fault-or-write logic runs. Own counter; a plan
+    /// enabling this requires a clock-bearing constructor
+    /// ([`FaultVfs::with_clock`]) or construction refuses.
+    pub latency: Trigger,
+    /// How long a selected sync is delayed, in microseconds.
+    pub latency_micros: u64,
     /// Total bytes that may reach the backing store before flushes fail with
     /// ENOSPC. `None` is unlimited.
     pub space_budget: Option<u64>,
@@ -231,6 +255,8 @@ impl FaultPlan {
             bit_flip: Trigger::Never,
             dirent_lie: Trigger::Never,
             dirent_loss: Trigger::Never,
+            latency: Trigger::Never,
+            latency_micros: 0,
             space_budget: None,
         }
     }
@@ -300,6 +326,12 @@ pub enum FaultKind {
         /// "removed".
         op: &'static str,
     },
+    /// An eligible sync was delayed. Records the delay actually awaited —
+    /// this event exists only after the timer completed, never before.
+    Latency {
+        /// The awaited delay, in microseconds.
+        micros: u64,
+    },
 }
 
 impl FaultKind {
@@ -317,6 +349,7 @@ impl FaultKind {
             Self::OutOfSpace { .. } => "out-of-space",
             Self::DirentSyncLie { .. } => "dirent-sync-lie",
             Self::DirentLoss { .. } => "dirent-loss",
+            Self::Latency { .. } => "latency",
         }
     }
 }
@@ -343,6 +376,7 @@ enum Class {
     BitFlip = 2,
     DirentLie = 3,
     DirentLoss = 4,
+    Latency = 5,
 }
 
 /// One namespace operation applied to the backing store whose durability is
@@ -391,7 +425,7 @@ impl NamespaceKind {
 struct LabState {
     plan: FaultPlan,
     rng: u64,
-    eligible: [u64; 5],
+    eligible: [u64; 6],
     events: Vec<FaultEvent>,
     namespace: Vec<NamespaceOp>,
     flushed_bytes: u64,
@@ -417,6 +451,7 @@ impl LabState {
             Class::BitFlip => self.plan.bit_flip,
             Class::DirentLie => self.plan.dirent_lie,
             Class::DirentLoss => self.plan.dirent_loss,
+            Class::Latency => self.plan.latency,
         }
     }
 
@@ -454,10 +489,20 @@ impl LabState {
 }
 
 /// Shared fault state: the seeded stream, the counters, the event log, the
-/// space budget, and the crash generation.
-#[derive(Debug)]
+/// space budget, the crash generation, and (when latency is enabled) the
+/// clock whose timer supplies awaited delays.
 pub struct Lab {
     state: Mutex<LabState>,
+    clock: Option<Cx<cap::All>>,
+}
+
+impl std::fmt::Debug for Lab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lab")
+            .field("state", &self.state)
+            .field("has_clock", &self.clock.is_some())
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for LabState {
@@ -472,12 +517,13 @@ impl std::fmt::Debug for LabState {
 }
 
 impl Lab {
-    fn new(plan: FaultPlan) -> Self {
+    fn new(plan: FaultPlan, clock: Option<Cx<cap::All>>) -> Self {
         Self {
+            clock,
             state: Mutex::new(LabState {
                 plan,
                 rng: plan.seed,
-                eligible: [0; 5],
+                eligible: [0; 6],
                 events: Vec::new(),
                 namespace: Vec::new(),
                 flushed_bytes: 0,
@@ -532,14 +578,52 @@ impl FaultVfs<UnixVfs> {
     pub fn unix(plan: FaultPlan) -> Self {
         Self::new(UnixVfs::new(), plan)
     }
+
+    /// [`FaultVfs::unix`] with a clock, for latency-enabled plans.
+    #[must_use]
+    pub fn unix_with_clock(plan: FaultPlan, clock: Cx<cap::All>) -> Self {
+        Self::with_clock(UnixVfs::new(), plan, clock)
+    }
 }
 
 impl<V: Vfs> FaultVfs<V> {
     /// Wraps `backing` with `plan`.
+    ///
+    /// # Panics
+    ///
+    /// Refuses a latency-enabled plan: without a clock the delay could only
+    /// be recorded, not awaited, and an unawaited delay is a placebo. Use
+    /// [`FaultVfs::with_clock`].
     pub fn new(backing: V, plan: FaultPlan) -> Self {
+        assert!(
+            plan.latency == Trigger::Never,
+            "a latency-enabled plan needs a clock: use FaultVfs::with_clock, \
+             which awaits the delay through the Cx's timer (virtual under the \
+             lab runtime) instead of silently not delaying"
+        );
         Self {
             backing: Arc::new(backing),
-            lab: Arc::new(Lab::new(plan)),
+            lab: Arc::new(Lab::new(plan, None)),
+        }
+    }
+
+    /// Wraps `backing` with `plan` and the clock that supplies awaited
+    /// delays — virtual time under the lab runtime's `Cx`, real time under a
+    /// live one.
+    ///
+    /// # Panics
+    ///
+    /// Refuses a latency-enabled plan whose `clock` carries no timer driver:
+    /// degrading to no-delay would be the placebo this class exists to avoid.
+    pub fn with_clock(backing: V, plan: FaultPlan, clock: Cx<cap::All>) -> Self {
+        assert!(
+            plan.latency == Trigger::Never || clock.timer_driver().is_some(),
+            "the supplied Cx has no timer driver; a latency-enabled plan \
+             cannot await its delays through it"
+        );
+        Self {
+            backing: Arc::new(backing),
+            lab: Arc::new(Lab::new(plan, Some(clock))),
         }
     }
 
@@ -736,6 +820,64 @@ impl<V: Vfs> FaultFile<V> {
             .collect()
     }
 
+    /// Awaits the plan's latency for one eligible sync, when selected. The
+    /// event is recorded only after the timer completes, so it reports a
+    /// delay that was awaited, never one that was merely intended.
+    async fn maybe_delay(&self) -> io::Result<()> {
+        let micros = {
+            let mut lab = self.lab.lock();
+            if lab.fires(Class::Latency) {
+                Some(lab.plan.latency_micros)
+            } else {
+                None
+            }
+        };
+        let Some(micros) = micros else {
+            return Ok(());
+        };
+        let Some(clock) = self.lab.clock.as_ref() else {
+            // Unreachable by construction — the clockless constructors
+            // refuse a latency-enabled plan — but if it ever becomes
+            // reachable, refusing beats silently not delaying.
+            return Err(io::Error::other(
+                "latency fired with no clock to await it through",
+            ));
+        };
+        // Registered against the CONSTRUCTION clock's driver, not resolved
+        // ambiently: `Sleep`'s ambient `Cx::current()` lookup is documented
+        // to return `None` inside a polled future on at least one path, and
+        // its wall-clock fallback cannot observe the lab's virtual time —
+        // measured here as a sleep that never completed (quiescence stall at
+        // the step budget). Explicit registration makes the delay virtual
+        // under the lab clock and real under a live one, by construction.
+        let Some(driver) = clock.timer_driver() else {
+            return Err(io::Error::other(
+                "latency fired but the clock lost its timer driver",
+            ));
+        };
+        let deadline = asupersync::types::Time::from_nanos(
+            clock
+                .now()
+                .as_nanos()
+                .saturating_add(micros.saturating_mul(1_000)),
+        );
+        let mut registered: Option<asupersync::time::TimerHandle> = None;
+        poll_fn(|task_cx| {
+            if clock.now().as_nanos() >= deadline.as_nanos() {
+                return Poll::Ready(());
+            }
+            if registered.is_none() {
+                registered = Some(driver.register(deadline, task_cx.waker().clone()));
+            }
+            Poll::Pending
+        })
+        .await;
+        self.lab
+            .lock()
+            .record(&self.path, FaultKind::Latency { micros });
+        Ok(())
+    }
+
     /// The directory half of the sync surface: settle or lie about the
     /// pending dirent operations owing this directory.
     async fn sync_dirents(&self) -> io::Result<()> {
@@ -752,6 +894,7 @@ impl<V: Vfs> FaultFile<V> {
             // what keeps the landed campaigns' file-sync arithmetic intact.
             return Ok(());
         }
+        self.maybe_delay().await?;
 
         {
             let mut lab = self.lab.lock();
@@ -798,6 +941,11 @@ impl<V: Vfs> FaultFile<V> {
             // with a workload's harmless syncs.
             return Ok(());
         }
+
+        // --- injectable latency ----------------------------------------------
+        // Before the fault-or-write logic: the sync is slow first, and only
+        // then honest, lying, torn, or refused — a real device's ordering.
+        self.maybe_delay().await?;
 
         // --- the fsync lie ---------------------------------------------------
         let unflushed: u64 = pending.iter().map(|(_, _, b)| b.len() as u64).sum();
