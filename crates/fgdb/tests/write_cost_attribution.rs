@@ -1,5 +1,19 @@
-//! **Differential attribution of the O(history) per-commit write cost**
-//! (bead `fgdb-fujt`; evidence chain 2543473 → b0ffc45).
+//! **Differential attribution of the O(history) per-commit write cost — now
+//! the regression lock that keeps it fixed**
+//! (bead `fgdb-fujt`; evidence chain 2543473 → b0ffc45 → ffe05f6).
+//!
+//! HISTORY OF THIS FILE'S VERDICTS. As landed (ffe05f6) the three verdicts
+//! CONVICTED `fgdb::rebuild()`'s capsule re-read loop: marginal write
+//! 81→183→445 ms over 8→32→96 commits of history, 95% of it re-reading and
+//! re-decoding every historical capsule, with the raw commit protocol flat at
+//! ~17 ms. The fujt fix (incremental snapshot: `Database` retains the fold and
+//! publishes from a clone; `rebuild()` unchanged as the open/recovery path)
+//! made the marginal write flat — 47.7→46.9→49.4 ms measured on the same
+//! instruments — so verdicts 1 and 2 are now INVERTED: they assert the
+//! marginal write stays bounded and stays well under the full-rebuild
+//! replica, and they RED if per-commit history-proportional work returns.
+//! The instruments and the report format are unchanged from the attribution
+//! era, so the numbers stay comparable across the flip.
 //!
 //! The sweep in `cx_probe.rs` proved per-commit cost GROWS with the number of
 //! commits already present (82 ms at 4 → 580 ms at 256, log-log exponent still
@@ -165,8 +179,7 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
             &entry.marker.effect_source;
         plaintexts.push((
             entry.marker.commit_seq,
-            drive(coordinator.read_capsule(&commit, *capsule_ref))
-                .expect("replica capsule read"),
+            drive(coordinator.read_capsule(&commit, *capsule_ref)).expect("replica capsule read"),
         ));
     }
     stages.capsule_read_recover = start.elapsed();
@@ -284,9 +297,12 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     // ---- Instrument 3: chronicle-only control — raw commits, no rebuild.
     let control_dir = scratch("chronicle-only");
     let control_keys = keys();
-    let mut coordinator =
-        drive(CommitCoordinator::open(&commit, &control_dir, capsule_keys(&control_keys)))
-            .expect("control coordinator");
+    let mut coordinator = drive(CommitCoordinator::open(
+        &commit,
+        &control_dir,
+        capsule_keys(&control_keys),
+    ))
+    .expect("control coordinator");
     let mut control = Vec::new();
     for round in 0..HISTORY_POINTS[HISTORY_POINTS.len() - 1] as u64 + 1 {
         let (bytes, capsule) = control_capsule_bytes(round);
@@ -322,29 +338,34 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
          late(mean of 8)={control_late:?}"
     );
 
-    // ---- VERDICT 1: the mechanism reproduces at this scale — the marginal
-    // write grows with history. (Sweep saw 82→580 ms over 4→256; requiring
-    // only 2.5x over 8→96 keeps machine noise from deciding the verdict.)
+    // ---- VERDICT 1 (the regression lock this file became once the fujt fix
+    // landed): the marginal write is BOUNDED — it must not grow with history.
+    // Attribution-era numbers, kept for the record: 81→183→445 ms over
+    // 8→32→96 (a 5.5x climb, 95% of it rebuild's capsule re-read loop).
+    // Post-fix: 47.7→46.9→49.4 ms, flat. 2x headroom keeps machine noise from
+    // deciding the verdict; a real regression to per-commit rebuild is >5x.
     let (small_n, small_t) = marginal[0];
     let (large_n, large_t) = marginal[marginal.len() - 1];
     assert!(
-        large_t.as_nanos() >= small_t.as_nanos().saturating_mul(5) / 2,
-        "the O(history) mechanism did not reproduce: marginal write at \
-         {large_n} commits ({large_t:?}) is not ≥2.5x the marginal write at \
-         {small_n} commits ({small_t:?}). If a fix landed, this test's \
-         attribution is stale — re-measure before trusting it; report above."
+        large_t.as_nanos() <= small_t.as_nanos().saturating_mul(2),
+        "THE O(HISTORY) WRITE COST IS BACK: marginal write at {large_n} \
+         commits ({large_t:?}) is more than 2x the marginal write at \
+         {small_n} commits ({small_t:?}). The incremental snapshot path \
+         (fgdb-fujt) bounded this; something reintroduced per-commit work \
+         proportional to history. Report above."
     );
 
-    // ---- VERDICT 2: the rebuild replica accounts for the majority of the
-    // marginal write at the largest history. This is the attribution: the
-    // derived-partition rebuild IS the O(history) term.
+    // ---- VERDICT 2: the live write path no longer pays the full rebuild.
+    // The replica STILL measures the rebuild (it is the open/recovery path,
+    // deliberately untouched), so at the largest history the marginal write
+    // must be well under it — inverted from the attribution era, when the
+    // replica accounted for ≥ half the marginal write.
     let (_, large_stages) = replicas[replicas.len() - 1];
     assert!(
-        large_stages.total().as_nanos() * 2 >= large_t.as_nanos(),
-        "attribution failed: at {large_n} commits the rebuild replica \
-         ({:?}) does not account for at least half the marginal write \
-         ({large_t:?}) — the O(history) term lives somewhere this file does \
-         not measure; report above.",
+        large_t.as_nanos() * 2 <= large_stages.total().as_nanos(),
+        "the marginal write at {large_n} commits ({large_t:?}) is not well \
+         under the full-rebuild replica ({:?}) — the write path is paying \
+         history-proportional rebuild work again; report above.",
         large_stages.total()
     );
 

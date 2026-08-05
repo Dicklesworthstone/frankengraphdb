@@ -511,6 +511,14 @@ pub struct Database {
     store: BlockStore,
     keys: DatabaseKeys,
     snapshot: Snapshot,
+    /// The persistent fold over every committed row, retained so a commit can
+    /// fold only its own template instead of re-reading the whole history
+    /// (`fgdb-fujt`: the per-commit rebuild's capsule re-read loop measured at
+    /// 95% of an O(history) marginal write cost, ffe05f6). Never authoritative:
+    /// it is seeded by the full rebuild at open, `rebuild()` remains the only
+    /// recovery path, and `incremental_publish_equals_rebuild.rs` pins that a
+    /// clone-publish of this writer is byte-identical to that rebuild.
+    writer: BlockWriter,
 }
 
 impl Database {
@@ -589,12 +597,13 @@ impl Database {
     async fn bind(cx: &CommitCx, path: &Path, keys: DatabaseKeys) -> Result<Self, OpenError> {
         let coordinator = CommitCoordinator::open(cx, path, keys.capsule_keys()).await?;
         let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
-        let snapshot = rebuild(cx, &coordinator, &store, &keys).await?;
+        let (snapshot, writer) = rebuild(cx, &coordinator, &store, &keys).await?;
         Ok(Self {
             coordinator,
             store,
             keys,
             snapshot,
+            writer,
         })
     }
 
@@ -686,7 +695,67 @@ impl Database {
             )
             .await?;
 
-        self.snapshot = rebuild(cx, &self.coordinator, &self.store, &self.keys).await?;
+        // Incremental snapshot maintenance (fgdb-fujt): the template in hand IS
+        // the delta the durable commit just appended, so fold exactly it into
+        // the retained writer instead of re-reading every historical capsule —
+        // the loop ffe05f6 measured at 95% of an O(history) marginal write.
+        // FG-INV-09's recompute-from-registered-bytes check is a re-READ law
+        // and still runs on every path that reads capsules back (open,
+        // recovery, the replica probe); this path never re-reads, it folds the
+        // bytes it just made durable. Fold-then-swap: a failure leaves
+        // `self.writer` at the pre-commit fold exactly as a rebuild failure
+        // leaves the snapshot stale — reopen rebuilds from the stream.
+        let frontier = CommitSeq(
+            self.coordinator
+                .chain()
+                .entries()
+                .last()
+                .expect("the commit that just succeeded is in the chain")
+                .marker
+                .commit_seq,
+        );
+        let mut folded = self.writer.clone();
+        let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
+        for coordinate in template.coordinate_entries() {
+            if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
+                continue;
+            }
+            for row in &coordinate.rows {
+                if matches!(
+                    row,
+                    DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
+                ) {
+                    next_birth_ordinal += 1;
+                }
+                folded
+                    .apply(self.keys.block_keys(), frontier, row)
+                    .map_err(|error| RebuildError::Fold {
+                        commit_seq: frontier.0,
+                        error,
+                    })?;
+            }
+        }
+        let (root, blocks) = folded
+            .clone()
+            .publish(self.keys.block_keys(), frontier)
+            .map_err(|error| RebuildError::Fold {
+                commit_seq: frontier.0,
+                error,
+            })?;
+        for block in &blocks {
+            self.store
+                .put(cx, &block.bytes)
+                .map_err(RebuildError::from)?;
+        }
+        let root_id = self.store.put_root(cx, &root).map_err(RebuildError::from)?;
+        let (_, decoded) = self.store.reopen(cx, root_id).map_err(RebuildError::from)?;
+        self.writer = folded;
+        self.snapshot = Snapshot {
+            blocks: decoded,
+            frontier,
+            root: root_id,
+            next_birth_ordinal,
+        };
         Ok(self.snapshot.frontier)
     }
 
@@ -830,7 +899,7 @@ async fn rebuild(
     coordinator: &CommitCoordinator,
     store: &BlockStore,
     keys: &DatabaseKeys,
-) -> Result<Snapshot, RebuildError> {
+) -> Result<(Snapshot, BlockWriter), RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut frontier = CommitSeq(0);
     let mut next_birth_ordinal = 0u64;
@@ -895,7 +964,11 @@ async fn rebuild(
         }
     }
 
+    // Publish from a clone and hand the fold state back: the caller retains it
+    // so later commits fold only their own template (fgdb-fujt). The strata
+    // equality law pins clone-publish == this very rebuild, byte for byte.
     let (root, blocks) = writer
+        .clone()
         .publish(keys.block_keys(), frontier)
         .map_err(|error| RebuildError::Fold {
             commit_seq: frontier.0,
@@ -907,10 +980,13 @@ async fn rebuild(
     let root_id = store.put_root(cx, &root)?;
     let (_, decoded) = store.reopen(cx, root_id)?;
 
-    Ok(Snapshot {
-        blocks: decoded,
-        frontier,
-        root: root_id,
-        next_birth_ordinal,
-    })
+    Ok((
+        Snapshot {
+            blocks: decoded,
+            frontier,
+            root: root_id,
+            next_birth_ordinal,
+        },
+        writer,
+    ))
 }
