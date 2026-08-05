@@ -105,6 +105,43 @@
 
 #![forbid(unsafe_code)]
 
+/// **Tripwire: the production `Cx` path is still closed upstream** (`fgdb-r8fa`).
+///
+/// `fgdb-0b8r` established that no external crate can obtain a `Cx` in a
+/// production build at asupersync `3e8d08e`, which is why
+/// `examples/open_a_database.rs` drives the spine through the LAB runtime. That
+/// is a fact about a pinned dependency, and facts about pinned dependencies rot
+/// silently: the revision gets bumped, the path opens, and nobody notices that
+/// the workaround is now unnecessary.
+///
+/// These doctests are that notice. They assert the path is CLOSED, so they start
+/// failing the moment it opens — a `compile_fail` test fails by compiling. When
+/// either one goes red, the fix is not to delete it: swap `run_async_under_lab`
+/// for the runtime entry in the example and in any production caller, then
+/// retire this module and close `fgdb-r8fa`.
+///
+/// **What is closed is the NON-ESCALATING path, not every path.**
+/// `Cx::for_testing` is reachable here — `test-internals` is a real asupersync
+/// feature and this crate enables it under `[dev-dependencies]`, which is why
+/// tests, examples and doctests can construct one. That is deliberately NOT used:
+/// it mints `Budget::INFINITE` with full capabilities and inherits no runtime
+/// cap-mask, which is the "external-crate capability injection" escape
+/// asupersync's own doc warns about. Using it would satisfy the type checker and
+/// break doctrine 6.
+///
+/// So there is no tripwire on `for_testing` — it is available and must stay
+/// unused. The tripwire is on the path that would let us stop using the lab
+/// runtime honestly: `Runtime::request_cx_with_budget`, which asupersync's
+/// documentation calls "the only ambient-free way to mint a Cx in production"
+/// and which is declared `pub(crate)`:
+///
+/// ```compile_fail
+/// let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+/// let _cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+/// ```
+#[cfg(doctest)]
+mod production_cx_path_tripwire {}
+
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
 use fgdb_chronicle::identity::IdentifiedObject;

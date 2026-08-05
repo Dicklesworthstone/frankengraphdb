@@ -30,19 +30,25 @@
 //! - `fgdb::Database` needs a `&CommitCx`, which comes only from
 //!   `PurposeContexts::narrow_runtime_root(&Cx<cap::All>)`.
 //! - `Cx::for_testing()` and `Cx::for_request()` are
-//!   `#[cfg(any(test, feature = "test-internals"))]`, and asupersync's
-//!   `[features]` table **does not define `test-internals`**.
+//!   `#[cfg(any(test, feature = "test-internals"))]`. That feature is real and
+//!   this crate enables it under `[dev-dependencies]`, so an example *can* call
+//!   `for_testing()`. **It deliberately does not.** That constructor mints
+//!   `Budget::INFINITE` with full capabilities and inherits no runtime cap-mask —
+//!   the "external-crate capability injection" escape asupersync's own doc warns
+//!   about. It would compile and it would break doctrine 6.
 //! - `Runtime::request_cx_with_budget` — which asupersync's own doc names as the
 //!   sanctioned production path, *"the only ambient-free way to mint a Cx in
 //!   production"* — is declared **`pub(crate)`**. Every call site is inside
 //!   `#[cfg(test)] mod tests`.
 //! - No public method on `Runtime` returns a `Cx` at all.
 //!
-//! So the documented production path is contradicted by its own visibility
-//! modifier, and `run_async_under_lab` is the only public, ungated way any
-//! external crate can obtain a `Cx`. This binary therefore proves the spine is
-//! **consumable from a program**, which was in doubt; it does **not** prove the
-//! database runs on a production runtime, which is still blocked upstream.
+//! So the gap is not "no path exists" — it is that **the only reachable path is
+//! an escalating one**, and the non-escalating path the documentation points at
+//! is `pub(crate)`. The lab runtime is therefore the honest choice here: it
+//! yields a `Cx` through a public, sanctioned entry without minting ambient
+//! authority. This binary proves the spine is **consumable from a program**,
+//! which was in doubt; it does **not** prove the database runs on a production
+//! runtime, which is still blocked upstream (`fgdb-r8fa`).
 //!
 //! Nothing here is labelled as a performance result, and it must not be used as
 //! one: the lab scheduler is deterministic and serialized, so timings taken
