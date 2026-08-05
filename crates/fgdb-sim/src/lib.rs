@@ -27,6 +27,7 @@
 pub mod artifact;
 pub mod campaign;
 pub mod completeness;
+pub mod ldfi;
 pub mod shrink;
 pub mod vfs;
 
