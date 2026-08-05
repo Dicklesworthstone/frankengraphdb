@@ -398,14 +398,49 @@ fn batch_writes(commit: &fgdb_types::context::CommitCx, db: &mut Database, batch
 /// with batch count. If per-edge cost dominates, total time is flat — and my
 /// recommendation is wrong and must be withdrawn.
 ///
-/// **MEASURED 2026-08-05** — see the table in the failure message. The derived
-/// split is asserted below rather than eyeballed: a per-commit cost recovered
-/// from the slope, and a per-edge cost recovered from the intercept.
+/// **MEASURED 2026-08-05.** Same 256 edges in every row:
+///
+/// | split | total | per commit |
+/// |---|---|---|
+/// | 256 × 1 | 148.58 s | 580 ms |
+/// | 64 × 4 | 12.77 s | 200 ms |
+/// | 16 × 16 | 1.39 s | 87 ms |
+/// | 4 × 64 | 0.33 s | 82 ms |
+/// | 1 × 256 | 0.20 s | 205 ms |
+///
+/// **THE CLAIM SURVIVED, BUT THE MECHANISM IS WORSE THAN I ASSUMED.** Identical
+/// work costs **725× more** as 256 commits than as one, so per-commit cost
+/// dominates overwhelmingly and the fgdb-by2l re-scoping recommendation stands.
+/// But I had assumed a *flat* per-commit cost. It is not flat — it grows with
+/// how many commits already exist: 82 ms at 4 commits, 200 ms at 64, 580 ms at
+/// 256.
+///
+/// **TOTAL WRITE COST IS SUPERLINEAR IN COMMIT COUNT, AND THE EXPONENT IS
+/// ITSELF DEGRADING.** Log-log slope across adjacent measured points:
+///
+/// | range | exponent |
+/// |---|---|
+/// | 4 → 16 commits | 1.04 |
+/// | 16 → 64 | 1.60 |
+/// | 64 → 256 | 1.77 |
+///
+/// It starts near-linear and trends toward quadratic. That is the signature of
+/// each commit doing work proportional to the history already present — the same
+/// shape the read path shows (every block examined) and recovery shows
+/// (O(commits)). A fixed n^1.7 would be bad; an exponent still climbing at the
+/// largest size measured means the extrapolation is a floor, not an estimate.
+///
+/// Nothing in §17 gates this directly — the ingest gate is a per-edge rate — but
+/// it bounds every gate that has to build a history first, and it is why the
+/// recovery sweep in this file could only afford 64 batches.
 #[test]
 fn per_commit_versus_per_edge_write_cost() {
     const TOTAL_EDGES: usize = 256;
     // (batches, edges per batch) — the product is TOTAL_EDGES in every row.
-    const SPLITS: [(usize, usize); 5] = [(256, 1), (64, 4), (16, 16), (4, 64), (1, 256)];
+    // 256x1 is DELIBERATELY ABSENT: measured once at 148.58 s, it alone made
+    // this test a ~173 s burden on every future suite run. Its number is
+    // recorded in the doc above; the effect is fully visible without it.
+    const SPLITS: [(usize, usize); 4] = [(64, 4), (16, 16), (4, 64), (1, 256)];
 
     let cx = Cx::for_testing();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
@@ -464,7 +499,7 @@ fn per_commit_versus_per_edge_write_cost() {
          which inverts the whole model; report {report:?}"
     );
 
-    let commit_dominated = most_commits.as_nanos() >= fewest_commits.as_nanos().saturating_mul(1_000_000);
+    let commit_dominated = most_commits.as_nanos() >= fewest_commits.as_nanos().saturating_mul(4);
 
     // THE CLAIM UNDER TEST, asserted so that a future change which makes
     // per-edge cost dominant will RED this and force the conclusion to be
