@@ -1,0 +1,1033 @@
+# =============================================================================
+# durable_state_slots.toml — the total cross-plane durable state-slot registry (G0)
+# =============================================================================
+# Bead: fgdb-4ozr (the nf1 seam; parent fgdb-g0-command-contracts-nf1).
+# Provenance: plan §5.1 (COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
+# line 298), verbatim: "`durable_state_slots.toml` is the total cross-plane
+# registry. Its rows point to exactly one backing field registry and use
+# {plane,role,slot_tag,backing_registry,stable_name,exact_wire_type,
+# reference_semantics,target_schema_id,activation_predicate,
+# initial_value_recipe,transition_writer_contract_ids[],
+# checkpoint_or_snapshot_class,floor_class,backup_class,
+# restore_reconciliation_class,gc_class,role_transition_class,status}."
+#
+# SEED DERIVATION (the reservation-bijection law). command_contracts.toml has
+# been forward-declaring DurableStateSlotRef values ("plane|role|slot_tag",
+# marked [C][F] "vs absent durable_state_slots.toml") since its F1/F2 tranche.
+# Those declarations are existing reservations, so rows here MINT AT THE
+# RESERVED CODES: one row per distinct ref in any consumed_state_slots /
+# written_state_slots array at HEAD (48 distinct refs; measured 2026-08-05,
+# registry_epoch 14 of command_contracts.toml). No slot is invented here; a
+# slot with no declaring contract ref does not get a row yet.
+#
+# Per-key derivation-authority marks (the command_contracts.toml convention):
+#   [S] source-forced by the plan sentence cited beside the mark
+#   [S-derived] forced indirectly; the comment names the carrier
+#   [C] owner-confirmed convention
+#   [F] forward-declared against an artifact that does not exist yet
+#
+# Key derivations used on every row below:
+#   plane, role, slot_tag       [S-derived] the declaring DurableStateSlotRef
+#   backing_registry            [S] the L298 plane split: SemanticPayload ->
+#                               state_payload_fields.toml, Protocol ->
+#                               protocol_state_fields.toml, PreparedOwnership ->
+#                               prepared_state_fields.toml, Consensus ->
+#                               consensus_state_fields.toml; Bootstrap slots
+#                               "remain fixed-location fields validated through
+#                               bootstrap_frames.toml but still receive
+#                               cross-index rows", so their backing_registry is
+#                               bootstrap_frames.toml.
+#   stable_name                 [C] the plan state-object name the slot tag was
+#                               minted from (round-12 confirmation: tags use
+#                               "the plan's own state-object names"), i.e. the
+#                               slot_tag itself; corrected in place if a slot's
+#                               activation tranche derives a different spelled
+#                               name.
+#   transition_writer_contract_ids
+#                               [S-derived] exactly the command_contracts.toml
+#                               rows whose written_state_slots carry this ref.
+#                               L298 quantifies "every ACTIVE slot names every
+#                               legal writer" over active slots; a reserved
+#                               row carries the writers DECLARED SO FAR, and
+#                               the validator holds it equal to the derived
+#                               set so the two registries cannot drift.
+#   remaining keys              [F] "ReservedPendingActivation" — the reserved
+#                               sentinel, legal ONLY on a status="reserved"
+#                               row (the SourceUnspelled precedent), resolved
+#                               in place when the slot's activation tranche
+#                               derives the real value from its defining plan
+#                               section. status="active" with any sentinel key
+#                               is a validator refusal.
+#
+# WHY EVERY ROW IS status="reserved". The activation closure (plan L1466 for
+# Local semantic, L1652 for Meta, L1548 for protocol recipes) and the
+# generated checkpoint/snapshot/floor/backup/restore/GC/transition walkers do
+# not exist at HEAD. L298: "every required checkpoint/snapshot/floor/backup/
+# restore/GC/transition walker is generated from it" — generation needs the
+# class keys, which are exactly the keys still reserved. The validator
+# refuses status="active" until that machinery lands (the command_contracts
+# live-row-refusal precedent).
+#
+# registry_epoch changes only when rows are added or retired.
+registry_epoch = 1
+
+
+[[slot]]
+plane = "Bootstrap"
+role = "Local"
+slot_tag = "pending_restore_creation_guard"
+backing_registry = "bootstrap_frames.toml"
+stable_name = "pending_restore_creation_guard"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [  ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "Bootstrap"
+role = "Local"
+slot_tag = "restore_bridge_origin"
+backing_registry = "bootstrap_frames.toml"
+stable_name = "restore_bridge_origin"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:recovery-bridge-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "Consensus"
+role = "Local"
+slot_tag = "joint_quorum_decode_proof"
+backing_registry = "consensus_state_fields.toml"
+stable_name = "joint_quorum_decode_proof"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [  ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "Protocol"
+role = "Local"
+slot_tag = "result_delivery_retention"
+backing_registry = "protocol_state_fields.toml"
+stable_name = "result_delivery_retention"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-read-close-spec", "cc:local:local-terminal-completion-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "audit_continuity_record"
+backing_registry = "state_payload_fields.toml"
+stable_name = "audit_continuity_record"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:audit-completeness-transition-spec", "cc:local:audit-recovery-spec", "cc:local:audit-terminal-spec", "cc:local:audit-ticket-admission-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "audit_terminal_freeze_record"
+backing_registry = "state_payload_fields.toml"
+stable_name = "audit_terminal_freeze_record"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:audit-terminal-freeze-spec:arm", "cc:local:audit-terminal-freeze-spec:begin-release", "cc:local:audit-terminal-freeze-spec:finalize-release", "cc:local:audit-terminal-plan-abandon-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "begin_idempotency_index"
+backing_registry = "state_payload_fields.toml"
+stable_name = "begin_idempotency_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-attempt-registration-spec:autocommit", "cc:local:local-attempt-registration-spec:explicit-begin", "cc:local:local-autocommit-write-spec", "cc:local:local-begin-reservation-spec", "cc:local:local-begin-terminal-spec", "cc:local:local-outcome-compaction-spec:never-registered", "cc:local:local-outcome-compaction-spec:terminal-ready", "cc:local:local-outcome-expiry-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "branch_epoch_boundary_hold_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "branch_epoch_boundary_hold_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:branch-epoch-boundary-abandon-spec", "cc:local:branch-epoch-boundary-cancel-spec", "cc:local:branch-epoch-boundary-reserve-spec", "cc:local:branch-fork-spec", "cc:local:branch-grant-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "branch_merge_ledger_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "branch_merge_ledger_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:merge-execute-spec", "cc:local:merge-prepare-spec", "cc:local:merge-reject-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "branch_registry"
+backing_registry = "state_payload_fields.toml"
+stable_name = "branch_registry"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:branch-fork-spec", "cc:local:branch-grant-spec", "cc:local:branch-retire-finalize-spec", "cc:local:branch-retire-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "bulk_load_registry"
+backing_registry = "state_payload_fields.toml"
+stable_name = "bulk_load_registry"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:bulk-load-transition-spec:abort", "cc:local:bulk-load-transition-spec:append-chunk", "cc:local:bulk-load-transition-spec:prepare-commit", "cc:local:bulk-load-transition-spec:reserve", "cc:local:bulk-load-transition-spec:seal" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "checkpoint_floor"
+backing_registry = "state_payload_fields.toml"
+stable_name = "checkpoint_floor"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [  ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "config_payload_floor"
+backing_registry = "state_payload_fields.toml"
+stable_name = "config_payload_floor"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:checkpoint-install-spec", "cc:local:configuration-transition-spec:commit-joint", "cc:local:configuration-transition-spec:commit-new", "cc:local:configuration-transition-spec:commit-retirement-floor", "cc:local:configuration-transition-spec:propose-joint", "cc:local:initial-config-floor-install-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "configuration_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "configuration_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:configuration-transition-spec:commit-joint", "cc:local:configuration-transition-spec:commit-new", "cc:local:configuration-transition-spec:commit-retirement-floor", "cc:local:configuration-transition-spec:propose-joint" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "conflict_index"
+backing_registry = "state_payload_fields.toml"
+stable_name = "conflict_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-conflict-compaction-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "derived_build_registry"
+backing_registry = "state_payload_fields.toml"
+stable_name = "derived_build_registry"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:derived-build-transition-spec:abort", "cc:local:derived-build-transition-spec:begin-validation", "cc:local:derived-build-transition-spec:publish-catchup-progress", "cc:local:derived-build-transition-spec:publish-ready", "cc:local:derived-build-transition-spec:publish-snapshot-progress", "cc:local:derived-build-transition-spec:reserve" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "dp_request_index"
+backing_registry = "state_payload_fields.toml"
+stable_name = "dp_request_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:dp-transition-spec:abandon", "cc:local:dp-transition-spec:arm-charge", "cc:local:dp-transition-spec:commit-result", "cc:local:dp-transition-spec:compact", "cc:local:dp-transition-spec:prepare", "cc:local:dp-transition-spec:reclaim", "cc:local:dp-transition-spec:start", "cc:local:dp-transition-spec:yield", "cc:local:privacy-continuity-import-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "escrow_rights_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "escrow_rights_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:escrow-rights-transition-spec:advance-quota-epoch", "cc:local:escrow-rights-transition-spec:compact-terminal-evidence", "cc:local:escrow-rights-transition-spec:reconfigure-domain", "cc:local:escrow-rights-transition-spec:retire-branch-overlay", "cc:local:escrow-rights-transition-spec:transfer-atomic" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "expiry_epoch_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "expiry_epoch_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:expiry-epoch-advance-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "finalization_allocation_reservation"
+backing_registry = "state_payload_fields.toml"
+stable_name = "finalization_allocation_reservation"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:finalization-allocation-disposition-spec:abandoned-spent", "cc:local:finalization-allocation-disposition-spec:consumed" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "format_compatibility_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "format_compatibility_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:format-transition-spec:activate-write-epoch", "cc:local:format-transition-spec:advertise-target", "cc:local:format-transition-spec:record-first-target-write", "cc:local:format-transition-spec:retire-old-decoder", "cc:local:format-transition-spec:rewrite-equivalent" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "format_first_target_escape_receipt"
+backing_registry = "state_payload_fields.toml"
+stable_name = "format_first_target_escape_receipt"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [  ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "id_allocator_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "id_allocator_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:allocation-reservation-transition-spec:escaping-reserve", "cc:local:local-final-certification-reserve-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "local_delta_batch_index"
+backing_registry = "state_payload_fields.toml"
+stable_name = "local_delta_batch_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-delta-batch-retention-cut-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "logical_state_payload"
+backing_registry = "state_payload_fields.toml"
+stable_name = "logical_state_payload"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:checkpoint-install-spec", "cc:local:configuration-transition-spec:commit-joint", "cc:local:configuration-transition-spec:commit-new", "cc:local:configuration-transition-spec:commit-retirement-floor", "cc:local:configuration-transition-spec:propose-joint", "cc:local:initial-config-floor-install-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "logical_state_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "logical_state_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-autocommit-write-spec", "cc:local:recovery-bridge-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "privacy_ledger_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "privacy_ledger_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:privacy-continuity-import-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "recovery_checkpoint"
+backing_registry = "state_payload_fields.toml"
+stable_name = "recovery_checkpoint"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:checkpoint-install-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "remote_configuration_trust_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "remote_configuration_trust_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:advance-remote-configuration-evidence-spec", "cc:local:validate-remote-configuration-anchor-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "remote_retention_consumer_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "remote_retention_consumer_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:remote-retention-control-spec:adopt-legacy-authority-transfer", "cc:local:remote-retention-control-spec:consume-release-ack", "cc:local:remote-retention-control-spec:publish-consumer-release-evidence", "cc:local:remote-retention-control-spec:register-consumer-grant", "cc:local:remote-retention-control-spec:request-consumer-release" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "remote_retention_obligation_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "remote_retention_obligation_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:remote-retention-control-spec:acquire-grant", "cc:local:remote-retention-control-spec:apply-authority-release", "cc:local:remote-retention-control-spec:publish-authority-release-ack" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "resource_ledger_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "resource_ledger_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:resource-ledger-transition-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "retention_map"
+backing_registry = "state_payload_fields.toml"
+stable_name = "retention_map"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:branch-retire-finalize-spec", "cc:local:checkpoint-install-spec", "cc:local:history-cut-activation-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "revocation_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "revocation_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:revocation-transition-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "security_policy_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "security_policy_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:policy-transition-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "statement_index"
+backing_registry = "state_payload_fields.toml"
+stable_name = "statement_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-statement-abort-spec", "cc:local:local-statement-publication-spec", "cc:local:local-statement-registration-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "terminal_admission_fence"
+backing_registry = "state_payload_fields.toml"
+stable_name = "terminal_admission_fence"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-prepare-admission-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "terminal_certification_reservation_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "terminal_certification_reservation_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-final-certification-cancel-spec", "cc:local:local-final-certification-reserve-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "terminal_coordinate_hold_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "terminal_coordinate_hold_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-final-certification-cancel-spec", "cc:local:local-final-certification-reserve-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "terminal_obligation_hold_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "terminal_obligation_hold_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-final-certification-cancel-spec", "cc:local:local-final-certification-reserve-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "time_authority_registry"
+backing_registry = "state_payload_fields.toml"
+stable_name = "time_authority_registry"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:time-authority-issuance-close-spec", "cc:local:time-authority-issuance-fence-authorize-spec", "cc:local:time-authority-profile-retirement-spec", "cc:local:time-authority-profile-transition-spec", "cc:local:time-authority-registry-transition-authorize-spec", "cc:local:time-authority-rotation-intent-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "time_subject_issuance_reservation_index"
+backing_registry = "state_payload_fields.toml"
+stable_name = "time_subject_issuance_reservation_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:time-issuance-admission-freeze-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "txn_allocation_binding_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "txn_allocation_binding_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:allocation-reservation-transition-spec:binding-compaction", "cc:local:allocation-reservation-transition-spec:escaping-reserve" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "txn_outcome_index"
+backing_registry = "state_payload_fields.toml"
+stable_name = "txn_outcome_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-outcome-compaction-spec:never-registered", "cc:local:local-outcome-compaction-spec:terminal-ready", "cc:local:local-outcome-expiry-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "txn_outcome_record"
+backing_registry = "state_payload_fields.toml"
+stable_name = "txn_outcome_record"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-attempt-registration-spec:autocommit", "cc:local:local-attempt-registration-spec:explicit-begin", "cc:local:local-autocommit-write-spec", "cc:local:local-begin-reservation-spec", "cc:local:local-prepare-admission-spec", "cc:local:local-read-close-spec", "cc:local:local-terminal-completion-spec", "cc:local:txn-abort-spec", "cc:local:txn-ownership-expiry-abort-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "txn_outcome_summary"
+backing_registry = "state_payload_fields.toml"
+stable_name = "txn_outcome_summary"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:local-outcome-compaction-spec:never-registered", "cc:local:local-outcome-compaction-spec:terminal-ready" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "txn_ownership_lease"
+backing_registry = "state_payload_fields.toml"
+stable_name = "txn_ownership_lease"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:txn-ownership-expiry-abort-spec", "cc:local:txn-ownership-transition-spec:reattach", "cc:local:txn-ownership-transition-spec:renew" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "txn_workspace_generation"
+backing_registry = "state_payload_fields.toml"
+stable_name = "txn_workspace_generation"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:allocation-reservation-transition-spec:escaping-reserve", "cc:local:local-attempt-registration-spec:autocommit", "cc:local:local-attempt-registration-spec:explicit-begin", "cc:local:local-autocommit-write-spec", "cc:local:local-statement-publication-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
