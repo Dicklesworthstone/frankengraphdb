@@ -2164,7 +2164,14 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // each now a census candidate with a catalog row. The a03 rename
     // ResultSemanticOwnerRef -> ResultSemanticOwnerRecordRef (a03:1510) re-keys
     // an existing candidate and is count-neutral.
-    assert_eq!(baseline.top_level_candidates.len(), 1_258);
+    // 1_258 -> 1_259: fgdb-35qx recognized the closure-law enumeration cue
+    // ("Key lifecycle uses only `A`, `B`, …" — the exact three-site
+    // population), surfacing ShardKeyMaterialActivateSpec, the thirteenth
+    // registered key-lifecycle control, which is enumerated at a08:1874 with
+    // no structural body anywhere and was previously censused by zero rows.
+    // The mutation-proved corpus-delta source test pins the exact
+    // one-candidate recovery.
+    assert_eq!(baseline.top_level_candidates.len(), 1_259);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT

@@ -60,6 +60,7 @@ pub enum DefinitionKind {
     ProseLinkedStructural,
     ProseDefinitionNoBody,
     BoldOwnerStructural,
+    ClosureEnumeration,
 }
 
 impl DefinitionKind {
@@ -73,6 +74,7 @@ impl DefinitionKind {
             Self::ProseLinkedStructural => "prose-linked-structural",
             Self::ProseDefinitionNoBody => "prose-definition-no-body",
             Self::BoldOwnerStructural => "bold-owner-structural",
+            Self::ClosureEnumeration => "closure-enumeration",
         }
     }
 }
@@ -1666,6 +1668,111 @@ fn prose_schema_links(
     links
 }
 
+/// The closure-law enumeration cue. Measured over the pinned Appendix
+/// (2026-08-05, fgdb-35qx): exactly three fragments' leading prose ends with
+/// "uses only" — one bare name (a07:1718), the five-control key-lifecycle
+/// closure law (a08:1874), and one arm-qualified path (a16:2239) that
+/// [`simple_type_display`] rejects. The phrase is the Appendix's idiom for a
+/// CLOSED control set ("Key lifecycle uses only `A`, `B`, … These typed
+/// controls … are the only … paths"), so each enumerated bare name is a
+/// normative top-level mention even when its structural body lives in a
+/// different slice. fgdb-35qx is the defect this claims: the enumerated
+/// `ShardKeyMaterialActivateSpec` has no structural body anywhere, and
+/// without this pass the census never surfaced it as a candidate at all.
+const CLOSURE_ENUMERATION_CUE: &str = "uses only";
+
+/// Whether `before` ends with `phrase` at a whitespace word boundary, the
+/// same tail discipline as [`phrase_defined_owner`]: the whole text, or a
+/// tail preceded by whitespace — never a substring of a longer word, never a
+/// slice through a multi-byte char.
+fn ends_with_phrase(before: &str, phrase: &str) -> bool {
+    let normalized = normalize_whitespace(before);
+    if normalized.eq_ignore_ascii_case(phrase) {
+        return true;
+    }
+    if normalized.len() <= phrase.len() {
+        return false;
+    }
+    normalized
+        .get(normalized.len() - phrase.len()..)
+        .is_some_and(|tail| {
+            let head = &normalized[..normalized.len() - phrase.len()];
+            head.ends_with(char::is_whitespace) && tail.eq_ignore_ascii_case(phrase)
+        })
+}
+
+/// The only list connectors a closure enumeration distributes across.
+/// Deliberately exact to the measured population: the a08:1874 five-name list
+/// joins with "," three times and ", and" once; no measured site uses a bare
+/// "and" or any other separator, so nothing looser is admitted.
+fn closure_list_connector(after: &str) -> bool {
+    let normalized = normalize_whitespace(after);
+    normalized == "," || normalized.eq_ignore_ascii_case(", and")
+}
+
+/// Claim every bare backticked type name enumerated by a closure-law
+/// "uses only" sentence as a [`SchemaOwnerStatus::NamedConceptNoBody`]
+/// occurrence.
+///
+/// Fail-closed by construction: the cue must end the fragment's leading
+/// prose, every claimed fragment must be one complete bare type display
+/// (an arm-qualified `A::B` or a `Name{…}` body is rejected by
+/// [`simple_type_display`]), and the walk stops at the first connector
+/// outside the exact measured set. The claim carries no structural
+/// expression and emits no ambiguity: a closure enumeration is an exact
+/// normative sentence, not a failed definition, so there is nothing to
+/// adjudicate — the census only records that the name is normatively
+/// enumerated.
+fn closure_enumeration_occurrences(
+    fragments: &[MarkdownFragment],
+    source_map: &SourceMap<'_>,
+    occurrences: &mut Vec<SchemaOccurrence>,
+) {
+    let mut by_line: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, fragment) in fragments.iter().enumerate() {
+        if fragment.kind == FragmentKind::Inline {
+            by_line
+                .entry(source_map.position(fragment.source_range.start).line)
+                .or_default()
+                .push(index);
+        }
+    }
+    for indexes in by_line.values_mut() {
+        indexes.sort_by_key(|index| fragments[*index].source_range.start);
+        let mut position = 0;
+        while position < indexes.len() {
+            if !ends_with_phrase(
+                &fragments[indexes[position]].before,
+                CLOSURE_ENUMERATION_CUE,
+            ) {
+                position += 1;
+                continue;
+            }
+            let mut claim = position;
+            while claim < indexes.len() {
+                let fragment = &fragments[indexes[claim]];
+                let Some(display_name) = simple_type_display(&fragment.text) else {
+                    break;
+                };
+                if let Some(occurrence) = make_schema_occurrence(
+                    display_name,
+                    SchemaOwnerStatus::NamedConceptNoBody,
+                    DefinitionKind::ClosureEnumeration,
+                    fragment.source_range.clone(),
+                    None,
+                ) {
+                    occurrences.push(occurrence);
+                }
+                if !closure_list_connector(&fragment.after) {
+                    break;
+                }
+                claim += 1;
+            }
+            position = claim + 1;
+        }
+    }
+}
+
 /// The range, within `before`, of the bold owner name that owns the structural
 /// fragment `before` precedes. Two spellings, one reader.
 ///
@@ -2347,6 +2454,8 @@ fn extract_schema_occurrences(
         }
         let _ = link.cue;
     }
+
+    closure_enumeration_occurrences(fragments, source_map, &mut occurrences);
 
     claimed_ranges.sort_by_key(|range| (range.start, range.end));
     for fragment in fragments {
@@ -6233,6 +6342,160 @@ mod tests {
                 .fields
                 .iter()
                 .all(|field| !field.key.schema_owner.eq("EmbeddedRecord"))
+        );
+    }
+
+    #[test]
+    fn closure_enumeration_cue_claims_the_exact_list_and_mutation_proved() {
+        let source = concat!(
+            "Key lifecycle uses only `AlphaSpec`, `BetaSpec`, and `GammaSpec` with the exact basis described above.\n",
+            "Renewal uses only `QualifiedPayload::Arm`, and nothing else may renew it.\n",
+            "The registry uses mostly `DeclinedSpec`, so the cue must not fire here.\n",
+            "The service uses only `SoloSpec`.\n",
+            "Continuation uses only `HeadSpec`; `TailRecordSpec` stays unclaimed across the semicolon.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "closure",
+            start_line: 30,
+            end_line: 34,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 30, &slices)
+            .expect("a closure enumeration must census conservatively");
+
+        for claimed in ["AlphaSpec", "BetaSpec", "GammaSpec", "SoloSpec", "HeadSpec"] {
+            let candidate = census
+                .schemas
+                .iter()
+                .find(|schema| schema.key.family.eq(claimed));
+            assert!(
+                candidate.is_some(),
+                "{claimed} is enumerated by a closure law and must be claimed"
+            );
+            let candidate = candidate.expect("presence is asserted above");
+            assert_eq!(
+                candidate.owner_statuses,
+                vec![super::SchemaOwnerStatus::NamedConceptNoBody],
+                "{claimed} is a name-only closure mention, nothing stronger"
+            );
+            assert!(
+                census.ambiguities.iter().all(|ambiguity| {
+                    ambiguity
+                        .key
+                        .schema_family
+                        .as_deref()
+                        .is_none_or(|family| !family.eq(claimed))
+                }),
+                "{claimed}: a closure enumeration is exact and owes no adjudication"
+            );
+        }
+        for unclaimed in ["QualifiedPayload", "DeclinedSpec", "TailRecordSpec"] {
+            assert!(
+                census
+                    .schemas
+                    .iter()
+                    .all(|schema| !schema.key.family.eq(unclaimed)),
+                "{unclaimed} must not be claimed: arm-qualified paths, a mutated cue, \
+                 and post-semicolon names are all outside the exact grammar"
+            );
+        }
+
+        // INJECTED FAULT / VACUITY CONTROL: erase only the first closure cue.
+        // Its whole list must disappear while the single-name sites survive,
+        // proving the claims flow through the cue and not a bare-name reader.
+        let faulted_source = source.replacen("lifecycle uses only", "lifecycle uses mostly", 1);
+        assert_ne!(faulted_source, source, "the cue mutation must fire");
+        let faulted = census_appendix_source(faulted_source.as_bytes(), 30, &slices)
+            .expect("the faulted source must remain syntactically valid");
+        for erased in ["AlphaSpec", "BetaSpec", "GammaSpec"] {
+            assert!(
+                faulted
+                    .schemas
+                    .iter()
+                    .all(|schema| !schema.key.family.eq(erased)),
+                "{erased} must vanish with its cue"
+            );
+        }
+        assert!(
+            faulted
+                .schemas
+                .iter()
+                .any(|schema| schema.key.family.eq("SoloSpec")),
+            "the untouched closure site must keep its claim"
+        );
+    }
+
+    #[test]
+    fn appendix_closure_enumeration_population_has_exact_corpus_delta() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the current Appendix A source must census");
+        assert_eq!(
+            source.matches("uses only `").count(),
+            3,
+            "the Appendix-wide closure-cue population must be re-audited before this grammar widens"
+        );
+
+        // The fgdb-35qx defect: the thirteenth registered key-lifecycle
+        // control is enumerated at 1874 but has no structural body anywhere,
+        // so without the closure pass it was censused by ZERO rows.
+        let activate = census
+            .schemas
+            .iter()
+            .find(|row| row.key.family.eq("ShardKeyMaterialActivateSpec"))
+            .expect("the closure pass must surface ShardKeyMaterialActivateSpec");
+        assert_eq!(
+            activate.owner_statuses,
+            vec![super::SchemaOwnerStatus::NamedConceptNoBody],
+        );
+
+        // INJECTED FAULT / OLD-GRAMMAR CONTROL: erase all three measured cues
+        // and require the exact whole-census delta. Every other enumerated
+        // name keeps a structural definition elsewhere, so the closed set
+        // difference is exactly the one recovered candidate.
+        let mut faulted_source = source.clone();
+        for _ in 0..3 {
+            let next = faulted_source.replacen("uses only `", "uses mostly `", 1);
+            assert_ne!(next, faulted_source, "the old-grammar mutation must fire");
+            faulted_source = next;
+        }
+        let faulted = census_appendix_source(faulted_source.as_bytes(), 1388, &slices)
+            .expect("the old-grammar control must remain syntactically valid");
+        let schema_keys = census
+            .schemas
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        let faulted_schema_keys = faulted
+            .schemas
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            schema_keys
+                .difference(&faulted_schema_keys)
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["top|ShardKeyMaterialActivateSpec".to_owned()],
+            "the closure grammar recovers exactly one candidate the old grammar missed"
+        );
+        assert!(
+            faulted_schema_keys.is_subset(&schema_keys),
+            "removing the cue must never invent a candidate"
         );
     }
 
