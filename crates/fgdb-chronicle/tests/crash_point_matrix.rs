@@ -1360,3 +1360,163 @@ fn truncation_anywhere_in_the_final_entry_recovers_the_prefix() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// The steps-2–3 validation seam (fgdb-3bfs). Two claims are under test, each
+// with a way of being quietly false:
+//
+//   * **The seam is consulted, with the real draft.** A trait the commit path
+//     never calls — or calls with values other than the ones it publishes —
+//     is a counterfeit parameter: deleting it would change nothing. The
+//     recording validator below fails if the seam is skipped, double-called,
+//     or handed a draft that differs from what became durable.
+//   * **A rejection is free.** The abort must land before the first durable
+//     byte: no capsule file, no log growth, no consumed sequence, no
+//     poisoning. A rejection that left residue would turn "refused" into a
+//     recovery problem.
+// ---------------------------------------------------------------------------
+
+/// Rejects every draft under a fixture law, counting consultations.
+struct RejectAll {
+    consulted: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl fgdb_chronicle::validate::CommitValidator for RejectAll {
+    fn validate(
+        &mut self,
+        _draft: &fgdb_chronicle::validate::CommitDraft<'_>,
+    ) -> Result<(), fgdb_chronicle::validate::ValidationRejection> {
+        self.consulted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(fgdb_chronicle::validate::ValidationRejection {
+            law: "fixture:always-reject",
+            detail: "deterministic rejecting fixture".to_string(),
+        })
+    }
+}
+
+/// Records every draft it approves, so the test can compare what the seam saw
+/// against what the commit published.
+struct RecordEveryDraft {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(u64, ObjectId, Vec<u8>, u64)>>>,
+}
+
+impl fgdb_chronicle::validate::CommitValidator for RecordEveryDraft {
+    fn validate(
+        &mut self,
+        draft: &fgdb_chronicle::validate::CommitDraft<'_>,
+    ) -> Result<(), fgdb_chronicle::validate::ValidationRejection> {
+        self.seen.lock().expect("recorder lock").push((
+            draft.commit_seq.0,
+            draft.capsule_oid,
+            draft.capsule_plaintext.to_vec(),
+            draft.marker.commit_seq,
+        ));
+        Ok(())
+    }
+}
+
+#[test]
+fn a_rejected_draft_leaves_no_durable_trace_and_frees_its_sequence() {
+    under_lab(0x3b_f5_01, |cx| async move {
+        let cx = &cx;
+        let dir = scratch_dir("validator-rejection-is-free");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open fresh dir");
+        // Commit 1 rides the default pass-through validator: the seam's
+        // opening state must not get in the way of a clean commit.
+        commit_ok(&mut coordinator, cx, 1).await;
+        let log_len_before = std::fs::metadata(dir.join(COMMIT_LOG_NAME))
+            .expect("committed log exists")
+            .len();
+        assert_eq!(capsule_file_count(&dir), 1);
+
+        let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        coordinator.set_validator(Box::new(RejectAll {
+            consulted: consulted.clone(),
+        }));
+        let chain_snapshot = coordinator.chain().clone();
+        let outcome = coordinator
+            .commit(cx, &capsule_bytes(2), |allocated, oid| {
+                marker_for(allocated, oid, &chain_snapshot)
+            })
+            .await;
+        assert!(
+            matches!(
+                &outcome,
+                Err(CommitError::Rejected(rejection))
+                    if rejection.law == "fixture:always-reject"
+            ),
+            "the verdict must surface as Rejected under the validator's law, got {outcome:?}"
+        );
+        assert_eq!(
+            consulted.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the seam is consulted exactly once per attempt"
+        );
+
+        // Nothing durable moved: same one capsule, same log bytes, the
+        // sequence is still free, and the coordinator is still healthy.
+        assert_eq!(capsule_file_count(&dir), 1, "no capsule was written");
+        assert_eq!(
+            std::fs::metadata(dir.join(COMMIT_LOG_NAME))
+                .expect("log still exists")
+                .len(),
+            log_len_before,
+            "no marker entry was appended"
+        );
+        assert!(!coordinator.is_poisoned(), "a rejection is not an interrupted commit");
+        assert_eq!(
+            coordinator.next_commit_seq().expect("chain readable").0,
+            2,
+            "the rejected attempt did not consume its sequence"
+        );
+
+        // The same draft, resubmitted under pass-through, commits at the
+        // sequence the rejection left free — the abort was invisible.
+        coordinator.set_validator(Box::new(fgdb_chronicle::validate::PassThroughValidator));
+        commit_ok(&mut coordinator, cx, 2).await;
+        drop(coordinator);
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen after rejection and retry");
+        assert_eq!(reopened.chain().len(), 2, "both clean commits recovered");
+        assert_eq!(reopened.chain().verify(), Ok(()));
+    });
+}
+
+#[test]
+fn the_seam_judges_the_exact_draft_the_commit_publishes() {
+    under_lab(0x3b_f5_02, |cx| async move {
+        let cx = &cx;
+        let dir = scratch_dir("validator-sees-the-published-draft");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open fresh dir");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        coordinator.set_validator(Box::new(RecordEveryDraft { seen: seen.clone() }));
+        commit_ok(&mut coordinator, cx, 1).await;
+        commit_ok(&mut coordinator, cx, 2).await;
+
+        let seen = seen.lock().expect("recorder lock");
+        assert_eq!(seen.len(), 2, "one consultation per commit, no more, no fewer");
+        for (expected_seq, (seq, oid, plaintext, marker_seq)) in (1u64..).zip(seen.iter()) {
+            assert_eq!(*seq, expected_seq, "the draft carries the allocated sequence");
+            assert_eq!(
+                *oid,
+                capsule_oid(expected_seq),
+                "the draft names the derived capsule identity, not a caller claim"
+            );
+            assert_eq!(
+                plaintext,
+                &capsule_bytes(expected_seq),
+                "the draft carries the exact plaintext that became durable"
+            );
+            assert_eq!(
+                *marker_seq, expected_seq,
+                "the judged marker is the one the log entry framed"
+            );
+        }
+    });
+}

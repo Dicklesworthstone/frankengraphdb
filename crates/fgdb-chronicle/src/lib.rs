@@ -30,6 +30,7 @@ pub mod scrub;
 pub mod store;
 pub mod symbol;
 pub mod symbolize;
+pub mod validate;
 
 pub use commit::{CommitCoordinator, CommitError, CrashPoint};
 pub use identity::{
@@ -53,3 +54,4 @@ pub use store::{
 };
 pub use symbol::{SymbolError, SymbolRecord};
 pub use symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
+pub use validate::{CommitDraft, CommitValidator, PassThroughValidator, ValidationRejection};

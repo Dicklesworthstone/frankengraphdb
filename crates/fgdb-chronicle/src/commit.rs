@@ -30,6 +30,7 @@
 use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_container};
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
 use crate::store::{sync_created_entry, sync_directory, sync_file};
+use crate::validate::{CommitDraft, CommitValidator, PassThroughValidator, ValidationRejection};
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use fgdb_crypto::Digest;
@@ -118,6 +119,11 @@ pub enum CommitError {
     /// must not be committed, and one that cannot be recovered is not a commit
     /// this database can honour.
     Capsule(CapsuleError),
+    /// The installed steps-2–3 validator refused the draft. Unlike every
+    /// other arm this is a verdict, not a failure: nothing durable was
+    /// written, the sequence was not consumed, and the coordinator is not
+    /// poisoned — the caller may repair the draft and resubmit.
+    Rejected(ValidationRejection),
     /// Another live coordinator already owns this database's commit stream.
     /// Recovery and sequence allocation must never run concurrently against
     /// one log, even inside one process.
@@ -159,6 +165,7 @@ impl core::fmt::Display for CommitError {
                 write!(f, "commit chain diverges at seq {commit_seq}")
             }
             Self::Capsule(error) => write!(f, "capsule: {error}"),
+            Self::Rejected(rejection) => write!(f, "commit not published: {rejection}"),
             Self::WriterAlreadyOpen => {
                 f.write_str("another commit coordinator already owns this database")
             }
@@ -244,6 +251,11 @@ pub struct CommitCoordinator<V: Vfs = UnixVfs> {
     _writer_lease: std::fs::File,
     keys: CapsuleKeys,
     chain: MarkerChain,
+    /// The steps-2–3 validation seam (plan §5.2), consulted once per commit
+    /// before the first durable byte. Opens as the deterministic
+    /// [`PassThroughValidator`]; the w4 validator stack replaces the instance
+    /// via [`CommitCoordinator::set_validator`], never the seam.
+    validator: Box<dyn CommitValidator + Send>,
     discarded_tail_bytes: usize,
     poisoned: bool,
     capsule_directory_parent_sync_pending: bool,
@@ -321,6 +333,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             _writer_lease: writer_lease,
             keys,
             chain,
+            validator: Box::new(PassThroughValidator),
             discarded_tail_bytes,
             poisoned: false,
             // Re-sync once after every open. This both closes a newly created
@@ -370,6 +383,16 @@ impl<V: Vfs> CommitCoordinator<V> {
 
     pub fn chain(&self) -> &MarkerChain {
         &self.chain
+    }
+
+    /// Install the steps-2–3 validator every subsequent commit is judged by.
+    ///
+    /// This is how the w4 stack (FCW/SSI validation, merge ladder,
+    /// constraints, durable-quota ledger) plugs into the protocol. Replacing
+    /// the validator affects only future drafts: verdicts already rendered
+    /// licensed exactly the drafts they saw.
+    pub fn set_validator(&mut self, validator: Box<dyn CommitValidator + Send>) {
+        self.validator = validator;
     }
 
     /// The directory whose durable stream this coordinator owns.
@@ -612,6 +635,20 @@ impl<V: Vfs> CommitCoordinator<V> {
             marker_oid: chained.marker_oid,
             commit_seq: CommitSeq(chained.marker.commit_seq),
         };
+
+        // ---- Steps 2–3: the validation seam. The draft is structurally
+        // complete (sealed, chained, framed) and nothing is durable yet, so a
+        // rejection aborts with no durable trace, no consumed sequence, and
+        // no poisoning — the one point in the protocol where refusing is
+        // free. The validator receives no Cx on purpose: see crate::validate.
+        self.validator
+            .validate(&CommitDraft {
+                commit_seq: CommitSeq(commit_seq),
+                capsule_oid,
+                capsule_plaintext: plaintext,
+                marker: &marker,
+            })
+            .map_err(CommitError::Rejected)?;
 
         // ---- Build + D1: the capsule becomes durable BEFORE any marker can
         // name it. A marker pointing at non-durable bytes would be a commit
