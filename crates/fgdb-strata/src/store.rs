@@ -53,6 +53,7 @@ use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decod
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, StorageReadCx};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -823,6 +824,94 @@ impl BlockStore {
             .map(PartitionRootVersion)
     }
 
+    /// [`BlockStore::put`], memoised under `receipts` (fgdb-gieu).
+    ///
+    /// A block whose identity already carries a receipt is returned without
+    /// touching the filesystem: this store made those exact bytes durable
+    /// earlier in the receipts' lifetime, and content addressing makes the
+    /// identity the proof that "these bytes" and "those bytes" are one object.
+    /// A block without a receipt takes the ordinary durable path, then earns
+    /// its receipt by passing the same decode and edge-history admission that
+    /// [`BlockStore::put_root`] would otherwise re-derive from disk on every
+    /// later publication — measured at O(blocks) redundant reads, hashes and
+    /// fsyncs per commit on the live publish loop.
+    ///
+    /// An empty decoded block earns no receipt and is deliberately not an
+    /// error here: the slow path accepts those bytes too, and the refusal
+    /// belongs to root admission, which is where it always lived.
+    pub fn put_verified(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+        receipts: &mut PublishReceipts,
+    ) -> Result<DeltaBlockVersion, StoreError> {
+        let id = block_id(&self.k_oid, self.namespace, bytes);
+        if receipts.spans.contains_key(&id) {
+            return Ok(DeltaBlockVersion(id));
+        }
+        let stored = self.put(cx, bytes)?;
+        debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
+        let entries = decode_block(bytes).map_err(StoreError::Malformed)?;
+        receipts
+            .validator
+            .observe_block(receipts.spans.len(), &entries)
+            .map_err(StoreError::MalformedRoot)?;
+        if let Some(span) = crate::root::span_of(&entries) {
+            receipts.spans.insert(id, span);
+        }
+        Ok(stored)
+    }
+
+    /// [`BlockStore::put_root`], with admission memoised under `receipts`
+    /// (fgdb-gieu).
+    ///
+    /// Full admission re-reads and re-decodes every named block from disk to
+    /// prove three things: the bytes are the block the root means, the block
+    /// spans exactly the range the root claims, and the whole history agrees
+    /// on EId identity and lifecycle. For the live publish loop those proofs
+    /// were already earned — at [`BlockStore::put_verified`] time for new
+    /// blocks, or by an earlier call's disk fallback here — so a reference
+    /// whose identity AND claimed range both match its receipt is admitted
+    /// without I/O. A reference with no receipt, or whose claimed range
+    /// contradicts its receipt, takes the full disk path (and earns a
+    /// receipt), so a root that lies about a range is refused by exactly the
+    /// check that always refused it, and a fresh receipts value degrades to
+    /// one full admission rather than to weaker checking.
+    ///
+    /// The edge-history law is not weakened either, only accumulated: the
+    /// receipts' validator has observed every receipted block's entries once,
+    /// and blocks are immutable, so re-observing them per publication proves
+    /// nothing the retained state does not already prove. Restated statements
+    /// (a tombstone repeating its birth) pass the validator identically on
+    /// both paths.
+    pub fn put_root_verified(
+        &self,
+        cx: &CommitCx,
+        root: &crate::root::PartitionRoot,
+        receipts: &mut PublishReceipts,
+    ) -> Result<PartitionRootVersion, StoreError> {
+        let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
+        for (at, reference) in root.blocks.iter().enumerate() {
+            if receipts.spans.get(&reference.block_id)
+                == Some(&(reference.first_seq, reference.last_seq))
+            {
+                continue;
+            }
+            let entries = self.resolve_root_block(cx, at, reference)?;
+            receipts
+                .validator
+                .observe_block(at, &entries)
+                .map_err(StoreError::MalformedRoot)?;
+            // `resolve_root_block` proved the actual span equals the claim.
+            receipts.spans.insert(
+                reference.block_id,
+                (reference.first_seq, reference.last_seq),
+            );
+        }
+        self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
+            .map(PartitionRootVersion)
+    }
+
     /// Load the partition root named by `id`, using the root format's exact byte
     /// ceiling and root-specific identity verifier before structural decoding.
     pub fn get_root(
@@ -913,6 +1002,43 @@ impl BlockStore {
     /// being true, and this crate is never optimized (§15).
     pub fn contains(&self, cx: &impl StorageReadCx, id: DeltaBlockVersion) -> bool {
         self.get_bytes(cx, id).is_ok()
+    }
+}
+
+/// Durability-and-verification receipts for one live publish lineage
+/// (fgdb-gieu): which block identities a [`BlockStore`] has already made
+/// durable and admitted, plus the cross-block edge-history state those
+/// admissions accumulated.
+///
+/// The receipt transfers no authority a caller could not earn on the slow
+/// path: an identity enters the map only after the store itself wrote the
+/// bytes durably ([`BlockStore::put_verified`]) or read them back from disk
+/// ([`BlockStore::put_root_verified`]'s fallback), and in both cases the
+/// entries passed the same identity, span, and edge-history checks full
+/// admission runs. What a receipt buys is memoisation, not trust: the proof
+/// already happened in this process over these immutable content-addressed
+/// bytes, so re-deriving it from disk on every subsequent publication is
+/// O(blocks) work per commit with no new information in it.
+///
+/// Scope it like the fold it accompanies: one receipts value per open
+/// database session, dropped with the session. It is never persisted —
+/// a receipt is a statement about what THIS process has proven and fsynced,
+/// and a fresh process must re-earn those proofs from disk, which the
+/// fallback path does automatically on the first publication after open.
+#[derive(Debug, Default)]
+pub struct PublishReceipts {
+    validator: crate::root::EdgeHistoryValidator,
+    spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
+}
+
+impl PublishReceipts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Is this identity already durable-and-admitted under these receipts?
+    pub fn holds(&self, id: DeltaBlockVersion) -> bool {
+        self.spans.contains_key(&id.0)
     }
 }
 

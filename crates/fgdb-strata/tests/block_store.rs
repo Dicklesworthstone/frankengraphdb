@@ -909,6 +909,237 @@ fn reopening_with_a_missing_block_is_refused() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// The receipted publish path (fgdb-gieu)
+// ---------------------------------------------------------------------------
+
+use fgdb_strata::store::PublishReceipts;
+
+fn delete(eid: u128) -> DeltaRow {
+    DeltaRow::DeleteEdge {
+        eid: EId(eid),
+        before_version: ObjectId([0; 32]),
+    }
+}
+
+/// **The receipted path derives the identical publication.** One writer
+/// lineage, two stores: every commit's root id must agree between the plain
+/// path and the receipted path — including across a seal boundary and a
+/// cross-block tombstone, the shapes that exercise the receipts' cumulative
+/// edge-history state. This is the differential that makes the memoisation
+/// claim falsifiable: a receipt that skipped work the slow path needed would
+/// eventually publish a different root or refuse a lawful one.
+#[test]
+fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
+    let dir_plain = scratch_dir("receipts-differential-plain");
+    let dir_receipted = scratch_dir("receipts-differential-receipted");
+    under_lab(51, move |cx| {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let plain = BlockStore::open(cx, &dir_plain, K_OID, NAMESPACE).expect("opens");
+        let receipted = BlockStore::open(cx, &dir_receipted, K_OID, NAMESPACE).expect("opens");
+        let mut receipts = PublishReceipts::new();
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+
+        let rows: [DeltaRow; 4] = [
+            create(10, 1, 2),
+            create(11, 1, 3),
+            delete(10),
+            create(12, 2, 3),
+        ];
+        for (b, row) in rows.iter().enumerate() {
+            let seq = CommitSeq(b as u64 + 1);
+            writer.apply(strata_keys, seq, row).expect("applies");
+            if b == 0 {
+                // Force a sealed prefix so the later tombstone restates a birth
+                // ACROSS blocks, the case the cumulative validator must accept.
+                writer.seal(strata_keys).expect("seals");
+            }
+            let (root, blocks) = writer.clone().publish(strata_keys, seq).expect("publishes");
+
+            for block in &blocks {
+                plain.put(cx, &block.bytes).expect("plain put");
+            }
+            let plain_root = plain.put_root(cx, &root).expect("plain put_root");
+
+            for block in &blocks {
+                receipted
+                    .put_verified(cx, &block.bytes, &mut receipts)
+                    .expect("put_verified");
+            }
+            let receipted_root = receipted
+                .put_root_verified(cx, &root, &mut receipts)
+                .expect("put_root_verified");
+
+            assert_eq!(
+                receipted_root, plain_root,
+                "commit {seq:?}: the receipted path published a different root"
+            );
+        }
+    });
+}
+
+/// **A receipt really is a filesystem skip, and it is scoped to what this
+/// session proved.** Damage planted over a receipted block's file makes the
+/// plain idempotent put refuse (`DamagedExisting`) — it re-reads the file —
+/// while the receipted put returns the identity without touching the inode:
+/// the receipt records that THIS process already made those exact bytes
+/// durable, and content addressing makes re-deriving that from a disk that
+/// can only agree or be damaged pure re-verification. The damage is not
+/// thereby forgiven: any path that actually reads the block (`get`, reopen,
+/// recovery) still refuses it by identity, exactly as the planted-damage laws
+/// above pin.
+#[test]
+fn a_receipted_block_is_admitted_without_rereading_its_file() {
+    let dir = scratch_dir("receipts-skip");
+    under_lab(52, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let mut receipts = PublishReceipts::new();
+        let bytes = sample();
+        let id = store
+            .put_verified(cx, &bytes, &mut receipts)
+            .expect("earns the receipt");
+        assert!(receipts.holds(id));
+
+        let other = encode_block(&[entry(9, 9, 7)]).expect("encodes");
+        std::fs::write(store.path(id.0), &other).expect("plants damage");
+
+        assert!(
+            matches!(
+                store.put(cx, &bytes),
+                Err(StoreError::DamagedExisting { .. })
+            ),
+            "the plain path re-reads the file and must see the damage"
+        );
+        assert_eq!(
+            store
+                .put_verified(cx, &bytes, &mut receipts)
+                .expect("the receipt answers without the file"),
+            id,
+            "a receipted identity resolves from the session's own proof"
+        );
+        assert!(
+            matches!(store.get(cx, id), Err(StoreError::IdentityMismatch { .. })),
+            "and every reading path still refuses the damaged bytes"
+        );
+    });
+}
+
+/// A root that lies about a receipted block's range gets no benefit from the
+/// receipt: the span mismatch routes that reference back through full disk
+/// admission, which refuses it with exactly the diagnostic the plain path
+/// gives. The memoised fast path must never be the wider one.
+#[test]
+fn a_root_lying_about_a_receipted_range_is_still_refused() {
+    let dir = scratch_dir("receipts-range-lie");
+    under_lab(53, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let mut receipts = PublishReceipts::new();
+        let bytes = sample();
+        let block_id = store
+            .put_verified(cx, &bytes, &mut receipts)
+            .expect("stores block");
+        let lying = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(3),
+            blocks: vec![BlockRef {
+                block_id: block_id.0,
+                first_seq: CommitSeq(2),
+                last_seq: CommitSeq(2),
+            }],
+        };
+        let root_bytes = fgdb_strata::root::encode_root(&lying).expect("encodes root");
+        let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
+
+        assert!(matches!(
+            store.put_root_verified(cx, &lying, &mut receipts),
+            Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch {
+                at: 0,
+                declared: (CommitSeq(2), CommitSeq(2)),
+                actual: (CommitSeq(1), CommitSeq(2)),
+            }))
+        ));
+        assert!(
+            !store.path(root_id).exists(),
+            "a refused root must not acquire a canonical path"
+        );
+    });
+}
+
+/// Fresh receipts degrade to one full admission, not to weaker checking: a
+/// session that inherits a store populated by someone else re-reads every
+/// referenced block from disk on its first publication, earns the receipts,
+/// and only then skips.
+#[test]
+fn fresh_receipts_fall_back_to_full_disk_admission() {
+    let dir = scratch_dir("receipts-fallback");
+    under_lab(54, move |cx| {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer
+            .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
+            .expect("creates");
+        writer.seal(strata_keys).expect("seals");
+        writer
+            .apply(strata_keys, CommitSeq(4), &create(11, 1, 3))
+            .expect("creates");
+        let (root, blocks) = writer
+            .publish(strata_keys, CommitSeq(4))
+            .expect("publishes");
+        assert_eq!(blocks.len(), 2, "the fixture needs a sealed prefix");
+
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        for block in &blocks {
+            store.put(cx, &block.bytes).expect("plain put");
+        }
+        let expected = store.put_root(cx, &root).expect("plain put_root");
+
+        // A NEW session over the same store: no receipts, so admission must
+        // come from disk — and must succeed, seeding every receipt.
+        let mut receipts = PublishReceipts::new();
+        let republished = store
+            .put_root_verified(cx, &root, &mut receipts)
+            .expect("full-admission fallback");
+        assert_eq!(republished, expected);
+        for block in &blocks {
+            assert!(
+                receipts.holds(DeltaBlockVersion(block.block_id)),
+                "the fallback earns the receipt it verified"
+            );
+        }
+    });
+}
+
+/// The cross-block EId law survives memoisation — and fires EARLIER. The
+/// receipted path validates each block's entries as the receipt is earned, so
+/// a future block reusing a spent EId is refused at `put_verified` time,
+/// before any root could even name it. The plain path refuses the same defect
+/// at `put_root`; both refuse, neither publishes.
+#[test]
+fn receipted_puts_refuse_eid_reuse_as_the_receipt_is_earned() {
+    let dir = scratch_dir("receipts-eid-reuse");
+    under_lab(55, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let mut receipts = PublishReceipts::new();
+        let early = edge(10, 1, 2, 1, Some(3));
+        let future = edge(10, 1, 2, 5, None);
+        let early_bytes = encode_block(&[early]).expect("encodes");
+        let future_bytes = encode_block(&[future]).expect("encodes");
+
+        store
+            .put_verified(cx, &early_bytes, &mut receipts)
+            .expect("the first birth is lawful");
+        assert!(matches!(
+            store.put_verified(cx, &future_bytes, &mut receipts),
+            Err(StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
+                eid: EId(10),
+                ..
+            }))
+        ));
+    });
+}
+
 /// A root is subject to the same identity rule as a block: bytes at its path that
 /// are a DIFFERENT root are refused.
 #[test]

@@ -581,7 +581,7 @@ pub fn merge_neighbours(
 ///
 /// Root admission uses this without retaining decoded future blocks; merge and
 /// compaction consume the same state into their canonical one-entry-per-EId map.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct EdgeHistoryValidator {
     entries: std::collections::BTreeMap<EId, crate::AdjacencyEntry>,
     seen: usize,

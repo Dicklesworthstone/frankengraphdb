@@ -151,8 +151,8 @@ use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId,
     RelationId, SchemaEpoch,
 };
-use fgdb_strata::root::{RootError, merge_neighbours};
-use fgdb_strata::store::{BlockStore, StoreError};
+use fgdb_strata::root::{BlockRef, RootError, merge_neighbours};
+use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
 use fgdb_types::context::CommitCx;
@@ -491,6 +491,11 @@ impl WriteBatch {
 #[derive(Debug)]
 struct Snapshot {
     blocks: Vec<Vec<AdjacencyEntry>>,
+    /// The root's block references, aligned with `blocks`. Retained so the
+    /// next commit can tell which decoded blocks the new root carries forward
+    /// unchanged (fgdb-gieu) — content addressing makes the identity the
+    /// proof, so an unchanged reference means an unchanged decoded block.
+    refs: Vec<BlockRef>,
     frontier: CommitSeq,
     root: PartitionRootVersion,
     /// The next unspent birth ordinal, derived by counting the creations the
@@ -519,6 +524,12 @@ pub struct Database {
     /// recovery path, and `incremental_publish_equals_rebuild.rs` pins that a
     /// clone-publish of this writer is byte-identical to that rebuild.
     writer: BlockWriter,
+    /// Durability-and-admission receipts for the blocks this session has
+    /// already published (fgdb-gieu). Session-scoped like the writer above,
+    /// and with the same trust story: never authoritative, never persisted —
+    /// a fresh process re-earns every proof from disk via the receipts'
+    /// fallback path on its first publication.
+    receipts: PublishReceipts,
 }
 
 impl Database {
@@ -604,6 +615,11 @@ impl Database {
             keys,
             snapshot,
             writer,
+            // Deliberately empty rather than seeded from the rebuild: the first
+            // publication's fallback re-earns every block's admission from disk
+            // through the same checks, so an open session starts from proven
+            // state without a second trust-bearing constructor (fgdb-gieu).
+            receipts: PublishReceipts::new(),
         })
     }
 
@@ -742,16 +758,75 @@ impl Database {
                 commit_seq: frontier.0,
                 error,
             })?;
+        // Strata-side incremental publish (fgdb-gieu): the sealed prefix of a
+        // partition is immutable and content-addressed, so of everything the
+        // clone-publish returned, only blocks this session has not already made
+        // durable cost any I/O — `put_verified` skips receipted identities, and
+        // `put_root_verified` admits receipted references without re-reading
+        // them from disk. Measured pre-fix: every commit re-put every sealed
+        // block (read + hash + two fsyncs each) and re-read + re-decoded the
+        // whole partition twice more (admission, reopen) — O(blocks) disk work
+        // per commit with no new information in it.
         for block in &blocks {
             self.store
-                .put(cx, &block.bytes)
+                .put_verified(cx, &block.bytes, &mut self.receipts)
                 .map_err(RebuildError::from)?;
         }
-        let root_id = self.store.put_root(cx, &root).map_err(RebuildError::from)?;
-        let (_, decoded) = self.store.reopen(cx, root_id).map_err(RebuildError::from)?;
+        let root_id = self
+            .store
+            .put_root_verified(cx, &root, &mut self.receipts)
+            .map_err(RebuildError::from)?;
+
+        // Refresh the snapshot without re-reading the partition: carry forward
+        // the decoded blocks whose references are unchanged, and decode the new
+        // ones from the exact bytes `put_verified` just content-addressed and
+        // fsynced. The encode→address→fsync→decode round trip rebuild's doc
+        // demands still happens — over the in-memory bytes the disk now holds —
+        // and `incremental_snapshot.rs` pins that a from-scratch reopen derives
+        // this same root and adjacency. Decode failures refuse here, before the
+        // old snapshot is disturbed (fold-then-swap, as above).
+        let mut fresh: std::collections::BTreeMap<ObjectId, Vec<AdjacencyEntry>> =
+            std::collections::BTreeMap::new();
+        let carried: std::collections::BTreeSet<ObjectId> =
+            self.snapshot.refs.iter().map(|r| r.block_id).collect();
+        for reference in &root.blocks {
+            if carried.contains(&reference.block_id) || fresh.contains_key(&reference.block_id) {
+                continue;
+            }
+            let sealed = blocks
+                .iter()
+                .find(|block| block.block_id == reference.block_id)
+                .expect("every reference in a publish's root names a block that publish returned");
+            fresh.insert(
+                reference.block_id,
+                fgdb_strata::decode_block(&sealed.bytes)
+                    .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?,
+            );
+        }
+        let mut carried: std::collections::BTreeMap<ObjectId, Vec<AdjacencyEntry>> = self
+            .snapshot
+            .refs
+            .iter()
+            .map(|r| r.block_id)
+            .zip(std::mem::take(&mut self.snapshot.blocks))
+            .collect();
+        let decoded = root
+            .blocks
+            .iter()
+            .map(|reference| {
+                carried
+                    .remove(&reference.block_id)
+                    .or_else(|| fresh.remove(&reference.block_id))
+                    .expect(
+                        "every root reference resolves: EIds are spend-once, so one \
+                         publication cannot name the same block identity twice",
+                    )
+            })
+            .collect();
         self.writer = folded;
         self.snapshot = Snapshot {
             blocks: decoded,
+            refs: root.blocks,
             frontier,
             root: root_id,
             next_birth_ordinal,
@@ -978,11 +1053,12 @@ async fn rebuild(
         store.put(cx, &block.bytes)?;
     }
     let root_id = store.put_root(cx, &root)?;
-    let (_, decoded) = store.reopen(cx, root_id)?;
+    let (reopened_root, decoded) = store.reopen(cx, root_id)?;
 
     Ok((
         Snapshot {
             blocks: decoded,
+            refs: reopened_root.blocks,
             frontier,
             root: root_id,
             next_birth_ordinal,

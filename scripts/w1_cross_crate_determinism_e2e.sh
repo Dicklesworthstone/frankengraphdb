@@ -200,6 +200,24 @@ workspace_test_failed() { # stage log exit-code genuine-failure-diagnostic
   local rc="$3"
   local failure_diagnostic="$4"
 
+  # A failing run must not be classified RED while the tree it ran against was
+  # mutating underneath it. The mid/after pin checks below the run sites never
+  # execute on this path — the failure handler preempts them — which is exactly
+  # how fgdb-gfim reported nondeterminism: a concurrent checkout swapped
+  # registries/ mid-run-2, run 2 went red, and the gate blamed determinism
+  # before the PIN_AFTER comparison could say INDETERMINATE. Re-check first.
+  # A pin that cannot be computed skips this guard and falls through to the
+  # red classification: masking a real failure is worse than missing an abort.
+  local pin_now
+  pin_now="$(source_pin || true)"
+  if [ -n "$pin_now" ] && [ "$pin_now" != "$PIN_BEFORE" ]; then
+    gate_diag "INDETERMINATE: the source tree changed during $stage (another agent committed)."
+    gate_diag "  before=$PIN_BEFORE  now=$pin_now"
+    gate_diag "  The failure cannot be attributed; this is NOT a determinism finding."
+    gate_diag "retained evidence: $EVIDENCE_DIR"
+    gate_abort_unrun "$stage: source tree changed mid-run; the failure cannot be attributed"
+  fi
+
   if cargo_extern_artifact_disappeared "$log"; then
     gate_diag "INDETERMINATE: a Cargo dependency artifact disappeared during $stage."
     gate_diag "  The workspace assertions did not complete; this is NOT a determinism finding."
@@ -352,9 +370,30 @@ FIXTURE
 # A pin that fails must fail loudly: stderr is NOT swallowed, and an empty or
 # short digest aborts. An empty pin compares equal to the next empty pin, which
 # would turn the guard below into a no-op that always reports "unchanged".
+#
+# COVERAGE IS RUNTIME INPUTS, NOT JUST COMPILED SOURCE (fgdb-gfim, measured
+# 2026-08-05). The workspace suite READS the tree at run time: registry-check
+# alone consumes registries/**, .beads/issues.jsonl, AGENTS.md, the plan
+# document, docs/*.md and scripts/*.sh, and its corpus fixtures. A pin
+# restricted to crates/tools *.rs+Cargo.toml certified "unchanged" while a
+# concurrent `git checkout` in the same root swapped registries/ to a
+# three-week-old vintage between run 1 and run 2 — the identical binary then
+# failed 8 targets, reading as nondeterminism. So the pin is the union of the
+# tracked file set (git ls-files, total over every runtime input in a git
+# tree) and an extension-blind sweep of crates/tools/registries (which also
+# catches an UNTRACKED file cargo would still compile — a property the
+# tracked set alone loses).
 source_pin() {
   local pin files count
-  files="$(find crates tools \( -name '*.rs' -o -name 'Cargo.toml' \) -type f | LC_ALL=C sort)"
+  files="$(
+    {
+      find crates tools registries -type f 2>/dev/null
+      git ls-files 2>/dev/null
+      printf '%s\n' Cargo.toml Cargo.lock
+    } | LC_ALL=C sort -u | while IFS= read -r f; do
+      if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+    done
+  )"
   count="$(printf '%s' "$files" | grep -c . || true)"
   # An empty walk is never legitimate here and must not be pinnable. GNU xargs
   # runs its command ONCE even with no input, so `find | xargs sha256sum` over
