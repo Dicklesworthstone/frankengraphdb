@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 7
+registry_epoch = 8
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -322,4 +322,75 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:format-transition-spec"
 source_location = "a02:1218"
 statement = "FormatTransitionSpec<Role> is the closed Semantic ordered union AdvertiseTarget; ActivateWriteEpoch; RecordFirstTargetWrite; RewriteEquivalent; RetireOldDecoder. ActivateWriteEpoch contains no guessed future position; its applied command record supplies the assigned activation_applied_position, which every later activation reference authenticates."
+status = "registered"
+
+# --- F5d delta-batch retention cut (frozen ordinal 27). C2 (round 10) included
+# --- it as the last F5 member; L1930 spells the command and its evidence but
+# --- never the struct body, so the contract row carries T6 sentinels.
+
+[[classification]]
+type_name = "LocalDeltaBatchRetentionCutSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-delta-batch-retention-cut-spec"
+source_location = "a10:1930"
+statement = "The role-specific ordered LocalDeltaBatchRetentionCutSpec may install ActivatedDeltaRetentionCut<Local> and advance retained_after_commit_seq only after the paired checkpoint/floor and ordinary activated retention cut cover the same position; apply replaces old strong entries with the prefix commitment in the same state transition."
+status = "registered"
+
+# --- F6 remote-retention-and-trust (frozen ordinals 28-30). The union row is
+# --- ARMED, so it binds the member-root id and resolves through the eight
+# --- "{root}:{arm}" contract rows (round-12 T4). The four Remote*Spec
+# --- sub-bodies its arms name are PreOrderArtifact per ruling C11: L1582
+# --- reaches each via StrongRef inside an arm payload, which is the pre-order
+# --- construction shape, never a second ordered input.
+
+[[classification]]
+type_name = "RemoteRetentionControlSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:remote-retention-control-spec"
+source_location = "a04:1582"
+statement = "RemoteRetentionControlSpec is the closed role-valid union AcquireGrant; RegisterConsumerGrant; RequestConsumerRelease; PublishConsumerReleaseEvidence; ApplyAuthorityRelease; PublishAuthorityReleaseAck; ConsumeReleaseAck; AdoptLegacyAuthorityTransfer, included in Local/Meta/Shard control registries; the generated role matrix fixes each arm to authority, consumer, or transition-consumer posture and there is no generic transfer arm."
+status = "registered"
+
+[[classification]]
+type_name = "AdvanceRemoteConfigurationEvidenceSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:advance-remote-configuration-evidence-spec"
+source_location = "a04:1584"
+statement = "AdvanceRemoteConfigurationEvidenceSpec is the ordinary role-valid CAS; apply verifies the exact predecessor/anchor and atomically selects CurrentEvidence(successor,generation+1), and topology/configuration can never advance while trust remains behind."
+status = "registered"
+
+[[classification]]
+type_name = "ValidateRemoteConfigurationAnchorSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:validate-remote-configuration-anchor-spec"
+source_location = "a04:1586"
+statement = "ValidateRemoteConfigurationAnchorSpec constructs ValidatedRemoteConfigurationAnchor and atomically selects its strong anchor at generation+1, legal only after the RemoteTrustCompactionPrecondition proves no surviving object still binds a predecessor evidence; both specs are explicit Local/Meta/Shard control variants."
+status = "registered"
+
+[[classification]]
+type_name = "RemoteRetentionGrantSpec"
+class = "PreOrderArtifact"
+source_location = "a04:1582"
+statement = "C11: the AcquireGrant arm reaches RemoteRetentionGrantSpec via StrongRef<RemoteRetentionGrantSpec>, the pre-order body shape; the ordered input is RemoteRetentionControlSpec."
+status = "registered"
+
+[[classification]]
+type_name = "RemoteRetentionReleaseRequestSpec"
+class = "PreOrderArtifact"
+source_location = "a04:1582"
+statement = "C11: the RequestConsumerRelease arm reaches RemoteRetentionReleaseRequestSpec via StrongRef<RemoteRetentionReleaseRequestSpec>, the pre-order body shape; the ordered input is RemoteRetentionControlSpec."
+status = "registered"
+
+[[classification]]
+type_name = "RemoteRetentionReleaseApplySpec"
+class = "PreOrderArtifact"
+source_location = "a04:1582"
+statement = "C11: the ApplyAuthorityRelease arm reaches RemoteRetentionReleaseApplySpec via StrongRef<RemoteRetentionReleaseApplySpec>, the pre-order body shape; the ordered input is RemoteRetentionControlSpec."
+status = "registered"
+
+[[classification]]
+type_name = "RetentionAuthorityTransferAdoptionSpec"
+class = "PreOrderArtifact"
+source_location = "a04:1582"
+statement = "C11: the AdoptLegacyAuthorityTransfer arm reaches RetentionAuthorityTransferAdoptionSpec via StrongRef<RetentionAuthorityTransferAdoptionSpec>, the pre-order body shape; the ordered input is RemoteRetentionControlSpec."
 status = "registered"

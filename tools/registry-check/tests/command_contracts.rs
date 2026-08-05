@@ -143,6 +143,23 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:format-transition-spec:record-first-target-write",
         "cc:local:format-transition-spec:rewrite-equivalent",
         "cc:local:format-transition-spec:retire-old-decoder",
+        // F5d delta-batch retention cut (frozen ordinal 0x001b). The last F5
+        // member per ruling C2 (round 10); struct body unspelled, T6 sentinels.
+        "cc:local:local-delta-batch-retention-cut-spec",
+        // F6 remote-retention-and-trust (frozen ordinals 0x001c-0x001e). The
+        // eight RemoteRetentionControlSpec inner tags are FORCED by the
+        // wire_types.toml union_variant reservations 0x0101-0x0108, which
+        // agree with L1582 source order.
+        "cc:local:remote-retention-control-spec:acquire-grant",
+        "cc:local:remote-retention-control-spec:register-consumer-grant",
+        "cc:local:remote-retention-control-spec:request-consumer-release",
+        "cc:local:remote-retention-control-spec:publish-consumer-release-evidence",
+        "cc:local:remote-retention-control-spec:apply-authority-release",
+        "cc:local:remote-retention-control-spec:publish-authority-release-ack",
+        "cc:local:remote-retention-control-spec:consume-release-ack",
+        "cc:local:remote-retention-control-spec:adopt-legacy-authority-transfer",
+        "cc:local:advance-remote-configuration-evidence-spec",
+        "cc:local:validate-remote-configuration-anchor-spec",
     ] {
         assert!(
             registry
@@ -153,8 +170,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 38,
-        "the population may only grow from the landed F1-F4/F5a/F5b rows"
+        registry.contracts.len() >= 49,
+        "the population may only grow from the landed F1-F6 rows"
     );
 }
 
@@ -173,6 +190,8 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:allocation-reservation-transition-spec", 2),
         ("cc:local:finalization-allocation-disposition-spec", 2),
         ("cc:local:configuration-transition-spec", 4),
+        ("cc:local:format-transition-spec", 5),
+        ("cc:local:remote-retention-control-spec", 8),
     ] {
         let family: Vec<_> = registry
             .contracts

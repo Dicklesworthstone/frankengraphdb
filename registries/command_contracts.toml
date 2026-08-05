@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 7
+registry_epoch = 8
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1269,6 +1269,364 @@ consumed_state_slots = [ "SemanticPayload|Local|format_compatibility_state", "Se
 written_state_slots = [ "SemanticPayload|Local|format_compatibility_state" ]  # [C][F]
 checkpoint_floor_classes = [ "format-epoch" ]                             # [C][F]
 backup_restore_gc_classes = [ "format-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F5d delta-batch retention cut — frozen ordinal 27. LocalDeltaBatchRetentionCutSpec
+# is the LAST F5 member: ruling C2 (round 10) included it in F5 at the position
+# the freeze proposal gave it, immediately after the format transition, so the
+# dense ordinal following F5c's 26 is 27. The F5a header's "configuration,
+# format, and delta-retention members remain in their own ordered increment"
+# recorded exactly this deferral. The exact struct body is never spelled —
+# L1930 names the command, its evidence (DeltaRetentionCutEvidence<Role>), and
+# its apply obligations only — so body-dependent audit keys record the
+# SourceUnspelled sentinel per T6, legal only on reserved rows.
+#
+# NOTE ON THE PREDECESSOR HANDOFF: the wedged pane's proposal named this
+# increment "F6 ... ordinal 27+". Re-derived against the frozen order (the
+# round-10 confirmation makes the proposal doc the frozen object, C2 resolved
+# INCLUDE-in-F5): ordinal 27 belongs to this F5 member and F6 owns 28-30.
+# Landing F6 at 27 would have minted permanently wrong tags (plan line 290).
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:local-delta-batch-retention-cut-spec"     # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001b                                                   # [S] frozen dense ordinal 27
+input_schema_id = "LocalDeltaBatchRetentionCutSpec"                       # [S] L1930 "the role-specific ordered" command (struct body unspelled)
+input_wire_tag = 0x001b                                                   # [C]
+body_schema_id = "LocalDeltaBatchRetentionCutSpec"                        # [S]
+result_schema_id = "ActivatedDeltaRetentionCut<Local>"                    # [S] L1930 "may install ActivatedDeltaRetentionCut<Role>"
+applied_record_schema_id = "LocalDeltaBatchIndex"                         # [S] L1928/1930: advances retained_after_commit_seq and active_cut_ref
+handler_symbol = "fgdb_apply::local::local_delta_batch_retention_cut_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S] C2: an F5 member of the L1916 semantic registry; L1930 "role-specific ordered"
+sequence_effects = "may install the activated cut and advance retained_after_commit_seq only after the paired checkpoint/floor and ordinary activated retention cut cover the same position; apply replaces old strong entries with the prefix commitment in the same state transition; a missing retained entry is corruption, and a query below a proved cut returns HistoryUnavailable or the already-recorded gap contract"  # [S] L1930
+expected_state_schema_id = "LocalDeltaBatchIndex"                         # [S] L1930 basis_index_digest names the index as the cut basis
+authority_arm = "DeltaRetentionCutEvidence<Local>"                        # [S-derived] C-h tier 3: the cut is evidence-authorized (L1930 complete_obligation_bijection)
+authority_evidence_target_schema_id = "DeltaRetentionCutEvidence<Local>"  # [S] L1930 exact evidence schema
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:local-delta-batch-retention-cut-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|local_delta_batch_index", "SemanticPayload|Local|retention_map" ]  # [C][F] the paired ordinary activated retention cut is the coverage precondition
+written_state_slots = [ "SemanticPayload|Local|local_delta_batch_index" ]  # [C][F]
+checkpoint_floor_classes = [ "retention-cut" ]                            # [C][F] L1930: floors retain the current index and active cut
+backup_restore_gc_classes = [ "retention-cut" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F6 remote-retention-and-trust — frozen ordinals 28-30. Family per the round-10
+# freeze: RemoteRetentionControlSpec (28, ARMED), then the two trust controls
+# AdvanceRemoteConfigurationEvidenceSpec (29) and
+# ValidateRemoteConfigurationAnchorSpec (30), L1582/L1584/L1586 defining-site
+# order. L1582 spells the union as closed role-valid with EIGHT arms and says it
+# "is included in Local/Meta/Shard control registries"; these are the Local rows.
+#
+# THE INNER TAGS ARE FORCED, NOT MINTED. wire_types.toml already reserves the
+# eight arms as union_variant rows 0x0101-0x0108 with wire_tag 0x0001-0x0008 in
+# exactly the L1582 source order (AcquireGrant .. AdoptLegacyAuthorityTransfer),
+# so per the reservation-bijection law each contract row takes its reserved
+# inner tag — measured 8/8 agreement with source order, unlike F5c's fresh mint.
+#
+# ARM POSTURE IS SOURCE-FORCED: "The generated role matrix fixes each arm to
+# authority, consumer, or transition-consumer posture and rejects a
+# record/evidence type in the wrong arm" (L1582), recorded per-row in
+# posture_feature_predicate instead of the C-g "always" default.
+#
+# C11 (round 10): the four Remote*Spec sub-bodies the arms name are PRE-ORDER
+# payloads reached via StrongRef — they get PreOrderArtifact classification
+# rows, never their own ordered contract rows.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:acquire-grant"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] frozen dense ordinal 28
+input_schema_id = "RemoteRetentionControlSpec"                            # [S] L1582 exact closed role-valid union
+input_wire_tag = 0x001c                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] forced: wire_types.toml 0x0101 reserves AcquireGrant at 0x0001; first in L1582 source order
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RemoteRetentionGrantRecord"                           # [S] L1402 "Authority apply creates RemoteRetentionGrantRecord"
+applied_record_schema_id = "RemoteRetentionObligationRoot"                # [S] L1402 the record is created "in RemoteRetentionObligationRoot, which roots the exact target closure"
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::acquire_grant"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 F6 family projection; L1582 ordered control union
+sequence_effects = "creates the Active grant record in the obligation root from the pre-order grant spec; the target ref and identity must be the exact registered pair, and any (authority_domain,grant_id) collision with nonidentical bytes fails closed"  # [S] L1402
+expected_state_schema_id = "RemoteRetentionObligationRoot"                # [S] keyed (authority_domain,grant_id) map
+authority_arm = "SourceUnspelled"                                         # [S] the L1582 arm payload names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled arm
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent from the fully spelled arm
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:acquire-grant"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F] L1582: floors classify every authority/consumer/transfer entry
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "authority-group posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:register-consumer-grant"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] shared member outer tag
+input_schema_id = "RemoteRetentionControlSpec"                            # [S]
+input_wire_tag = 0x001c                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] forced: wire_types.toml 0x0102 reserves RegisterConsumerGrant at 0x0002
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RemoteRetentionConsumerRoot"                          # [S-derived] L1580 the Acquired entry is the produced state
+applied_record_schema_id = "RemoteRetentionConsumerRoot"                  # [S] L1580 Acquired{grant_evidence_ref,local_consumer_set_commitment}
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::register_consumer_grant"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "installs Acquired under (authority_domain,grant_id) only after authenticating all leaves and byte-matching both complete domains against expected_consumer_root_digest; the authority ledger, not the evidence, owns the remote target"  # [S] L1402/L1582
+expected_state_schema_id = "RemoteRetentionConsumerRoot"                  # [S] expected_consumer_root_digest
+authority_arm = "SourceUnspelled"                                         # [S] no authority member in the arm payload
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:register-consumer-grant"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F]
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "consumer-group posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:request-consumer-release"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] shared member outer tag
+input_schema_id = "RemoteRetentionControlSpec"                            # [S]
+input_wire_tag = 0x001c                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] forced: wire_types.toml 0x0103 reserves RequestConsumerRelease at 0x0003
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RemoteRetentionReleaseRequestRecord"                  # [S] L1404 stage 1 "constructs RemoteRetentionReleaseRequestRecord"
+applied_record_schema_id = "RemoteRetentionConsumerRoot"                  # [S] L1404 "installs ReleaseRequested"
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::request_consumer_release"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "stage 1 of the six-transition release handshake, never inferred from time or a missing client: apply rechecks the complete consumer root, constructs the release request record, and installs ReleaseRequested, which cannot acquire or create another local ref under the old grant"  # [S] L1404
+expected_state_schema_id = "RemoteRetentionConsumerRoot"                  # [S] the Acquired entry it transitions
+authority_arm = "SourceUnspelled"                                         # [S] no authority member in the arm payload
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:request-consumer-release"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F]
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "consumer-group posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:publish-consumer-release-evidence"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] shared member outer tag
+input_schema_id = "RemoteRetentionControlSpec"                            # [S]
+input_wire_tag = 0x001c                                                   # [C]
+inner_wire_tag = 0x0004                                                   # [S] forced: wire_types.toml 0x0104 reserves PublishConsumerReleaseEvidence at 0x0004
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RemoteRetentionConsumerRoot"                          # [S-derived] the ReleaseCertified entry is the produced state
+applied_record_schema_id = "RemoteRetentionConsumerRoot"                  # [S] L1404 "the later consumer publish control installs this portable leaf as ReleaseCertified"
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::publish_consumer_release_evidence"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "stage 2 publication: installs the already-created release request certificate and its generated portable ExportLeaf as ReleaseCertified; the certificate was created by the consumer quorum only after ReleaseRequested and a root recheck"  # [S] L1404
+expected_state_schema_id = "RemoteRetentionConsumerRoot"                  # [S] the ReleaseRequested entry it strengthens
+authority_arm = "SourceUnspelled"                                         # [S] no authority member in the arm payload
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:publish-consumer-release-evidence"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F] L1582: plus unpublished certificate-ledger evidence
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "consumer-group posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:apply-authority-release"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] shared member outer tag
+input_schema_id = "RemoteRetentionControlSpec"                            # [S]
+input_wire_tag = 0x001c                                                   # [C]
+inner_wire_tag = 0x0005                                                   # [S] forced: wire_types.toml 0x0105 reserves ApplyAuthorityRelease at 0x0005
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RemoteRetentionReleaseTombstone"                      # [S] L1404 stage 3 "creates RemoteRetentionReleaseTombstone"
+applied_record_schema_id = "RemoteRetentionObligationRoot"                # [S] L1578 the ReleaseApplied{tombstone_ref} entry
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::apply_authority_release"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "stage 3: the authority imports the release request leaf, rechecks every stronger authority root, removes the active grant, and creates the tombstone with no strong edge to the active record, spec, target, or apply command; the release command/log retains those inputs only until its verified cut"  # [S] L1404
+expected_state_schema_id = "RemoteRetentionObligationRoot"                # [S] expected_active_grant_digest names the Active entry
+authority_arm = "SourceUnspelled"                                         # [S] no authority member in the arm payload
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:apply-authority-release"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F]
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "authority-group posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:publish-authority-release-ack"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] shared member outer tag
+input_schema_id = "RemoteRetentionControlSpec"                            # [S]
+input_wire_tag = 0x001c                                                   # [C]
+inner_wire_tag = 0x0006                                                   # [S] forced: wire_types.toml 0x0106 reserves PublishAuthorityReleaseAck at 0x0006
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RemoteRetentionAckPublishRecord"                      # [S] L1404 stage 5 "atomically creates RemoteRetentionAckPublishRecord"
+applied_record_schema_id = "RemoteRetentionObligationRoot"                # [S] L1578 the AckPublished entry with release_summary_key and retain_ack_through
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::publish_authority_release_ack"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "stage 5: atomically creates the ack publish record and installs the release summary entry, both available through the capability-safe permanent release-proof floor with no new releasable grant needed to prove the old grant released; requires the stage-4 ack certificate and its portable leaf, created only after the applied tombstone root"  # [S] L1404
+expected_state_schema_id = "RemoteRetentionObligationRoot"                # [S] the ReleaseApplied entry it publishes from
+authority_arm = "SourceUnspelled"                                         # [S] no authority member in the arm payload
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:publish-authority-release-ack"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F]
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "authority-group posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:consume-release-ack"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] shared member outer tag
+input_schema_id = "RemoteRetentionControlSpec"                            # [S]
+input_wire_tag = 0x001c                                                   # [C]
+inner_wire_tag = 0x0007                                                   # [S] forced: wire_types.toml 0x0107 reserves ConsumeReleaseAck at 0x0007
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RemoteRetentionConsumeAckRecord"                      # [S] L1404 stage 6 "creates RemoteRetentionConsumeAckRecord"
+applied_record_schema_id = "RemoteRetentionConsumerRoot"                  # [S] L1580 the Acknowledged{ack_leaf_ref,release_summary_key,retire_after_floor} entry
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::consume_release_ack"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "stage 6: the consumer imports the portable ack leaf without a CertifiedRemoteStrongRef, rechecks that its current complete root still contains no old-grant ref, and creates the consume-ack record with the no-old-grant proof; only then may request/grant evidence retire after its checkpoint floor"  # [S] L1404
+expected_state_schema_id = "RemoteRetentionConsumerRoot"                  # [S] expected_frozen_consumer_set_commitment
+authority_arm = "SourceUnspelled"                                         # [S] no authority member in the arm payload
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:consume-release-ack"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F]
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "consumer-group posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:remote-retention-control-spec:adopt-legacy-authority-transfer"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001c                                                   # [S] shared member outer tag
+input_schema_id = "RemoteRetentionControlSpec"                            # [S]
+input_wire_tag = 0x001c                                                   # [C]
+inner_wire_tag = 0x0008                                                   # [S] forced: wire_types.toml 0x0108 reserves AdoptLegacyAuthorityTransfer at 0x0008
+body_schema_id = "RemoteRetentionControlSpec"                             # [S]
+result_schema_id = "RetentionAuthorityTransferAdoptionRecord"             # [S] L1580/L1608 the adoption record the AuthorityTransferAdopted entry retains
+applied_record_schema_id = "RemoteRetentionConsumerRoot"                  # [S] L1580 AuthorityTransferAdopted{adoption_record_ref,new_authority_grant_evidence_ref}
+handler_symbol = "fgdb_apply::local::remote_retention_control_spec::adopt_legacy_authority_transfer"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "adopts the one certified Local-to-Meta retention authority transfer via the exact adoption arm; there is no generic transfer arm — old-Local transfer records are created only by BeginRoleTransitionSpec and Meta transfer evidence only by the certified activation projection"  # [S] L1582
+expected_state_schema_id = "RemoteRetentionConsumerRoot"                  # [S] the AuthorityTransferPending entry it adopts from
+authority_arm = "SourceUnspelled"                                         # [S] no authority member in the arm payload
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:remote-retention-control-spec:adopt-legacy-authority-transfer"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_consumer_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-retention" ]                         # [C][F]
+backup_restore_gc_classes = [ "remote-retention" ]                        # [C][F]
+posture_feature_predicate = "transition-consumer posture (L1582 generated role matrix)"  # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:advance-remote-configuration-evidence-spec"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001d                                                   # [S] frozen dense ordinal 29
+input_schema_id = "AdvanceRemoteConfigurationEvidenceSpec"                # [S] L1584 exact body; "Both specs are explicit Local/Meta/Shard control variants" (L1586)
+input_wire_tag = 0x001d                                                   # [C]
+body_schema_id = "AdvanceRemoteConfigurationEvidenceSpec"                 # [S]
+result_schema_id = "RemoteConfigurationTrustRoot"                         # [S] L1584 "atomically selects CurrentEvidence(successor,generation+1)"
+applied_record_schema_id = "RemoteConfigurationTrustRoot"                 # [S] the sole selector of current imported trust
+handler_symbol = "fgdb_apply::local::advance_remote_configuration_evidence_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 F6 family projection
+sequence_effects = "the ordinary role-valid CAS: apply verifies the exact predecessor/anchor and atomically selects CurrentEvidence(successor, generation+1); every adoption that changes authority must embed the same expected selector/generation and successor evidence and perform this CAS atomically — topology/configuration can never advance while trust remains behind"  # [S] L1584
+expected_state_schema_id = "RemoteConfigurationTrustRoot"                 # [S] expected_trust_generation and expected_selected_evidence_or_anchor
+authority_arm = "SourceUnspelled"                                         # [S] the exact L1584 body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent from the fully spelled body
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:advance-remote-configuration-evidence-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_configuration_trust_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_configuration_trust_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-trust" ]                             # [C][F] L1584: covered by every checkpoint/vector/configuration floor
+backup_restore_gc_classes = [ "remote-trust" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:validate-remote-configuration-anchor-spec"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001e                                                   # [S] frozen dense ordinal 30
+input_schema_id = "ValidateRemoteConfigurationAnchorSpec"                 # [S] L1586 exact body
+input_wire_tag = 0x001e                                                   # [C]
+body_schema_id = "ValidateRemoteConfigurationAnchorSpec"                  # [S]
+result_schema_id = "ValidatedRemoteConfigurationAnchor"                   # [S] L1586 "constructs ValidatedRemoteConfigurationAnchor"
+applied_record_schema_id = "RemoteConfigurationTrustRoot"                 # [S] L1586 "atomically selects its strong anchor at generation+1"
+handler_symbol = "fgdb_apply::local::validate_remote_configuration_anchor_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "anchor compaction is legal only after reissuing/advancing every live wrapper, grant, backup, replay manifest, prepared owner, and certificate-ledger entry to the selected current evidence; apply verifies every transition while predecessors remain rooted, requires the precondition to prove no surviving object still binds one, then constructs the anchor and atomically selects it at generation+1; no trust gap is legal, and predecessor evidence may retire only after the anchor command is checkpoint-cut with the zero-live-old proof still valid"  # [S] L1586
+expected_state_schema_id = "RemoteConfigurationTrustRoot"                 # [S] expected_trust_root_generation and expected_current_anchor_digest
+authority_arm = "RemoteTrustCompactionPrecondition"                       # [S-derived] C-h tier 3: evidence-authorized via precondition_ref
+authority_evidence_target_schema_id = "RemoteTrustCompactionPrecondition" # [S] L1586 the generated exhaustive precondition
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent from the fully spelled body
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:validate-remote-configuration-anchor-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|remote_configuration_trust_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|remote_configuration_trust_root" ]   # [C][F]
+checkpoint_floor_classes = [ "remote-trust" ]                             # [C][F]
+backup_restore_gc_classes = [ "remote-trust" ]                            # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

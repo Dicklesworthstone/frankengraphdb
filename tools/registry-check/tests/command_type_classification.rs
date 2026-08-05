@@ -68,6 +68,12 @@ fn source_forced_seed_population_is_present() {
         "InitialConfigFloorInstallSpec",
         "HistoryCutActivationSpec",
         "ConfigurationTransitionSpec",
+        "LocalDeltaBatchRetentionCutSpec",
+        "RemoteRetentionControlSpec",
+        "AdvanceRemoteConfigurationEvidenceSpec",
+        "ValidateRemoteConfigurationAnchorSpec",
+        "RemoteRetentionGrantSpec",
+        "RetentionAuthorityTransferAdoptionSpec",
     ] {
         assert!(
             registry
@@ -78,8 +84,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 29,
-        "the population may only grow from the landed F1-F4/F5a/F5b/F5c rows"
+        registry.classifications.len() >= 37,
+        "the population may only grow from the landed F1-F6 rows"
     );
 }
 
