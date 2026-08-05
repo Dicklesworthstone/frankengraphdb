@@ -27,6 +27,8 @@
 pub mod artifact;
 pub mod campaign;
 pub mod completeness;
+pub mod dual_run;
+pub mod fixture;
 pub mod ldfi;
 pub mod redaction;
 pub mod shrink;

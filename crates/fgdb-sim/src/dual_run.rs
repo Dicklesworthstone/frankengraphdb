@@ -1,0 +1,371 @@
+//! The two-runs-one-seed determinism gate and the lab-vs-live dual-run driver
+//! (plan §15.1 force multiplier 4; q97e items 4 and 6; bead `fgdb-qd2s`).
+//!
+//! Both consume the exported fixture from [`crate::fixture`]:
+//!
+//! - [`determinism_gate`] runs the fixture N times under the LAB runtime at
+//!   one seed and demands **byte-identical** serialized traces plus equal
+//!   Foata trace fingerprints and schedule-certificate hashes. A failure names
+//!   the first diverging byte and event — the bead's "determinism-gate
+//!   failures log the first diverging trace offset" requirement is a field on
+//!   the verdict, not a prose promise.
+//! - [`dual_run_fixture`] wires the same fixture into asupersync's own
+//!   [`DualRunHarness`] — the foundation's structured lab-vs-live comparison —
+//!   running once under the lab (virtual clock, deterministic scheduler) and
+//!   once under the live runtime (wall clock, real scheduler), then comparing
+//!   the clock-free [`crate::fixture::FixtureSemantics`] projections. We
+//!   deliberately do NOT hand-roll trace diffing here: Doctrine #1 says the
+//!   foundation is consumed as-is, and the harness already owns normalization,
+//!   invariant checks, and mismatch classification.
+//!
+//! # Why the two sides may differ, and what must not
+//!
+//! Under live, timestamps are wall-clock and the producer/consumer interleave
+//! at the scheduler's whim, so trace BYTES are not comparable across runtimes.
+//! What must survive the runtime swap is meaning: the chain digests, the
+//! record counts, the durable byte count. That is exactly the semantic
+//! projection the harness compares, and the counters ride
+//! [`ResourceSurfaceRecord`] with exact tolerance.
+//!
+//! # Every verdict is reconstructable from its record
+//!
+//! Both entry points return structs whose `log_lines` carry the seed, per-run
+//! fingerprints, schedule hashes, and side-by-side semantic digests, so a
+//! campaign verdict can be re-read without re-running (q97e's logging
+//! acceptance).
+
+use std::path::Path;
+
+use asupersync::Budget;
+use asupersync::lab::{
+    CancellationRecord, DualRunHarness, DualRunResult, LabConfig, LabRuntime, LoserDrainRecord,
+    NormalizedSemantics, ObligationBalanceRecord, RegionCloseRecord, ResourceSurfaceRecord,
+    TerminalOutcome,
+};
+use asupersync::runtime::RuntimeBuilder;
+
+use crate::fixture::{FixtureConfig, FixtureSemantics, first_divergence, fixture_futures};
+
+/// Scope name for the fixture's semantic counters.
+const SURFACE_SCOPE: &str = "fgdb.sim.fixture";
+
+/// One completed lab execution of the fixture.
+pub struct LabFixtureRun {
+    /// Canonical serialized trace (see [`crate::fixture::TraceHandle::to_bytes`]).
+    pub trace_bytes: Vec<u8>,
+    /// Foata/Mazurkiewicz fingerprint from the lab's own trace buffer.
+    pub trace_fingerprint: u64,
+    /// Schedule-certificate hash: the dispatch decisions themselves.
+    pub schedule_hash: u64,
+    /// Virtual nanoseconds the run consumed — proof the clock was virtual.
+    pub virtual_elapsed_nanos: u64,
+    /// Clock-free semantic projection.
+    pub semantics: FixtureSemantics,
+}
+
+/// Runs the fixture once under the lab runtime with auto-advancing virtual
+/// time, both components as separate tasks under the deterministic scheduler.
+///
+/// # Panics
+///
+/// Panics if the run fails to reach quiescence or violates a runtime
+/// invariant — a broken harness must never return a comparable-looking value.
+#[must_use]
+pub fn run_fixture_under_lab(
+    cfg: &FixtureConfig,
+    scratch_dir: &Path,
+    mut lab_config: LabConfig,
+) -> LabFixtureRun {
+    lab_config.auto_advance_time = true;
+    let mut lab = LabRuntime::new(lab_config);
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (producer_fut, consumer_fut, trace) = fixture_futures(cfg, scratch_dir);
+    let (producer_task, _producer_handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, producer_fut)
+        .expect("create producer task");
+    let (consumer_task, _consumer_handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, consumer_fut)
+        .expect("create consumer task");
+    lab.scheduler.lock().schedule(producer_task, 0);
+    lab.scheduler.lock().schedule(consumer_task, 0);
+    let virtual_report = lab.run_with_auto_advance();
+    let report = lab.report();
+    assert!(
+        report.quiescent,
+        "fixture lab run did not reach quiescence: {report:?}"
+    );
+    assert!(
+        report.invariant_violations.is_empty(),
+        "fixture lab run violated invariants: {:?}",
+        report.invariant_violations
+    );
+    LabFixtureRun {
+        trace_bytes: trace.to_bytes(),
+        trace_fingerprint: report.trace_fingerprint,
+        schedule_hash: report.trace_certificate.schedule_hash,
+        virtual_elapsed_nanos: virtual_report.virtual_elapsed_nanos,
+        semantics: trace.semantics(),
+    }
+}
+
+/// Runs the fixture once under the LIVE runtime: real clock, real scheduler,
+/// ambient `Cx` installed by `block_on`. The two component futures are polled
+/// jointly inside one task — the live side's concurrency shape is allowed to
+/// differ from the lab's; only semantics must survive.
+#[must_use]
+pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> FixtureSemantics {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("live runtime builds");
+    let (producer_fut, consumer_fut, trace) = fixture_futures(cfg, scratch_dir);
+    runtime.block_on(async move {
+        join2(producer_fut, consumer_fut).await;
+    });
+    trace.semantics()
+}
+
+/// Polls two independent futures to completion within one task. Local and
+/// dependency-free on purpose: the foundation's `Join` combinator is a
+/// region-spawning builder, which is more machinery than "run both halves of
+/// the fixture in this task" needs.
+async fn join2(
+    a: impl std::future::Future<Output = ()> + Send,
+    b: impl std::future::Future<Output = ()> + Send,
+) {
+    let mut a = Box::pin(a);
+    let mut b = Box::pin(b);
+    let mut a_done = false;
+    let mut b_done = false;
+    std::future::poll_fn(|cx| {
+        if !a_done && a.as_mut().poll(cx).is_ready() {
+            a_done = true;
+        }
+        if !b_done && b.as_mut().poll(cx).is_ready() {
+            b_done = true;
+        }
+        if a_done && b_done {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// Where and how two same-seed runs first disagreed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DivergencePoint {
+    /// Index of the run that diverged from run 0.
+    pub run_index: usize,
+    /// First differing byte in the serialized trace.
+    pub byte_offset: usize,
+    /// Event that byte falls inside, when it is in the event region.
+    pub event_index: Option<usize>,
+}
+
+/// The two-runs-at-one-seed gate's complete, self-describing verdict.
+#[derive(Debug)]
+pub struct DeterminismVerdict {
+    /// The seed every run used.
+    pub seed: u64,
+    /// How many runs were compared.
+    pub runs: usize,
+    /// Whether every run was byte-identical with matching fingerprints.
+    pub passed: bool,
+    /// First divergence against run 0, if any.
+    pub first_divergence: Option<DivergencePoint>,
+    /// Per-run Foata fingerprints.
+    pub trace_fingerprints: Vec<u64>,
+    /// Per-run schedule-certificate hashes.
+    pub schedule_hashes: Vec<u64>,
+    /// Per-run virtual elapsed nanoseconds.
+    pub virtual_elapsed_nanos: Vec<u64>,
+    /// The verdict, reconstructable without re-running.
+    pub log_lines: Vec<String>,
+}
+
+/// Runs the fixture `runs` times at one seed under the lab and compares every
+/// run against run 0: serialized trace bytes, lab trace fingerprint, and
+/// schedule hash all must match. Each run gets its own subdirectory of
+/// `scratch_root` so the durable leg cannot cross-contaminate runs.
+#[must_use]
+pub fn determinism_gate(
+    cfg: &FixtureConfig,
+    scratch_root: &Path,
+    runs: usize,
+) -> DeterminismVerdict {
+    assert!(runs >= 2, "a determinism gate needs at least two runs");
+    let mut executions = Vec::with_capacity(runs);
+    for run in 0..runs {
+        let dir = scratch_root.join(format!("run-{run}"));
+        executions.push(run_fixture_under_lab(cfg, &dir, LabConfig::new(cfg.seed)));
+    }
+
+    let mut log_lines = Vec::new();
+    for (i, run) in executions.iter().enumerate() {
+        log_lines.push(format!(
+            "determinism-gate seed={:#x} run={} trace_bytes={} fingerprint={:#x} schedule_hash={:#x} virtual_elapsed_ns={}",
+            cfg.seed,
+            i,
+            run.trace_bytes.len(),
+            run.trace_fingerprint,
+            run.schedule_hash,
+            run.virtual_elapsed_nanos,
+        ));
+    }
+
+    let mut first = None;
+    for (i, run) in executions.iter().enumerate().skip(1) {
+        if let Some((byte_offset, event_index)) =
+            first_divergence(&executions[0].trace_bytes, &run.trace_bytes)
+        {
+            first = Some(DivergencePoint {
+                run_index: i,
+                byte_offset,
+                event_index,
+            });
+            log_lines.push(format!(
+                "determinism-gate FAILED seed={:#x}: first diverging trace offset byte={byte_offset} event={event_index:?} (run 0 vs run {i})",
+                cfg.seed,
+            ));
+            break;
+        }
+    }
+    let fingerprints_agree = executions
+        .iter()
+        .all(|r| r.trace_fingerprint == executions[0].trace_fingerprint);
+    let schedules_agree = executions
+        .iter()
+        .all(|r| r.schedule_hash == executions[0].schedule_hash);
+    if first.is_none() && fingerprints_agree && schedules_agree {
+        log_lines.push(format!(
+            "determinism-gate PASSED seed={:#x}: {} runs byte-identical",
+            cfg.seed, runs
+        ));
+    } else if first.is_none() {
+        log_lines.push(format!(
+            "determinism-gate FAILED seed={:#x}: traces byte-identical but lab reports disagree (fingerprints_agree={fingerprints_agree} schedules_agree={schedules_agree})",
+            cfg.seed,
+        ));
+    }
+
+    DeterminismVerdict {
+        seed: cfg.seed,
+        runs,
+        passed: first.is_none() && fingerprints_agree && schedules_agree,
+        first_divergence: first,
+        trace_fingerprints: executions.iter().map(|r| r.trace_fingerprint).collect(),
+        schedule_hashes: executions.iter().map(|r| r.schedule_hash).collect(),
+        virtual_elapsed_nanos: executions.iter().map(|r| r.virtual_elapsed_nanos).collect(),
+        log_lines,
+    }
+}
+
+/// Projects the fixture's semantics into the harness's normalized vocabulary.
+/// The consumer digest rides `surface_result`; the counts ride exact-tolerance
+/// counters; `chain_intact` is a counter so a broken network leg is a compared
+/// value, not a silent assumption.
+fn to_normalized(semantics: &FixtureSemantics) -> NormalizedSemantics {
+    let mut terminal = TerminalOutcome::ok();
+    terminal.surface_result = Some(semantics.final_digest_hex.clone());
+    NormalizedSemantics {
+        terminal_outcome: terminal,
+        cancellation: CancellationRecord::none(),
+        loser_drain: LoserDrainRecord::not_applicable(),
+        region_close: RegionCloseRecord::quiescent(),
+        obligation_balance: ObligationBalanceRecord::zero(),
+        resource_surface: ResourceSurfaceRecord::empty(SURFACE_SCOPE)
+            .with_counter("records_produced", semantics.produced)
+            .with_counter("records_consumed", semantics.consumed)
+            .with_counter("durable_bytes", semantics.durable_bytes)
+            .with_counter("chain_intact", i64::from(semantics.chain_intact)),
+    }
+}
+
+/// The dual run's result plus its reconstructable log.
+pub struct DualRunOutcome {
+    /// The foundation harness's structured comparison.
+    pub result: DualRunResult,
+    /// Side-by-side digests and counters, reconstructable without re-running.
+    pub log_lines: Vec<String>,
+}
+
+/// Runs the fixture under the lab AND under the live runtime at one seed via
+/// asupersync's [`DualRunHarness`], comparing the clock-free semantics.
+///
+/// `live_seed_override` deliberately runs the live side at a different seed —
+/// the mutation control proving the comparison can fail. Pass `None` for the
+/// honest dual run.
+#[must_use]
+pub fn dual_run_fixture(
+    cfg: &FixtureConfig,
+    scratch_root: &Path,
+    live_seed_override: Option<u64>,
+) -> DualRunOutcome {
+    let lab_cfg = cfg.clone();
+    let lab_dir = scratch_root.join("lab");
+    let live_cfg = cfg.clone();
+    let live_dir = scratch_root.join("live");
+
+    let mut harness = DualRunHarness::phase1(
+        "fgdb.sim.fixture.producer_consumer",
+        SURFACE_SCOPE,
+        "v1",
+        "producer/consumer fixture over virtual time, lab VFS, and virtual TCP",
+        cfg.seed,
+    )
+    .lab(move |config| {
+        let run = run_fixture_under_lab(&lab_cfg, &lab_dir, config);
+        to_normalized(&run.semantics)
+    });
+    if let Some(seed) = live_seed_override {
+        harness = harness.live(move |_seed, _entropy| {
+            let mut mutated = live_cfg.clone();
+            mutated.seed = seed;
+            to_normalized(&run_fixture_live(&mutated, &live_dir))
+        });
+    } else {
+        harness = harness.live(move |seed, _entropy| {
+            let mut effective = live_cfg.clone();
+            effective.seed = seed;
+            to_normalized(&run_fixture_live(&effective, &live_dir))
+        });
+    }
+    let result = harness.run();
+
+    let lab_digest = result
+        .lab
+        .semantics
+        .terminal_outcome
+        .surface_result
+        .clone()
+        .unwrap_or_default();
+    let live_digest = result
+        .live
+        .semantics
+        .terminal_outcome
+        .surface_result
+        .clone()
+        .unwrap_or_default();
+    let log_lines = vec![
+        format!(
+            "dual-run seed={:#x} lab_digest={lab_digest} live_digest={live_digest}",
+            cfg.seed
+        ),
+        format!(
+            "dual-run seed={:#x} lab_counters={:?} live_counters={:?}",
+            cfg.seed,
+            result.lab.semantics.resource_surface.counters,
+            result.live.semantics.resource_surface.counters
+        ),
+        format!(
+            "dual-run seed={:#x} passed={} mismatches={}",
+            cfg.seed,
+            result.passed(),
+            result.verdict.mismatches.len()
+        ),
+    ];
+    DualRunOutcome { result, log_lines }
+}
