@@ -73,7 +73,15 @@ pub struct LdfiTarget {
 }
 
 /// The bead that owns each not-yet-built cluster, named once.
-const W2: &str = "fgdb-1xtp";
+///
+/// fgdb-1xtp's rows were re-derived 2026-08-05 after its three steps landed
+/// (async migration 9b80da3, FaultVfs bac511b, crash-matrix re-expression
+/// 8876ea4): the file-level dual-root boundaries flipped to reachable with
+/// witnesses in `root_store_durability.rs`, and the two clusters that stayed
+/// unreachable now name the beads that actually own their gaps instead of a
+/// discharged one.
+const DIRENT_MODEL: &str = "fgdb-3a3u";
+const DUAL_ROOT_MACHINERY: &str = "fgdb-1dgm";
 const W12: &str = "fgdb-verif-sim-q97e";
 
 const fn later(bead: &'static str) -> Reachability {
@@ -110,31 +118,46 @@ pub static TARGETS: &[LdfiTarget] = &[
     LdfiTarget {
         id: "directory-sync",
         source_phrase: "every file/directory action in D1/D2",
-        // Chronicle syncs the directory through std::fs, not through a Vfs,
-        // so there is no seam to inject at until step 1 of fgdb-1xtp lands.
-        reachability: later(W2),
+        // The SEAM now exists — chronicle syncs directories through the Vfs
+        // (9b80da3) and FaultVfs opens directory handles (8876ea4) — but a
+        // directory sync carries no dirty sectors, so no fault class can fire
+        // on it: dirents are unmodelled. Reachable means "can be FAULTED",
+        // not "can be called", so this stays unreachable until the fault
+        // model represents dirent durability.
+        reachability: later(DIRENT_MODEL),
     },
     // "every ordered, certificate, external-CAS, or physical side-effect
     //  boundary in dual-root publication"
     LdfiTarget {
         id: "dual-root-ordered-boundary",
         source_phrase: "ordered ... boundary in dual-root publication",
-        reachability: later(W2),
+        // The write-inactive-slot-then-sync ordering of `RootStore` runs
+        // through `RootStore::with_vfs`, so the fault model can lie at the
+        // barrier that makes the ordering durable. Witnessed in
+        // `tests/sim_ldfi.rs` (fsync lie loses the publish; recovery selects
+        // the prior generation).
+        reachability: Reachability::Reachable,
     },
     LdfiTarget {
         id: "dual-root-certificate-boundary",
         source_phrase: "certificate ... boundary in dual-root publication",
-        reachability: later(W2),
+        // No certificate exists in the landed dual-slot protocol; the
+        // boundary cannot be faulted because it cannot be reached.
+        reachability: later(DUAL_ROOT_MACHINERY),
     },
     LdfiTarget {
         id: "dual-root-external-cas-boundary",
         source_phrase: "external-CAS ... boundary in dual-root publication",
-        reachability: later(W2),
+        // Same: the landed protocol has no external CAS interaction.
+        reachability: later(DUAL_ROOT_MACHINERY),
     },
     LdfiTarget {
         id: "dual-root-physical-side-effect-boundary",
         source_phrase: "physical side-effect boundary in dual-root publication",
-        reachability: later(W2),
+        // The physical action of the landed protocol is the slot write and
+        // its sync, which go through the Vfs and can be refused (ENOSPC) or
+        // lied to. Witnessed beside the ordered-boundary witness.
+        reachability: Reachability::Reachable,
     },
     // "attempt generation/ticket claim/statement-workspace publication and
     //  delivery"

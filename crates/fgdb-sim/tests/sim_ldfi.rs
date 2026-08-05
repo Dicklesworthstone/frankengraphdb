@@ -118,19 +118,236 @@ fn the_coverage_gap_is_reported_not_hidden() {
 }
 
 #[test]
-fn reachable_targets_are_only_the_ones_the_lab_vfs_can_fault() {
-    // The lab VFS injects at file writes and syncs. Anything else claiming
-    // reachability would be asserting an injector that does not exist —
-    // exactly the overclaim this registry is meant to prevent, committed by
-    // the registry itself.
-    for target in TARGETS {
-        if target.reachability.is_reachable() {
-            assert!(
-                target.id.contains("file-write") || target.id.contains("file-sync"),
-                "target {:?} claims reachability, but the only injector that exists \
-                 is the lab VFS over file writes and syncs",
-                target.id
-            );
-        }
+fn reachable_targets_are_exactly_the_witnessed_ones() {
+    // Reachability is a CLAIM that the lab VFS can fault the target, and a
+    // claim needs a witness — a test in this repository that actually injects
+    // there. The allowlist is exact on purpose: flipping a row to reachable
+    // must arrive together with its witness, or this test names the overclaim.
+    //
+    //   d1/d2 file writes and syncs — witnessed by the FaultVfs section of
+    //     `durability_semantics_e2e.rs` (fsync lies, interior tear, ENOSPC,
+    //     bit flip, all through the real commit path);
+    //   dual-root ordered + physical boundaries — witnessed below in this
+    //     file (`a_lying_publish_sync_*`, `enospc_refuses_the_publish_*`).
+    let witnessed: BTreeSet<&str> = [
+        "d1-file-write",
+        "d1-file-sync",
+        "d2-file-write",
+        "d2-file-sync",
+        "dual-root-ordered-boundary",
+        "dual-root-physical-side-effect-boundary",
+    ]
+    .into_iter()
+    .collect();
+    let reachable: BTreeSet<&str> = TARGETS
+        .iter()
+        .filter(|target| target.reachability.is_reachable())
+        .map(|target| target.id)
+        .collect();
+    assert_eq!(
+        reachable, witnessed,
+        "reachable rows and witnessed rows must be the same set — an entry \
+         only on the left is an overclaim, one only on the right is a stale \
+         inventory"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The witnesses for the dual-root rows (bead fgdb-s41i). `RootStore` went
+// Vfs-generic at 9b80da3 and the FaultVfs composes with real durable paths
+// since 8876ea4, so the ordered (write-inactive-slot-then-sync) and physical
+// (the slot bytes reaching the platter) boundaries of dual-root publication
+// are faultable — and a row may only say so because these tests inject there.
+// ---------------------------------------------------------------------------
+
+use asupersync::lab::run_async_under_lab;
+use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, RootSlot};
+use fgdb_chronicle::store::{RootStore, StoreError};
+use fgdb_sim::vfs::{FaultKind, FaultPlan, FaultVfs, Trigger};
+use fgdb_types::context::{CommitCx, PurposeContexts};
+
+fn scratch_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("fgdb-sim-ldfi-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (output, report) = run_async_under_lab(seed, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        test(contexts.commit()).await
+    });
+    assert!(
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+    );
+    output
+}
+
+fn bootstrap(seed: u8) -> RootBootstrap {
+    RootBootstrap {
+        root_encoding_id: [seed; 32],
+        root_placement_id: [seed.wrapping_add(1); 32],
+        root_placement_epoch: 1,
+        failure_domain_policy_id: 2,
+        root_failure_domain_id: 7,
+        segment_id: 11,
+        offset: 0,
+        encoded_len: 4096,
+        root_symbol_inventory_digest: [seed.wrapping_add(2); 32],
+        object_kind: 0x0001,
+        canonical_plaintext_len: 1024,
+        codec_profile: 1,
+        compressed_len: 1024,
+        data_crypto_profile: 1,
+        dek_id: [seed.wrapping_add(3); 16],
+        nonce_len: NONCE_CAPACITY as u16,
+        nonce_or_siv: [seed.wrapping_add(4); NONCE_CAPACITY],
+        object_tag_len: 16,
+        fec_profile: 1,
+        transfer_length: 4096,
+        oti_common: 0x0001_0002_0003_0004,
+        oti_scheme: 0x0005_0006,
+        symbol_size: 256,
+        source_block_count: 1,
+        symbol_auth_profile: 1,
+        ciphertext_id: [seed.wrapping_add(5); 32],
+        ciphertext_digest: [seed.wrapping_add(6); 32],
+        opener_kind: 1,
+        oid_key_id: [seed.wrapping_add(7); 16],
+        opener_payload_len: 32,
+        opener_payload: [seed.wrapping_add(8); OPENER_PAYLOAD_LEN],
+        opener_digest: [seed.wrapping_add(9); 32],
     }
+}
+
+fn root_slot(generation: u64) -> RootSlot {
+    RootSlot {
+        format_major: 1,
+        format_minor: 0,
+        slot_generation: generation,
+        local_writer_fence_epoch: 3,
+        database_id: [0xaa; 16],
+        database_security_namespace_id: [0x5a; 32],
+        cluster_incarnation: 4,
+        incarnation_continuity_profile_id: 1,
+        cluster_incarnation_continuity_digest: [0xc3; 32],
+        continuity_cas_version: 12,
+        service_visibility_epoch: 5,
+        root_manifest_oid: [0x77; 32],
+        bootstrap: bootstrap(generation as u8),
+    }
+}
+
+/// THE ORDERED-BOUNDARY WITNESS: the sync that makes a publish durable LIES,
+/// the publish is acknowledged, and after a crash recovery selects the PRIOR
+/// generation — cleanly, because the ordering wrote the slot nobody was
+/// depending on. A faultless twin proves the workload publishes generation 2
+/// when the barrier is honest, so the regression is attributable to the lie.
+#[test]
+fn a_lying_publish_sync_loses_the_acknowledged_generation_cleanly() {
+    let faulted_dir = scratch_dir("lying-publish");
+    let control_dir = scratch_dir("lying-publish-control");
+    under_lab(90, move |cx| async move {
+        let cx = &cx;
+        // Eligible syncs: create's file sync is #1, publish's is #2.
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::Nth(2),
+            ..FaultPlan::faultless()
+        });
+        let store = RootStore::with_vfs(vfs.clone(), &faulted_dir);
+        store.create(cx, &root_slot(1)).await.expect("genesis");
+        store
+            .publish(cx, &root_slot(2))
+            .await
+            .expect("the publish is ACKNOWLEDGED — that is the point");
+
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned lie fired: {events:?}");
+        assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
+        assert_eq!(
+            events[0].path,
+            store.path(),
+            "the 2nd eligible sync must be the publish barrier on manifest.root"
+        );
+
+        vfs.crash();
+        let reopened = RootStore::with_vfs(vfs.clone(), &faulted_dir);
+        let recovered = reopened.current(cx).await.expect("recovery still opens");
+        assert_eq!(
+            recovered.slot_generation, 1,
+            "the acknowledged generation 2 never reached the platter, and its \
+             loss is CLEAN because the ordering damaged only the inactive slot"
+        );
+
+        let control = RootStore::with_vfs(FaultVfs::unix(FaultPlan::faultless()), &control_dir);
+        control.create(cx, &root_slot(1)).await.expect("genesis");
+        control.publish(cx, &root_slot(2)).await.expect("publish");
+        assert_eq!(
+            control.current(cx).await.expect("control").slot_generation,
+            2,
+            "with an honest barrier the same workload publishes generation 2 — \
+             without this the lie test could pass against a broken workload"
+        );
+    });
+}
+
+/// THE PHYSICAL-BOUNDARY WITNESS: the platter refuses the publish's bytes
+/// (ENOSPC), the error is the kernel's own, and the published root is intact.
+/// Space returning makes the same publish succeed.
+#[test]
+fn enospc_refuses_the_publish_and_the_prior_root_survives() {
+    let dir = scratch_dir("enospc-publish");
+    under_lab(91, move |cx| async move {
+        let cx = &cx;
+        // Genesis lands honestly; a fresh fault model with a budget smaller
+        // than one slot then owns the publish.
+        RootStore::new(&dir)
+            .create(cx, &root_slot(1))
+            .await
+            .expect("genesis");
+
+        let vfs = FaultVfs::unix(FaultPlan {
+            space_budget: Some(8),
+            ..FaultPlan::faultless()
+        });
+        let store = RootStore::with_vfs(vfs.clone(), &dir);
+        let refused = store.publish(cx, &root_slot(2)).await;
+        // assert!(matches!) rather than a match-with-panic arm: NobleMoose's
+        // fgdb-j8lt ratchet re-pin is certifying as this lands, and this test
+        // needs no new panic-class site to say what it means.
+        assert!(
+            matches!(
+                &refused,
+                Err(StoreError::Io(error)) if error.raw_os_error() == Some(28)
+            ),
+            "a full disk must surface as the kernel's own ENOSPC; got {refused:?}"
+        );
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned refusal: {events:?}");
+        assert!(matches!(events[0].kind, FaultKind::OutOfSpace { .. }));
+
+        let intact = RootStore::new(&dir);
+        assert_eq!(
+            intact
+                .current(cx)
+                .await
+                .expect("prior root")
+                .slot_generation,
+            1,
+            "a refused publish must leave the published root untouched"
+        );
+        intact
+            .publish(cx, &root_slot(2))
+            .await
+            .expect("the same publish succeeds once space returns");
+        assert_eq!(
+            intact.current(cx).await.expect("new root").slot_generation,
+            2
+        );
+    });
 }
