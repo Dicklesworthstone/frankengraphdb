@@ -228,6 +228,16 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:bulk-load-transition-spec:seal",
         "cc:local:bulk-load-transition-spec:prepare-commit",
         "cc:local:bulk-load-transition-spec:abort",
+        // F12 derived-build (frozen ordinal 0x003e). Six inner tags, fresh
+        // mint from the L643 source order (no tag-order sentence in source —
+        // singly determined, unlike DP/bulk-load); schema activation
+        // contributes zero rows per I-9.
+        "cc:local:derived-build-transition-spec:reserve",
+        "cc:local:derived-build-transition-spec:publish-snapshot-progress",
+        "cc:local:derived-build-transition-spec:publish-catchup-progress",
+        "cc:local:derived-build-transition-spec:begin-validation",
+        "cc:local:derived-build-transition-spec:publish-ready",
+        "cc:local:derived-build-transition-spec:abort",
     ] {
         assert!(
             registry
@@ -238,8 +248,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 97,
-        "the population may only grow from the landed F1-F11 rows"
+        registry.contracts.len() >= 103,
+        "the population may only grow from the landed F1-F12 rows"
     );
 }
 
@@ -264,6 +274,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:dp-transition-spec", 8),
         ("cc:local:audit-terminal-freeze-spec", 3),
         ("cc:local:bulk-load-transition-spec", 5),
+        ("cc:local:derived-build-transition-spec", 6),
     ] {
         let family: Vec<_> = registry
             .contracts

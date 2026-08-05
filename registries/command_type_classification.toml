@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 13
+registry_epoch = 14
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -675,4 +675,19 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:bulk-load-transition-spec"
 source_location = "a10:1918"
 statement = "Required Local semantic rows include BulkLoadTransitionSpec<Local>; per L637 it has exactly Reserve, AppendChunk, Seal, PrepareCommit, and Abort — its u8 arm tags follow that source order, each is an explicitly registered Local/Meta staging control, and Committed is reached only by the transaction-carried BulkLoad intent, never by a staging-control arm."
+status = "registered"
+
+# --- F12 derived-build (frozen ordinal 62). ONE ARMED member; its row binds
+# --- the member-root id (round-12 T4). Schema activation contributes ZERO
+# --- rows per I-9 — Active is selected only by the committed schema-
+# --- activation path (L643). Anchored at the in-range family-sentence line
+# --- a10:1918 (L643 sits in §7 outside every slice range; the same
+# --- treatment as BulkLoadTransitionSpec above).
+
+[[classification]]
+type_name = "DerivedBuildTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:derived-build-transition-spec"
+source_location = "a10:1918"
+statement = "Required Local semantic rows include DerivedBuildTransitionSpec<Local>; per L643 it has exactly Reserve, PublishSnapshotProgress, PublishCatchupProgress, BeginValidation, PublishReady, and Abort — every progress update is monotone/idempotent, owns its bounded closure, and advertises its exact watermark; the validation certificate names no future activation."
 status = "registered"

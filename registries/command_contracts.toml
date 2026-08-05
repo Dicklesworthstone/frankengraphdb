@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 13
+registry_epoch = 14
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -3125,6 +3125,199 @@ consumed_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]     # [C][
 written_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]      # [C][F]
 checkpoint_floor_classes = [ "bulk-load" ]                                # [C][F]
 backup_restore_gc_classes = [ "bulk-load" ]                               # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F12 derived-build — frozen ordinal 62, ONE ARMED member per the round-10
+# frozen order: DerivedBuildTransitionSpec<Local> with the six L643 arms
+# Reserve|PublishSnapshotProgress|PublishCatchupProgress|BeginValidation|
+# PublishReady|Abort. Schema activation contributes ZERO rows per I-9:
+# Active is selected by the committed schema-activation path, never by a
+# build-transition arm — PublishReady ends at ReadyForSchemaActivation
+# {validation_certificate_ref}, and the certificate "names no future
+# activation" (L643). A committed SchemaOp::DeclareIndex creates the
+# versioned IndexDefinition in DeclaredBuilding; it does not make any
+# generation usable.
+#
+# FRESH MINT for the arms: no wire_types.toml union_variant reservation names
+# DerivedBuildTransitionSpec (MEASURED 0 hits), so inner tags 0x0001-0x0006
+# mint from the L643 source order — the F5c precedent. Unlike the DP (L936)
+# and bulk-load (L637) families, L643 carries NO u8-tag-order sentence, so
+# the mint is singly determined; recorded so nobody later mistakes it for a
+# reservation match or a source-forced tag assignment.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:derived-build-transition-spec:reserve"    # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003e                                                   # [S] frozen dense ordinal 62
+input_schema_id = "DerivedBuildTransitionSpec<Local>"                     # [S] L643 "has exactly Reserve, PublishSnapshotProgress, PublishCatchupProgress, BeginValidation, PublishReady, and Abort"; I-6 canonical spelling
+input_wire_tag = 0x003e                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] Reserve is first in the L643 source order (fresh mint; no tag-order sentence in source)
+body_schema_id = "DerivedBuildTransitionSpec<Local>"                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the Reserved entry effect names no result schema
+applied_record_schema_id = "DerivedBuildRegistry<Local>"                  # [S-derived] the registry maps (definition_oid,generation_id) through the L643 state machine; Reserve creates its Reserved state
+handler_symbol = "fgdb_apply::local::derived_build_transition_spec::reserve"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 required Local semantic row
+sequence_effects = "creates the Reserved state for one (definition_oid,generation_id) in the separate exact shadow lifecycle; a committed SchemaOp::DeclareIndex has already created the versioned IndexDefinition in DeclaredBuilding, and no build state makes any generation usable"  # [S] L643
+expected_state_schema_id = "DerivedBuildRegistry<Local>"                  # [S] the (definition_oid,generation_id) mapped state
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled on the arm
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no per-arm struct body spelled
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:derived-build-transition-spec:reserve"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|derived_build_registry" ] # [C][F]
+written_state_slots = [ "SemanticPayload|Local|derived_build_registry" ]  # [C][F]
+checkpoint_floor_classes = [ "derived-build" ]                            # [C][F]
+backup_restore_gc_classes = [ "derived-build" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:derived-build-transition-spec:publish-snapshot-progress"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003e                                                   # [S] shared member outer tag
+input_schema_id = "DerivedBuildTransitionSpec<Local>"                     # [S]
+input_wire_tag = 0x003e                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] second in the L643 source order
+body_schema_id = "DerivedBuildTransitionSpec<Local>"                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DerivedBuildRegistry<Local>"                  # [S-derived] Reserved -> SnapshotBuilding{pin,watermark} and monotone progress within it (L643)
+handler_symbol = "fgdb_apply::local::derived_build_transition_spec::publish_snapshot_progress"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "publishes snapshot-build progress against the pinned snapshot and declared watermark; every progress update is monotone/idempotent, owns its bounded closure, and advertises its exact watermark"  # [S] L643
+expected_state_schema_id = "DerivedBuildRegistry<Local>"                  # [S] the SnapshotBuilding state with its pin and watermark
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:derived-build-transition-spec:publish-snapshot-progress"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|derived_build_registry" ] # [C][F]
+written_state_slots = [ "SemanticPayload|Local|derived_build_registry" ]  # [C][F]
+checkpoint_floor_classes = [ "derived-build" ]                            # [C][F]
+backup_restore_gc_classes = [ "derived-build" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:derived-build-transition-spec:publish-catchup-progress"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003e                                                   # [S] shared member outer tag
+input_schema_id = "DerivedBuildTransitionSpec<Local>"                     # [S]
+input_wire_tag = 0x003e                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] third in the L643 source order
+body_schema_id = "DerivedBuildTransitionSpec<Local>"                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DerivedBuildRegistry<Local>"                  # [S-derived] SnapshotBuilding -> CatchingUp{contiguous_delta_frontier} and monotone progress within it (L643)
+handler_symbol = "fgdb_apply::local::derived_build_transition_spec::publish_catchup_progress"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "publishes catch-up progress along the contiguous delta frontier; every progress update is monotone/idempotent, owns its bounded closure, and advertises its exact watermark"  # [S] L643
+expected_state_schema_id = "DerivedBuildRegistry<Local>"                  # [S] the CatchingUp state with its contiguous_delta_frontier
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:derived-build-transition-spec:publish-catchup-progress"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|derived_build_registry" ] # [C][F]
+written_state_slots = [ "SemanticPayload|Local|derived_build_registry" ]  # [C][F]
+checkpoint_floor_classes = [ "derived-build" ]                            # [C][F]
+backup_restore_gc_classes = [ "derived-build" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:derived-build-transition-spec:begin-validation"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003e                                                   # [S] shared member outer tag
+input_schema_id = "DerivedBuildTransitionSpec<Local>"                     # [S]
+input_wire_tag = 0x003e                                                   # [C]
+inner_wire_tag = 0x0004                                                   # [S] fourth in the L643 source order
+body_schema_id = "DerivedBuildTransitionSpec<Local>"                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DerivedBuildRegistry<Local>"                  # [S-derived] CatchingUp -> Validating{candidate_component_root} (L643)
+handler_symbol = "fgdb_apply::local::derived_build_transition_spec::begin_validation"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "selects Validating over the candidate component root; the DerivedGenerationValidationCertificate to be produced binds definition/identity/security/authority, pinned snapshot, complete delta interval, exact component root/content commitment, scalar/collation/approximation profiles, constraint and deletion semantics, validation oracle results, resource bounds, and signer/configuration evidence"  # [S] L643
+expected_state_schema_id = "DerivedBuildRegistry<Local>"                  # [S] the CatchingUp state this arm terminates
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:derived-build-transition-spec:begin-validation"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|derived_build_registry" ] # [C][F]
+written_state_slots = [ "SemanticPayload|Local|derived_build_registry" ]  # [C][F]
+checkpoint_floor_classes = [ "derived-build" ]                            # [C][F]
+backup_restore_gc_classes = [ "derived-build" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:derived-build-transition-spec:publish-ready"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003e                                                   # [S] shared member outer tag
+input_schema_id = "DerivedBuildTransitionSpec<Local>"                     # [S]
+input_wire_tag = 0x003e                                                   # [C]
+inner_wire_tag = 0x0005                                                   # [S] fifth in the L643 source order
+body_schema_id = "DerivedBuildTransitionSpec<Local>"                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the ReadyForSchemaActivation state owns the certificate by ref; no result schema is spelled for the arm
+applied_record_schema_id = "DerivedBuildRegistry<Local>"                  # [S-derived] Validating -> ReadyForSchemaActivation{validation_certificate_ref} (L643)
+handler_symbol = "fgdb_apply::local::derived_build_transition_spec::publish_ready"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "selects ReadyForSchemaActivation owning the DerivedGenerationValidationCertificate by ref; the certificate names no future activation, and Active is selected only by the committed schema-activation path — never by a build-transition arm (schema activation contributes zero rows per I-9)"  # [S] L643
+expected_state_schema_id = "DerivedBuildRegistry<Local>"                  # [S] the Validating state this arm terminates
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled; the certificate binds signer/configuration evidence
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:derived-build-transition-spec:publish-ready"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|derived_build_registry" ] # [C][F]
+written_state_slots = [ "SemanticPayload|Local|derived_build_registry" ]  # [C][F]
+checkpoint_floor_classes = [ "derived-build" ]                            # [C][F]
+backup_restore_gc_classes = [ "derived-build" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:derived-build-transition-spec:abort"      # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003e                                                   # [S] shared member outer tag
+input_schema_id = "DerivedBuildTransitionSpec<Local>"                     # [S]
+input_wire_tag = 0x003e                                                   # [C]
+inner_wire_tag = 0x0006                                                   # [S] sixth in the L643 source order
+body_schema_id = "DerivedBuildTransitionSpec<Local>"                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DerivedBuildRegistry<Local>"                  # [S-derived] any preactivation state -> Aborted{typed_reason,disposition} (L643)
+handler_symbol = "fgdb_apply::local::derived_build_transition_spec::abort" # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "selects Aborted{typed_reason,disposition} from any preactivation state; an Active generation is never aborted through this arm"  # [S] L643
+expected_state_schema_id = "DerivedBuildRegistry<Local>"                  # [S] the preactivation state this arm terminates
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:derived-build-transition-spec:abort"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|derived_build_registry" ] # [C][F]
+written_state_slots = [ "SemanticPayload|Local|derived_build_registry" ]  # [C][F]
+checkpoint_floor_classes = [ "derived-build" ]                            # [C][F]
+backup_restore_gc_classes = [ "derived-build" ]                           # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]
