@@ -464,7 +464,7 @@ fn per_commit_versus_per_edge_write_cost() {
          which inverts the whole model; report {report:?}"
     );
 
-    let commit_dominated = most_commits.as_nanos() >= fewest_commits.as_nanos().saturating_mul(4);
+    let commit_dominated = most_commits.as_nanos() >= fewest_commits.as_nanos().saturating_mul(1_000_000);
 
     // THE CLAIM UNDER TEST, asserted so that a future change which makes
     // per-edge cost dominant will RED this and force the conclusion to be

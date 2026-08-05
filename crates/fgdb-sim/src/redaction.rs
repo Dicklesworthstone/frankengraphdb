@@ -180,12 +180,19 @@ impl RedactionPolicy {
     ///
     /// Feeds [`crate::completeness::Recording::withheld_classes`] directly, so
     /// a redacted bundle cannot grade as `Replayable`.
+    /// Sorted, and that is load-bearing rather than tidy:
+    /// [`crate::completeness::grade`] sorts the list it receives, so returning
+    /// declaration order here would make an otherwise-correct grade compare
+    /// unequal to the policy that produced it. Caught by
+    /// `a_redacted_bundle_cannot_grade_as_replayable`.
     #[must_use]
     pub fn withheld_classes(&self) -> Vec<String> {
-        RecordClass::ALL
+        let mut names: Vec<String> = RecordClass::ALL
             .iter()
             .filter(|class| self.disposition(**class) != Disposition::Retained)
             .map(|class| class.name().to_string())
-            .collect()
+            .collect();
+        names.sort();
+        names
     }
 }
