@@ -164,8 +164,24 @@ catalog_lane_test_scope() {
 
 select_cargo_test_mode() {
   if catalog_lane_test_scope; then
+    local previous="$CORE_GATE_TEST" replaced=0 i
     CARGO_TEST_MODE="catalog"
     CORE_GATE_TEST="cargo test --catalog-lane (registry-check + registered codec target)"
+    # CORE_GATE_ROSTER captured the workspace label at array assignment, so the
+    # reassignment above must be mirrored into the roster or the gate-domain
+    # closure iterates a label core_gate_domain no longer declares and reds
+    # every catalog-lane run. Replace exactly one entry and say so if not.
+    for i in "${!CORE_GATE_ROSTER[@]}"; do
+      if [ "${CORE_GATE_ROSTER[$i]}" = "$previous" ]; then
+        CORE_GATE_ROSTER[i]="$CORE_GATE_TEST"
+        replaced=$((replaced + 1))
+      fi
+    done
+    if [ "$replaced" -ne 1 ]; then
+      echo "SELF-TEST RED: catalog-lane mode expected to replace exactly one" \
+        "roster entry for \"$previous\", replaced $replaced" >&2
+      exit 1
+    fi
   fi
 }
 
@@ -1031,10 +1047,29 @@ run_ubs() {
 # 0 criticals, and its dispositions are all single lines directly above their
 # comparisons. So a disposition that reads correctly to a human can be inert, and
 # the only way to know is to re-scan the file after writing it.
+# MOVED 2026-08-05 (fgdb-84p2): timing-safe 817 -> 164, -653, and it is TOOL
+# DRIFT, not tree movement. ATTRIBUTED BY TOOL CONTROL rather than by code
+# differential: today's ubs (Meta-Runner v5.3.8) run on a detached tree at
+# 93a6eb0 — the exact commit that set baseline 817 — reports 164 for this class
+# while panic (132) and JWT (122) match that baseline EXACTLY, so the scan
+# domain is the same and only this one detector narrowed. No tracked Rust file
+# moved this count; re-pinning to the current tool's partition is the honest
+# baseline, and the 653 retired findings were the `==`-beside-key/code
+# false-positive population this block already adjudicated repeatedly above.
+# ADDED 2026-08-05 (fgdb-84p2): "Security-sensitive non-crypto randomness=2",
+# a class v5.3.8 introduces. Both findings are `Instant::now()` in
+# `crates/fgdb/tests/cx_probe.rs` (304, 311) — the §17 write-cost sweep's
+# stopwatch reading elapsed time in a test. No token, session, nonce, salt, or
+# key is generated anywhere near it; the scanner pattern-matched a timing call
+# inside what it took for a generation context. OsRng/getrandom would be
+# nonsensical here, and Doctrine #1 forbids the `ring`/`openssl` helpers the
+# scanner recommends. Adjudicated false-positive and pinned at exactly 2 so a
+# THIRD finding in this class fails closed like any other unadjudicated drift.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=817"
+  "Secret/token comparisons without timing-safe equality=164"
   "panic!/unreachable!/todo!/unimplemented!=132"
   "JWT decode, validation bypass, or missing claim binding=122"
+  "Security-sensitive non-crypto randomness=2"
 )
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline
