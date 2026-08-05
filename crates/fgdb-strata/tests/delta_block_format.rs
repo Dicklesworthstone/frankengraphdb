@@ -204,6 +204,66 @@ fn foreign_bytes_and_future_versions_are_refused_distinctly() {
     );
 }
 
+/// The reserved `property_patch_refs[]` slot is a CONTRACT, not dead bytes
+/// (fgdb-2t7q ruling 3B): a block declaring patch refs before the patch
+/// machinery exists is refused with the exact declared count, and restoring
+/// the reserved zero makes the same bytes decode again — the two halves prove
+/// the count is read and validated rather than skipped.
+#[test]
+fn a_nonzero_property_patch_count_is_refused_until_the_machinery_lands() {
+    let mut declared = encode_block(&sample()).expect("encodes");
+    // The count sits at bytes [39, 41) — after magic, format, rows,
+    // (src, relation, direction), and span count.
+    declared[39..41].copy_from_slice(&3u16.to_be_bytes());
+    assert_eq!(
+        decode_block(&declared),
+        Err(BlockError::PropertyPatchesNotYetImplemented { declared: 3 })
+    );
+
+    declared[39..41].copy_from_slice(&0u16.to_be_bytes());
+    assert_eq!(
+        decode_block(&declared).expect("the reserved zero decodes"),
+        sample(),
+        "restoring the reserved zero must restore the block, or the refusal \
+         above was testing something other than this slot"
+    );
+}
+
+/// THE JOINT-FIT WITNESS for the fgdb-2t7q headroom coupling: ruling 1B-i's
+/// visibility spans and ruling 3B's per-entry locator spend the SAME 3 B that
+/// remain under §6.2's 16 B ceiling after the two identity columns, so they
+/// cannot be verified independently — this pins the arithmetic jointly, on the
+/// same reference run the byte-economy chain measures.
+///
+/// The sitting's escape hatch fires if spans exceed 2 B/entry amortized; the
+/// locator needs at least 1 B. Both live inside the measured column cost or
+/// the 4 KiB / 256-entry sizing stops being achievable as written — which
+/// would be a plan-level finding, not a tuning problem.
+#[test]
+fn visibility_spans_and_the_patch_locator_jointly_fit_the_ceiling() {
+    let rows = run_of(NORMATIVE_ENTRIES_PER_BLOCK);
+    let encoded = encode_block(&rows).expect("encodes the normative run");
+
+    // Whole-frame amortized cost of everything that is NOT the two identity
+    // columns, measured by differencing against the columns' own payload cost.
+    let dsts: Vec<_> = rows.iter().map(|e| e.dst).collect();
+    let eids: Vec<_> = rows.iter().map(|e| e.eid).collect();
+    let column_bytes = codec_payload_len(&dsts) + codec_payload_len(&eids);
+    let framing_bytes = encoded.len() - column_bytes;
+    let span_and_frame_amortized = framing_bytes.div_ceil(rows.len());
+
+    const LOCATOR_MIN_BYTES: usize = 1;
+    let columns_amortized = column_bytes.div_ceil(rows.len());
+    assert!(
+        columns_amortized + span_and_frame_amortized + LOCATOR_MIN_BYTES
+            <= NORMATIVE_BYTES_PER_ENTRY,
+        "joint fit failed on the reference run: columns {columns_amortized} + \
+         spans/framing {span_and_frame_amortized} + locator {LOCATOR_MIN_BYTES} \
+         exceeds §6.2's {NORMATIVE_BYTES_PER_ENTRY} B ceiling — the fgdb-2t7q \
+         field-1 escape hatch fires and 1C needs its churn cost measured"
+    );
+}
+
 /// TRUNCATION is refused, and the error says how much was expected.
 ///
 /// Every prefix of a valid block is tested, because "it refuses an empty tail" and

@@ -137,8 +137,23 @@ pub struct DeltaBlockVersion(pub ObjectId);
 #[repr(transparent)]
 pub struct PartitionRootVersion(pub ObjectId);
 
-/// Header: magic + format + rows + `(src, relation, direction)` + span count.
-const HEADER_LEN: usize = 4 + 2 + 4 + 16 + 8 + 1 + 4;
+/// Header: magic + format + rows + `(src, relation, direction)` + span count
+/// + property-patch-ref count.
+///
+/// The final u16 is §6.2's `property_patch_refs[]` in its ruled shape
+/// (fgdb-2t7q ruling 3B: a block-level ref set indexed by a per-entry
+/// `prop_row_ref` locator), carried as an EXPLICIT RESERVATION: the count is
+/// framed and validated, and a nonzero value is refused fail-closed until
+/// `fgdb-w3-properties-gou` lands the patch objects and the locator column
+/// beside real data. The sitting's own alternative (3C) was accepted only on
+/// the condition that deferral be "explicitly reserved rather than silently
+/// omitted, or the format is re-broken when properties lands" — this slot is
+/// that reservation, in the same pattern as `Direction`'s reserved reverse
+/// family. Budget note, measured in `tests/delta_block_format.rs`: the two
+/// identity columns cost 13 B/entry and visibility spans amortize under 2, so
+/// the locator has >=1 B of the 16 B ceiling left — the joint-fit witness
+/// pins that arithmetic.
+const HEADER_LEN: usize = 4 + 2 + 4 + 16 + 8 + 1 + 4 + 2;
 const COLUMN_FRAME_LEN: usize = 2 + 1 + 4 + 4;
 const VISIBILITY_SPAN_LEN: usize = 4 + 4 + 8 + 8;
 const MAX_IDENTITY_COLUMN_BYTES: usize = 4096;
@@ -247,6 +262,14 @@ pub enum BlockError {
     UnsupportedDirection {
         direction: u8,
     },
+    /// The reserved `property_patch_refs[]` count is nonzero, and the patch
+    /// machinery that would make it lawful has not landed
+    /// (fgdb-w3-properties-gou). Fail-closed like an unknown direction: bytes
+    /// claiming a capability this decoder does not have are refused, never
+    /// skipped.
+    PropertyPatchesNotYetImplemented {
+        declared: u16,
+    },
     UnsupportedIdentityCodec {
         column: u8,
         codec_id: u16,
@@ -314,6 +337,11 @@ impl core::fmt::Display for BlockError {
             Self::UnsupportedDirection { direction } => {
                 write!(f, "block direction {direction} is not implemented")
             }
+            Self::PropertyPatchesNotYetImplemented { declared } => write!(
+                f,
+                "block declares {declared} property patch ref(s); the reserved \
+                 slot is zero until the patch machinery lands"
+            ),
             Self::UnsupportedIdentityCodec { column, codec_id } => write!(
                 f,
                 "identity column {column} names unsupported codec {codec_id:#06x}"
@@ -404,6 +432,9 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
     out.extend_from_slice(&descriptor.relation.0.to_be_bytes());
     out.push(descriptor.direction as u8);
     out.extend_from_slice(&(spans.len() as u32).to_be_bytes());
+    // property_patch_refs[] (fgdb-2t7q ruling 3B): reserved, always zero until
+    // fgdb-w3-properties-gou supplies patch objects — see HEADER_LEN's doc.
+    out.extend_from_slice(&0u16.to_be_bytes());
     append_identity_column(&mut out, destinations.descriptor(), &destination_payload);
     append_identity_column(&mut out, edge_ids.descriptor(), &edge_id_payload);
     for span in spans {
@@ -516,6 +547,15 @@ fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
         },
     };
     let span_count = u32::from_be_bytes(bytes[35..39].try_into().expect("fixed header")) as usize;
+    let patch_ref_count = u16::from_be_bytes(bytes[39..41].try_into().expect("fixed header"));
+    if patch_ref_count != 0 {
+        // The slot is real and validated; its nonzero arm is not yet lawful.
+        // Refusing here rather than skipping is what makes the reservation a
+        // contract instead of dead bytes (fgdb-2t7q ruling 3B).
+        return Err(BlockError::PropertyPatchesNotYetImplemented {
+            declared: patch_ref_count,
+        });
+    }
     let mut offset = HEADER_LEN;
     let destinations = read_identity_column::<VId>(bytes, &mut offset, count as usize, 0)?;
     let edge_ids = read_identity_column::<EId>(bytes, &mut offset, count as usize, 1)?;
