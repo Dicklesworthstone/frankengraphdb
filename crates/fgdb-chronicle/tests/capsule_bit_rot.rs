@@ -148,13 +148,14 @@ fn scratch_allocation_skips_a_stale_nonempty_process_root() {
     );
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         // lab_test_passed() covers ALL THREE channels — quiescence, the full
@@ -183,8 +184,10 @@ fn plaintext() -> Vec<u8> {
 }
 
 /// Commit `plaintext()` and return the capsule's on-disk path and identity.
-fn committed(dir: &Path, cx: &CommitCx) -> (PathBuf, ObjectId) {
-    let mut coordinator = CommitCoordinator::open(cx, dir, keys()).expect("open");
+async fn committed(dir: &Path, cx: &CommitCx) -> (PathBuf, ObjectId) {
+    let mut coordinator = CommitCoordinator::open(cx, dir, keys())
+        .await
+        .expect("open");
     let chain_snapshot = coordinator.chain().clone();
     let body = plaintext();
     let oid = coordinator.capsule_id(&body);
@@ -192,6 +195,7 @@ fn committed(dir: &Path, cx: &CommitCx) -> (PathBuf, ObjectId) {
         .commit(cx, &body, |seq, capsule| {
             marker_for(seq, capsule, &chain_snapshot)
         })
+        .await
         .expect("commit");
     drop(coordinator);
     (only_capsule_path(dir), oid)
@@ -232,11 +236,14 @@ fn rot_symbols(path: &Path, count: usize) -> usize {
 #[test]
 fn an_undamaged_capsule_reads_back_exactly() {
     let dir = scratch_dir("clean");
-    under_lab(1, move |cx| {
-        let (path, oid) = committed(&dir, cx);
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+    under_lab(1, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(cx, oid).expect("reads"),
+            coordinator.read_capsule(cx, oid).await.expect("reads"),
             plaintext()
         );
 
@@ -258,13 +265,16 @@ fn an_undamaged_capsule_reads_back_exactly() {
 #[test]
 fn a_single_rotted_symbol_heals_invisibly() {
     let dir = scratch_dir("one");
-    under_lab(2, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(2, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         rot_symbols(&path, 1);
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(cx, oid).expect("heals"),
+            coordinator.read_capsule(cx, oid).await.expect("heals"),
             plaintext(),
             "one rotted symbol must be invisible, not merely survivable"
         );
@@ -275,16 +285,20 @@ fn a_single_rotted_symbol_heals_invisibly() {
 #[test]
 fn rot_within_the_repair_budget_heals() {
     let dir = scratch_dir("budget");
-    under_lab(3, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(3, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         let budget = keys().profile.erasure_budget();
         let total = rot_symbols(&path, budget);
         assert!(budget > 0 && budget < total);
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert_eq!(
             coordinator
                 .read_capsule(cx, oid)
+                .await
                 .expect("heals at the budget"),
             plaintext(),
             "the budget is a promise about the last symbol as much as the first"
@@ -300,13 +314,16 @@ fn rot_within_the_repair_budget_heals() {
 #[test]
 fn rot_beyond_the_repair_budget_fails_closed() {
     let dir = scratch_dir("beyond");
-    under_lab(4, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(4, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         let over = keys().profile.erasure_budget() + 1;
         rot_symbols(&path, over);
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let result = coordinator.read_capsule(cx, oid);
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let result = coordinator.read_capsule(cx, oid).await;
         assert!(
             result.is_err(),
             "beyond the budget the read must FAIL, not return {} bytes",
@@ -325,23 +342,29 @@ fn the_repair_budget_is_the_exact_boundary() {
     let budget = keys().profile.erasure_budget();
     let heals = {
         let dir = scratch_dir("edge-at");
-        under_lab(5, move |cx| {
-            let (path, oid) = committed(&dir, cx);
+        under_lab(5, move |cx| async move {
+            let cx = &cx;
+            let (path, oid) = committed(&dir, cx).await;
             rot_symbols(&path, budget);
             CommitCoordinator::open(cx, &dir, keys())
+                .await
                 .expect("reopen")
                 .read_capsule(cx, oid)
+                .await
                 .is_ok()
         })
     };
     let past = {
         let dir = scratch_dir("edge-past");
-        under_lab(6, move |cx| {
-            let (path, oid) = committed(&dir, cx);
+        under_lab(6, move |cx| async move {
+            let cx = &cx;
+            let (path, oid) = committed(&dir, cx).await;
             rot_symbols(&path, budget + 1);
             CommitCoordinator::open(cx, &dir, keys())
+                .await
                 .expect("reopen")
                 .read_capsule(cx, oid)
+                .await
                 .is_ok()
         })
     };
@@ -362,17 +385,20 @@ fn the_repair_budget_is_the_exact_boundary() {
 #[test]
 fn rot_in_the_container_header_is_refused() {
     let dir = scratch_dir("header");
-    under_lab(7, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(7, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         let mut bytes = std::fs::read(&path).expect("read");
         // Byte 6 is inside object_kind, past the magic and the format word: a
         // field the decoder must trust and cannot cross-check.
         bytes[6] ^= 0x01;
         std::fs::write(&path, &bytes).expect("write");
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert!(
-            coordinator.read_capsule(cx, oid).is_err(),
+            coordinator.read_capsule(cx, oid).await.is_err(),
             "header damage is not recoverable and must not read as success"
         );
     });
@@ -383,15 +409,18 @@ fn rot_in_the_container_header_is_refused() {
 #[test]
 fn a_destroyed_magic_is_refused() {
     let dir = scratch_dir("magic");
-    under_lab(8, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(8, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         let mut bytes = std::fs::read(&path).expect("read");
         bytes[0] ^= 0xff;
         std::fs::write(&path, &bytes).expect("write");
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert!(matches!(
-            coordinator.read_capsule(cx, oid),
+            coordinator.read_capsule(cx, oid).await,
             Err(CommitError::Capsule(_))
         ));
     });
@@ -406,12 +435,15 @@ fn a_destroyed_magic_is_refused() {
 #[test]
 fn healed_bytes_still_recompute_their_identity() {
     let dir = scratch_dir("identity");
-    under_lab(9, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(9, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         rot_symbols(&path, keys().profile.erasure_budget());
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let healed = coordinator.read_capsule(cx, oid).expect("heals");
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let healed = coordinator.read_capsule(cx, oid).await.expect("heals");
         assert_eq!(
             coordinator.capsule_id(&healed),
             oid,
@@ -429,18 +461,24 @@ fn healed_bytes_still_recompute_their_identity() {
 #[test]
 fn healing_a_read_does_not_repair_the_file() {
     let dir = scratch_dir("nonrepair");
-    under_lab(10, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(10, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         rot_symbols(&path, 1);
         let after_damage = std::fs::read(&path).expect("read container");
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(cx, oid).expect("heals"),
+            coordinator.read_capsule(cx, oid).await.expect("heals"),
             plaintext()
         );
         assert_eq!(
-            coordinator.read_capsule(cx, oid).expect("heals again"),
+            coordinator
+                .read_capsule(cx, oid)
+                .await
+                .expect("heals again"),
             plaintext()
         );
         assert_eq!(
@@ -470,8 +508,9 @@ fn healing_a_read_does_not_repair_the_file() {
 #[test]
 fn rot_in_the_declared_repair_count_is_refused() {
     let dir = scratch_dir("budget-field");
-    under_lab(11, move |cx| {
-        let (path, oid) = committed(&dir, cx);
+    under_lab(11, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
         let mut bytes = std::fs::read(&path).expect("read");
         let (descriptor, symbols) = decode_container(&bytes).expect("decodes");
 
@@ -495,10 +534,12 @@ fn rot_in_the_declared_repair_count_is_refused() {
         bytes[repair_at + 3] ^= 0x01;
         std::fs::write(&path, &bytes).expect("write");
 
-        let coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert!(
             matches!(
-                coordinator.read_capsule(cx, oid),
+                coordinator.read_capsule(cx, oid).await,
                 Err(CommitError::Capsule(
                     fgdb_chronicle::capsule::CapsuleError::RepairBudgetMismatch { .. }
                 ))

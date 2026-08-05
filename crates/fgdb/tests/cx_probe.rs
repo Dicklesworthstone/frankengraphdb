@@ -67,10 +67,42 @@ use fgdb_delta_types::RelationId;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 const KNOWS: RelationId = RelationId(1);
+
+/// Minimal single-future executor for the non-lab lane: poll, park until woken.
+///
+/// The database's durable path is async (chronicle's Vfs migration), but this
+/// file's whole point is running OFF the lab runtime — and the production
+/// runtime path is still unavailable (module doc, item 2). asupersync's
+/// `spawn_blocking` documents a dedicated-thread fallback when no runtime
+/// blocking pool exists, so the I/O futures complete and wake this parked
+/// thread without any runtime. Timing note: the parked-thread round trip is
+/// microseconds against the millisecond-scale operations measured here, and
+/// the sync read path (`neighbours`) is measured without this wrapper.
+fn drive<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let mut future = pin!(future);
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut task_cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut task_cx) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys {
@@ -97,13 +129,13 @@ fn a_non_lab_cx_is_constructible() {
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     let dir = scratch("constructible");
-    let mut db = Database::create(&commit, &dir, keys()).expect("creates off the lab runtime");
+    let mut db =
+        drive(Database::create(&commit, &dir, keys())).expect("creates off the lab runtime");
     let mut batch = WriteBatch::new(KNOWS);
     batch.create_vertex(VId(1), vec![], vec![]);
     batch.create_vertex(VId(2), vec![], vec![]);
     batch.add_edge(EId(1), VId(1), VId(2), vec![]);
-    db.write(&commit, batch)
-        .expect("commits off the lab runtime");
+    drive(db.write(&commit, batch)).expect("commits off the lab runtime");
 
     assert_eq!(
         db.neighbours(VId(1), KNOWS).expect("reads"),
@@ -164,7 +196,7 @@ fn warm_point_read_latency_distribution() {
     let cx = Cx::for_testing();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
-    let mut db = Database::create(&commit, &dir, keys()).expect("creates");
+    let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
     let mut batch = WriteBatch::new(KNOWS);
     batch.create_vertex(VId(1), vec![], vec![]);
     batch.create_vertex(VId(2), vec![], vec![]);
@@ -175,7 +207,7 @@ fn warm_point_read_latency_distribution() {
         eid += 1;
     }
     batch.add_edge(EId(eid), VId(2), VId(1000), vec![]);
-    db.write(&commit, batch).expect("commits");
+    drive(db.write(&commit, batch)).expect("commits");
 
     const WARMUP: usize = 200;
     const SAMPLES: usize = 2_000;
@@ -296,13 +328,13 @@ fn recovery_cost_versus_capsule_tail_length() {
     let mut report = Vec::new();
     for batches in BATCHES {
         let dir = scratch(&format!("recovery-{batches}"));
-        let mut db = Database::create(&commit, &dir, keys()).expect("creates");
+        let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
         batch_writes(&commit, &mut db, batches);
         drop(db);
 
         // RECOVERY: the reopen itself.
         let start = Instant::now();
-        let db = Database::open(&commit, &dir, keys()).expect("reopens");
+        let db = drive(Database::open(&commit, &dir, keys())).expect("reopens");
         let reopen = start.elapsed();
 
         // TIME TO FIRST QUERY, which is what §17 actually gates — an open that
@@ -372,7 +404,7 @@ fn batch_writes(commit: &fgdb_types::context::CommitCx, db: &mut Database, batch
         }
         batch.create_vertex(VId(2000 + b as u128), vec![], vec![]);
         batch.add_edge(EId(b as u128 + 1), VId(1), VId(2000 + b as u128), vec![]);
-        db.write(commit, batch).expect("commits");
+        drive(db.write(commit, batch)).expect("commits");
     }
 }
 
@@ -454,7 +486,7 @@ fn per_commit_versus_per_edge_write_cost() {
         );
 
         let dir = scratch(&format!("writesplit-{batches}x{per_batch}"));
-        let mut db = Database::create(&commit, &dir, keys()).expect("creates");
+        let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
 
         let start = Instant::now();
         let mut eid = 1u128;
@@ -468,7 +500,7 @@ fn per_commit_versus_per_edge_write_cost() {
                 batch.add_edge(EId(eid), VId(1), VId(3000 + eid), vec![]);
                 eid += 1;
             }
-            db.write(&commit, batch).expect("commits");
+            drive(db.write(&commit, batch)).expect("commits");
         }
         let elapsed = start.elapsed();
 

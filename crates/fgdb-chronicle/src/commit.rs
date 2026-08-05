@@ -30,13 +30,14 @@
 use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_container};
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
 use crate::store::{sync_created_entry, sync_directory, sync_file};
+use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
+use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use fgdb_crypto::Digest;
 use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
 use fgdb_types::{CommitSeq, MarkerRef};
-use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{Read, Write};
+use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
 
 /// Sub-directory holding capsule bytes.
@@ -228,10 +229,19 @@ pub enum CrashPoint {
 /// gap-free without coordination: there is no second allocator to race. The
 /// type retains a process-death-released whole-file lease for its lifetime, so
 /// a caller cannot hold two coordinators over one log.
+///
+/// Every durable read and write goes through the [`Vfs`] the coordinator was
+/// opened with; production is [`UnixVfs`], the lab hands in a faulting one.
+/// The one deliberate exception is the writer lease below.
 #[derive(Debug)]
-pub struct CommitCoordinator {
+pub struct CommitCoordinator<V: Vfs = UnixVfs> {
+    vfs: V,
     dir: PathBuf,
-    _writer_lease: File,
+    /// The whole-file lock is process-liveness authority, not durable state:
+    /// it is released by process death and never read back. `Vfs` has no lock
+    /// surface — a faulting filesystem that could "lie" about lock ownership
+    /// would model nothing real — so the lease stays on `std::fs` on purpose.
+    _writer_lease: std::fs::File,
     keys: CapsuleKeys,
     chain: MarkerChain,
     discarded_tail_bytes: usize,
@@ -257,38 +267,56 @@ enum EntryDefect {
 type DecodedEntry = (CommitMarker, Digest, usize);
 type EntryRead = Option<Result<DecodedEntry, EntryDefect>>;
 
-impl CommitCoordinator {
-    /// Open a database directory's commit stream, recovering whatever is
-    /// durable.
-    pub fn open(
+impl CommitCoordinator<UnixVfs> {
+    /// Open a database directory's commit stream on the real filesystem,
+    /// recovering whatever is durable.
+    pub async fn open(
         cx: &CommitCx,
+        database_dir: impl AsRef<Path>,
+        keys: CapsuleKeys,
+    ) -> Result<Self, CommitError> {
+        Self::open_with_vfs(cx, UnixVfs::new(), database_dir, keys).await
+    }
+}
+
+impl<V: Vfs> CommitCoordinator<V> {
+    /// Open a database directory's commit stream through an explicit [`Vfs`],
+    /// recovering whatever is durable. This is the constructor the lab uses to
+    /// interpose a faulting filesystem; [`CommitCoordinator::open`] is the
+    /// production shape.
+    pub async fn open_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
         database_dir: impl AsRef<Path>,
         keys: CapsuleKeys,
     ) -> Result<Self, CommitError> {
         let dir = database_dir.as_ref().to_path_buf();
         let writer_lease = Self::acquire_writer_lease(cx, &dir)?;
         let capsule_dir = dir.join(CAPSULE_DIR);
-        cx.with_restriction(|| -> Result<(), CommitError> {
-            match std::fs::create_dir(&capsule_dir) {
-                Ok(()) => {}
+        cx.with_restriction_async(async {
+            match vfs.create_dir(&capsule_dir).await {
+                Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if !std::fs::symlink_metadata(&capsule_dir)?
+                    if !vfs
+                        .symlink_metadata(&capsule_dir)
+                        .await?
                         .file_type()
                         .is_dir()
                     {
-                        return Err(std::io::Error::new(
+                        return Err(CommitError::from(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             "capsule path exists but is not a directory",
-                        )
-                        .into());
+                        )));
                     }
+                    Ok(())
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => Err(error.into()),
             }
-            Ok(())
-        })?;
-        let (chain, discarded_tail_bytes) = Self::recover_chain(cx, &dir)?;
+        })
+        .await?;
+        let (chain, discarded_tail_bytes) = Self::recover_chain(cx, &vfs, &dir).await?;
         Ok(Self {
+            vfs,
             dir,
             _writer_lease: writer_lease,
             keys,
@@ -307,10 +335,10 @@ impl CommitCoordinator {
     /// truncate the log. Opening an independent descriptor is load-bearing:
     /// duplicated handles can share lock ownership on some platforms, whereas
     /// independent opens contend both within one process and across processes.
-    fn acquire_writer_lease(cx: &CommitCx, dir: &Path) -> Result<File, CommitError> {
+    fn acquire_writer_lease(cx: &CommitCx, dir: &Path) -> Result<std::fs::File, CommitError> {
         cx.with_restriction(|| {
             let path = dir.join(COORDINATOR_LOCK_NAME);
-            let lease = match OpenOptions::new()
+            let lease = match std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create_new(true)
@@ -325,7 +353,10 @@ impl CommitCoordinator {
                         )
                         .into());
                     }
-                    OpenOptions::new().read(true).write(true).open(&path)?
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)?
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -390,26 +421,26 @@ impl CommitCoordinator {
     /// for publication, and deduplication must not require another
     /// capsule-sized allocation. A length or byte mismatch is a conflict;
     /// genuine read failures remain I/O errors.
-    fn existing_capsule_matches(
+    async fn existing_capsule_matches(
         cx: &impl StorageReadCx,
-        file: &mut File,
+        file: &mut V::File,
         expected: &[u8],
     ) -> Result<bool, CommitError> {
-        cx.with_restriction(|| {
+        cx.with_restriction_async(async {
             let expected_len = u64::try_from(expected.len()).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "capsule container length does not fit u64",
                 )
             })?;
-            if file.metadata()?.len() != expected_len {
+            if file.metadata().await?.len() != expected_len {
                 return Ok(false);
             }
 
             let mut actual = [0u8; CAPSULE_COMPARE_BUFFER_BYTES];
             for expected_chunk in expected.chunks(actual.len()) {
-                match file.read_exact(&mut actual[..expected_chunk.len()]) {
-                    Ok(()) => {}
+                match file.read_exact(&mut actual[..expected_chunk.len()]).await {
+                    Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                         return Ok(false);
                     }
@@ -426,8 +457,9 @@ impl CommitCoordinator {
             // protocol concern, but accepting bytes we did not compare would still
             // be wrong here.
             let mut trailing = [0u8; 1];
-            Ok(file.read(&mut trailing)? == 0)
+            Ok(file.read(&mut trailing).await? == 0)
         })
+        .await
     }
 
     /// Read a durable capsule's bytes back.
@@ -441,17 +473,20 @@ impl CommitCoordinator {
     /// content addressed and durable; what the bytes *mean* belongs to whoever
     /// wrote them, and the marker already carries the digests that let a reader
     /// prove it got the object it asked for.
-    pub fn read_capsule(
+    pub async fn read_capsule(
         &self,
         cx: &impl StorageReadCx,
         capsule_oid: ObjectId,
     ) -> Result<Vec<u8>, CommitError> {
-        cx.with_restriction(|| {
-            let mut container = Vec::new();
-            File::open(Self::capsule_path(&self.dir, capsule_oid))?.read_to_end(&mut container)?;
+        cx.with_restriction_async(async {
+            let container = self
+                .vfs
+                .read(&Self::capsule_path(&self.dir, capsule_oid))
+                .await?;
             let (descriptor, symbols) = decode_container(&container)?;
             Ok(self.keys.recover(&descriptor, &symbols, capsule_oid)?)
         })
+        .await
     }
 
     /// The identity `plaintext` will have as a capsule under this database's
@@ -466,8 +501,14 @@ impl CommitCoordinator {
 
     /// Is this capsule durable? Used by recovery to identify orphans — bytes
     /// written by a commit that never reached D2.
-    pub fn capsule_exists(&self, cx: &impl StorageReadCx, capsule_oid: ObjectId) -> bool {
-        cx.with_restriction(|| Self::capsule_path(&self.dir, capsule_oid).exists())
+    pub async fn capsule_exists(&self, cx: &impl StorageReadCx, capsule_oid: ObjectId) -> bool {
+        cx.with_restriction_async(async {
+            self.vfs
+                .metadata(&Self::capsule_path(&self.dir, capsule_oid))
+                .await
+                .is_ok()
+        })
+        .await
     }
 
     /// The file component of a durability barrier, named for the same reason
@@ -479,8 +520,8 @@ impl CommitCoordinator {
     /// It goes through the capability context because that boundary is where a
     /// lab runtime attaches fsync lies, latency, and crash injection — the two
     /// barriers are exactly the instants a durability test needs to control.
-    fn barrier(cx: &CommitCx, file: &File) -> Result<(), CommitError> {
-        sync_file(cx, file)?;
+    async fn barrier(cx: &CommitCx, file: &V::File) -> Result<(), CommitError> {
+        sync_file(cx, file).await?;
         Ok(())
     }
 
@@ -497,7 +538,7 @@ impl CommitCoordinator {
         database_dir: impl AsRef<Path>,
         bytes: u64,
     ) -> Result<(), CommitError> {
-        let file = OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .write(true)
             .open(database_dir.as_ref().join(COMMIT_LOG_NAME))?;
         let len = file.metadata()?.len();
@@ -511,19 +552,20 @@ impl CommitCoordinator {
     /// to append. It is a callback because the sequence is allocated HERE, by
     /// the single actor — a caller that chose its own sequence could not be
     /// gap-free.
-    pub fn commit(
+    pub async fn commit(
         &mut self,
         cx: &CommitCx,
         plaintext: &[u8],
         marker_for: impl FnOnce(u64, ObjectId) -> CommitMarker,
     ) -> Result<MarkerRef, CommitError> {
         self.commit_with_crash(cx, plaintext, marker_for, None)
+            .await
     }
 
     /// Commit, optionally stopping at a crash point. The crash path is the
     /// same code as the durable path up to the stopping instant, which is the
     /// only way a crash test says anything about the real protocol.
-    pub fn commit_with_crash(
+    pub async fn commit_with_crash(
         &mut self,
         cx: &CommitCx,
         plaintext: &[u8],
@@ -576,24 +618,30 @@ impl CommitCoordinator {
         // pointing at bytes that may not exist.
         let capsule_path = Self::capsule_path(&self.dir, capsule_oid);
         let encoded_capsule = encode_container(&sealed);
-        let capsule_file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&capsule_path)
+        let capsule_file = match self
+            .vfs
+            .open(
+                &capsule_path,
+                &OpenOptions::new().read(true).write(true).create_new(true),
+            )
+            .await
         {
             Ok(mut file) => {
-                file.write_all(&encoded_capsule)?;
+                file.write_all(&encoded_capsule).await?;
+                file.flush().await?;
                 file
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = cx.with_restriction(|| std::fs::symlink_metadata(&capsule_path))?;
+                let metadata = cx
+                    .with_restriction_async(self.vfs.symlink_metadata(&capsule_path))
+                    .await?;
                 if !metadata.file_type().is_file() {
                     return Err(CommitError::CapsulePathConflict { capsule_oid });
                 }
-                let mut file =
-                    cx.with_restriction(|| OpenOptions::new().read(true).open(&capsule_path))?;
-                if !Self::existing_capsule_matches(cx, &mut file, &encoded_capsule)? {
+                let mut file = cx
+                    .with_restriction_async(self.vfs.open_read(&capsule_path))
+                    .await?;
+                if !Self::existing_capsule_matches(cx, &mut file, &encoded_capsule).await? {
                     return Err(CommitError::CapsulePathConflict { capsule_oid });
                 }
                 file
@@ -604,21 +652,22 @@ impl CommitCoordinator {
             return Err(CommitError::Io(std::io::Error::other("crash: before D1")));
         }
         let capsule_dir = self.dir.join(CAPSULE_DIR);
-        sync_created_entry(cx, &capsule_file, &capsule_dir, || {
+        sync_created_entry(cx, &self.vfs, &capsule_file, &capsule_dir, || {
             if crash_at == Some(CrashPoint::AfterCapsuleFileSyncBeforeDirectorySync) {
                 return Err(std::io::Error::other(
                     "crash: capsule inode durable before directory entry",
                 ));
             }
             Ok(())
-        })?;
+        })
+        .await?;
         if self.capsule_directory_parent_sync_pending {
             if crash_at == Some(CrashPoint::AfterCapsuleDirectorySyncBeforeParentDirectorySync) {
                 return Err(CommitError::Io(std::io::Error::other(
                     "crash: capsule directory durable before database directory entry",
                 )));
             }
-            sync_directory(cx, &self.dir)?;
+            sync_directory(cx, &self.vfs, &self.dir).await?;
             self.capsule_directory_parent_sync_pending = false;
         }
         if crash_at == Some(CrashPoint::AfterD1) {
@@ -628,15 +677,18 @@ impl CommitCoordinator {
         // ---- The marker. Every structural and framing law was checked before
         // D1, so a log entry that exists is an entry recovery can decode.
         let log_path = self.log_path();
-        let (mut log, log_created) = match OpenOptions::new()
-            .append(true)
-            .create_new(true)
-            .open(&log_path)
+        let (mut log, log_created) = match self
+            .vfs
+            .open(&log_path, &OpenOptions::new().append(true).create_new(true))
+            .await
         {
             Ok(file) => (file, true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                (OpenOptions::new().append(true).open(&log_path)?, false)
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                self.vfs
+                    .open(&log_path, &OpenOptions::new().append(true))
+                    .await?,
+                false,
+            ),
             Err(error) => return Err(error.into()),
         };
 
@@ -647,22 +699,24 @@ impl CommitCoordinator {
         // committed again would re-issue `commit_seq` and append a duplicate —
         // turning a survivable crash into a log that fails recovery outright.
         self.poisoned = true;
-        log.write_all(&entry)?;
+        log.write_all(&entry).await?;
+        log.flush().await?;
         if crash_at == Some(CrashPoint::AfterMarkerBeforeD2) {
             return Err(CommitError::Io(std::io::Error::other("crash: before D2")));
         }
         if log_created || self.commit_log_parent_sync_pending {
-            sync_created_entry(cx, &log, &self.dir, || {
+            sync_created_entry(cx, &self.vfs, &log, &self.dir, || {
                 if crash_at == Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync) {
                     return Err(std::io::Error::other(
                         "crash: marker-log inode durable before directory entry",
                     ));
                 }
                 Ok(())
-            })?;
+            })
+            .await?;
             self.commit_log_parent_sync_pending = false;
         } else {
-            Self::barrier(cx, &log)?;
+            Self::barrier(cx, &log).await?;
             if crash_at == Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync) {
                 return Err(CommitError::Io(std::io::Error::other(
                     "crash: marker-log inode durable",
@@ -722,10 +776,14 @@ impl CommitCoordinator {
     /// as a tail would let one bad entry silently delete every commit after it
     /// while recovery reported success, which is the worst outcome available to
     /// a commit log: durable data lost with a green light.
-    fn recover_chain(cx: &CommitCx, dir: &Path) -> Result<(MarkerChain, usize), CommitError> {
-        cx.with_restriction(|| {
+    async fn recover_chain(
+        cx: &CommitCx,
+        vfs: &V,
+        dir: &Path,
+    ) -> Result<(MarkerChain, usize), CommitError> {
+        cx.with_restriction_async(async {
             let path = dir.join(COMMIT_LOG_NAME);
-            let mut file = match File::open(&path) {
+            let mut file = match vfs.open_read(&path).await {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     return Ok((MarkerChain::new(), 0));
@@ -742,7 +800,7 @@ impl CommitCoordinator {
             let mut entry = Vec::with_capacity(
                 ENTRY_HEADER_BYTES + MAX_ENTRY_BODY + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES,
             );
-            while let Some(decoded) = Self::read_next_entry(&mut file, &mut entry)? {
+            while let Some(decoded) = Self::read_next_entry(&mut file, &mut entry).await? {
                 let (marker, stored_chain_hash, consumed) = match decoded {
                     Ok(decoded) => decoded,
                     // Reachable only when the remaining bytes run out, which by
@@ -781,7 +839,7 @@ impl CommitCoordinator {
                     "commit log length does not fit u64",
                 ))
             })?;
-            let file_len = file.metadata()?.len();
+            let file_len = file.metadata().await?.len();
             let discarded_tail_bytes =
                 usize::try_from(file_len.checked_sub(valid_len).ok_or_else(|| {
                     CommitError::Io(std::io::Error::new(
@@ -802,13 +860,14 @@ impl CommitCoordinator {
                 // following restart would stop at that old prefix and silently
                 // lose the acknowledged commit. The next successful D2 sync makes
                 // this truncation durable together with the appended entry.
-                OpenOptions::new()
-                    .write(true)
-                    .open(&path)?
-                    .set_len(valid_len)?;
+                vfs.open(&path, &OpenOptions::new().write(true))
+                    .await?
+                    .set_len(valid_len)
+                    .await?;
             }
             Ok((chain, discarded_tail_bytes))
         })
+        .await
     }
 
     /// Read and decode exactly one bounded entry.
@@ -816,9 +875,12 @@ impl CommitCoordinator {
     /// `None` is a clean entry-boundary EOF. A partial header/body is handed to
     /// `decode_entry`, which preserves the same missing-versus-wrong-byte rule
     /// as the in-memory decoder without ever reading beyond one maximum entry.
-    fn read_next_entry(reader: &mut impl Read, entry: &mut Vec<u8>) -> std::io::Result<EntryRead> {
+    async fn read_next_entry<R: AsyncRead + Unpin>(
+        reader: &mut R,
+        entry: &mut Vec<u8>,
+    ) -> std::io::Result<EntryRead> {
         entry.clear();
-        if !Self::read_until_len(reader, entry, ENTRY_HEADER_BYTES)? {
+        if !Self::read_until_len(reader, entry, ENTRY_HEADER_BYTES).await? {
             return if entry.is_empty() {
                 Ok(None)
             } else {
@@ -837,22 +899,22 @@ impl CommitCoordinator {
             return Ok(Some(Err(EntryDefect::Corrupt)));
         }
         let total = ENTRY_HEADER_BYTES + body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
-        let _complete = Self::read_until_len(reader, entry, total)?;
+        let _complete = Self::read_until_len(reader, entry, total).await?;
         Ok(Some(Self::decode_entry(entry)))
     }
 
     /// Extend `bytes` to `target_len`, returning false only when EOF arrives
     /// first. Reads use a fixed stack chunk so even a corrupt length field never
     /// controls a single allocation or read request.
-    fn read_until_len(
-        reader: &mut impl Read,
+    async fn read_until_len<R: AsyncRead + Unpin>(
+        reader: &mut R,
         bytes: &mut Vec<u8>,
         target_len: usize,
     ) -> std::io::Result<bool> {
         let mut chunk = [0u8; 8 * 1024];
         while bytes.len() < target_len {
             let wanted = (target_len - bytes.len()).min(chunk.len());
-            match reader.read(&mut chunk[..wanted]) {
+            match reader.read(&mut chunk[..wanted]).await {
                 Ok(0) => return Ok(false),
                 Ok(read) => bytes.extend_from_slice(&chunk[..read]),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -927,7 +989,10 @@ impl CommitCoordinator {
     /// These are the residue of commits that crashed between D1 and D2. They
     /// are NOT partial commits — they are bytes nobody referenced — and
     /// reclaiming them is ordinary maintenance rather than recovery.
-    pub fn orphan_capsules(&self, cx: &impl StorageReadCx) -> Result<Vec<ObjectId>, CommitError> {
+    pub async fn orphan_capsules(
+        &self,
+        cx: &impl StorageReadCx,
+    ) -> Result<Vec<ObjectId>, CommitError> {
         let referenced: Vec<ObjectId> = self
             .chain
             .entries()
@@ -941,11 +1006,11 @@ impl CommitCoordinator {
             })
             .collect();
 
-        cx.with_restriction(|| {
+        cx.with_restriction_async(async {
             let mut orphans = Vec::new();
             let capsule_dir = self.dir.join(CAPSULE_DIR);
-            for entry in std::fs::read_dir(&capsule_dir)? {
-                let entry = entry?;
+            let mut entries = self.vfs.read_dir(&capsule_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
                 let name = entry.file_name();
                 let Some(stem) = name
                     .to_string_lossy()
@@ -964,6 +1029,7 @@ impl CommitCoordinator {
             orphans.sort_by_key(|oid| oid.0);
             Ok(orphans)
         })
+        .await
     }
 }
 
@@ -980,8 +1046,12 @@ fn decode_hex_oid(hex: &str) -> Option<ObjectId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitCoordinator, ENTRY_HEADER_BYTES, EntryDefect};
-    use std::io::{self, Read};
+    use super::{CommitCoordinator, ENTRY_HEADER_BYTES, EntryDefect, UnixVfs};
+    use asupersync::io::{AsyncRead, ReadBuf};
+    use std::future::Future;
+    use std::io;
+    use std::pin::{Pin, pin};
+    use std::task::{Context, Poll, Waker};
 
     /// A hostile source with an invalid fixed header and an arbitrarily large
     /// suffix. Touching the suffix panics, so this is a direct negative control
@@ -990,16 +1060,32 @@ mod tests {
         header_delivered: bool,
     }
 
-    impl Read for InvalidHeaderWithForbiddenSuffix {
-        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+    impl AsyncRead for InvalidHeaderWithForbiddenSuffix {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
             assert!(
                 !self.header_delivered,
                 "recovery read past a corrupt header"
             );
-            assert_eq!(bytes.len(), ENTRY_HEADER_BYTES);
-            bytes.copy_from_slice(b"BAD!\0\0\0\0");
+            assert_eq!(buf.remaining(), ENTRY_HEADER_BYTES);
+            buf.put_slice(b"BAD!\0\0\0\0");
             self.header_delivered = true;
-            Ok(ENTRY_HEADER_BYTES)
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Drive a future that never actually suspends: the hostile source always
+    /// returns `Ready`, so a `Pending` would mean the reader, not the source,
+    /// blocked.
+    fn poll_ready<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut task = Context::from_waker(waker);
+        match pin!(future).poll(&mut task) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("read future suspended over a ready-only source"),
         }
     }
 
@@ -1009,9 +1095,12 @@ mod tests {
             header_delivered: false,
         };
         let mut entry = Vec::new();
-        let decoded = CommitCoordinator::read_next_entry(&mut source, &mut entry)
-            .expect("the source itself is readable")
-            .expect("a header was present");
+        let decoded = poll_ready(CommitCoordinator::<UnixVfs>::read_next_entry(
+            &mut source,
+            &mut entry,
+        ))
+        .expect("the source itself is readable")
+        .expect("a header was present");
         assert!(matches!(decoded, Err(EntryDefect::Corrupt)));
         assert_eq!(entry.len(), ENTRY_HEADER_BYTES);
     }

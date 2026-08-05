@@ -78,13 +78,14 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         // lab_test_passed() covers ALL THREE channels — quiescence, the full
@@ -119,7 +120,7 @@ fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
 }
 
 /// Commit one template's worth of rows through the real durable path.
-fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<DeltaRow>) {
+async fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<DeltaRow>) {
     let template = LogicalDeltaTemplate::build(
         INTENT_SEMANTICS,
         [0x22; 32],
@@ -134,7 +135,9 @@ fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<Del
     )
     .expect("template builds");
     let capsule = prepare_capsule(&K_OID, NAMESPACE, &template).expect("seals");
-    commit_capsule(coordinator, cx, &capsule, vec![]).expect("commits");
+    commit_capsule(coordinator, cx, &capsule, vec![])
+        .await
+        .expect("commits");
 }
 
 /// Rebuild a partition from the RECOVERED stream.
@@ -144,13 +147,17 @@ fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<Del
 /// carries. This is how a real partition is rebuilt after a restart — there is no
 /// other source of truth (doctrine 5: derived structures are never more
 /// authoritative than the commit stream, and recovery discards and rebuilds them).
-fn rebuild_from_stream(cx: &CommitCx, coordinator: &CommitCoordinator) -> Vec<Vec<AdjacencyEntry>> {
+async fn rebuild_from_stream(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+) -> Vec<Vec<AdjacencyEntry>> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, 0);
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
         let EffectSource::Local { capsule_ref, .. } = &entry.marker.effect_source;
         let bytes = coordinator
             .read_capsule(cx, *capsule_ref)
+            .await
             .expect("a committed capsule is readable");
         let template =
             LogicalDeltaTemplate::decode_canonical(&bytes).expect("a committed template decodes");
@@ -179,22 +186,30 @@ fn rebuild_from_stream(cx: &CommitCx, coordinator: &CommitCoordinator) -> Vec<Ve
 #[test]
 fn a_partition_rebuilt_from_the_recovered_stream_agrees_with_the_oracle() {
     let dir = scratch_dir("arc");
-    under_lab(21, move |cx| {
+    under_lab(21, move |cx| async move {
+        let cx = &cx;
         {
-            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-            commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]);
-            commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2)]);
-            commit_rows(&mut coordinator, cx, vec![edge(11, 1, 3), edge(12, 2, 3)]);
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]).await;
+            commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2)]).await;
+            commit_rows(&mut coordinator, cx, vec![edge(11, 1, 3), edge(12, 2, 3)]).await;
         }
         // The coordinator is GONE. Everything below comes off disk.
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let database = replay(cx, &reopened).expect("the stream replays").database;
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let database = replay(cx, &reopened)
+            .await
+            .expect("the stream replays")
+            .database;
         let graph = database
             .graph(GRAPH, BRANCH)
             .expect("the coordinate materialized");
         let frontier = database.applied_through(GRAPH, BRANCH).expect("a frontier");
 
-        let blocks = rebuild_from_stream(cx, &reopened);
+        let blocks = rebuild_from_stream(cx, &reopened).await;
         assert!(!blocks.is_empty(), "the stream produced blocks");
 
         for source in [1u128, 2, 3] {
@@ -221,16 +236,20 @@ fn a_partition_rebuilt_from_the_recovered_stream_agrees_with_the_oracle() {
 #[test]
 fn a_deletion_in_a_later_commit_agrees_with_the_oracle() {
     let dir = scratch_dir("delete");
-    under_lab(22, move |cx| {
+    under_lab(22, move |cx| async move {
+        let cx = &cx;
         {
-            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-            commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]);
-            commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2), edge(11, 1, 3)]);
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]).await;
+            commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2), edge(11, 1, 3)]).await;
             // A later commit retires one of them. The before-image is READ from
             // the replayed stream rather than invented: the materializer refuses a
             // version that disagrees with materialized state, and that check is
             // the delta stream's self-verification.
             let before_version = replay(cx, &coordinator)
+                .await
                 .expect("replays")
                 .database
                 .graph(GRAPH, BRANCH)
@@ -244,14 +263,17 @@ fn a_deletion_in_a_later_commit_agrees_with_the_oracle() {
                     eid: EId(10),
                     before_version,
                 }],
-            );
+            )
+            .await;
         }
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let database = replay(cx, &reopened).expect("replays").database;
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let database = replay(cx, &reopened).await.expect("replays").database;
         let graph = database.graph(GRAPH, BRANCH).expect("materialized");
         let frontier = database.applied_through(GRAPH, BRANCH).expect("frontier");
 
-        let blocks = rebuild_from_stream(cx, &reopened);
+        let blocks = rebuild_from_stream(cx, &reopened).await;
         assert_eq!(
             graph.neighbours(VId(1), REL),
             vec![VId(3)],
@@ -284,19 +306,26 @@ fn a_deletion_in_a_later_commit_agrees_with_the_oracle() {
 #[test]
 fn rebuilding_twice_produces_identical_blocks() {
     let dir = scratch_dir("deterministic");
-    under_lab(23, move |cx| {
+    under_lab(23, move |cx| async move {
+        let cx = &cx;
         {
-            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-            commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2)]);
-            commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2)]);
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2)]).await;
+            commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2)]).await;
         }
         let first = {
-            let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-            rebuild_from_stream(cx, &reopened)
+            let reopened = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("reopen");
+            rebuild_from_stream(cx, &reopened).await
         };
         let second = {
-            let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-            rebuild_from_stream(cx, &reopened)
+            let reopened = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("reopen");
+            rebuild_from_stream(cx, &reopened).await
         };
         assert_eq!(
             first, second,

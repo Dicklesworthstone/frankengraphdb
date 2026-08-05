@@ -75,13 +75,14 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         // lab_test_passed() covers ALL THREE channels — quiescence, the full
@@ -158,12 +159,13 @@ impl ReferenceEffectFixtureResult {
 /// This test deliberately derives the caller basis from replay so the
 /// composition scenario is meaningful. The convention is local to this file
 /// and must not be cited as a production current-head guarantee.
-fn append_fixture(
+async fn append_fixture(
     coordinator: &mut CommitCoordinator,
     cx: &CommitCx,
     statements: &[Statement],
 ) -> ReferenceEffectFixtureResult {
     let basis = replay(cx, coordinator)
+        .await
         .expect("the stream replays")
         .database
         .graph(GRAPH, BRANCH)
@@ -206,15 +208,18 @@ fn append_fixture(
     // Empty by design for this fixture: it proves effect-byte durability, not
     // coordinate-head visibility. A real write path must supply and validate
     // the exact head CAS rather than cite this helper as evidence.
-    let _marker = commit_capsule(coordinator, cx, &capsule, vec![]).expect("capsule commits");
+    let _marker = commit_capsule(coordinator, cx, &capsule, vec![])
+        .await
+        .expect("capsule commits");
     ReferenceEffectFixtureResult::MarkerAppended {
         effects: effects.len(),
         statement_failures: statement_failures.len(),
     }
 }
 
-fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
+async fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
     replay(cx, coordinator)
+        .await
         .expect("replays")
         .database
         .graph(GRAPH, BRANCH)
@@ -230,8 +235,11 @@ fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
 #[test]
 fn reference_effects_round_trip_through_chronicle() {
     let dir = scratch_dir("arc");
-    under_lab(1, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(1, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
 
         let first = append_fixture(
             &mut coordinator,
@@ -241,7 +249,8 @@ fn reference_effects_round_trip_through_chronicle() {
                 create(2, "grace"),
                 add_edge(10, 1, 2),
             ])],
-        );
+        )
+        .await;
         assert!(matches!(
             first,
             ReferenceEffectFixtureResult::MarkerAppended { effects: 3, .. }
@@ -259,7 +268,8 @@ fn reference_effects_round_trip_through_chronicle() {
                 "ada-lovelace",
                 MismatchPolicy::StatementError,
             )])],
-        );
+        )
+        .await;
         assert!(matches!(
             second,
             ReferenceEffectFixtureResult::MarkerAppended { effects: 1, .. }
@@ -267,8 +277,10 @@ fn reference_effects_round_trip_through_chronicle() {
         drop(coordinator);
 
         // Restart: nothing in memory, everything from disk.
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let graph = graph_of(cx, &reopened);
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let graph = graph_of(cx, &reopened).await;
         assert_eq!(graph.vertex_count(), 2);
         assert_eq!(graph.edge_count(), 1);
         assert_eq!(
@@ -291,13 +303,17 @@ fn reference_effects_round_trip_through_chronicle() {
 #[test]
 fn an_aborted_reference_evaluation_appends_no_graph_marker() {
     let dir = scratch_dir("abort");
-    under_lab(2, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(2, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         append_fixture(
             &mut coordinator,
             cx,
             &[Statement::new(vec![create(1, "ada")])],
-        );
+        )
+        .await;
         let markers_before = coordinator.chain().len();
         let seq_before = coordinator.next_commit_seq();
         let capsules_before = std::fs::read_dir(dir.join(fgdb_chronicle::commit::CAPSULE_DIR))
@@ -313,7 +329,8 @@ fn an_aborted_reference_evaluation_appends_no_graph_marker() {
                 // And this guard aborts the whole transaction.
                 Statement::new(vec![cas(1, "WRONG", "never", MismatchPolicy::TxnAbort)]),
             ],
-        );
+        )
+        .await;
         assert!(
             matches!(
                 aborted,
@@ -345,7 +362,7 @@ fn an_aborted_reference_evaluation_appends_no_graph_marker() {
 
         // And the graph is exactly what the first transaction left, so the
         // aborted statement that WOULD have succeeded left no trace either.
-        let graph = graph_of(cx, &coordinator);
+        let graph = graph_of(cx, &coordinator).await;
         assert_eq!(graph.vertex_count(), 1);
         assert!(graph.vertex(VId(2)).is_none());
     });
@@ -357,13 +374,17 @@ fn an_aborted_reference_evaluation_appends_no_graph_marker() {
 #[test]
 fn an_empty_reference_effect_set_appends_no_graph_marker_and_is_not_an_abort() {
     let dir = scratch_dir("empty");
-    under_lab(3, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(3, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         append_fixture(
             &mut coordinator,
             cx,
             &[Statement::new(vec![create(1, "ada")])],
-        );
+        )
+        .await;
         let before = coordinator.chain().len();
 
         // Setting the name to what it already is, plus a NoOp guard that fails.
@@ -378,7 +399,8 @@ fn an_empty_reference_effect_set_appends_no_graph_marker_and_is_not_an_abort() {
                 },
                 cas(1, "WRONG", "never", MismatchPolicy::NoOp),
             ])],
-        );
+        )
+        .await;
         assert!(
             matches!(
                 empty,
@@ -399,13 +421,17 @@ fn an_empty_reference_effect_set_appends_no_graph_marker_and_is_not_an_abort() {
 #[test]
 fn a_statement_error_still_appends_the_surviving_reference_effects() {
     let dir = scratch_dir("stmt-error");
-    under_lab(4, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(4, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         append_fixture(
             &mut coordinator,
             cx,
             &[Statement::new(vec![create(1, "ada")])],
-        );
+        )
+        .await;
 
         let mixed = append_fixture(
             &mut coordinator,
@@ -420,14 +446,15 @@ fn a_statement_error_still_appends_the_surviving_reference_effects() {
                 )]),
                 Statement::new(vec![create(3, "alan")]),
             ],
-        );
+        )
+        .await;
         let (effects, statement_failures) = mixed
             .appended_counts()
             .expect("a graph marker was appended");
         assert_eq!(effects, 2, "statements 0 and 2 produced effects");
         assert_eq!(statement_failures, 1, "statement 1 failed");
 
-        let graph = graph_of(cx, &coordinator);
+        let graph = graph_of(cx, &coordinator).await;
         assert_eq!(graph.vertex_count(), 3, "ada, grace and alan are durable");
         assert_eq!(
             graph.vertex(VId(1)).expect("ada").props.get(&NAME),
@@ -446,18 +473,22 @@ fn a_statement_error_still_appends_the_surviving_reference_effects() {
 #[test]
 fn a_crash_mid_fixture_append_leaves_the_committed_prefix_replayable() {
     let dir = scratch_dir("crash");
-    under_lab(5, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(5, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         append_fixture(
             &mut coordinator,
             cx,
             &[Statement::new(vec![create(1, "ada")])],
-        );
+        )
+        .await;
 
         // Build the next fixture capsule the same way
         // append_fixture would, then crash after D1 so the capsule is durable
         // and unnamed.
-        let basis = graph_of(cx, &coordinator);
+        let basis = graph_of(cx, &coordinator).await;
         let outcome =
             fgdb_reference::intents::evaluate(&basis, &[Statement::new(vec![create(2, "grace")])]);
         let (effects, _) = outcome.committed_parts().expect("committed");
@@ -475,28 +506,32 @@ fn a_crash_mid_fixture_append_leaves_the_committed_prefix_replayable() {
         )
         .expect("builds");
         let capsule = fgdb_sim::prepare_capsule(&K_OID, NAMESPACE, &template).expect("prepares");
-        let crashed = coordinator.commit_with_crash(
-            cx,
-            &capsule.bytes,
-            |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &capsule, vec![]),
-            Some(CrashPoint::AfterD1),
-        );
+        let crashed = coordinator
+            .commit_with_crash(
+                cx,
+                &capsule.bytes,
+                |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &capsule, vec![]),
+                Some(CrashPoint::AfterD1),
+            )
+            .await;
         assert!(crashed.is_err());
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let graph = graph_of(cx, &reopened);
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let graph = graph_of(cx, &reopened).await;
         assert_eq!(
             graph.vertex_count(),
             1,
             "the crashed transaction contributed nothing"
         );
         assert!(
-            reopened.capsule_exists(cx, capsule.object_id),
+            reopened.capsule_exists(cx, capsule.object_id).await,
             "though its capsule is durable — the orphan is real"
         );
         assert_eq!(
-            reopened.orphan_capsules(cx).expect("scan"),
+            reopened.orphan_capsules(cx).await.expect("scan"),
             vec![capsule.object_id]
         );
 
@@ -507,11 +542,12 @@ fn a_crash_mid_fixture_append_leaves_the_committed_prefix_replayable() {
             &mut reopened,
             cx,
             &[Statement::new(vec![create(3, "alan")])],
-        );
+        )
+        .await;
         assert!(matches!(
             next,
             ReferenceEffectFixtureResult::MarkerAppended { .. }
         ));
-        assert_eq!(graph_of(cx, &reopened).vertex_count(), 2);
+        assert_eq!(graph_of(cx, &reopened).await.vertex_count(), 2);
     });
 }

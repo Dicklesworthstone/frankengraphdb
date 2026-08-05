@@ -71,13 +71,14 @@ fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("fgdb-spine-diff-{}-{name}", std::process::id()))
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         report.lab_test_passed(),
@@ -92,8 +93,10 @@ fn under_lab<T: Send + 'static>(
 /// self-loop, a second relation, and a hub with several destinations. A fixture
 /// where every vertex has one neighbour would agree under almost any folding
 /// mistake.
-fn write_history(cx: &CommitCx, dir: &Path) {
-    let mut db = Database::create(cx, dir, engine_keys()).expect("creates");
+async fn write_history(cx: &CommitCx, dir: &Path) {
+    let mut db = Database::create(cx, dir, engine_keys())
+        .await
+        .expect("creates");
 
     let mut first = WriteBatch::new(KNOWS);
     for vid in 1..=5u128 {
@@ -101,7 +104,7 @@ fn write_history(cx: &CommitCx, dir: &Path) {
     }
     first.add_edge(EId(10), VId(1), VId(2), vec![]);
     first.add_edge(EId(11), VId(1), VId(3), vec![]);
-    db.write(cx, first).expect("first batch commits");
+    db.write(cx, first).await.expect("first batch commits");
 
     // PARALLEL EDGES: same (src, dst), different EId. EId is the unconditional
     // parallel-edge discriminator (§4.1), so a fold keyed on the pair alone
@@ -109,13 +112,13 @@ fn write_history(cx: &CommitCx, dir: &Path) {
     let mut second = WriteBatch::new(KNOWS);
     second.add_edge(EId(12), VId(1), VId(2), vec![]);
     second.add_edge(EId(13), VId(4), VId(4), vec![]); // self-loop
-    db.write(cx, second).expect("second batch commits");
+    db.write(cx, second).await.expect("second batch commits");
 
     // A SECOND RELATION over an overlapping vertex set.
     let mut third = WriteBatch::new(WORKS_WITH);
     third.add_edge(EId(14), VId(1), VId(5), vec![]);
     third.add_edge(EId(15), VId(2), VId(3), vec![]);
-    db.write(cx, third).expect("third batch commits");
+    db.write(cx, third).await.expect("third batch commits");
 }
 
 /// **THE DIFFERENTIAL: the engine's answer equals the oracle's, for every vertex
@@ -123,12 +126,15 @@ fn write_history(cx: &CommitCx, dir: &Path) {
 #[test]
 fn the_spine_agrees_with_the_reference_oracle() {
     let dir = scratch("agreement");
-    under_lab(101, move |cx| {
-        write_history(cx, &dir);
+    under_lab(101, move |cx| async move {
+        let cx = &cx;
+        write_history(cx, &dir).await;
 
         // ENGINE SIDE. A fresh open, so the answers come from the durable path
         // rather than from the writer that produced them.
-        let engine = Database::open(cx, &dir, engine_keys()).expect("reopens");
+        let engine = Database::open(cx, &dir, engine_keys())
+            .await
+            .expect("reopens");
         let probes: Vec<(VId, RelationId)> = (1..=6u128)
             .flat_map(|vid| [(VId(vid), KNOWS), (VId(vid), WORKS_WITH)])
             .collect();
@@ -140,8 +146,10 @@ fn the_spine_agrees_with_the_reference_oracle() {
 
         // ORACLE SIDE. Its own coordinator over the same directory; nothing but
         // the bytes on disk crosses from the engine.
-        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys()).expect("oracle opens");
-        let replayed = replay(cx, &coordinator).expect("the stream replays");
+        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("oracle opens");
+        let replayed = replay(cx, &coordinator).await.expect("the stream replays");
         let graph = replayed
             .database
             .graph(GRAPH, BRANCH)
@@ -177,21 +185,28 @@ fn the_spine_agrees_with_the_reference_oracle() {
 #[test]
 fn agreement_survives_a_reopen() {
     let dir = scratch("reopen-agreement");
-    under_lab(102, move |cx| {
-        write_history(cx, &dir);
+    under_lab(102, move |cx| async move {
+        let cx = &cx;
+        write_history(cx, &dir).await;
 
         let first = {
-            let engine = Database::open(cx, &dir, engine_keys()).expect("reopens");
+            let engine = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("reopens");
             engine.neighbours(VId(1), KNOWS).expect("reads")
         };
         let second = {
-            let engine = Database::open(cx, &dir, engine_keys()).expect("reopens again");
+            let engine = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("reopens again");
             engine.neighbours(VId(1), KNOWS).expect("reads")
         };
         assert_eq!(first, second, "the engine must not drift across reopens");
 
-        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys()).expect("oracle opens");
-        let replayed = replay(cx, &coordinator).expect("the stream replays");
+        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("oracle opens");
+        let replayed = replay(cx, &coordinator).await.expect("the stream replays");
         let oracle = replayed
             .database
             .graph(GRAPH, BRANCH)

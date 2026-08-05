@@ -16,6 +16,14 @@
 //! creation and publication stay on `CommitCx`. That split lets read-only roles
 //! inspect durable state without gaining any way to publish it.
 //!
+//! ALL I/O GOES THROUGH A [`Vfs`]. The store is generic over asupersync's
+//! filesystem trait and defaults to [`UnixVfs`], so production behaviour is
+//! the real filesystem while the lab hands in a faulting implementation that
+//! can lie about fsync, tear a write, flip a bit, or refuse space — the §15
+//! fault classes `std::fs` structurally could not model. The async boundary
+//! exists for the same reason: `VfsFile`'s operations are futures, so the lab
+//! runtime owns every scheduling point of the durable path.
+//!
 //! NOT HERE, deliberately: the filesystem profile (sector size, atomicity
 //! class) that decides how large a write may be before it can tear, which is
 //! bead `w2-filesystem-profiles`; and the publication sequencer/permit
@@ -25,10 +33,11 @@
 use crate::root::{
     ROOT_FILE_LEN, RootSelection, RootSlot, SLOT_A_OFFSET, SLOT_B_OFFSET, SLOT_LEN, select_root,
 };
+use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
+use asupersync::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 /// Run the ordered durability work for a new or previously uncertain
@@ -39,40 +48,51 @@ use std::path::{Path, PathBuf};
 /// operations, in this order, under the same `CommitCx` boundary. The hook is
 /// test-facing: crash matrices stop after the inode sync and before the
 /// directory sync without maintaining a second, weaker implementation path.
-pub(crate) fn sync_created_entry(
+pub(crate) async fn sync_created_entry<V: Vfs>(
     cx: &CommitCx,
-    file: &File,
+    vfs: &V,
+    file: &V::File,
     parent_directory: &Path,
     after_file_sync: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     run_created_entry_barrier(
-        || cx.with_restriction(|| file.sync_all()),
+        || sync_file(cx, file),
         after_file_sync,
-        || sync_directory(cx, parent_directory),
+        || sync_directory(cx, vfs, parent_directory),
     )
+    .await
 }
 
 /// Sync one already-open file through the commit capability boundary.
-pub(crate) fn sync_file(cx: &CommitCx, file: &File) -> std::io::Result<()> {
-    cx.with_restriction(|| file.sync_all())
+pub(crate) async fn sync_file<F: VfsFile>(cx: &CommitCx, file: &F) -> std::io::Result<()> {
+    cx.with_restriction_async(file.sync_all()).await
 }
 
 /// Make the directory entries in `directory` durable.
-pub(crate) fn sync_directory(cx: &CommitCx, directory: &Path) -> std::io::Result<()> {
-    cx.with_restriction(|| {
-        let directory = File::open(directory)?;
-        directory.sync_all()
+pub(crate) async fn sync_directory<V: Vfs>(
+    cx: &CommitCx,
+    vfs: &V,
+    directory: &Path,
+) -> std::io::Result<()> {
+    cx.with_restriction_async(async {
+        let directory = vfs.open(directory, &OpenOptions::new().read(true)).await?;
+        directory.sync_all().await
     })
+    .await
 }
 
-fn run_created_entry_barrier(
-    sync_file: impl FnOnce() -> std::io::Result<()>,
+async fn run_created_entry_barrier<FileFut, DirFut>(
+    sync_file: impl FnOnce() -> FileFut,
     after_file_sync: impl FnOnce() -> std::io::Result<()>,
-    sync_parent_directory: impl FnOnce() -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    sync_file()?;
+    sync_parent_directory: impl FnOnce() -> DirFut,
+) -> std::io::Result<()>
+where
+    FileFut: Future<Output = std::io::Result<()>>,
+    DirFut: Future<Output = std::io::Result<()>>,
+{
+    sync_file().await?;
     after_file_sync()?;
-    sync_parent_directory()
+    sync_parent_directory().await
 }
 
 /// The published root file's name inside a database directory.
@@ -148,15 +168,27 @@ impl From<std::io::Error> for StoreError {
 
 /// A database directory's published root.
 #[derive(Debug)]
-pub struct RootStore {
+pub struct RootStore<V: Vfs = UnixVfs> {
+    vfs: V,
     path: PathBuf,
 }
 
-impl RootStore {
-    /// Bind to the `manifest.root` inside a database directory. Opening is
-    /// separate from reading so a caller can bind before the file exists.
+impl RootStore<UnixVfs> {
+    /// Bind to the `manifest.root` inside a database directory on the real
+    /// filesystem. Opening is separate from reading so a caller can bind
+    /// before the file exists.
     pub fn new(database_dir: impl AsRef<Path>) -> Self {
+        Self::with_vfs(UnixVfs::new(), database_dir)
+    }
+}
+
+impl<V: Vfs> RootStore<V> {
+    /// Bind to the `manifest.root` inside a database directory reached through
+    /// an explicit [`Vfs`]. This is the constructor the lab uses to interpose
+    /// a faulting filesystem; [`RootStore::new`] is the production shape.
+    pub fn with_vfs(vfs: V, database_dir: impl AsRef<Path>) -> Self {
         Self {
+            vfs,
             path: database_dir.as_ref().join(ROOT_FILE_NAME),
         }
     }
@@ -173,53 +205,55 @@ impl RootStore {
     /// pair rule covers genesis exactly as it covers any later convergence.
     /// Creation returns only after both the root inode and its parent-directory
     /// entry are durable.
-    pub fn create(&self, cx: &CommitCx, slot: &RootSlot) -> Result<(), StoreError> {
-        self.create_with_crash(cx, slot, None)
+    pub async fn create(&self, cx: &CommitCx, slot: &RootSlot) -> Result<(), StoreError> {
+        self.create_with_crash(cx, slot, None).await
     }
 
     /// Create the first root, optionally stopping between inode and directory
     /// durability. The normal path delegates here so the crash matrix cannot
     /// accidentally test a different sequence of operations.
     #[doc(hidden)]
-    pub fn create_with_crash(
+    pub async fn create_with_crash(
         &self,
         cx: &CommitCx,
         slot: &RootSlot,
         crash_at: Option<RootCreateCrashPoint>,
     ) -> Result<(), StoreError> {
         let bytes = slot.serialize();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.path)?;
-        file.write_all(&bytes)?;
-        file.write_all(&bytes)?;
+        let mut file = self
+            .vfs
+            .open(&self.path, &OpenOptions::new().write(true).create_new(true))
+            .await?;
+        file.write_all(&bytes).await?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
         let parent = self.path.parent().ok_or_else(|| {
             StoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "manifest.root has no parent directory",
             ))
         })?;
-        sync_created_entry(cx, &file, parent, || {
+        sync_created_entry(cx, &self.vfs, &file, parent, || {
             if crash_at == Some(RootCreateCrashPoint::AfterFileSyncBeforeDirectorySync) {
                 return Err(std::io::Error::other(
                     "crash: root inode durable before directory entry",
                 ));
             }
             Ok(())
-        })?;
+        })
+        .await?;
         Ok(())
     }
 
     /// Read the file and apply the recovery rule.
-    pub fn recover(&self, cx: &impl StorageReadCx) -> Result<RootSelection, StoreError> {
-        let bytes = self.read_file(cx)?;
+    pub async fn recover(&self, cx: &impl StorageReadCx) -> Result<RootSelection, StoreError> {
+        let bytes = self.read_file(cx).await?;
         Ok(select_root(&bytes))
     }
 
     /// The currently published root, or an error naming why there is none.
-    pub fn current(&self, cx: &impl StorageReadCx) -> Result<RootSlot, StoreError> {
-        match self.recover(cx)? {
+    pub async fn current(&self, cx: &impl StorageReadCx) -> Result<RootSlot, StoreError> {
+        match self.recover(cx).await? {
             RootSelection::Selected { slot, .. } | RootSelection::IdenticalPair { slot } => {
                 Ok(*slot)
             }
@@ -244,8 +278,8 @@ impl RootStore {
     /// generation become the highest credible one, and it becomes so
     /// atomically from any reader's perspective, because selection is by
     /// generation and the new slot is either fully durable or not credible.
-    pub fn publish(&self, cx: &CommitCx, next: &RootSlot) -> Result<(), StoreError> {
-        let file_bytes = self.read_file(cx)?;
+    pub async fn publish(&self, cx: &CommitCx, next: &RootSlot) -> Result<(), StoreError> {
+        let file_bytes = self.read_file(cx).await?;
         let (current_generation, occupied_index) = match select_root(&file_bytes) {
             RootSelection::Selected { slot, index, .. } => (slot.slot_generation, index),
             // An identical pair occupies both slots equally; writing either is
@@ -275,10 +309,14 @@ impl RootStore {
         } else {
             SLOT_A_OFFSET
         };
-        let mut file = OpenOptions::new().write(true).open(&self.path)?;
-        file.seek(SeekFrom::Start(target_offset as u64))?;
-        file.write_all(&next.serialize())?;
-        Self::barrier(cx, &file)?;
+        let mut file = self
+            .vfs
+            .open(&self.path, &OpenOptions::new().write(true))
+            .await?;
+        file.seek(SeekFrom::Start(target_offset as u64)).await?;
+        file.write_all(&next.serialize()).await?;
+        file.flush().await?;
+        Self::barrier(cx, &file).await?;
         Ok(())
     }
 
@@ -286,23 +324,22 @@ impl RootStore {
     /// benchmark is most tempted to skip, and a durability claim measured
     /// without it is not a durability claim (doctrine 7: no non-durable
     /// benchmark mode reported as a result).
-    fn barrier(cx: &CommitCx, file: &File) -> Result<(), StoreError> {
-        // The capability context is what a lab runtime swaps to inject fsync
-        // lies, latency, and crashes at this exact boundary; the restriction
-        // scope is where that interception attaches.
-        sync_file(cx, file)?;
+    async fn barrier(cx: &CommitCx, file: &V::File) -> Result<(), StoreError> {
+        // The capability context and the Vfs are what a lab runtime swaps to
+        // inject fsync lies, latency, and crashes at this exact boundary.
+        sync_file(cx, file).await?;
         Ok(())
     }
 
-    fn read_file(&self, cx: &impl StorageReadCx) -> Result<Vec<u8>, StoreError> {
-        cx.with_restriction(|| {
-            let mut file = File::open(&self.path)?;
-            let len = file.metadata()?.len();
+    async fn read_file(&self, cx: &impl StorageReadCx) -> Result<Vec<u8>, StoreError> {
+        cx.with_restriction_async(async {
+            let mut file = self.vfs.open_read(&self.path).await?;
+            let len = file.metadata().await?.len();
             if len != ROOT_FILE_LEN as u64 {
                 return Err(StoreError::MalformedFile { len });
             }
             let mut bytes = Vec::with_capacity(ROOT_FILE_LEN);
-            file.read_to_end(&mut bytes)?;
+            file.read_to_end(&mut bytes).await?;
             if bytes.len() != ROOT_FILE_LEN {
                 return Err(StoreError::MalformedFile {
                     len: bytes.len() as u64,
@@ -310,14 +347,15 @@ impl RootStore {
             }
             Ok(bytes)
         })
+        .await
     }
 
     /// Which physical slot currently holds the selected root: 0 = A, 1 = B.
     /// Exposed so a test — or an operator — can observe that publishing
     /// actually alternates rather than rewriting one slot forever, which is
     /// the failure mode that silently removes all crash safety.
-    pub fn selected_slot_index(&self, cx: &impl StorageReadCx) -> Result<u8, StoreError> {
-        match self.recover(cx)? {
+    pub async fn selected_slot_index(&self, cx: &impl StorageReadCx) -> Result<u8, StoreError> {
+        match self.recover(cx).await? {
             RootSelection::Selected { index, .. } => Ok(index),
             RootSelection::IdenticalPair { .. } => Ok(0),
             RootSelection::MalformedFile { len } => {
@@ -334,17 +372,27 @@ impl RootStore {
     /// targeted. Test-facing on purpose: the crash-point matrix (§15) needs to
     /// place a failure at an exact instant, and doing that through the real
     /// write path is how the test stays honest about which bytes moved.
+    ///
+    /// Deliberately takes no capability context: it models damage arriving
+    /// from OUTSIDE the process — a torn write the store never observed — so
+    /// routing it through a `CommitCx` would claim an authority the scenario
+    /// does not have.
     #[doc(hidden)]
-    pub fn damage_slot_for_test(&self, index: u8, byte: usize) -> Result<(), StoreError> {
+    pub async fn damage_slot_for_test(&self, index: u8, byte: usize) -> Result<(), StoreError> {
         let offset = if index == 0 {
             SLOT_A_OFFSET
         } else {
             SLOT_B_OFFSET
         };
-        let mut file = OpenOptions::new().write(true).open(&self.path)?;
-        file.seek(SeekFrom::Start((offset + byte % SLOT_LEN) as u64))?;
-        file.write_all(&[0xff])?;
-        file.sync_all()?;
+        let mut file = self
+            .vfs
+            .open(&self.path, &OpenOptions::new().write(true))
+            .await?;
+        file.seek(SeekFrom::Start((offset + byte % SLOT_LEN) as u64))
+            .await?;
+        file.write_all(&[0xff]).await?;
+        file.flush().await?;
+        file.sync_all().await?;
         Ok(())
     }
 }
@@ -353,14 +401,29 @@ impl RootStore {
 mod tests {
     use super::run_created_entry_barrier;
     use std::cell::RefCell;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    /// Drive a future that never actually suspends. The barrier composes
+    /// ready futures in these tests, so a single poll must complete it; a
+    /// `Pending` here would mean the test harness, not the barrier, blocked.
+    fn poll_ready<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut task = Context::from_waker(waker);
+        match pin!(future).poll(&mut task) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("barrier future suspended in a ready-only test"),
+        }
+    }
 
     #[test]
     fn creation_barrier_orders_inode_hook_then_parent_directory() {
         let events = RefCell::new(Vec::new());
-        run_created_entry_barrier(
+        poll_ready(run_created_entry_barrier(
             || {
                 events.borrow_mut().push("file");
-                Ok(())
+                std::future::ready(Ok(()))
             },
             || {
                 events.borrow_mut().push("crash-hook");
@@ -368,9 +431,9 @@ mod tests {
             },
             || {
                 events.borrow_mut().push("parent-directory");
-                Ok(())
+                std::future::ready(Ok(()))
             },
-        )
+        ))
         .expect("barrier");
 
         assert_eq!(
@@ -382,10 +445,10 @@ mod tests {
     #[test]
     fn a_crash_after_inode_sync_prevents_directory_publication() {
         let events = RefCell::new(Vec::new());
-        let result = run_created_entry_barrier(
+        let result = poll_ready(run_created_entry_barrier(
             || {
                 events.borrow_mut().push("file");
-                Ok(())
+                std::future::ready(Ok(()))
             },
             || {
                 events.borrow_mut().push("crash-hook");
@@ -393,9 +456,9 @@ mod tests {
             },
             || {
                 events.borrow_mut().push("parent-directory");
-                Ok(())
+                std::future::ready(Ok(()))
             },
-        );
+        ));
 
         assert!(result.is_err());
         assert_eq!(events.into_inner(), ["file", "crash-hook"]);

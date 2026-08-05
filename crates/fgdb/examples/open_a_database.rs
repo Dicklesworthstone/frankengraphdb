@@ -80,14 +80,14 @@ fn main() {
         let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
 
         // ---- create, write, read -------------------------------------------
-        let mut db = Database::create(cx, &path, keys)?;
+        let mut db = Database::create(cx, &path, keys).await?;
         let mut batch = WriteBatch::new(KNOWS);
         batch.create_vertex(VId(1), vec![], vec![]);
         batch.create_vertex(VId(2), vec![], vec![]);
         batch.create_vertex(VId(3), vec![], vec![]);
         batch.add_edge(EId(10), VId(1), VId(2), vec![]);
         batch.add_edge(EId(11), VId(1), VId(3), vec![]);
-        let seq = db.write(cx, batch)?;
+        let seq = db.write(cx, batch).await?;
 
         let before = db.neighbours(VId(1), KNOWS)?;
         let root_before = db.partition_root();
@@ -99,7 +99,7 @@ fn main() {
         println!("  dropped the database handle");
 
         // ---- reopen with nothing but the path and the keys ------------------
-        let db = Database::open(cx, &path, keys)?;
+        let db = Database::open(cx, &path, keys).await?;
         let after = db.neighbours(VId(1), KNOWS)?;
         println!("  neighbours(1) after reopen: {after:?}");
 

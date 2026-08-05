@@ -66,13 +66,14 @@ fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("fgdb-hostile-{}-{name}", std::process::id()))
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         report.lab_test_passed(),
@@ -140,8 +141,9 @@ fn bytes_per_live_edge_under_power_law_skew() {
     let dir = scratch("skew-bytes");
     let measured = under_lab(41, {
         let dir = dir.clone();
-        move |cx| {
-            let mut db = Database::create(cx, &dir, keys()).expect("creates");
+        move |cx| async move {
+            let cx = &cx;
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
 
             let mut batch = WriteBatch::new(KNOWS);
             let mut eid = 1u128;
@@ -153,12 +155,12 @@ fn bytes_per_live_edge_under_power_law_skew() {
                     eid += 1;
                 }
             }
-            db.write(cx, batch).expect("the skewed batch commits");
+            db.write(cx, batch).await.expect("the skewed batch commits");
             drop(db);
 
             // COLD REOPEN, so the number describes a durable database rather
             // than a process that still has everything in memory.
-            let db = Database::open(cx, &dir, keys()).expect("reopens");
+            let db = Database::open(cx, &dir, keys()).await.expect("reopens");
 
             // CORRECTNESS FIRST: a fast path that returns the wrong graph is
             // not a result. The bead requires every benchmark to assert what it
@@ -224,34 +226,34 @@ fn bytes_per_live_edge_under_power_law_skew() {
 fn bytes_per_live_edge_swept_across_scale() {
     const SIZES: [u128; 5] = [1, 4, 16, 64, 256];
 
-    let measured: Vec<(u128, u64)> = under_lab(44, move |cx| {
-        SIZES
-            .iter()
-            .map(|edges| {
-                let dir = scratch(&format!("sweep-{edges}"));
-                let mut db = Database::create(cx, &dir, keys()).expect("creates");
-                let mut batch = WriteBatch::new(KNOWS);
-                batch.create_vertex(VId(1), vec![], vec![]);
-                for k in 0..*edges {
-                    batch.create_vertex(VId(1000 + k), vec![], vec![]);
-                    batch.add_edge(EId(k + 1), VId(1), VId(1000 + k), vec![]);
-                }
-                db.write(cx, batch).expect("commits");
-                drop(db);
+    let measured: Vec<(u128, u64)> = under_lab(44, move |cx| async move {
+        let cx = &cx;
+        let mut measured = Vec::new();
+        for edges in SIZES {
+            let dir = scratch(&format!("sweep-{edges}"));
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(1), vec![], vec![]);
+            for k in 0..edges {
+                batch.create_vertex(VId(1000 + k), vec![], vec![]);
+                batch.add_edge(EId(k + 1), VId(1), VId(1000 + k), vec![]);
+            }
+            db.write(cx, batch).await.expect("commits");
+            drop(db);
 
-                // Cold reopen, and assert the answer, so a cheap directory is
-                // never mistaken for an efficient one.
-                let db = Database::open(cx, &dir, keys()).expect("reopens");
-                let found = db.neighbours(VId(1), KNOWS).expect("reads");
-                assert_eq!(
-                    found.len() as u128,
-                    *edges,
-                    "the {edges}-edge database lost neighbours across the reopen"
-                );
+            // Cold reopen, and assert the answer, so a cheap directory is
+            // never mistaken for an efficient one.
+            let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+            let found = db.neighbours(VId(1), KNOWS).expect("reads");
+            assert_eq!(
+                found.len() as u128,
+                edges,
+                "the {edges}-edge database lost neighbours across the reopen"
+            );
 
-                (*edges, bytes_on_disk(&dir) / *edges as u64)
-            })
-            .collect()
+            measured.push((edges, bytes_on_disk(&dir) / edges as u64));
+        }
+        measured
     });
 
     let worst = measured
@@ -329,24 +331,25 @@ fn the_byte_measurement_responds_to_history_size() {
     let small_dir = scratch("bytes-small");
     let large_dir = scratch("bytes-large");
 
-    let write_n = move |cx: &CommitCx, dir: &Path, edges: u128| -> u64 {
-        let mut db = Database::create(cx, dir, keys()).expect("creates");
+    async fn write_n(cx: &CommitCx, dir: &Path, edges: u128) -> u64 {
+        let mut db = Database::create(cx, dir, keys()).await.expect("creates");
         let mut batch = WriteBatch::new(KNOWS);
         batch.create_vertex(VId(1), vec![], vec![]);
         for k in 0..edges {
             batch.create_vertex(VId(1000 + k), vec![], vec![]);
             batch.add_edge(EId(k + 1), VId(1), VId(1000 + k), vec![]);
         }
-        db.write(cx, batch).expect("commits");
+        db.write(cx, batch).await.expect("commits");
         drop(db);
         bytes_on_disk(dir)
-    };
+    }
 
     let (small, large) = under_lab(42, {
         let (small_dir, large_dir) = (small_dir.clone(), large_dir.clone());
-        move |cx| {
-            let small = write_n(cx, &small_dir, 4);
-            let large = write_n(cx, &large_dir, 64);
+        move |cx| async move {
+            let cx = &cx;
+            let small = write_n(cx, &small_dir, 4).await;
+            let large = write_n(cx, &large_dir, 64).await;
             (small, large)
         }
     });
@@ -370,8 +373,9 @@ fn a_cold_reopen_answers_identically_across_the_whole_skew() {
     let dir = scratch("cold-reopen");
     under_lab(43, {
         let dir = dir.clone();
-        move |cx| {
-            let mut db = Database::create(cx, &dir, keys()).expect("creates");
+        move |cx| async move {
+            let cx = &cx;
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
             let mut batch = WriteBatch::new(KNOWS);
             let mut eid = 1u128;
             for (src, degree) in SKEW {
@@ -382,7 +386,7 @@ fn a_cold_reopen_answers_identically_across_the_whole_skew() {
                     eid += 1;
                 }
             }
-            db.write(cx, batch).expect("commits");
+            db.write(cx, batch).await.expect("commits");
 
             // Answers taken from the WARM database, before the drop.
             let warm: Vec<Vec<VId>> = SKEW
@@ -391,7 +395,7 @@ fn a_cold_reopen_answers_identically_across_the_whole_skew() {
                 .collect();
             drop(db);
 
-            let db = Database::open(cx, &dir, keys()).expect("reopens");
+            let db = Database::open(cx, &dir, keys()).await.expect("reopens");
             for ((src, degree), warm_answer) in SKEW.iter().zip(warm) {
                 let cold = db.neighbours(VId(*src), KNOWS).expect("cold read");
                 assert_eq!(

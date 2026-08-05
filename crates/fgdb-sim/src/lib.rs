@@ -155,7 +155,7 @@ impl From<CommitError> for ReplayError {
 /// own crash point through, so this wrapper has exactly one consumer — the
 /// verification suites — and moving it would put an unused function in the
 /// engine's public surface.
-pub fn commit_capsule(
+pub async fn commit_capsule(
     coordinator: &mut CommitCoordinator,
     cx: &CommitCx,
     capsule: &PreparedCapsule,
@@ -166,9 +166,11 @@ pub fn commit_capsule(
     // caller believed. `PreparedCapsule::object_id` is the same value computed
     // independently, and the e2e suite asserts the two agree — a cross-check
     // that would be lost if this simply trusted one of them.
-    coordinator.commit(cx, &capsule.bytes, |seq, oid| {
-        marker_for_capsule(seq, oid, capsule, head_updates)
-    })
+    coordinator
+        .commit(cx, &capsule.bytes, |seq, oid| {
+            marker_for_capsule(seq, oid, capsule, head_updates)
+        })
+        .await
 }
 
 /// What a replay produces: the materialized graph AND the delta index that
@@ -185,11 +187,13 @@ pub struct Replayed {
 
 /// Materialize the durable commit stream into graph state, discarding the
 /// index. Kept for callers that only want the graph.
-pub fn materialize(
+pub async fn materialize(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
 ) -> Result<ReferenceDatabase, ReplayError> {
-    replay(cx, coordinator).map(|replayed| replayed.database)
+    replay(cx, coordinator)
+        .await
+        .map(|replayed| replayed.database)
 }
 
 /// **Replay the durable commit stream into graph state and the delta window.**
@@ -211,7 +215,10 @@ pub fn materialize(
 /// lane. Recovery is inside that lane — every marker it walks came out of the
 /// recovered chain, which holds only entries that reached D2 — so it can make
 /// the attestation honestly rather than needing a back door.
-pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed, ReplayError> {
+pub async fn replay(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+) -> Result<Replayed, ReplayError> {
     let mut database = ReferenceDatabase::with_database_id(reference_database_id(cx, coordinator)?);
     let mut index = LocalDeltaBatchIndex::new();
     for entry in coordinator.chain().entries() {
@@ -221,13 +228,13 @@ pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed
             logical_delta_template_digest,
         } = &entry.marker.effect_source;
 
-        if !coordinator.capsule_exists(cx, *capsule_ref) {
+        if !coordinator.capsule_exists(cx, *capsule_ref).await {
             return Err(ReplayError::MissingCapsule {
                 commit_seq,
                 capsule_oid: *capsule_ref,
             });
         }
-        let bytes = coordinator.read_capsule(cx, *capsule_ref)?;
+        let bytes = coordinator.read_capsule(cx, *capsule_ref).await?;
 
         let recomputed = template_digest(&bytes);
         // ubs:ignore — canonical logical-effect integrity is public, not authentication material.

@@ -51,8 +51,36 @@ use fgdb_strata::writer::BlockWriter;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::{BranchId, DatabaseSecurityNamespaceId, GraphId, ObjectId};
 use fgdb_types::{EId, VId};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
+
+/// Minimal single-future executor for the non-lab lane — same shape and
+/// rationale as `cx_probe.rs`: this file measures OFF the lab runtime, and
+/// asupersync's `spawn_blocking` falls back to dedicated threads without a
+/// runtime, so the durable-path futures complete and wake this parked thread.
+/// The parked-thread round trip is microseconds against the millisecond-scale
+/// operations measured here.
+fn drive<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let mut future = pin!(future);
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut task_cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut task_cx) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
 
 const KNOWS: RelationId = RelationId(1);
 /// The spine's partition coordinates (`fgdb::lib` GRAPH/BRANCH/PARTITION are
@@ -84,7 +112,7 @@ fn build_history(commit: &fgdb_types::context::CommitCx, db: &mut Database, comm
         }
         batch.create_vertex(VId(2000 + b as u128), vec![], vec![]);
         batch.add_edge(EId(b as u128 + 1), VId(1), VId(2000 + b as u128), vec![]);
-        db.write(commit, batch).expect("history commit");
+        drive(db.write(commit, batch)).expect("history commit");
     }
 }
 
@@ -121,7 +149,7 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
     let mut stages = ReplicaStages::default();
 
     let start = Instant::now();
-    let coordinator = CommitCoordinator::open(&commit, dir, capsule_keys(&keys))
+    let coordinator = drive(CommitCoordinator::open(&commit, dir, capsule_keys(&keys)))
         .expect("replica coordinator opens");
     stages.open_recover_chain = start.elapsed();
 
@@ -137,8 +165,7 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
             &entry.marker.effect_source;
         plaintexts.push((
             entry.marker.commit_seq,
-            coordinator
-                .read_capsule(&commit, *capsule_ref)
+            drive(coordinator.read_capsule(&commit, *capsule_ref))
                 .expect("replica capsule read"),
         ));
     }
@@ -239,14 +266,14 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     let mut replicas: Vec<(usize, ReplicaStages)> = Vec::new();
     for &n in &HISTORY_POINTS {
         let dir = scratch(&format!("hist-{n}"));
-        let mut db = Database::create(&commit, &dir, keys()).expect("creates");
+        let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
         build_history(&commit, &mut db, n);
 
         let start = Instant::now();
         let mut batch = WriteBatch::new(KNOWS);
         batch.create_vertex(VId(900_000), vec![], vec![]);
         batch.add_edge(EId(900_000), VId(1), VId(900_000), vec![]);
-        db.write(&commit, batch).expect("marginal commit");
+        drive(db.write(&commit, batch)).expect("marginal commit");
         let t_marginal = start.elapsed();
         marginal.push((n, t_marginal));
 
@@ -258,17 +285,16 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     let control_dir = scratch("chronicle-only");
     let control_keys = keys();
     let mut coordinator =
-        CommitCoordinator::open(&commit, &control_dir, capsule_keys(&control_keys))
+        drive(CommitCoordinator::open(&commit, &control_dir, capsule_keys(&control_keys)))
             .expect("control coordinator");
     let mut control = Vec::new();
     for round in 0..HISTORY_POINTS[HISTORY_POINTS.len() - 1] as u64 + 1 {
         let (bytes, capsule) = control_capsule_bytes(round);
         let start = Instant::now();
-        coordinator
-            .commit(&commit, &bytes, |seq, oid| {
-                marker_for_capsule(seq, oid, &capsule, Vec::new())
-            })
-            .expect("control commit");
+        drive(coordinator.commit(&commit, &bytes, |seq, oid| {
+            marker_for_capsule(seq, oid, &capsule, Vec::new())
+        }))
+        .expect("control commit");
         control.push(start.elapsed());
     }
 

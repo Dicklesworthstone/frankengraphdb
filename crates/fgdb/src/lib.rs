@@ -31,15 +31,15 @@
 //! # let (outcome, report) = run_async_under_lab(7, move |root| async move {
 //! # let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
 //! # let path = &path;
-//! let mut db = Database::create(cx, path, keys)?;
+//! let mut db = Database::create(cx, path, keys).await?;
 //! let mut batch = WriteBatch::new(RelationId(1));
 //! batch.create_vertex(VId(1), vec![], vec![]);
 //! batch.create_vertex(VId(2), vec![], vec![]);
 //! batch.add_edge(EId(10), VId(1), VId(2), vec![]);
-//! db.write(cx, batch)?;                       // real capsule, real marker, two fsyncs
+//! db.write(cx, batch).await?;                 // real capsule, real marker, two fsyncs
 //! assert_eq!(db.neighbours(VId(1), RelationId(1))?, vec![VId(2)]);
 //! drop(db);
-//! let db = Database::open(cx, path, keys)?;   // nothing carried but the path and the keys
+//! let db = Database::open(cx, path, keys).await?;   // nothing carried but the path and the keys
 //! assert_eq!(db.neighbours(VId(1), RelationId(1))?, vec![VId(2)]);
 //! # Ok::<(), Box<dyn core::error::Error + Send + Sync>>(())
 //! # });
@@ -515,7 +515,7 @@ pub struct Database {
 
 impl Database {
     /// Create a database in `path`, which must be absent or an empty directory.
-    pub fn create(
+    pub async fn create(
         cx: &CommitCx,
         path: impl AsRef<Path>,
         keys: DatabaseKeys,
@@ -544,7 +544,7 @@ impl Database {
             }
             Err(error) => return Err(OpenError::Io(error)),
         }
-        Self::bind(cx, path, keys)
+        Self::bind(cx, path, keys).await
     }
 
     /// Open the database in `path`.
@@ -552,7 +552,7 @@ impl Database {
     /// Fails closed when `path` does not hold one. See
     /// [`OpenError::NotADatabase`] for why this cannot simply delegate to
     /// `CommitCoordinator::open`.
-    pub fn open(
+    pub async fn open(
         cx: &CommitCx,
         path: impl AsRef<Path>,
         keys: DatabaseKeys,
@@ -579,17 +579,17 @@ impl Database {
                 missing: CAPSULE_DIR,
             });
         }
-        Self::bind(cx, path, keys)
+        Self::bind(cx, path, keys).await
     }
 
     /// Open the commit stream and the block store, then rebuild the fold.
     ///
     /// The database-ness decision belongs to the two callers above; by here it
     /// has been made.
-    fn bind(cx: &CommitCx, path: &Path, keys: DatabaseKeys) -> Result<Self, OpenError> {
-        let coordinator = CommitCoordinator::open(cx, path, keys.capsule_keys())?;
+    async fn bind(cx: &CommitCx, path: &Path, keys: DatabaseKeys) -> Result<Self, OpenError> {
+        let coordinator = CommitCoordinator::open(cx, path, keys.capsule_keys()).await?;
         let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
-        let snapshot = rebuild(cx, &coordinator, &store, &keys)?;
+        let snapshot = rebuild(cx, &coordinator, &store, &keys).await?;
         Ok(Self {
             coordinator,
             store,
@@ -605,8 +605,12 @@ impl Database {
     /// the commit; the republish that follows is derived work, and its failure
     /// is reported without pretending the commit did not happen — a reopen
     /// rebuilds the same partition from the stream.
-    pub fn write(&mut self, cx: &CommitCx, batch: WriteBatch) -> Result<CommitSeq, WriteError> {
-        self.write_with_crash(cx, batch, None)
+    pub async fn write(
+        &mut self,
+        cx: &CommitCx,
+        batch: WriteBatch,
+    ) -> Result<CommitSeq, WriteError> {
+        self.write_with_crash(cx, batch, None).await
     }
 
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
@@ -621,7 +625,7 @@ impl Database {
     /// A crash point returns `Err` and does NOT republish the derived partition —
     /// which is exactly right, because the process this models is not around to
     /// republish anything. Drop the `Database` and reopen to see what survived.
-    pub fn write_with_crash(
+    pub async fn write_with_crash(
         &mut self,
         cx: &CommitCx,
         batch: WriteBatch,
@@ -673,14 +677,16 @@ impl Database {
         )?;
 
         let capsule = prepare_capsule(&self.keys.k_oid, self.keys.namespace, &template)?;
-        self.coordinator.commit_with_crash(
-            cx,
-            &capsule.bytes,
-            |seq, oid| marker_for_capsule(seq, oid, &capsule, Vec::new()),
-            crash_at,
-        )?;
+        self.coordinator
+            .commit_with_crash(
+                cx,
+                &capsule.bytes,
+                |seq, oid| marker_for_capsule(seq, oid, &capsule, Vec::new()),
+                crash_at,
+            )
+            .await?;
 
-        self.snapshot = rebuild(cx, &self.coordinator, &self.store, &self.keys)?;
+        self.snapshot = rebuild(cx, &self.coordinator, &self.store, &self.keys).await?;
         Ok(self.snapshot.frontier)
     }
 
@@ -819,7 +825,7 @@ pub fn marker_for_capsule(
 /// Only markers reach this loop, so an orphan capsule — bytes on disk that no
 /// marker names — contributes nothing without needing to be excluded. That is
 /// the marker-is-the-commit rule doing the work.
-fn rebuild(
+async fn rebuild(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
     store: &BlockStore,
@@ -837,13 +843,13 @@ fn rebuild(
             logical_delta_template_digest,
         } = &entry.marker.effect_source;
 
-        if !coordinator.capsule_exists(cx, *capsule_ref) {
+        if !coordinator.capsule_exists(cx, *capsule_ref).await {
             return Err(RebuildError::MissingCapsule {
                 commit_seq: commit_seq.0,
                 capsule_oid: *capsule_ref,
             });
         }
-        let bytes = coordinator.read_capsule(cx, *capsule_ref)?;
+        let bytes = coordinator.read_capsule(cx, *capsule_ref).await?;
         let recomputed = template_digest(&bytes);
         // FG-INV-09's recompute-from-registered-bytes check. Skipping it would
         // turn silent corruption into silently different graph state, which is

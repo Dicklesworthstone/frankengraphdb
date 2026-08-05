@@ -76,13 +76,14 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         // lab_test_passed() covers ALL THREE channels — quiescence, the full
@@ -116,14 +117,16 @@ fn set(vid: u128, value: i64) -> Statement {
 }
 
 /// The recovered database — the only authority a transaction may read.
-fn recovered(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceDatabase {
+async fn recovered(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceDatabase {
     replay(cx, coordinator)
+        .await
         .expect("the stream replays")
         .database
 }
 
-fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
+async fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
     recovered(cx, coordinator)
+        .await
         .graph(GRAPH, BRANCH)
         .cloned()
         .unwrap_or_else(ReferenceGraph::new)
@@ -134,8 +137,9 @@ fn graph_of(cx: &CommitCx, coordinator: &CommitCoordinator) -> ReferenceGraph {
 /// Every marker produced here advances `(GRAPH, BRANCH)`, so that coordinate's
 /// recovered frontier is also the global Chronicle frontier. This is not a
 /// general way to derive a database-wide commit sequence.
-fn next_seq(cx: &CommitCx, coordinator: &CommitCoordinator) -> CommitSeq {
+async fn next_seq(cx: &CommitCx, coordinator: &CommitCoordinator) -> CommitSeq {
     let applied = recovered(cx, coordinator)
+        .await
         .applied_through(GRAPH, BRANCH)
         .map_or(0, |seq| seq.0);
     CommitSeq(applied + 1)
@@ -181,7 +185,7 @@ struct Attempt {
 /// discarded: the durable stream is re-derived by replay, so nothing in memory
 /// can outlive a crash. Passing the live database would let the harness carry
 /// state across a crash the database itself would not.
-fn finish(
+async fn finish(
     coordinator: &mut CommitCoordinator,
     cx: &CommitCx,
     txn: Transaction,
@@ -189,9 +193,9 @@ fn finish(
     crash: Option<CrashPoint>,
 ) -> Attempt {
     let trace = txn.trace(id);
-    let seq = next_seq(cx, coordinator);
+    let seq = next_seq(cx, coordinator).await;
     let effects = txn.effects().to_vec();
-    let mut decision_basis = recovered(cx, coordinator);
+    let mut decision_basis = recovered(cx, coordinator).await;
     // The logical command sequence MATCHES the commit sequence here, and that is
     // required rather than convenient: `marker_for_capsule` writes
     // `logical_command_seq: commit_seq` into the marker, and replay reads the
@@ -228,7 +232,9 @@ fn finish(
 
     match crash {
         None => {
-            commit_capsule(coordinator, cx, &capsule, vec![]).expect("capsule commits");
+            commit_capsule(coordinator, cx, &capsule, vec![])
+                .await
+                .expect("capsule commits");
             Attempt {
                 outcome,
                 trace: trace.committed_at(seq),
@@ -236,12 +242,14 @@ fn finish(
             }
         }
         Some(point) => {
-            let crashed = coordinator.commit_with_crash(
-                cx,
-                &capsule.bytes,
-                |s, oid| fgdb_sim::marker_for_capsule(s, oid, &capsule, vec![]),
-                Some(point),
-            );
+            let crashed = coordinator
+                .commit_with_crash(
+                    cx,
+                    &capsule.bytes,
+                    |s, oid| fgdb_sim::marker_for_capsule(s, oid, &capsule, vec![]),
+                    Some(point),
+                )
+                .await;
             assert!(crashed.is_err(), "the injected crash must fail the commit");
             // NOT marked committed: the marker never reached D2, so this
             // transaction is not in the history however far the write got.
@@ -265,27 +273,31 @@ fn finish(
 #[test]
 fn a_refused_transaction_seals_no_capsule() {
     let dir = scratch_dir("refused");
-    under_lab(11, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-        let db = recovered(cx, &coordinator);
+    under_lab(11, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        let db = recovered(cx, &coordinator).await;
         let mut seed = begin(&db);
         seed.execute(&[create(1, 0), create(2, 0)])
             .expect("executes");
         assert!(
             finish(&mut coordinator, cx, seed, 0, None)
+                .await
                 .outcome
                 .is_committed()
         );
 
         // Both read the same durable state.
-        let db = recovered(cx, &coordinator);
+        let db = recovered(cx, &coordinator).await;
         let mut first = begin(&db);
         let mut second = begin(&db);
         first.execute(&[set(1, 10)]).expect("executes");
         second.execute(&[set(1, 20)]).expect("executes");
 
-        let won = finish(&mut coordinator, cx, first, 1, None);
-        let lost = finish(&mut coordinator, cx, second, 2, None);
+        let won = finish(&mut coordinator, cx, first, 1, None).await;
+        let lost = finish(&mut coordinator, cx, second, 2, None).await;
         assert!(won.outcome.is_committed());
         assert!(lost.outcome.conflicts().is_some(), "SI refuses the second");
 
@@ -293,21 +305,25 @@ fn a_refused_transaction_seals_no_capsule() {
         // transaction would have written is absent from the store.
         let would_have = lost.capsule_oid.expect("its capsule identity is known");
         assert!(
-            !coordinator.capsule_exists(cx, would_have),
+            !coordinator.capsule_exists(cx, would_have).await,
             "the refused transaction's bytes reached the disk"
         );
         assert!(
-            coordinator.capsule_exists(cx, won.capsule_oid.expect("prepared")),
+            coordinator
+                .capsule_exists(cx, won.capsule_oid.expect("prepared"))
+                .await,
             "while the winner's did — otherwise the check above is vacuous"
         );
         assert_eq!(
-            coordinator.orphan_capsules(cx).expect("scan"),
+            coordinator.orphan_capsules(cx).await.expect("scan"),
             vec![],
             "a refused transaction leaves no orphan"
         );
-        assert_eq!(graph_of(cx, &coordinator).vertex_count(), 2);
+        assert_eq!(graph_of(cx, &coordinator).await.vertex_count(), 2);
         assert_eq!(
-            recovered(cx, &coordinator).applied_through(GRAPH, BRANCH),
+            recovered(cx, &coordinator)
+                .await
+                .applied_through(GRAPH, BRANCH),
             Some(CommitSeq(2)),
             "one seed commit and one winner — the loser consumed no sequence"
         );
@@ -324,16 +340,19 @@ fn a_refused_transaction_seals_no_capsule() {
 #[test]
 fn durability_decides_membership_in_the_ssi_history() {
     let dir = scratch_dir("membership");
-    under_lab(12, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-        let db = recovered(cx, &coordinator);
+    under_lab(12, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        let db = recovered(cx, &coordinator).await;
         let mut seed = begin(&db);
         seed.execute(&[create(1, 1), create(2, 1)])
             .expect("executes");
-        finish(&mut coordinator, cx, seed, 0, None);
+        finish(&mut coordinator, cx, seed, 0, None).await;
 
         // Write skew: each reads the invariant, each zeroes the other's element.
-        let db = recovered(cx, &coordinator);
+        let db = recovered(cx, &coordinator).await;
         let mut t1 = begin(&db);
         let mut t2 = begin(&db);
         for vid in [1, 2] {
@@ -343,21 +362,25 @@ fn durability_decides_membership_in_the_ssi_history() {
         t1.execute(&[set(1, 0)]).expect("executes");
         t2.execute(&[set(2, 0)]).expect("executes");
 
-        let a = finish(&mut coordinator, cx, t1, 1, None);
+        let a = finish(&mut coordinator, cx, t1, 1, None).await;
         // t2's marker never reaches D2.
-        let b = finish(&mut coordinator, cx, t2, 2, Some(CrashPoint::AfterD1));
+        let b = finish(&mut coordinator, cx, t2, 2, Some(CrashPoint::AfterD1)).await;
         assert!(a.outcome.is_committed() && b.outcome.is_committed());
         assert_eq!(b.trace.commit_seq, None, "the lost commit is not committed");
 
         drop(coordinator);
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
 
         // The recovered graph carries only the first transaction's effect.
-        let graph = graph_of(cx, &reopened);
+        let graph = graph_of(cx, &reopened).await;
         assert_eq!(prop_of(&graph, 1), Some(0), "t1 landed");
         assert_eq!(prop_of(&graph, 2), Some(1), "t2 did not");
         assert!(
-            reopened.capsule_exists(cx, b.capsule_oid.expect("prepared")),
+            reopened
+                .capsule_exists(cx, b.capsule_oid.expect("prepared"))
+                .await,
             "its capsule is durable — the orphan is real, and still not a commit"
         );
 
@@ -390,26 +413,31 @@ fn durability_decides_membership_in_the_ssi_history() {
 #[test]
 fn a_crash_releases_the_lost_transactions_conflicts() {
     let dir = scratch_dir("release");
-    under_lab(13, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-        let db = recovered(cx, &coordinator);
+    under_lab(13, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        let db = recovered(cx, &coordinator).await;
         let mut seed = begin(&db);
         seed.execute(&[create(1, 0)]).expect("executes");
-        finish(&mut coordinator, cx, seed, 0, None);
+        finish(&mut coordinator, cx, seed, 0, None).await;
 
         // A transaction writes v1 and is lost after D1.
-        let db = recovered(cx, &coordinator);
+        let db = recovered(cx, &coordinator).await;
         let mut lost = begin(&db);
         lost.execute(&[set(1, 50)]).expect("executes");
-        let lost = finish(&mut coordinator, cx, lost, 1, Some(CrashPoint::AfterD1));
+        let lost = finish(&mut coordinator, cx, lost, 1, Some(CrashPoint::AfterD1)).await;
         assert!(lost.outcome.is_committed(), "it decided to commit");
 
         drop(coordinator);
-        let mut reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let mut reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
 
         // A later transaction writes the SAME element. It must not conflict: the
         // write that would have conflicted is not in the history.
-        let db = recovered(cx, &reopened);
+        let db = recovered(cx, &reopened).await;
         assert_eq!(
             db.applied_through(GRAPH, BRANCH),
             Some(CommitSeq(1)),
@@ -417,13 +445,13 @@ fn a_crash_releases_the_lost_transactions_conflicts() {
         );
         let mut later = begin(&db);
         later.execute(&[set(1, 99)]).expect("executes");
-        let later = finish(&mut reopened, cx, later, 2, None);
+        let later = finish(&mut reopened, cx, later, 2, None).await;
         assert!(
             later.outcome.is_committed(),
             "a lost transaction must not poison the element it touched: {:?}",
             later.outcome
         );
-        assert_eq!(prop_of(&graph_of(cx, &reopened), 1), Some(99));
+        assert_eq!(prop_of(&graph_of(cx, &reopened).await, 1), Some(99));
     });
 }
 
@@ -437,11 +465,14 @@ fn a_crash_releases_the_lost_transactions_conflicts() {
 #[test]
 fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
     let dir = scratch_dir("seq");
-    under_lab(14, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(14, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         for round in 0..4u128 {
-            let db = recovered(cx, &coordinator);
-            let predicted = next_seq(cx, &coordinator);
+            let db = recovered(cx, &coordinator).await;
+            let predicted = next_seq(cx, &coordinator).await;
             assert_eq!(
                 coordinator
                     .next_commit_seq()
@@ -452,7 +483,7 @@ fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
             let mut txn = begin(&db);
             txn.execute(&[create(round + 1, round as i64)])
                 .expect("executes");
-            let attempt = finish(&mut coordinator, cx, txn, round as usize, None);
+            let attempt = finish(&mut coordinator, cx, txn, round as usize, None).await;
             let (seq, _, _) = attempt
                 .outcome
                 .committed_parts()
@@ -468,7 +499,9 @@ fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
                 "the marker Chronicle actually appended must carry the predicted sequence"
             );
             assert_eq!(
-                recovered(cx, &coordinator).applied_through(GRAPH, BRANCH),
+                recovered(cx, &coordinator)
+                    .await
+                    .applied_through(GRAPH, BRANCH),
                 Some(predicted),
                 "and the durable stream agrees with both"
             );
@@ -487,15 +520,18 @@ fn the_predicted_sequence_matches_the_one_chronicle_assigns() {
 #[test]
 fn dangerous_structures_are_monotone_under_restriction() {
     let dir = scratch_dir("monotone");
-    under_lab(15, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-        let db = recovered(cx, &coordinator);
+    under_lab(15, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        let db = recovered(cx, &coordinator).await;
         let mut seed = begin(&db);
         seed.execute(&[create(1, 1), create(2, 1)])
             .expect("executes");
-        finish(&mut coordinator, cx, seed, 0, None);
+        finish(&mut coordinator, cx, seed, 0, None).await;
 
-        let db = recovered(cx, &coordinator);
+        let db = recovered(cx, &coordinator).await;
         let mut t1 = begin(&db);
         let mut t2 = begin(&db);
         for vid in [1, 2] {
@@ -504,8 +540,8 @@ fn dangerous_structures_are_monotone_under_restriction() {
         }
         t1.execute(&[set(1, 0)]).expect("executes");
         t2.execute(&[set(2, 0)]).expect("executes");
-        let a = finish(&mut coordinator, cx, t1, 1, None);
-        let b = finish(&mut coordinator, cx, t2, 2, None);
+        let a = finish(&mut coordinator, cx, t1, 1, None).await;
+        let b = finish(&mut coordinator, cx, t2, 2, None).await;
 
         let full = vec![a.trace, b.trace];
         let whole = dangerous_structures(&full);

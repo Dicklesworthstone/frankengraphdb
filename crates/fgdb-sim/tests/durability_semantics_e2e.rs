@@ -16,6 +16,7 @@
 //!
 //! Everything runs under asupersync's lab runtime with a real `CommitCx`.
 
+use asupersync::fs::UnixVfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CommitCoordinator, CrashPoint};
@@ -64,13 +65,14 @@ fn text(value: &str) -> CanonicalScalar {
     CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(value).expect("bounded text"))
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         // lab_test_passed() covers ALL THREE channels — quiescence, the full
@@ -183,17 +185,24 @@ fn expect_graph_after(database: &ReferenceDatabase, commits: usize) {
 #[test]
 fn a_graph_committed_to_disk_is_rebuilt_after_a_restart() {
     let dir = scratch_dir("restart");
-    under_lab(1, move |cx| {
+    under_lab(1, move |cx| async move {
+        let cx = &cx;
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         for capsule in &capsules {
-            commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("commit");
         }
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert_eq!(reopened.chain().len(), 3);
-        let database = materialize(cx, &reopened).expect("materializes");
+        let database = materialize(cx, &reopened).await.expect("materializes");
         expect_graph_after(&database, 3);
 
         // The property survived the whole round trip: encode, seal into a
@@ -215,13 +224,18 @@ fn a_graph_committed_to_disk_is_rebuilt_after_a_restart() {
 #[test]
 fn materializing_twice_yields_identical_state() {
     let dir = scratch_dir("deterministic");
-    under_lab(2, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(2, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         for capsule in &three_commits() {
-            commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("commit");
         }
-        let first = materialize(cx, &coordinator).expect("first");
-        let second = materialize(cx, &coordinator).expect("second");
+        let first = materialize(cx, &coordinator).await.expect("first");
+        let second = materialize(cx, &coordinator).await.expect("second");
         assert_eq!(first, second);
 
         let snapshot = first.snapshot(GRAPH, BRANCH).expect("snapshot");
@@ -241,13 +255,20 @@ fn materializing_twice_yields_identical_state() {
 fn independent_directories_do_not_share_snapshot_authority() {
     let first_dir = scratch_dir("authority-first");
     let second_dir = scratch_dir("authority-second");
-    under_lab(3, move |cx| {
-        let first_coordinator =
-            CommitCoordinator::open(cx, &first_dir, keys()).expect("open first database");
-        let second_coordinator =
-            CommitCoordinator::open(cx, &second_dir, keys()).expect("open second database");
-        let first = materialize(cx, &first_coordinator).expect("materialize first database");
-        let second = materialize(cx, &second_coordinator).expect("materialize second database");
+    under_lab(3, move |cx| async move {
+        let cx = &cx;
+        let first_coordinator = CommitCoordinator::open(cx, &first_dir, keys())
+            .await
+            .expect("open first database");
+        let second_coordinator = CommitCoordinator::open(cx, &second_dir, keys())
+            .await
+            .expect("open second database");
+        let first = materialize(cx, &first_coordinator)
+            .await
+            .expect("materialize first database");
+        let second = materialize(cx, &second_coordinator)
+            .await
+            .expect("materialize second database");
         let snapshot = first
             .genesis_snapshot(GRAPH, BRANCH)
             .expect("first genesis snapshot");
@@ -286,24 +307,35 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
     .enumerate()
     {
         let dir = scratch_dir(&format!("prefix-{index}"));
-        under_lab(10 + index as u64, move |cx| {
+        under_lab(10 + index as u64, move |cx| async move {
+            let cx = &cx;
             let capsules = three_commits();
-            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-            commit_capsule(&mut coordinator, cx, &capsules[0], vec![]).expect("commit 1");
-            commit_capsule(&mut coordinator, cx, &capsules[1], vec![]).expect("commit 2");
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_capsule(&mut coordinator, cx, &capsules[0], vec![])
+                .await
+                .expect("commit 1");
+            commit_capsule(&mut coordinator, cx, &capsules[1], vec![])
+                .await
+                .expect("commit 2");
 
             let third = capsules[2].clone();
-            let crashed = coordinator.commit_with_crash(
-                cx,
-                &third.bytes,
-                |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
-                Some(point),
-            );
+            let crashed = coordinator
+                .commit_with_crash(
+                    cx,
+                    &third.bytes,
+                    |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
+                    Some(point),
+                )
+                .await;
             assert!(crashed.is_err(), "{point:?} must not report success");
             drop(coordinator);
 
-            let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen after crash");
-            let database = materialize(cx, &reopened).expect("materializes");
+            let reopened = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("reopen after crash");
+            let database = materialize(cx, &reopened).await.expect("materializes");
 
             expect_graph_after(&database, 2);
 
@@ -311,13 +343,14 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
             // whole and decodable, and it must still contribute nothing.
             let capsule_durable = point != CrashPoint::BeforeCapsule;
             assert_eq!(
-                reopened.capsule_exists(cx, third.object_id),
+                reopened.capsule_exists(cx, third.object_id).await,
                 capsule_durable,
                 "{point:?}: capsule presence"
             );
             if capsule_durable {
                 let orphan_bytes = reopened
                     .read_capsule(cx, third.object_id)
+                    .await
                     .expect("readable");
                 assert!(
                     LogicalDeltaTemplate::decode_canonical(&orphan_bytes).is_ok(),
@@ -325,7 +358,7 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
                      what keeps it out of the graph; being unnamed by any marker is"
                 );
                 assert_eq!(
-                    reopened.orphan_capsules(cx).expect("scan"),
+                    reopened.orphan_capsules(cx).await.expect("scan"),
                     vec![third.object_id]
                 );
             }
@@ -338,37 +371,53 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
 #[test]
 fn a_torn_tail_removes_its_effects_and_the_sequence_is_reused() {
     let dir = scratch_dir("torn");
-    under_lab(20, move |cx| {
+    under_lab(20, move |cx| async move {
+        let cx = &cx;
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-        commit_capsule(&mut coordinator, cx, &capsules[0], vec![]).expect("commit 1");
-        commit_capsule(&mut coordinator, cx, &capsules[1], vec![]).expect("commit 2");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        commit_capsule(&mut coordinator, cx, &capsules[0], vec![])
+            .await
+            .expect("commit 1");
+        commit_capsule(&mut coordinator, cx, &capsules[1], vec![])
+            .await
+            .expect("commit 2");
         let committed_len = log_len(&dir);
 
         let third = capsules[2].clone();
-        let _ = coordinator.commit_with_crash(
-            cx,
-            &third.bytes,
-            |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
-            Some(CrashPoint::AfterMarkerBeforeD2),
-        );
+        let _ = coordinator
+            .commit_with_crash(
+                cx,
+                &third.bytes,
+                |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
+                Some(CrashPoint::AfterMarkerBeforeD2),
+            )
+            .await;
         drop(coordinator);
 
         // The un-fsynced tail was lost, as a crash before a barrier may do.
         let written = log_len(&dir);
         assert!(written > committed_len);
-        CommitCoordinator::tear_log_tail_for_test(&dir, (written - committed_len) as u64 - 4)
-            .expect("tear");
+        CommitCoordinator::<UnixVfs>::tear_log_tail_for_test(
+            &dir,
+            (written - committed_len) as u64 - 4,
+        )
+        .expect("tear");
 
-        let mut reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let mut reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         assert_eq!(reopened.chain().len(), 2);
-        expect_graph_after(&materialize(cx, &reopened).expect("materializes"), 2);
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 2);
 
         // And the database is still writable: committing the third template
         // again lands at the sequence the torn one abandoned.
         assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(3)));
-        commit_capsule(&mut reopened, cx, &capsules[2], vec![]).expect("recommit");
-        expect_graph_after(&materialize(cx, &reopened).expect("materializes"), 3);
+        commit_capsule(&mut reopened, cx, &capsules[2], vec![])
+            .await
+            .expect("recommit");
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 3);
     });
 }
 
@@ -394,11 +443,16 @@ fn log_len(dir: &Path) -> usize {
 #[test]
 fn a_rewritten_capsule_is_refused_rather_than_materialized() {
     let dir = scratch_dir("rewritten");
-    under_lab(30, move |cx| {
+    under_lab(30, move |cx| async move {
+        let cx = &cx;
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         for capsule in &capsules {
-            commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("commit");
         }
         drop(coordinator);
 
@@ -412,8 +466,10 @@ fn a_rewritten_capsule_is_refused_rather_than_materialized() {
         std::fs::write(&path, fgdb_chronicle::capsule::encode_container(&sealed))
             .expect("rewrite capsule");
 
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let result = materialize(cx, &reopened);
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let result = materialize(cx, &reopened).await;
         assert!(
             result.is_err(),
             "a substituted capsule must never materialize; got {result:?}"
@@ -421,7 +477,10 @@ fn a_rewritten_capsule_is_refused_rather_than_materialized() {
 
         // Nothing partial was applied on the way to failing.
         assert!(
-            reopened.read_capsule(cx, capsules[0].object_id).is_err(),
+            reopened
+                .read_capsule(cx, capsules[0].object_id)
+                .await
+                .is_err(),
             "the substituted container must not recover under the committed identity"
         );
     });
@@ -438,9 +497,12 @@ fn a_rewritten_capsule_is_refused_rather_than_materialized() {
 #[test]
 fn a_marker_declaring_the_wrong_template_digest_is_refused() {
     let dir = scratch_dir("wrong-digest");
-    under_lab(31, move |cx| {
+    under_lab(31, move |cx| async move {
+        let cx = &cx;
         let capsule = three_commits()[0].clone();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         coordinator
             .commit(cx, &capsule.bytes, |seq, oid| {
                 let mut marker = fgdb_sim::marker_for_capsule(seq, oid, &capsule, vec![]);
@@ -451,11 +513,14 @@ fn a_marker_declaring_the_wrong_template_digest_is_refused() {
                 };
                 marker
             })
+            .await
             .expect("the commit itself is well formed");
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let result = materialize(cx, &reopened);
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let result = materialize(cx, &reopened).await;
         assert!(
             matches!(
                 result,
@@ -473,9 +538,12 @@ fn a_marker_declaring_the_wrong_template_digest_is_refused() {
 #[test]
 fn replay_preserves_the_markers_independent_logical_command_sequence() {
     let dir = scratch_dir("logical-command-sequence");
-    under_lab(37, move |cx| {
+    under_lab(37, move |cx| async move {
+        let cx = &cx;
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
 
         for (capsule, logical_command_seq) in [(&capsules[0], 10_u64), (&capsules[1], 25_u64)] {
             coordinator
@@ -485,12 +553,15 @@ fn replay_preserves_the_markers_independent_logical_command_sequence() {
                     marker.logical_command_seq = logical_command_seq;
                     marker
                 })
+                .await
                 .expect("commit with an independent logical command position");
         }
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let recovered = replay(cx, &reopened).expect("replay");
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let recovered = replay(cx, &reopened).await.expect("replay");
         assert_eq!(
             recovered.database.replay_frontier(),
             fgdb_types::CommitSeq(2)
@@ -508,11 +579,16 @@ fn replay_preserves_the_markers_independent_logical_command_sequence() {
 #[test]
 fn a_missing_capsule_under_a_committed_marker_fails_closed() {
     let dir = scratch_dir("missing");
-    under_lab(31, move |cx| {
+    under_lab(31, move |cx| async move {
+        let cx = &cx;
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         for capsule in &capsules {
-            commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("commit");
         }
         drop(coordinator);
 
@@ -521,8 +597,10 @@ fn a_missing_capsule_under_a_committed_marker_fails_closed() {
             .join(format!("{}.capsule", hex(&capsules[1].object_id.0)));
         std::fs::remove_file(&path).expect("remove the second capsule");
 
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-        let result = materialize(cx, &reopened);
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        let result = materialize(cx, &reopened).await;
         assert!(
             matches!(
                 result,
@@ -551,9 +629,12 @@ fn hex(bytes: &[u8; 32]) -> String {
 #[test]
 fn a_prepared_capsule_agrees_with_the_stores_derived_identity() {
     let dir = scratch_dir("identity-agreement");
-    under_lab(40, move |cx| {
+    under_lab(40, move |cx| async move {
+        let cx = &cx;
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
 
         for capsule in &capsules {
             assert_eq!(
@@ -571,9 +652,10 @@ fn a_prepared_capsule_agrees_with_the_stores_derived_identity() {
                 observed = Some(oid);
                 fgdb_sim::marker_for_capsule(seq, oid, &capsules[0], vec![])
             })
+            .await
             .expect("commit");
         assert_eq!(observed, Some(expected));
-        assert!(coordinator.capsule_exists(cx, expected));
+        assert!(coordinator.capsule_exists(cx, expected).await);
     });
 }
 
@@ -582,15 +664,23 @@ fn a_prepared_capsule_agrees_with_the_stores_derived_identity() {
 #[test]
 fn a_committed_capsule_recovers_its_exact_plaintext_through_the_codec() {
     let dir = scratch_dir("codec-round-trip");
-    under_lab(41, move |cx| {
+    under_lab(41, move |cx| async move {
+        let cx = &cx;
         let capsule = three_commits()[0].clone();
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-        commit_capsule(&mut coordinator, cx, &capsule, vec![]).expect("commit");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        commit_capsule(&mut coordinator, cx, &capsule, vec![])
+            .await
+            .expect("commit");
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
+        let reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
         let recovered = reopened
             .read_capsule(cx, capsule.object_id)
+            .await
             .expect("recovers through the codec");
         assert_eq!(recovered, capsule.bytes);
 
@@ -627,23 +717,34 @@ fn the_delta_frontier_equals_the_committed_prefix_after_a_crash() {
     .enumerate()
     {
         let dir = scratch_dir(&format!("frontier-{index_case}"));
-        under_lab(50 + index_case as u64, move |cx| {
+        under_lab(50 + index_case as u64, move |cx| async move {
+            let cx = &cx;
             let capsules = three_commits();
-            let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
-            commit_capsule(&mut coordinator, cx, &capsules[0], vec![]).expect("commit 1");
-            commit_capsule(&mut coordinator, cx, &capsules[1], vec![]).expect("commit 2");
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_capsule(&mut coordinator, cx, &capsules[0], vec![])
+                .await
+                .expect("commit 1");
+            commit_capsule(&mut coordinator, cx, &capsules[1], vec![])
+                .await
+                .expect("commit 2");
 
             let third = capsules[2].clone();
-            let _ = coordinator.commit_with_crash(
-                cx,
-                &third.bytes,
-                |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
-                Some(point),
-            );
+            let _ = coordinator
+                .commit_with_crash(
+                    cx,
+                    &third.bytes,
+                    |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
+                    Some(point),
+                )
+                .await;
             drop(coordinator);
 
-            let reopened = CommitCoordinator::open(cx, &dir, keys()).expect("reopen");
-            let replayed = replay(cx, &reopened).expect("replays");
+            let reopened = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("reopen");
+            let replayed = replay(cx, &reopened).await.expect("replays");
 
             // The graph and the window agree about how far history got.
             expect_graph_after(&replayed.database, 2);
@@ -686,12 +787,17 @@ fn the_delta_frontier_equals_the_committed_prefix_after_a_crash() {
 #[test]
 fn the_window_and_the_graph_cover_the_same_commits() {
     let dir = scratch_dir("window-graph-agree");
-    under_lab(60, move |cx| {
-        let mut coordinator = CommitCoordinator::open(cx, &dir, keys()).expect("open");
+    under_lab(60, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
         for capsule in &three_commits() {
-            commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("commit");
         }
-        let replayed = replay(cx, &coordinator).expect("replays");
+        let replayed = replay(cx, &coordinator).await.expect("replays");
 
         assert_eq!(replayed.index.frontier(), fgdb_types::CommitSeq(3));
         assert_eq!(replayed.index.len(), 3);

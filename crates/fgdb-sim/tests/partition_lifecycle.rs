@@ -76,13 +76,14 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         // lab_test_passed() covers ALL THREE channels — quiescence, the full
@@ -116,7 +117,7 @@ fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
     }
 }
 
-fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<DeltaRow>) {
+async fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<DeltaRow>) {
     let template = LogicalDeltaTemplate::build(
         INTENT_SEMANTICS,
         [0x22; 32],
@@ -131,18 +132,23 @@ fn commit_rows(coordinator: &mut CommitCoordinator, cx: &CommitCx, rows: Vec<Del
     )
     .expect("template builds");
     let capsule = prepare_capsule(&K_OID, NAMESPACE, &template).expect("seals");
-    commit_capsule(coordinator, cx, &capsule, vec![]).expect("commits");
+    commit_capsule(coordinator, cx, &capsule, vec![])
+        .await
+        .expect("commits");
 }
 
 /// PHASE 1 — write a history through the real durable commit path.
-fn commit_a_history(dir: &Path, cx: &CommitCx) {
-    let mut coordinator = CommitCoordinator::open(cx, dir, keys()).expect("open");
-    commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]);
-    commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2), edge(11, 1, 3)]);
+async fn commit_a_history(dir: &Path, cx: &CommitCx) {
+    let mut coordinator = CommitCoordinator::open(cx, dir, keys())
+        .await
+        .expect("open");
+    commit_rows(&mut coordinator, cx, vec![vertex(1), vertex(2), vertex(3)]).await;
+    commit_rows(&mut coordinator, cx, vec![edge(10, 1, 2), edge(11, 1, 3)]).await;
 
     // A deletion whose creation lives in an EARLIER capsule, so the writer's
     // live-edge map has to survive across commits to resolve it.
     let before_version = replay(cx, &coordinator)
+        .await
         .expect("replays")
         .database
         .graph(GRAPH, BRANCH)
@@ -156,19 +162,26 @@ fn commit_a_history(dir: &Path, cx: &CommitCx) {
             eid: EId(10),
             before_version,
         }],
-    );
-    commit_rows(&mut coordinator, cx, vec![edge(12, 2, 3)]);
+    )
+    .await;
+    commit_rows(&mut coordinator, cx, vec![edge(12, 2, 3)]).await;
 
     // Re-create the retired TOPOLOGY under a fresh edge identity. Equal topology
     // is deliberately not a seal boundary: EId is the parallel-edge
     // discriminator, so this exercises the multigraph key through persistence.
-    commit_rows(&mut coordinator, cx, vec![edge(13, 1, 2)]);
+    commit_rows(&mut coordinator, cx, vec![edge(13, 1, 2)]).await;
 }
 
 /// PHASE 2 — recover the stream, build the partition, persist it, and return ONLY
 /// the root identity. Everything else goes out of scope.
-fn build_and_persist(dir: &Path, cx: &CommitCx, seal_after: CommitSeq) -> PartitionRootVersion {
-    let reopened = CommitCoordinator::open(cx, dir, keys()).expect("reopen");
+async fn build_and_persist(
+    dir: &Path,
+    cx: &CommitCx,
+    seal_after: CommitSeq,
+) -> PartitionRootVersion {
+    let reopened = CommitCoordinator::open(cx, dir, keys())
+        .await
+        .expect("reopen");
     let mut writer = BlockWriter::new(GRAPH, BRANCH, 0);
     let mut frontier = CommitSeq(0);
 
@@ -176,7 +189,10 @@ fn build_and_persist(dir: &Path, cx: &CommitCx, seal_after: CommitSeq) -> Partit
         let commit_seq = CommitSeq(entry.marker.commit_seq);
         frontier = commit_seq;
         let EffectSource::Local { capsule_ref, .. } = &entry.marker.effect_source;
-        let bytes = reopened.read_capsule(cx, *capsule_ref).expect("readable");
+        let bytes = reopened
+            .read_capsule(cx, *capsule_ref)
+            .await
+            .expect("readable");
         let template = LogicalDeltaTemplate::decode_canonical(&bytes).expect("decodes");
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
@@ -202,9 +218,11 @@ fn build_and_persist(dir: &Path, cx: &CommitCx, seal_after: CommitSeq) -> Partit
 }
 
 /// What the oracle says the durable stream implies, at its frontier.
-fn oracle_answer(dir: &Path, cx: &CommitCx, source: u128) -> (Vec<VId>, CommitSeq) {
-    let reopened = CommitCoordinator::open(cx, dir, keys()).expect("reopen");
-    let database = replay(cx, &reopened).expect("replays").database;
+async fn oracle_answer(dir: &Path, cx: &CommitCx, source: u128) -> (Vec<VId>, CommitSeq) {
+    let reopened = CommitCoordinator::open(cx, dir, keys())
+        .await
+        .expect("reopen");
+    let database = replay(cx, &reopened).await.expect("replays").database;
     let frontier = database.applied_through(GRAPH, BRANCH).expect("a frontier");
     let graph = database.graph(GRAPH, BRANCH).expect("materialized");
     (graph.neighbours(VId(source), REL), frontier)
@@ -214,9 +232,10 @@ fn oracle_answer(dir: &Path, cx: &CommitCx, source: u128) -> (Vec<VId>, CommitSe
 #[test]
 fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
     let dir = scratch_dir("lifecycle");
-    under_lab(51, move |cx| {
-        commit_a_history(&dir, cx);
-        let root_id = build_and_persist(&dir, cx, CommitSeq(2));
+    under_lab(51, move |cx| async move {
+        let cx = &cx;
+        commit_a_history(&dir, cx).await;
+        let root_id = build_and_persist(&dir, cx, CommitSeq(2)).await;
 
         // NOTHING survives from the phases above except the path and this id —
         // exactly what a restarted process would hold.
@@ -224,7 +243,7 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
         let (root, blocks) = store.reopen(cx, root_id).expect("the partition reopens");
 
         for source in [1u128, 2, 3] {
-            let (expected, frontier) = oracle_answer(&dir, cx, source);
+            let (expected, frontier) = oracle_answer(&dir, cx, source).await;
             assert_eq!(
                 merge_neighbours(&blocks, VId(source), REL, frontier).expect("merges"),
                 expected,
@@ -235,9 +254,9 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
         // The fixture is non-trivial in both directions, or agreement is cheap:
         // 1->2 was created, deleted, and re-created under a new edge identity, so
         // the adjacency is live again by a DIFFERENT version than the one that died.
-        let (v1, _) = oracle_answer(&dir, cx, 1);
+        let (v1, _) = oracle_answer(&dir, cx, 1).await;
         assert_eq!(v1, vec![VId(2), VId(3)]);
-        let (v2, _) = oracle_answer(&dir, cx, 2);
+        let (v2, _) = oracle_answer(&dir, cx, 2).await;
         assert_eq!(v2, vec![VId(3)]);
         assert!(
             root.blocks.len() >= 2,
@@ -258,10 +277,11 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
 #[test]
 fn a_compacted_partition_still_agrees_after_reopening() {
     let dir = scratch_dir("compacted");
-    under_lab(52, move |cx| {
-        commit_a_history(&dir, cx);
-        let root_id = build_and_persist(&dir, cx, CommitSeq(2));
-        let (_, frontier) = oracle_answer(&dir, cx, 1);
+    under_lab(52, move |cx| async move {
+        let cx = &cx;
+        commit_a_history(&dir, cx).await;
+        let root_id = build_and_persist(&dir, cx, CommitSeq(2)).await;
+        let (_, frontier) = oracle_answer(&dir, cx, 1).await;
 
         let compacted_root_id = {
             let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
@@ -305,7 +325,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
         let (_, blocks) = store.reopen(cx, compacted_root_id).expect("reopens");
         for source in [1u128, 2, 3] {
-            let (expected, _) = oracle_answer(&dir, cx, source);
+            let (expected, _) = oracle_answer(&dir, cx, source).await;
             assert_eq!(
                 merge_neighbours(&blocks, VId(source), REL, frontier).expect("merges"),
                 expected,

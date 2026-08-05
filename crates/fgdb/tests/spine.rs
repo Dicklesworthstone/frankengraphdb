@@ -54,13 +54,14 @@ fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("fgdb-spine-{}-{name}", std::process::id()))
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         report.lab_test_passed(),
@@ -72,44 +73,47 @@ fn under_lab<T: Send + 'static>(
 /// Commit the fixture history: three vertices, two `KNOWS` edges across two
 /// separate batches, and one `WORKS_WITH` edge that must never answer a `KNOWS`
 /// query.
-fn write_fixture(cx: &CommitCx, dir: &Path) {
-    let mut db = Database::create(cx, dir, keys()).expect("creates");
+async fn write_fixture(cx: &CommitCx, dir: &Path) {
+    let mut db = Database::create(cx, dir, keys()).await.expect("creates");
 
     let mut first = WriteBatch::new(KNOWS);
     first.create_vertex(VId(1), vec![], vec![]);
     first.create_vertex(VId(2), vec![], vec![]);
     first.create_vertex(VId(3), vec![], vec![]);
     first.add_edge(EId(10), VId(1), VId(2), vec![]);
-    db.write(cx, first).expect("the first batch commits");
+    db.write(cx, first).await.expect("the first batch commits");
 
     // A SECOND batch, so the fold has to survive across capsules rather than
     // being one encode of one in-memory list.
     let mut second = WriteBatch::new(KNOWS);
     second.add_edge(EId(11), VId(1), VId(3), vec![]);
-    db.write(cx, second).expect("the second batch commits");
+    db.write(cx, second)
+        .await
+        .expect("the second batch commits");
 
     let mut other = WriteBatch::new(WORKS_WITH);
     other.add_edge(EId(12), VId(1), VId(2), vec![]);
-    db.write(cx, other).expect("the third batch commits");
+    db.write(cx, other).await.expect("the third batch commits");
 }
 
 /// **THE LIFECYCLE LAW: open, write, read, drop, reopen, read.**
 #[test]
 fn open_write_read_drop_reopen_returns_the_same_graph() {
     let dir = scratch("lifecycle");
-    under_lab(71, move |cx| {
+    under_lab(71, move |cx| async move {
+        let cx = &cx;
         let (before, frontier, root) = {
-            let mut db = Database::create(cx, &dir, keys()).expect("creates");
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
             let mut batch = WriteBatch::new(KNOWS);
             batch.create_vertex(VId(1), vec![], vec![]);
             batch.create_vertex(VId(2), vec![], vec![]);
             batch.add_edge(EId(10), VId(1), VId(2), vec![]);
-            db.write(cx, batch).expect("commits");
+            db.write(cx, batch).await.expect("commits");
 
             let mut second = WriteBatch::new(KNOWS);
             second.create_vertex(VId(3), vec![], vec![]);
             second.add_edge(EId(11), VId(1), VId(3), vec![]);
-            db.write(cx, second).expect("commits");
+            db.write(cx, second).await.expect("commits");
 
             (
                 db.neighbours(VId(1), KNOWS).expect("reads"),
@@ -127,7 +131,7 @@ fn open_write_read_drop_reopen_returns_the_same_graph() {
         );
 
         // NOTHING crosses this line except `dir` and `keys()`.
-        let db = Database::open(cx, &dir, keys()).expect("reopens");
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
             db.neighbours(VId(1), KNOWS).expect("reads"),
             before,
@@ -147,9 +151,10 @@ fn open_write_read_drop_reopen_returns_the_same_graph() {
 #[test]
 fn reads_are_keyed_on_source_and_relation() {
     let dir = scratch("keying");
-    under_lab(72, move |cx| {
-        write_fixture(cx, &dir);
-        let db = Database::open(cx, &dir, keys()).expect("reopens");
+    under_lab(72, move |cx| async move {
+        let cx = &cx;
+        write_fixture(cx, &dir).await;
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
 
         assert_eq!(
             db.neighbours(VId(1), KNOWS).expect("reads"),
@@ -183,15 +188,16 @@ fn reads_are_keyed_on_source_and_relation() {
 fn repeated_reopens_publish_the_same_root() {
     let dir = scratch("determinism");
     let empty_dir = scratch("determinism-empty");
-    under_lab(73, move |cx| {
-        write_fixture(cx, &dir);
+    under_lab(73, move |cx| async move {
+        let cx = &cx;
+        write_fixture(cx, &dir).await;
 
         let first = {
-            let db = Database::open(cx, &dir, keys()).expect("reopens");
+            let db = Database::open(cx, &dir, keys()).await.expect("reopens");
             db.partition_root()
         };
         let second = {
-            let db = Database::open(cx, &dir, keys()).expect("reopens");
+            let db = Database::open(cx, &dir, keys()).await.expect("reopens");
             db.partition_root()
         };
         assert_eq!(
@@ -201,7 +207,9 @@ fn repeated_reopens_publish_the_same_root() {
         );
 
         let empty = {
-            let db = Database::create(cx, &empty_dir, keys()).expect("creates");
+            let db = Database::create(cx, &empty_dir, keys())
+                .await
+                .expect("creates");
             db.partition_root()
         };
         assert_ne!(
@@ -217,11 +225,12 @@ fn repeated_reopens_publish_the_same_root() {
 #[test]
 fn opening_a_directory_that_is_not_a_database_fails_closed() {
     let dir = scratch("foreign");
-    under_lab(74, move |cx| {
+    under_lab(74, move |cx| async move {
+        let cx = &cx;
         std::fs::create_dir_all(&dir).expect("scratch dir");
         std::fs::write(dir.join("notes.txt"), b"not a database").expect("foreign file");
 
-        let refusal = Database::open(cx, &dir, keys());
+        let refusal = Database::open(cx, &dir, keys()).await;
         assert!(
             matches!(&refusal, Err(OpenError::NotADatabase { missing, .. }) if *missing == "capsules"),
             "a foreign directory must be refused, and the refusal must name what is \
@@ -239,8 +248,9 @@ fn opening_a_directory_that_is_not_a_database_fails_closed() {
 #[test]
 fn opening_a_path_that_does_not_exist_fails_closed() {
     let dir = scratch("absent");
-    under_lab(75, move |cx| {
-        let refusal = Database::open(cx, &dir, keys());
+    under_lab(75, move |cx| async move {
+        let cx = &cx;
+        let refusal = Database::open(cx, &dir, keys()).await;
         assert!(
             matches!(&refusal, Err(OpenError::NotADatabase { .. })),
             "an absent path must be refused: {refusal:?}"
@@ -255,9 +265,10 @@ fn opening_a_path_that_does_not_exist_fails_closed() {
 #[test]
 fn creating_over_an_existing_database_is_refused() {
     let dir = scratch("recreate");
-    under_lab(76, move |cx| {
-        write_fixture(cx, &dir);
-        let refusal = Database::create(cx, &dir, keys());
+    under_lab(76, move |cx| async move {
+        let cx = &cx;
+        write_fixture(cx, &dir).await;
+        let refusal = Database::create(cx, &dir, keys()).await;
         assert!(
             matches!(&refusal, Err(OpenError::AlreadyADatabase { .. })),
             "create must refuse an existing database: {refusal:?}"
@@ -268,10 +279,11 @@ fn creating_over_an_existing_database_is_refused() {
 #[test]
 fn creating_in_a_non_empty_foreign_directory_is_refused() {
     let dir = scratch("occupied");
-    under_lab(77, move |cx| {
+    under_lab(77, move |cx| async move {
+        let cx = &cx;
         std::fs::create_dir_all(&dir).expect("scratch dir");
         std::fs::write(dir.join("someone_elses.txt"), b"hello").expect("foreign file");
-        let refusal = Database::create(cx, &dir, keys());
+        let refusal = Database::create(cx, &dir, keys()).await;
         assert!(
             matches!(&refusal, Err(OpenError::NotEmpty { .. })),
             "create must refuse a non-empty foreign directory: {refusal:?}"
@@ -283,9 +295,10 @@ fn creating_in_a_non_empty_foreign_directory_is_refused() {
 #[test]
 fn an_empty_batch_is_refused() {
     let dir = scratch("empty");
-    under_lab(78, move |cx| {
-        let mut db = Database::create(cx, &dir, keys()).expect("creates");
-        let refusal = db.write(cx, WriteBatch::new(KNOWS));
+    under_lab(78, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let refusal = db.write(cx, WriteBatch::new(KNOWS)).await;
         assert!(
             matches!(&refusal, Err(WriteError::EmptyBatch)),
             "an empty batch must be refused: {refusal:?}"
@@ -338,17 +351,18 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
     let mut fired = Vec::new();
     for (index, point) in points.into_iter().enumerate() {
         let dir = scratch(&format!("crash-{index}"));
-        fired.push((point, under_lab(80 + index as u64, move |cx| {
+        fired.push((point, under_lab(80 + index as u64, move |cx| async move {
+            let cx = &cx;
             let crashed;
             // A durable first batch, so the law is about the SECOND one and a
             // reopen that lost everything cannot pass by accident.
             {
-                let mut db = Database::create(cx, &dir, keys()).expect("creates");
+                let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
                 let mut first = WriteBatch::new(KNOWS);
                 first.create_vertex(VId(1), vec![], vec![]);
                 first.create_vertex(VId(2), vec![], vec![]);
                 first.add_edge(EId(10), VId(1), VId(2), vec![]);
-                db.write(cx, first).expect("the first batch commits");
+                db.write(cx, first).await.expect("the first batch commits");
                 assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(2)]);
 
                 let mut second = WriteBatch::new(KNOWS);
@@ -356,11 +370,11 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
                 second.create_vertex(VId(4), vec![], vec![]);
                 second.add_edge(EId(11), VId(1), VId(3), vec![]);
                 second.add_edge(EId(12), VId(1), VId(4), vec![]);
-                crashed = db.write_with_crash(cx, second, Some(point)).is_err();
+                crashed = db.write_with_crash(cx, second, Some(point)).await.is_err();
                 // The process dies here. Nothing republishes, nothing cleans up.
             }
 
-            let reopened = Database::open(cx, &dir, keys());
+            let reopened = Database::open(cx, &dir, keys()).await;
             assert!(
                 reopened.is_ok(),
                 "{point:?}: a crashed database must still reopen: {reopened:?}"
@@ -424,25 +438,28 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
 #[test]
 fn a_crash_on_the_first_commit_covers_the_parent_directory_instant() {
     let dir = scratch("crash-first-commit");
-    under_lab(90, move |cx| {
+    under_lab(90, move |cx| async move {
+        let cx = &cx;
         {
-            let mut db = Database::create(cx, &dir, keys()).expect("creates");
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
             let mut only = WriteBatch::new(KNOWS);
             only.create_vertex(VId(1), vec![], vec![]);
             only.create_vertex(VId(2), vec![], vec![]);
             only.add_edge(EId(10), VId(1), VId(2), vec![]);
-            let crashed = db.write_with_crash(
-                cx,
-                only,
-                Some(CrashPoint::AfterCapsuleDirectorySyncBeforeParentDirectorySync),
-            );
+            let crashed = db
+                .write_with_crash(
+                    cx,
+                    only,
+                    Some(CrashPoint::AfterCapsuleDirectorySyncBeforeParentDirectorySync),
+                )
+                .await;
             assert!(
                 crashed.is_err(),
                 "on the FIRST commit this instant exists and must fire: {crashed:?}"
             );
         }
 
-        let reopened = Database::open(cx, &dir, keys());
+        let reopened = Database::open(cx, &dir, keys()).await;
         assert!(
             reopened.is_ok(),
             "a database crashed on its first commit must still reopen: {reopened:?}"
@@ -461,11 +478,12 @@ fn a_crash_on_the_first_commit_covers_the_parent_directory_instant() {
 #[test]
 fn a_created_but_unwritten_database_reopens_empty() {
     let dir = scratch("fresh");
-    under_lab(79, move |cx| {
+    under_lab(79, move |cx| async move {
+        let cx = &cx;
         {
-            Database::create(cx, &dir, keys()).expect("creates");
+            Database::create(cx, &dir, keys()).await.expect("creates");
         }
-        let db = Database::open(cx, &dir, keys()).expect("reopens");
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert!(db.neighbours(VId(1), KNOWS).expect("reads").is_empty());
         assert_eq!(db.frontier(), fgdb_types::CommitSeq(0));
     });
