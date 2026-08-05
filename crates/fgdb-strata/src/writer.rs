@@ -132,7 +132,16 @@ impl core::fmt::Display for WriteError {
 impl core::error::Error for WriteError {}
 
 /// Folds delta rows into sealed blocks for one partition.
-#[derive(Debug)]
+///
+/// `Clone` is load-bearing, not convenience: `publish` consumes the writer,
+/// so a caller that keeps folding across publications — the incremental
+/// snapshot path that removes the O(history) per-commit rebuild
+/// (`fgdb-fujt`) — publishes from a clone and retains the original. The fold
+/// is a deterministic function of the row sequence, so a clone-publish at
+/// sequence k is byte-identical to a fresh writer replaying rows 1..k and
+/// publishing; `tests/incremental_publish_equals_rebuild.rs` pins exactly
+/// that equality, per shape, with a control that can fail.
+#[derive(Debug, Clone)]
 pub struct BlockWriter {
     graph: GraphId,
     branch: BranchId,
