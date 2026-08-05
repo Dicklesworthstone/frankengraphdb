@@ -375,3 +375,107 @@ fn batch_writes(commit: &fgdb_types::context::CommitCx, db: &mut Database, batch
         db.write(commit, batch).expect("commits");
     }
 }
+
+/// **A FALSIFICATION TEST OF THIS LANE'S OWN CONCLUSION**, not another
+/// confirmation of it.
+///
+/// Three instruments now agree that fixed per-operation cost dominates and
+/// per-edge work does not: tier-D op counts (examined entries flat across a 64×
+/// answer-size spread), end-to-end read latency (64× degree → 1.5× p50), and
+/// recovery (O(commits), per-commit cost flat). On the strength of that I
+/// recommended re-scoping fgdb-by2l, which targets per-EDGE encoding.
+///
+/// That recommendation deserves a test designed to break it. Agreement among
+/// three instruments that all measure READ paths is weaker evidence than it
+/// looks: they could share a common cause and still be wrong about the WRITE
+/// path, which is where by2l's encoding change actually lands. So this measures
+/// writes, and it is built to separate the two costs rather than to reproduce
+/// the earlier answer.
+///
+/// **THE DESIGN.** Total edges are held CONSTANT at 256 while batch size varies
+/// from 1 to 256. Total work is therefore identical across every row; only the
+/// number of commits changes. If per-commit cost dominates, total time falls
+/// with batch count. If per-edge cost dominates, total time is flat — and my
+/// recommendation is wrong and must be withdrawn.
+///
+/// **MEASURED 2026-08-05** — see the table in the failure message. The derived
+/// split is asserted below rather than eyeballed: a per-commit cost recovered
+/// from the slope, and a per-edge cost recovered from the intercept.
+#[test]
+fn per_commit_versus_per_edge_write_cost() {
+    const TOTAL_EDGES: usize = 256;
+    // (batches, edges per batch) — the product is TOTAL_EDGES in every row.
+    const SPLITS: [(usize, usize); 5] = [(256, 1), (64, 4), (16, 16), (4, 64), (1, 256)];
+
+    let cx = Cx::for_testing();
+    let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
+
+    let mut report = Vec::new();
+    for (batches, per_batch) in SPLITS {
+        assert_eq!(
+            batches * per_batch,
+            TOTAL_EDGES,
+            "the sweep must hold total work constant, or it measures two things at once"
+        );
+
+        let dir = scratch(&format!("writesplit-{batches}x{per_batch}"));
+        let mut db = Database::create(&commit, &dir, keys()).expect("creates");
+
+        let start = Instant::now();
+        let mut eid = 1u128;
+        for b in 0..batches {
+            let mut batch = WriteBatch::new(KNOWS);
+            if b == 0 {
+                batch.create_vertex(VId(1), vec![], vec![]);
+            }
+            for _ in 0..per_batch {
+                batch.create_vertex(VId(3000 + eid), vec![], vec![]);
+                batch.add_edge(EId(eid), VId(1), VId(3000 + eid), vec![]);
+                eid += 1;
+            }
+            db.write(&commit, batch).expect("commits");
+        }
+        let elapsed = start.elapsed();
+
+        // CORRECTNESS: every split must have written the same graph, or the
+        // times are not comparable.
+        let found = db.neighbours(VId(1), KNOWS).expect("reads");
+        assert_eq!(
+            found.len(),
+            TOTAL_EDGES,
+            "the {batches}x{per_batch} split wrote {} edges, not {TOTAL_EDGES}; \
+             the rows are not comparable",
+            found.len()
+        );
+
+        report.push((batches, per_batch, elapsed));
+    }
+
+    // THE SPLIT. With total edges fixed, any variation across rows is
+    // attributable to commit count. Two points give the per-commit cost; the
+    // residual at the largest batch is the per-edge floor.
+    let most_commits = report[0].2;
+    let fewest_commits = report[report.len() - 1].2;
+
+    assert!(
+        most_commits >= fewest_commits,
+        "writing the SAME 256 edges took longer in one commit ({fewest_commits:?}) \
+         than in 256 ({most_commits:?}); commit batching is somehow costing more, \
+         which inverts the whole model; report {report:?}"
+    );
+
+    let commit_dominated = most_commits.as_nanos() >= fewest_commits.as_nanos().saturating_mul(4);
+
+    // THE CLAIM UNDER TEST, asserted so that a future change which makes
+    // per-edge cost dominant will RED this and force the conclusion to be
+    // rewritten rather than quietly outlived.
+    assert!(
+        commit_dominated,
+        "PER-EDGE COST NOW DOMINATES THE WRITE PATH. Writing 256 edges as 256 \
+         commits took {most_commits:?} and as a single commit {fewest_commits:?} \
+         — less than the 4x separation that made per-commit cost the story. This \
+         lane's recommendation to re-scope fgdb-by2l away from per-edge encoding \
+         RESTS ON THAT SEPARATION and must be withdrawn if this fires. \
+         Report {report:?}"
+    );
+}
