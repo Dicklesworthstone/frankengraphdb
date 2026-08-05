@@ -470,6 +470,16 @@ use fgdb_strata::root::{
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::{BranchId, GraphId};
 
+/// Plant a root exactly as a damaged/restored store can present it: at the
+/// root transcript's own derived path, without asking the admission writer to
+/// validate its block set first.  Roots and blocks now have distinct §5.1
+/// headers, so the generic block writer is deliberately not a valid substitute.
+fn plant_unadmitted_root(store: &BlockStore, root_bytes: &[u8]) -> PartitionRootVersion {
+    let root_id = PartitionRootVersion(derive_root_id(&K_OID, NAMESPACE, root_bytes));
+    std::fs::write(store.path(root_id.0), root_bytes).expect("plants raw root object");
+    root_id
+}
+
 fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
     DeltaRow::CreateEdge {
         eid: EId(eid),
@@ -595,13 +605,13 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
             "failed admission must not publish the malformed root"
         );
 
-        // Plant the same well-formed root bytes through the generic object path
+        // Plant the same well-formed root bytes through its own raw identity path
         // to model a pre-existing or restored store. Fresh selective reopen reads
         // every block before minting its skip token, even though sequence 2 would
         // retain only the early block.
-        let planted_id = store.put(cx, &root_bytes).expect("plants raw root");
+        let planted_id = plant_unadmitted_root(&store, &root_bytes);
         assert_identity_conflict(
-            store.reopen_at(cx, PartitionRootVersion(planted_id.0), CommitSeq(2)),
+            store.reopen_at(cx, planted_id, CommitSeq(2)),
             EId(10),
             expected,
             found,
@@ -792,12 +802,7 @@ fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
             }],
         };
         let root_bytes = fgdb_strata::root::encode_root(&lying).expect("encodes root");
-        let root_id = PartitionRootVersion(
-            store
-                .put(cx, &root_bytes)
-                .expect("plants an unadmitted root")
-                .0,
-        );
+        let root_id = plant_unadmitted_root(&store, &root_bytes);
 
         assert!(matches!(
             store.reopen_at(cx, root_id, CommitSeq(3)),
@@ -882,13 +887,12 @@ fn reopening_with_a_missing_block_is_refused() {
             .expect("publishes");
 
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        // Store the root bytes through the generic object path and only the
-        // FIRST block. `put_root` itself rejects this incomplete publication;
-        // the raw path models a damaged/restored store that still reaches read.
+        // Store only the FIRST block. `put_root` itself rejects this incomplete
+        // publication; the root's raw identity path models a damaged/restored
+        // store that still reaches read.
         store.put(cx, &blocks[0].bytes).expect("stores");
         let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
-        let root_id =
-            PartitionRootVersion(store.put(cx, &root_bytes).expect("plants root object").0);
+        let root_id = plant_unadmitted_root(&store, &root_bytes);
 
         assert!(
             matches!(
