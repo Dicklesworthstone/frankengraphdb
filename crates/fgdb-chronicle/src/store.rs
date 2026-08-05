@@ -107,6 +107,57 @@ pub enum RootCreateCrashPoint {
     AfterFileSyncBeforeDirectorySync,
 }
 
+/// Evidence that one exact publication was observed durable — the plan's
+/// `RootPublicationEvidence` in its W1 subset: in-memory and unsigned, never
+/// persisted (the durable, signed form arrives with the registered
+/// certificate kinds and their signer machinery).
+///
+/// Minted ONLY from the post-barrier reread: the store re-reads the file it
+/// just synced and authenticates that recovery would now select exactly the
+/// published slot. Evidence therefore states what a recovering process WOULD
+/// see, never what the writer intended — and that difference is precisely
+/// the certificate boundary of dual-root publication (§15 LDFI): a lying
+/// sync or a torn slot makes the reread refuse, and no evidence exists to
+/// hand upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootPublicationEvidence {
+    /// Which physical slot the publication landed in: 0 = A, 1 = B.
+    pub written_index: u8,
+    /// The generation the post-barrier reread selected.
+    pub slot_generation: u64,
+    /// The root manifest object the selected slot points at.
+    pub root_manifest_oid: [u8; 32],
+}
+
+/// The continuity head an external CAS authority currently publishes for
+/// this database's incarnation lineage (§5.1's `ExternalCas` profile, W1
+/// subset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinuityHead {
+    /// The authority's current compare-and-swap version.
+    pub cas_version: u64,
+    /// The incarnation-continuity digest the authority holds at that version.
+    pub cluster_incarnation_continuity_digest: [u8; 32],
+}
+
+/// The external continuity authority consulted immediately before an
+/// irreversible slot write under the `ExternalCas` incarnation-continuity
+/// profile ("every … `RootSlot` write … revalidates the exact external
+/// continuity head/CAS version").
+///
+/// A trait rather than a concrete client so the deterministic lab can host
+/// the registered model — a linearizable CAS register under the
+/// predecessor-digest law (§15) — and fault it: a stale head, a forked head,
+/// and an outage are injectable data for the sim, which is what makes the
+/// external-CAS boundary of dual-root publication reachable for LDFI.
+pub trait ContinuityAuthority {
+    /// Fetch the exact current head. An error means UNAVAILABLE, and
+    /// publication under `ExternalCas` fails closed on it: "a stale/later/
+    /// unavailable external continuity head makes the database read-only" —
+    /// never a retry loop inside the store, never a write on faith.
+    fn current_head(&self, cx: &CommitCx) -> impl Future<Output = std::io::Result<ContinuityHead>>;
+}
+
 /// Why a durable root operation failed.
 #[derive(Debug)]
 pub enum StoreError {
@@ -129,6 +180,31 @@ pub enum StoreError {
     /// Publishing it would make recovery's "highest generation wins" rule
     /// select the older state.
     NonMonotonicGeneration { current: u64, proposed: u64 },
+    /// The write and barrier reported success, but the post-barrier reread
+    /// did not select the published slot. The bytes the writer believes
+    /// durable are not the bytes recovery would choose, so no publication
+    /// evidence may exist — this is the fail-closed arm of the certificate
+    /// boundary.
+    PublicationNotObservable { expected_generation: u64 },
+    /// The external continuity authority could not be reached. Publication
+    /// under `ExternalCas` fails closed rather than writing on faith.
+    ContinuityUnavailable(std::io::Error),
+    /// The authority's CAS version disagrees with the slot's. Behind means
+    /// the writer is publishing against a superseded observation; ahead
+    /// means another incarnation has advanced the lineage. Either way this
+    /// writer has lost the right to publish until it re-observes the head.
+    ContinuityVersionSkew {
+        head_cas_version: u64,
+        slot_cas_version: u64,
+    },
+    /// The versions agree but the digests do not: two histories claim the
+    /// same CAS position. This is fork evidence, not staleness, and nothing
+    /// local can resolve it.
+    ContinuityForked {
+        cas_version: u64,
+        head_digest: [u8; 32],
+        slot_digest: [u8; 32],
+    },
 }
 
 impl core::fmt::Display for StoreError {
@@ -147,6 +223,29 @@ impl core::fmt::Display for StoreError {
                 f,
                 "proposed generation {proposed} does not exceed current {current}"
             ),
+            Self::PublicationNotObservable {
+                expected_generation,
+            } => write!(
+                f,
+                "post-barrier reread did not select the published slot at generation \
+                 {expected_generation}; the publication is not observable and no evidence exists"
+            ),
+            Self::ContinuityUnavailable(error) => {
+                write!(f, "external continuity authority unavailable: {error}")
+            }
+            Self::ContinuityVersionSkew {
+                head_cas_version,
+                slot_cas_version,
+            } => write!(
+                f,
+                "continuity head is at CAS version {head_cas_version} but the slot expects \
+                 {slot_cas_version}; re-observe the head before publishing"
+            ),
+            Self::ContinuityForked { cas_version, .. } => write!(
+                f,
+                "continuity digests disagree at CAS version {cas_version}: two histories claim \
+                 one position; nothing local can resolve this"
+            ),
         }
     }
 }
@@ -154,7 +253,7 @@ impl core::fmt::Display for StoreError {
 impl core::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Io(error) | Self::ContinuityUnavailable(error) => Some(error),
             _ => None,
         }
     }
@@ -279,6 +378,38 @@ impl<V: Vfs> RootStore<V> {
     /// atomically from any reader's perspective, because selection is by
     /// generation and the new slot is either fully durable or not credible.
     pub async fn publish(&self, cx: &CommitCx, next: &RootSlot) -> Result<(), StoreError> {
+        self.publish_evidenced(cx, next).await.map(|_| ())
+    }
+
+    /// Publish, then prove it: the same alternation and barrier as
+    /// [`RootStore::publish`], followed by a post-barrier reread that
+    /// authenticates recovery would now select exactly `next`. Returns the
+    /// [`RootPublicationEvidence`] minted from that reread — the certificate
+    /// boundary of dual-root publication in its W1 subset. A publication the
+    /// reread cannot observe returns
+    /// [`StoreError::PublicationNotObservable`] and mints nothing; the
+    /// caller must treat the publication as failed even though bytes may
+    /// have moved, exactly as it would for a crash at the same instant.
+    pub async fn publish_evidenced(
+        &self,
+        cx: &CommitCx,
+        next: &RootSlot,
+    ) -> Result<RootPublicationEvidence, StoreError> {
+        self.publish_evidenced_with_steps(cx, next, || Ok(())).await
+    }
+
+    /// The exact production path with one deterministic observation point
+    /// between the durability barrier and the evidence reread. Witnesses use
+    /// it to model interference arriving at that instant — a torn slot the
+    /// barrier claimed durable — without maintaining a second, weaker
+    /// implementation path; the ordinary caller supplies a no-op.
+    #[doc(hidden)]
+    pub async fn publish_evidenced_with_steps(
+        &self,
+        cx: &CommitCx,
+        next: &RootSlot,
+        after_barrier: impl FnOnce() -> std::io::Result<()>,
+    ) -> Result<RootPublicationEvidence, StoreError> {
         let file_bytes = self.read_file(cx).await?;
         let (current_generation, occupied_index) = match select_root(&file_bytes) {
             RootSelection::Selected { slot, index, .. } => (slot.slot_generation, index),
@@ -317,7 +448,67 @@ impl<V: Vfs> RootStore<V> {
         file.write_all(&next.serialize()).await?;
         file.flush().await?;
         Self::barrier(cx, &file).await?;
-        Ok(())
+        after_barrier()?;
+
+        // The reread that mints the evidence. It goes through the same Vfs
+        // as the write and the barrier, so a lab filesystem that lied about
+        // the sync or tore the slot is caught HERE, by the store, before any
+        // caller can treat the publication as real.
+        let written_index: u8 = if occupied_index == 0 { 1 } else { 0 };
+        let reread = self.read_file(cx).await?;
+        match select_root(&reread) {
+            RootSelection::Selected { slot, index, .. }
+                if index == written_index && *slot == *next =>
+            {
+                Ok(RootPublicationEvidence {
+                    written_index,
+                    slot_generation: next.slot_generation,
+                    root_manifest_oid: next.root_manifest_oid,
+                })
+            }
+            _ => Err(StoreError::PublicationNotObservable {
+                expected_generation: next.slot_generation,
+            }),
+        }
+    }
+
+    /// [`RootStore::publish_evidenced`] under the `ExternalCas`
+    /// incarnation-continuity profile: revalidate the exact external
+    /// continuity head immediately before the irreversible slot write.
+    ///
+    /// The head must sit at exactly the CAS version the slot carries and
+    /// hold exactly the slot's continuity digest; skew, fork, or an
+    /// unreachable authority refuses BEFORE any byte moves, which the
+    /// witnesses pin by proving the root file is untouched after a refusal.
+    /// This is the external-CAS boundary of dual-root publication; the
+    /// always-on wiring of profile to path belongs to the publication
+    /// sequencer (`w2-root-publication`), which will make the profile choose
+    /// the entry point rather than the caller.
+    pub async fn publish_with_continuity<A: ContinuityAuthority>(
+        &self,
+        cx: &CommitCx,
+        next: &RootSlot,
+        authority: &A,
+    ) -> Result<RootPublicationEvidence, StoreError> {
+        let head = authority
+            .current_head(cx)
+            .await
+            .map_err(StoreError::ContinuityUnavailable)?;
+        if head.cas_version != next.continuity_cas_version {
+            return Err(StoreError::ContinuityVersionSkew {
+                head_cas_version: head.cas_version,
+                slot_cas_version: next.continuity_cas_version,
+            });
+        }
+        if head.cluster_incarnation_continuity_digest != next.cluster_incarnation_continuity_digest
+        {
+            return Err(StoreError::ContinuityForked {
+                cas_version: head.cas_version,
+                head_digest: head.cluster_incarnation_continuity_digest,
+                slot_digest: next.cluster_incarnation_continuity_digest,
+            });
+        }
+        self.publish_evidenced(cx, next).await
     }
 
     /// The durability barrier. Separated and named because it is the step a

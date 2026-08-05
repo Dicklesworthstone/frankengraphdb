@@ -48,6 +48,8 @@ pub use root::{
     recover_root_object, select_root,
 };
 pub use scrub::{LostReason, ScrubReport, ScrubVerdict, scrub_object};
-pub use store::{RootStore, StoreError};
+pub use store::{
+    ContinuityAuthority, ContinuityHead, RootPublicationEvidence, RootStore, StoreError,
+};
 pub use symbol::{SymbolError, SymbolRecord};
 pub use symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
