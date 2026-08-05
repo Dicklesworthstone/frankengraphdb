@@ -297,6 +297,12 @@ mod storage_read_seal {
 pub trait StorageReadCx: storage_read_seal::Sealed {
     /// Runs a storage read with this role's synchronous restriction installed.
     fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T;
+
+    /// Wraps an asynchronous storage read so this role's restriction is
+    /// installed for every poll. The async counterpart of
+    /// [`with_restriction`](Self::with_restriction), with the same
+    /// [`RestrictedFuture`] time/random caveat.
+    fn with_restriction_async<Fut: Future>(&self, future: Fut) -> RestrictedFuture<Fut>;
 }
 
 /// Query-only effects.
@@ -366,6 +372,10 @@ impl storage_read_seal::Sealed for QueryCx {}
 impl StorageReadCx for QueryCx {
     fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
         QueryCx::with_restriction(self, run)
+    }
+
+    fn with_restriction_async<Fut: Future>(&self, future: Fut) -> RestrictedFuture<Fut> {
+        QueryCx::with_restriction_async(self, future)
     }
 }
 
@@ -446,6 +456,10 @@ impl storage_read_seal::Sealed for TxnCx {}
 impl StorageReadCx for TxnCx {
     fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
         TxnCx::with_restriction(self, run)
+    }
+
+    fn with_restriction_async<Fut: Future>(&self, future: Fut) -> RestrictedFuture<Fut> {
+        TxnCx::with_restriction_async(self, future)
     }
 }
 
@@ -541,6 +555,10 @@ impl StorageReadCx for CommitCx {
     fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
         CommitCx::with_restriction(self, run)
     }
+
+    fn with_restriction_async<Fut: Future>(&self, future: Fut) -> RestrictedFuture<Fut> {
+        CommitCx::with_restriction_async(self, future)
+    }
 }
 
 /// Maintenance effects.
@@ -605,6 +623,10 @@ impl storage_read_seal::Sealed for MaintCx {}
 impl StorageReadCx for MaintCx {
     fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
         MaintCx::with_restriction(self, run)
+    }
+
+    fn with_restriction_async<Fut: Future>(&self, future: Fut) -> RestrictedFuture<Fut> {
+        MaintCx::with_restriction_async(self, future)
     }
 }
 
@@ -684,6 +706,10 @@ impl storage_read_seal::Sealed for ReplCx {}
 impl StorageReadCx for ReplCx {
     fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
         ReplCx::with_restriction(self, run)
+    }
+
+    fn with_restriction_async<Fut: Future>(&self, future: Fut) -> RestrictedFuture<Fut> {
+        ReplCx::with_restriction_async(self, future)
     }
 }
 
