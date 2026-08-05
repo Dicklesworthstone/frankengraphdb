@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 12
+registry_epoch = 13
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -2964,6 +2964,167 @@ consumed_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]  # [C
 written_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]   # [C][F]
 checkpoint_floor_classes = [ "audit-completeness" ]                       # [C][F]
 backup_restore_gc_classes = [ "audit-completeness" ]                      # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F11 bulk-load-staging — frozen ordinal 61, ONE ARMED member per the round-10
+# frozen order and the x2ar-3 ruling (FIVE ARMS + INTENT SENTENCE):
+# BulkLoadTransitionSpec<Local> with the five L637 arms
+# Reserve|AppendChunk|Seal|PrepareCommit|Abort. Committed is reached ONLY by
+# the transaction-carried BulkLoad intent of the finalizing ordinary
+# transaction, never by a staging-control arm (L637/L639) — so Committed has
+# NO arm row, and the offline OfflineBulkEpochFence install/release specs are
+# their own named members outside this family (L639).
+#
+# FRESH MINT for the arms, DOUBLY DETERMINED: no wire_types.toml
+# union_variant reservation names BulkLoadTransitionSpec (MEASURED 0 hits),
+# so inner tags 0x0001-0x0005 mint starting 0x0001 — and L637 independently
+# forces the same assignment: "its u8 arm tags follow that source order."
+# Recorded so nobody later mistakes it for a reservation match.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:bulk-load-transition-spec:reserve"        # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003d                                                   # [S] frozen dense ordinal 61
+input_schema_id = "BulkLoadTransitionSpec<Local>"                         # [S] L637 "has exactly Reserve, AppendChunk, Seal, PrepareCommit, and Abort"; x2ar-3 ruling; I-6 canonical spelling
+input_wire_tag = 0x003d                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] Reserve is first in the L637 source order; L637 forces "its u8 arm tags follow that source order" (fresh mint, 0 wire_types hits)
+body_schema_id = "BulkLoadTransitionSpec<Local>"                          # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the Reserved record effect names no result schema
+applied_record_schema_id = "BulkLoadRegistry<Local>"                      # [S-derived] the registry maps the request key/load ID to exactly one state-shaped record; Reserve creates its Reserved state (L637)
+handler_symbol = "fgdb_apply::local::bulk_load_transition_spec::reserve"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 required Local semantic row; L637 "each is an explicitly registered Local/Meta staging control"
+sequence_effects = "creates the Reserved state binding capability/request replay, source pin, and resource reservation under the BulkLoadRequestKey (posture, tenant/principal, authority ceiling, destination coordinate, mode, scoped idempotency key, source-format contract, canonical import options, schema/constraint contract, security binding); matching retry returns its original record and any drift fails; no record points to a future state or command and no client timeout releases staging"  # [S] L637
+expected_state_schema_id = "BulkLoadRegistry<Local>"                      # [S] the request-key/load-ID mapped state record
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled; the request key binds the authority ceiling and security binding (L637)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no per-arm struct body spelled
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:bulk-load-transition-spec:reserve"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]     # [C][F]
+written_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]      # [C][F]
+checkpoint_floor_classes = [ "bulk-load" ]                                # [C][F]
+backup_restore_gc_classes = [ "bulk-load" ]                               # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:bulk-load-transition-spec:append-chunk"   # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003d                                                   # [S] shared member outer tag
+input_schema_id = "BulkLoadTransitionSpec<Local>"                         # [S]
+input_wire_tag = 0x003d                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] second in the L637 source order
+body_schema_id = "BulkLoadTransitionSpec<Local>"                          # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "BulkLoadRegistry<Local>"                      # [S-derived] Reserved -> Ingesting{next_chunk_ordinal,chunk_root} (L637)
+handler_symbol = "fgdb_apply::local::bulk_load_transition_spec::append_chunk"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "ingests the bounded BulkSourceChunkManifest at the gap-free next chunk ordinal — ordinals and source ranges are gap-free and each row carries its original source-row digest; matching chunk retry returns its original record and any ordinal/digest/body drift fails; online load ingests bounded chunks against one pinned registered snapshot (L639)"  # [S] L637/L639
+expected_state_schema_id = "BulkLoadRegistry<Local>"                      # [S] the Ingesting state with next_chunk_ordinal and chunk_root
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:bulk-load-transition-spec:append-chunk"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]     # [C][F]
+written_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]      # [C][F]
+checkpoint_floor_classes = [ "bulk-load" ]                                # [C][F]
+backup_restore_gc_classes = [ "bulk-load" ]                               # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:bulk-load-transition-spec:seal"           # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003d                                                   # [S] shared member outer tag
+input_schema_id = "BulkLoadTransitionSpec<Local>"                         # [S]
+input_wire_tag = 0x003d                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] third in the L637 source order
+body_schema_id = "BulkLoadTransitionSpec<Local>"                          # [S]
+result_schema_id = "CanonicalBulkLoadManifest"                            # [S] Seal publishes the manifest the Sealed state owns by ref (L637)
+applied_record_schema_id = "BulkLoadRegistry<Local>"                      # [S-derived] Ingesting -> Sealed{manifest_ref} (L637)
+handler_symbol = "fgdb_apply::local::bulk_load_transition_spec::seal"     # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "seals the nonempty ordered chunk set into the CanonicalBulkLoadManifest owning total source/row/effect commitments and the deterministic Merkle root; physical runs are optional accelerators and can never define an effect"  # [S] L637
+expected_state_schema_id = "BulkLoadRegistry<Local>"                      # [S] the Ingesting state this arm terminates
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:bulk-load-transition-spec:seal" # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]     # [C][F]
+written_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]      # [C][F]
+checkpoint_floor_classes = [ "bulk-load" ]                                # [C][F]
+backup_restore_gc_classes = [ "bulk-load" ]                               # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:bulk-load-transition-spec:prepare-commit" # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003d                                                   # [S] shared member outer tag
+input_schema_id = "BulkLoadTransitionSpec<Local>"                         # [S]
+input_wire_tag = 0x003d                                                   # [C]
+inner_wire_tag = 0x0004                                                   # [S] fourth in the L637 source order
+body_schema_id = "BulkLoadTransitionSpec<Local>"                          # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "BulkLoadRegistry<Local>"                      # [S-derived] Sealed -> CommitPrepared{ordinary registration/workspace/prepare owner,manifest_ref} (L637)
+handler_symbol = "fgdb_apply::local::bulk_load_transition_spec::prepare_commit"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "selects CommitPrepared binding the ordinary registration/workspace/prepare owner and the sealed manifest; Committed is reached only by the transaction-carried BulkLoad intent of the finalizing ordinary transaction — which reauthorizes the union of effects, revalidates SSI/constraints/valid-time/escrow/resources/branch-head CAS against the current head, and commits one exact net effect/delta sequence (L639) — never by a staging-control arm"  # [S] L637/L639
+expected_state_schema_id = "BulkLoadRegistry<Local>"                      # [S] the Sealed state this arm advances
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:bulk-load-transition-spec:prepare-commit"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]     # [C][F]
+written_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]      # [C][F]
+checkpoint_floor_classes = [ "bulk-load" ]                                # [C][F]
+backup_restore_gc_classes = [ "bulk-load" ]                               # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:bulk-load-transition-spec:abort"          # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003d                                                   # [S] shared member outer tag
+input_schema_id = "BulkLoadTransitionSpec<Local>"                         # [S]
+input_wire_tag = 0x003d                                                   # [C]
+inner_wire_tag = 0x0005                                                   # [S] fifth in the L637 source order
+body_schema_id = "BulkLoadTransitionSpec<Local>"                          # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "BulkLoadRegistry<Local>"                      # [S-derived] any preterminal state -> Aborted{reason,staging_disposition} (L637)
+handler_symbol = "fgdb_apply::local::bulk_load_transition_spec::abort"    # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "selects Aborted{reason,staging_disposition}; ordered abort proves no commit occurred, and where an OfflineBulkEpochFence is installed its sole ordered release path on abort is OfflineBulkEpochFenceReleaseSpec (L639); no client timeout releases staging, and recovery resumes the exact request or drives explicit abort, never inferring success from run bytes"  # [S] L637/L639
+expected_state_schema_id = "BulkLoadRegistry<Local>"                      # [S] the preterminal state this arm terminates
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:bulk-load-transition-spec:abort"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]     # [C][F]
+written_state_slots = [ "SemanticPayload|Local|bulk_load_registry" ]      # [C][F]
+checkpoint_floor_classes = [ "bulk-load" ]                                # [C][F]
+backup_restore_gc_classes = [ "bulk-load" ]                               # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

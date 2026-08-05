@@ -219,6 +219,15 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:audit-terminal-spec",
         "cc:local:audit-recovery-spec",
         "cc:local:audit-completeness-transition-spec",
+        // F11 bulk-load-staging (frozen ordinal 0x003d). Five inner tags,
+        // fresh mint that L637 independently forces to the same source order
+        // Reserve|AppendChunk|Seal|PrepareCommit|Abort; Committed is
+        // intent-carried per the x2ar-3 ruling — no arm.
+        "cc:local:bulk-load-transition-spec:reserve",
+        "cc:local:bulk-load-transition-spec:append-chunk",
+        "cc:local:bulk-load-transition-spec:seal",
+        "cc:local:bulk-load-transition-spec:prepare-commit",
+        "cc:local:bulk-load-transition-spec:abort",
     ] {
         assert!(
             registry
@@ -229,8 +238,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 92,
-        "the population may only grow from the landed F1-F10 rows"
+        registry.contracts.len() >= 97,
+        "the population may only grow from the landed F1-F11 rows"
     );
 }
 
@@ -254,6 +263,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:escrow-rights-transition-spec", 5),
         ("cc:local:dp-transition-spec", 8),
         ("cc:local:audit-terminal-freeze-spec", 3),
+        ("cc:local:bulk-load-transition-spec", 5),
     ] {
         let family: Vec<_> = registry
             .contracts

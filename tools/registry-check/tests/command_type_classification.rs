@@ -102,6 +102,7 @@ fn source_forced_seed_population_is_present() {
         "AuditTerminalSpec",
         "AuditRecoverySpec",
         "AuditCompletenessTransitionSpec",
+        "BulkLoadTransitionSpec",
     ] {
         assert!(
             registry
@@ -112,8 +113,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 67,
-        "the population may only grow from the landed F1-F10 rows"
+        registry.classifications.len() >= 68,
+        "the population may only grow from the landed F1-F11 rows"
     );
 }
 

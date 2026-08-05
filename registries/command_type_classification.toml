@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 12
+registry_epoch = 13
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -659,4 +659,20 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:audit-completeness-transition-spec"
 source_location = "a21:986"
 statement = "AuditCompletenessTransitionSpec<Role> imports the exact CompletenessChanged successor/receipt pair locally through the same pipeline rules with terminal_audit_gate:StructurallyInapplicable{AuditSystemAuthority}; the continuity status and future profile validator permanently exclude the recorded gap."
+status = "registered"
+
+# --- F11 bulk-load-staging (frozen ordinal 61). ONE ARMED member; its row
+# --- binds the member-root id (round-12 T4). Committed is intent-carried per
+# --- L637/L639 and the x2ar-3 ruling — no arm. Anchored at the in-range
+# --- family-sentence line a10:1918 (the L637 defining line sits in §7,
+# --- outside every slice range, with no topical audit/bulk slice owning it;
+# --- a10:1918 names the required row directly and is the established anchor
+# --- for family-sentence-forced classes).
+
+[[classification]]
+type_name = "BulkLoadTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:bulk-load-transition-spec"
+source_location = "a10:1918"
+statement = "Required Local semantic rows include BulkLoadTransitionSpec<Local>; per L637 it has exactly Reserve, AppendChunk, Seal, PrepareCommit, and Abort — its u8 arm tags follow that source order, each is an explicitly registered Local/Meta staging control, and Committed is reached only by the transaction-carried BulkLoad intent, never by a staging-control arm."
 status = "registered"
