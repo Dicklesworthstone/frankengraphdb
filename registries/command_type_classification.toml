@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 10
+registry_epoch = 11
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -506,4 +506,100 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:expiry-epoch-advance-spec"
 source_location = "a12:266"
 statement = "The sequenced command stream observes expiry only as one registered ExpiryEpochAdvanceSpec control command per configured epoch tick — the sole sequencer-visible expiry artifact, an ordered transition carrying subject-bound rollback-resistant TimeValidationEvidence; included per ruling C4, with L268 deferring exactly this row decision to G0."
+status = "registered"
+
+# --- F9 policy-revocation-timeauthority-privacy-dp (frozen ordinals 44-54).
+# --- ELEVEN members: seven of them are the time-authority controls (46-52).
+# --- DpTransitionSpec is ARMED (the eight x2ar-4 arms), so its row binds the
+# --- member-root id (round-12 T4). Security binding contributes ZERO rows
+# --- per I-9. Policy/revocation/privacy/DP lines live in Warden §12 prose,
+# --- anchored under the topical slice a21 (the a12:256 precedent for
+# --- out-of-range lines); the time-authority lines are in a16's range.
+
+[[classification]]
+type_name = "PolicyTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:policy-transition-spec"
+source_location = "a21:878"
+statement = "PolicyTransitionSpec carries the exact before-root binding, mutation body ref, candidate after root, and before-binding admin authorization; the candidate cannot authorize itself and must equal exact deterministic application with checked epoch increment."
+status = "registered"
+
+[[classification]]
+type_name = "RevocationTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:revocation-transition-spec"
+source_location = "a21:880"
+statement = "RevocationTransitionSpec has the same before-root, candidate-after-root, before-root admin authorization, idempotency, and audit fields as the policy transition; it advances RevocationIndex once per nonempty command and can never remove/weaken an entry."
+status = "registered"
+
+[[classification]]
+type_name = "TimeIssuanceAdmissionFreezeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:time-issuance-admission-freeze-spec"
+source_location = "a16:2183"
+statement = "Each participating group first orders TimeIssuanceAdmissionFreezeSpec; its applied record blocks new reservations locally and exports GroupTimeIssuanceAdmissionFreezeCertificate — the first ordered step of the externally recoverable issuance-closing protocol."
+status = "registered"
+
+[[classification]]
+type_name = "TimeAuthorityRotationIntentSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:time-authority-rotation-intent-spec"
+source_location = "a16:2183"
+statement = "TimeAuthorityRotationIntentSpec<Role:AuthorityOwningRole> is then the ordered Semantic authorization; apply atomically selects ClosingRequested and creates immutable TimeAuthorityRotationIntentRecord owning the exact sets, operation IDs, resource holds, authorization, and audit lineage."
+status = "registered"
+
+[[classification]]
+type_name = "TimeAuthorityIssuanceCloseSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:time-authority-issuance-close-spec"
+source_location = "a16:2185"
+statement = "TimeAuthorityIssuanceCloseSpec<Role:AuthorityOwningRole> consumes the intent, receipt, dispatch terminal evidence, exact group-freeze set, and current registry and changes only ClosingRequested -> IssuanceClosing."
+status = "registered"
+
+[[classification]]
+type_name = "TimeAuthorityIssuanceFenceAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:time-authority-issuance-fence-authorize-spec"
+source_location = "a16:2187"
+statement = "TimeAuthorityIssuanceFenceAuthorizeSpec is an allowed successor spec tag of the non-widenable TimeAuthorityTransitionCompletionAuthority, constructible only from the rooted intent plus the exact dispatch attempt or terminal evidence at or beyond the listed irreversible state."
+status = "registered"
+
+[[classification]]
+type_name = "TimeAuthorityRegistryTransitionAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:time-authority-registry-transition-authorize-spec"
+source_location = "a16:2187"
+statement = "TimeAuthorityRegistryTransitionAuthorizeSpec is an allowed successor spec tag of the same non-widenable completion authority; the external registry-head CAS it authorizes rides the portable pre-CAS TimeAuthorityEpochTransitionPlan."
+status = "registered"
+
+[[classification]]
+type_name = "TimeAuthorityProfileTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:time-authority-profile-transition-spec"
+source_location = "a16:2221"
+statement = "Exact activation is TimeAuthorityProfileTransitionSpec<Role:AuthorityOwningRole>: it verifies the complete intent/dispatch/closing/quiescence/fence/inventory bijection and atomically selects the successor for new issuance while retaining the predecessor as Draining."
+status = "registered"
+
+[[classification]]
+type_name = "TimeAuthorityProfileRetirementSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:time-authority-profile-retirement-spec"
+source_location = "a16:2223"
+statement = "Exact retirement is TimeAuthorityProfileRetirementSpec<Role:AuthorityOwningRole>: apply first verifies the heavy closure, deterministically creates TimeAuthorityTransitionTerminalSummary, selects Retired{terminal_summary_ref}, and releases the drain hold only after the paired floors are durable."
+status = "registered"
+
+[[classification]]
+type_name = "PrivacyContinuityImportSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:privacy-continuity-import-spec"
+source_location = "a21:934"
+statement = "The sole Chronicle import is bounded PrivacyContinuityImportSpec<Role> for Local or Meta with exact expected current portable head, local ledger/request-index, current profile refs, and a nonempty direct-successor chain; the required Local semantic row is spelled at L1918. There is no RecordCharge command."
+status = "registered"
+
+[[classification]]
+type_name = "DpTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:dp-transition-spec"
+source_location = "a21:936"
+statement = "DpTransitionSpec<Role> has exactly Prepare, Abandon, ArmCharge, Start, Yield, Reclaim, CommitResult, and Compact; its u8 arm tags follow that source order. ChargeRefused, attach-to-ChargedIdle, ChargedMaterialPending, and UnavailableAfterCharge are selected only by PrivacyContinuityImportSpec charge bindings and exact restore/import dispositions, never by a DpTransitionSpec arm."
 status = "registered"

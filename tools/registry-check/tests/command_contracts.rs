@@ -184,6 +184,29 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:escrow-rights-transition-spec:retire-branch-overlay",
         "cc:local:escrow-rights-transition-spec:compact-terminal-evidence",
         "cc:local:expiry-epoch-advance-spec",
+        // F9 policy-revocation-timeauthority-privacy-dp (frozen ordinals
+        // 0x002c-0x0036): eleven members, SEVEN of them time-authority
+        // controls. DpTransitionSpec's eight inner tags are a fresh mint
+        // (measured 0 wire_types.toml hits) that L936 independently forces:
+        // "its u8 arm tags follow that source order".
+        "cc:local:policy-transition-spec",
+        "cc:local:revocation-transition-spec",
+        "cc:local:time-issuance-admission-freeze-spec",
+        "cc:local:time-authority-rotation-intent-spec",
+        "cc:local:time-authority-issuance-close-spec",
+        "cc:local:time-authority-issuance-fence-authorize-spec",
+        "cc:local:time-authority-registry-transition-authorize-spec",
+        "cc:local:time-authority-profile-transition-spec",
+        "cc:local:time-authority-profile-retirement-spec",
+        "cc:local:privacy-continuity-import-spec",
+        "cc:local:dp-transition-spec:prepare",
+        "cc:local:dp-transition-spec:abandon",
+        "cc:local:dp-transition-spec:arm-charge",
+        "cc:local:dp-transition-spec:start",
+        "cc:local:dp-transition-spec:yield",
+        "cc:local:dp-transition-spec:reclaim",
+        "cc:local:dp-transition-spec:commit-result",
+        "cc:local:dp-transition-spec:compact",
     ] {
         assert!(
             registry
@@ -194,8 +217,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 66,
-        "the population may only grow from the landed F1-F8 rows"
+        registry.contracts.len() >= 84,
+        "the population may only grow from the landed F1-F9 rows"
     );
 }
 
@@ -217,6 +240,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:format-transition-spec", 5),
         ("cc:local:remote-retention-control-spec", 8),
         ("cc:local:escrow-rights-transition-spec", 5),
+        ("cc:local:dp-transition-spec", 8),
     ] {
         let family: Vec<_> = registry
             .contracts

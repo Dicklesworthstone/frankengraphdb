@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 10
+registry_epoch = 11
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -2153,6 +2153,564 @@ consumed_state_slots = [ "SemanticPayload|Local|expiry_epoch_state" ]     # [C][
 written_state_slots = [ "SemanticPayload|Local|expiry_epoch_state" ]      # [C][F]
 checkpoint_floor_classes = [ "expiry-epoch" ]                             # [C][F]
 backup_restore_gc_classes = [ "expiry-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F9 policy-revocation-timeauthority-privacy-dp — frozen ordinals 44-54,
+# ELEVEN members per the round-10 frozen order (proposal doc + C3's +1 shift):
+# PolicyTransitionSpec (44); RevocationTransitionSpec (45); the SEVEN
+# time-authority controls (46-52): TimeIssuanceAdmissionFreezeSpec,
+# TimeAuthorityRotationIntentSpec<Local>, TimeAuthorityIssuanceCloseSpec<Local>,
+# TimeAuthorityIssuanceFenceAuthorizeSpec,
+# TimeAuthorityRegistryTransitionAuthorizeSpec,
+# TimeAuthorityProfileTransitionSpec<Local>,
+# TimeAuthorityProfileRetirementSpec<Local>; PrivacyContinuityImportSpec<Local>
+# (53); DpTransitionSpec<Local> (54, ARMED, the eight x2ar-4 arms).
+# Security binding contributes ZERO rows per I-9 (no SecurityBinding*Spec is
+# spelled anywhere as an ordered command).
+#
+# ROLE SPELLINGS: RotationIntent/IssuanceClose/ProfileTransition/
+# ProfileRetirement are <Role:AuthorityOwningRole> in source (L2183/L2185/
+# L2221/L2223), instantiated <Local> per the I-6 canonical spelling;
+# TimeIssuanceAdmissionFreezeSpec and the two *AuthorizeSpec successors are
+# spelled bare. PrivacyContinuityImportSpec<Role> is "for Local or Meta"
+# (L934) with the required Local row spelled at L1918.
+#
+# FRESH MINT for the DP arms, DOUBLY DETERMINED: no wire_types.toml
+# union_variant reservation names DpTransitionSpec (MEASURED 0 hits), so inner
+# tags 0x0001-0x0008 are minted starting 0x0001 — and L936 independently
+# forces the same assignment: "DpTransitionSpec<Role> has exactly Prepare,
+# Abandon, ArmCharge, Start, Yield, Reclaim, CommitResult, and Compact; its u8
+# arm tags follow that source order." Recorded so nobody later mistakes it for
+# a reservation match. ChargeRefused, attach-to-ChargedIdle,
+# ChargedMaterialPending, and UnavailableAfterCharge are import-selected
+# states, never DpTransitionSpec arms (L936); DP has no RecordCharge or
+# RecordDelivery (L1918).
+#
+# AUTHORITY SHAPES: the two root-transition rows (44, 45) carry the spelled
+# before-binding admin authorization (AuthorizationDecisionRecord, L878/L880);
+# the spelled time-authority bodies carry AuthorityBoundHeader<Local> directly
+# (L2183/L2221/L2223); IssuanceClose is header-authorized through the consumed
+# rotation-intent record's lineage (C-h tier 2); the two *AuthorizeSpec rows
+# are authorized by the non-widenable
+# TimeAuthorityTransitionCompletionAuthority<Local> that names them in
+# allowed_successor_spec_tags (L2187); DP ArmCharge/Start are header-
+# authorized through the owned operation record / execution lease (L930/L938).
+# CommitResult is the family's one cross-plane publication (L940) and carries
+# AtomicProtocolDetach with its cpcr recipe.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:policy-transition-spec"                   # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002c                                                   # [S] frozen dense ordinal 44
+input_schema_id = "PolicyTransitionSpec"                                  # [S] L878 exact body {transition_id,expected_before_root:WeakStateIdentity,expected_before_root_digest,expected_security_policy_epoch,mutation_body_ref,candidate_after_root_ref,admin_authorization_ref,terminal_audit_gate}
+input_wire_tag = 0x002c                                                   # [C]
+body_schema_id = "PolicyTransitionSpec"                                   # [S]
+result_schema_id = "SecurityPolicyRoot"                                   # [S] candidate_after_root_ref:StrongRef<SecurityPolicyRoot>
+applied_record_schema_id = "SecurityPolicyRoot"                           # [S-derived] the policy root the transition installs
+handler_symbol = "fgdb_apply::local::policy_transition_spec"              # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 F9 family projection
+sequence_effects = "admin authorization is evaluated solely under the before binding and the candidate cannot authorize itself; the candidate root must equal exact deterministic application of the SecurityPolicyMutationBody (Publish|Activate|RetireVerifier) with checked epoch increment; SecurityPolicyRetentionFloor retains every semantics/evaluator used by a live holder, and PolicyRetirementProof requires generated zero-live-reference evidence plus revocation of every issuing key/epoch or profiled time beyond the maximum legal offline-token window"  # [S] L878
+expected_state_schema_id = "SecurityPolicyRoot"                           # [S] expected_before_root/-digest plus expected_security_policy_epoch
+authority_arm = "AuthorizationDecisionRecord"                             # [S] L878 admin_authorization_ref:StrongRef<AuthorizationDecisionRecord>, before-binding evaluated
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L878 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:policy-transition-spec"        # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|security_policy_root" ]   # [C][F]
+written_state_slots = [ "SemanticPayload|Local|security_policy_root" ]    # [C][F]
+checkpoint_floor_classes = [ "security-policy" ]                          # [C][F]
+backup_restore_gc_classes = [ "security-policy" ]                         # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:revocation-transition-spec"               # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002d                                                   # [S] frozen dense ordinal 45
+input_schema_id = "RevocationTransitionSpec"                              # [S] L880 "the same before-root, candidate-after-root, before-root admin authorization, idempotency, and audit fields as the policy transition"
+input_wire_tag = 0x002d                                                   # [C]
+body_schema_id = "RevocationTransitionSpec"                               # [S]
+result_schema_id = "RevocationRoot"                                       # [S] the candidate-after revocation root (L880)
+applied_record_schema_id = "RevocationRoot"                               # [S-derived]
+handler_symbol = "fgdb_apply::local::revocation_transition_spec"          # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "revocation is monotone and restored access requires a fresh subject/epoch; the RevocationMutationBody is AppendSubjects{nonempty_sorted_unique_subjects,reason_class}|AdvanceIssuerMinimumEpoch|AdvancePrincipalMinimumEpoch; apply advances RevocationIndex once per nonempty command and can never remove or weaken an entry"  # [S] L880
+expected_state_schema_id = "RevocationRoot"                               # [S] the same before-root binding as the policy transition
+authority_arm = "AuthorizationDecisionRecord"                             # [S] L880 the same before-root admin authorization as the policy transition
+terminal_audit_freeze_arm = "Forbidden"                                   # [S-derived] the by-reference body mirrors L878, where it is absent
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L880 "the same ... audit fields as the policy transition"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:revocation-transition-spec"    # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|revocation_root" ]        # [C][F]
+written_state_slots = [ "SemanticPayload|Local|revocation_root" ]         # [C][F]
+checkpoint_floor_classes = [ "revocation" ]                               # [C][F]
+backup_restore_gc_classes = [ "revocation" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:time-issuance-admission-freeze-spec"      # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002e                                                   # [S] frozen dense ordinal 46
+input_schema_id = "TimeIssuanceAdmissionFreezeSpec"                       # [S] L2183 exact six-field body; five shorthand field types remain structurally ambiguous (the a16:2183 wire_types row records the same)
+input_wire_tag = 0x002e                                                   # [C]
+body_schema_id = "TimeIssuanceAdmissionFreezeSpec"                        # [S]
+result_schema_id = "GroupTimeIssuanceAdmissionFreezeCertificate"          # [S] the applied record exports it; Local consumes its own certificate (L2183)
+applied_record_schema_id = "SourceUnspelled"                              # T6: the reservation-blocking applied record carries no spelled schema name
+handler_symbol = "fgdb_apply::local::time_issuance_admission_freeze_spec" # [C][F]
+transition_class = "Semantic"                                             # [S] first ordered step of the externally recoverable closing protocol (L2183)
+sequence_effects = "each participating group first orders the admission freeze; its applied record blocks new old-profile reservations locally and exports the quorum-signed GroupTimeIssuanceAdmissionFreezeCertificate carrying the last admitted local sequence, reservation index digest, and post-freeze all-plane root-and-slot commitment; Local consumes its own certificate"  # [S] L2183
+expected_state_schema_id = "TimeSubjectIssuanceReservationIndex<Local>"   # [S-derived] expected_reservation_index_ref targets the role reservation index (L2191)
+authority_arm = "SourceUnspelled"                                         # [S] the exact L2183 body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L2183 verbatim: terminal_audit_gate:LifecycleScaffoldingNotRequired
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:time-issuance-admission-freeze-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|time_subject_issuance_reservation_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|time_subject_issuance_reservation_index" ]   # [C][F]
+checkpoint_floor_classes = [ "time-authority" ]                           # [C][F]
+backup_restore_gc_classes = [ "time-authority" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:time-authority-rotation-intent-spec"      # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002f                                                   # [S] frozen dense ordinal 47
+input_schema_id = "TimeAuthorityRotationIntentSpec<Local>"                # [S] L2183 <Role:AuthorityOwningRole>; I-6 canonical spelling; exact spelled body
+input_wire_tag = 0x002f                                                   # [C]
+body_schema_id = "TimeAuthorityRotationIntentSpec<Local>"                 # [S]
+result_schema_id = "TimeAuthorityRotationIntentRecord<Local>"             # [S-derived] the immutable record apply creates; only its durable PortableSemanticVisibilityCertificate<Local> may initialize the close dispatch
+applied_record_schema_id = "TimeAuthorityRotationIntentRecord<Local>"     # [S] "Apply atomically selects ClosingRequested and creates immutable TimeAuthorityRotationIntentRecord<Role>" (L2183)
+handler_symbol = "fgdb_apply::local::time_authority_rotation_intent_spec" # [C][F]
+transition_class = "Semantic"                                             # [S] L2183 verbatim: "the ordered Semantic authorization"
+sequence_effects = "consumes the exact current-and-prospective group freeze-certificate set and configured offline-issuer epoch set; apply atomically selects ClosingRequested and creates the immutable rotation-intent record owning those exact sets, the external close/fence/registry-transition operation recipes with their operation IDs/idempotency keys/transcripts, closure resource holds, authorization, and audit lineage; only its durable PortableSemanticVisibilityCertificate<Local> may initialize the universal external-effect dispatch for the close operation"  # [S] L2183
+expected_state_schema_id = "TimeAuthorityRegistry<Local>"                 # [S] expected_registry_ref + expected_registry_generation + expected_profile_state:ActiveForIssuance
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L2183 direct authority_bound_header field; admin_authorization_decision_ref is the co-spelled decision basis
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L2183 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:time-authority-rotation-intent-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]   # [C][F]
+checkpoint_floor_classes = [ "time-authority" ]                           # [C][F]
+backup_restore_gc_classes = [ "time-authority" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:time-authority-issuance-close-spec"       # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0030                                                   # [S] frozen dense ordinal 48
+input_schema_id = "TimeAuthorityIssuanceCloseSpec<Local>"                 # [S] L2185 <Role:AuthorityOwningRole>; I-6 canonical spelling (struct body unspelled beyond the consumed set)
+input_wire_tag = 0x0030                                                   # [C]
+body_schema_id = "TimeAuthorityIssuanceCloseSpec<Local>"                  # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the state change is the spelled effect; no result schema is named
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::time_authority_issuance_close_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "consumes the intent, closing receipt, dispatch terminal evidence, exact group-freeze set, and current registry and changes only ClosingRequested -> IssuanceClosing; before the external close is known sent a typed abort may instead select ClosingRequested -> ActiveForIssuance and release every unchanged group freeze and resource hold, and once the close dispatch is SentUnknown or receipted reopen is illegal"  # [S] L2185
+expected_state_schema_id = "TimeAuthorityRegistry<Local>"                 # [S] "and current registry"; the sole selected change is the profile state
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: the consumed TimeAuthorityRotationIntentRecord's lineage carries the header (L2183)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:time-authority-issuance-close-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]   # [C][F]
+checkpoint_floor_classes = [ "time-authority" ]                           # [C][F]
+backup_restore_gc_classes = [ "time-authority" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:time-authority-issuance-fence-authorize-spec"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0031                                                   # [S] frozen dense ordinal 49
+input_schema_id = "TimeAuthorityIssuanceFenceAuthorizeSpec"               # [S] L2187 named as an allowed successor spec tag of the completion authority (struct body unspelled)
+input_wire_tag = 0x0031                                                   # [C]
+body_schema_id = "TimeAuthorityIssuanceFenceAuthorizeSpec"                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the fence itself is the external portable TimeAuthorityIssuanceFence (L2195), produced by the dispatched operation, not by this command
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::time_authority_issuance_fence_authorize_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "authorizes the universal-dispatch final issuance fence, in the mandatory order only after every-group reservation drain and quiescence closure and every offline issuer fence; admissible only under the non-widenable completion authority, which cannot alter the successor, issuer/group sets, resources, operation IDs, request bodies, authority ceiling, or audit lineage, and cannot authorize abort, retirement, fresh issuance, or a new client choice"  # [S] L2187/L2219
+expected_state_schema_id = "SourceUnspelled"                              # T6: no struct body spelled
+authority_arm = "TimeAuthorityTransitionCompletionAuthority<Local>"       # [S] L2187 lists this spec in allowed_successor_spec_tags; constructible only from the rooted intent plus the exact dispatch attempt or terminal evidence at or beyond the listed irreversible state
+authority_evidence_target_schema_id = "TimeAuthorityTransitionCompletionAuthority<Local>"  # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:time-authority-issuance-fence-authorize-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]   # [C][F]
+checkpoint_floor_classes = [ "time-authority" ]                           # [C][F]
+backup_restore_gc_classes = [ "time-authority" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:time-authority-registry-transition-authorize-spec"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0032                                                   # [S] frozen dense ordinal 50
+input_schema_id = "TimeAuthorityRegistryTransitionAuthorizeSpec"          # [S] L2187 named as an allowed successor spec tag of the completion authority (struct body unspelled)
+input_wire_tag = 0x0032                                                   # [C]
+body_schema_id = "TimeAuthorityRegistryTransitionAuthorizeSpec"           # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the external CAS is executed by the dispatched registry-transition operation, not by this command
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::time_authority_registry_transition_authorize_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "authorizes the external registry-head CAS from the portable pre-CAS TimeAuthorityEpochTransitionPlan, which binds the rotation-intent digest, predecessor/successor profile oids and digests, issuance closing receipt digest, issuance fence digest, and subject-inventory closure digest; the cross-authority handoff is deliberately split from fence authorization, and the command is admissible only under the same non-widenable completion authority"  # [S] L2187/L2217
+expected_state_schema_id = "SourceUnspelled"                              # T6: no struct body spelled
+authority_arm = "TimeAuthorityTransitionCompletionAuthority<Local>"       # [S] L2187 lists this spec in allowed_successor_spec_tags
+authority_evidence_target_schema_id = "TimeAuthorityTransitionCompletionAuthority<Local>"  # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:time-authority-registry-transition-authorize-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]   # [C][F]
+checkpoint_floor_classes = [ "time-authority" ]                           # [C][F]
+backup_restore_gc_classes = [ "time-authority" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:time-authority-profile-transition-spec"   # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0033                                                   # [S] frozen dense ordinal 51
+input_schema_id = "TimeAuthorityProfileTransitionSpec<Local>"             # [S] L2221 <Role:AuthorityOwningRole>; I-6 canonical spelling; exact spelled body
+input_wire_tag = 0x0033                                                   # [C]
+body_schema_id = "TimeAuthorityProfileTransitionSpec<Local>"              # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: activation selects states; the epoch transition record is a consumed ref, not a result
+applied_record_schema_id = "TimeAuthorityRegistry<Local>"                 # [S-derived] the registry whose selected profile states the activation advances
+handler_symbol = "fgdb_apply::local::time_authority_profile_transition_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "verifies the complete intent/dispatch/closing/quiescence/fence/inventory bijection and atomically selects the successor for new issuance while retaining the predecessor as Draining; completion cannot widen the original authorization, change the successor, sets, operation IDs, or resources, or solicit a fresh client choice after the irreversible fence"  # [S] L2221
+expected_state_schema_id = "TimeAuthorityRegistry<Local>"                 # [S] expected_time_authority_registry_ref + expected_registry_generation + expected_selected_profile_state:IssuanceQuiescent
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L2221 direct authority_bound_header field; completion_authority:TimeAuthorityTransitionCompletionAuthority<Local> is the co-spelled non-widenable completion basis
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L2221 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:time-authority-profile-transition-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]   # [C][F]
+checkpoint_floor_classes = [ "time-authority" ]                           # [C][F]
+backup_restore_gc_classes = [ "time-authority" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:time-authority-profile-retirement-spec"   # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0034                                                   # [S] frozen dense ordinal 52
+input_schema_id = "TimeAuthorityProfileRetirementSpec<Local>"             # [S] L2223 <Role:AuthorityOwningRole>; I-6 canonical spelling; exact spelled body
+input_wire_tag = 0x0034                                                   # [C]
+body_schema_id = "TimeAuthorityProfileRetirementSpec<Local>"              # [S]
+result_schema_id = "TimeAuthorityTransitionTerminalSummary<Local>"        # [S] apply deterministically creates it and selects Retired{terminal_summary_ref}
+applied_record_schema_id = "TimeAuthorityRegistry<Local>"                 # [S-derived] the registry whose retiring profile state the retirement advances
+handler_symbol = "fgdb_apply::local::time_authority_profile_retirement_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "apply first verifies the heavy closure — every inventory row appears exactly once in the sorted subject dispositions with the complete bijection proof — then deterministically creates TimeAuthorityTransitionTerminalSummary, selects Retired{terminal_summary_ref}, and releases the drain hold only after shutdown, zero-dependency verifier/offline-issuer floors, and paired all-plane/configuration floors are durable; the cleanup authority authorizes only deterministic retirement of that one predecessor profile and cannot change either profile, reissue a subject, or widen authority"  # [S] L2223/L2189
+expected_state_schema_id = "TimeAuthorityRegistry<Local>"                 # [S] expected_time_authority_registry_ref + expected_registry_generation; required_retiring_state:Draining rides the cleanup authority (L2189)
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S] L2223 direct authority_bound_header field; cleanup_authority:TimeAuthorityRetirementCleanupAuthority<Local> is the co-spelled basis, constructible only from Draining plus the complete cleanup closure (L2189)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L2223 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:time-authority-profile-retirement-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|time_authority_registry" ]   # [C][F]
+checkpoint_floor_classes = [ "time-authority" ]                           # [C][F]
+backup_restore_gc_classes = [ "time-authority" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:privacy-continuity-import-spec"           # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0035                                                   # [S] frozen dense ordinal 53
+input_schema_id = "PrivacyContinuityImportSpec<Local>"                    # [S] L934 "The sole Chronicle import ... for Local or Meta"; required Local row spelled at L1918
+input_wire_tag = 0x0035                                                   # [C]
+body_schema_id = "PrivacyContinuityImportSpec<Local>"                     # [S]
+result_schema_id = "PrivacyLedgerState"                                   # [S] apply "advances the exact PrivacyLedgerState" (L934)
+applied_record_schema_id = "DpChargeBinding"                              # [S] apply creates DpChargeBinding, whose source_import_spec_ref roots this spec (L934)
+handler_symbol = "fgdb_apply::local::privacy_continuity_import_spec"      # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 required Local semantic row
+sequence_effects = "the sole Chronicle import, bounded with exact expected current portable head, local ledger/request-index, current profile refs, and a nonempty direct-successor chain of PrivacyContinuityImportStep values; apply recomputes every nonce/Renyi/tombstone/admin transition, validates every portable identity against its local typed owner, creates DpChargeBinding rows, advances the exact PrivacyLedgerState, and selects the role-valid request/admin states; the preexisting spec and assigned scalar order replace any forbidden reference to the future applied record; a frozen/retired head forbids new Prepare/ArmCharge and profile drift cannot reinterpret an old vector; there is no RecordCharge command"  # [S] L934
+expected_state_schema_id = "PrivacyContinuityRecord"                      # [S-derived] the exact expected current portable head; the local ledger/request-index and current profile refs are co-expected bindings
+authority_arm = "SourceUnspelled"                                         # [S] the bounded spec spells no authority member; administrative steps carry their own freeze/retire authorization refs (L934)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: the spec body is bounded by prose, not fully spelled
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:privacy-continuity-import-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|privacy_ledger_state", "SemanticPayload|Local|dp_request_index" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|privacy_ledger_state", "SemanticPayload|Local|dp_request_index" ]   # [C][F] advances the ledger and selects the role-valid request/admin states
+checkpoint_floor_classes = [ "privacy-continuity" ]                       # [C][F]
+backup_restore_gc_classes = [ "privacy-continuity" ]                      # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:prepare"               # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] frozen dense ordinal 54
+input_schema_id = "DpTransitionSpec<Local>"                               # [S] L936 "has exactly Prepare, Abandon, ArmCharge, Start, Yield, Reclaim, CommitResult, and Compact"
+input_wire_tag = 0x0036                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] Prepare is first in the L936 source order; L936 forces "its u8 arm tags follow that source order" (fresh mint, 0 wire_types hits)
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the Prepared leaf/record effect names no result schema
+applied_record_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the Prepared record of the L936 request machine (L2701 DAG: Prepare -> command -> Prepared record)
+handler_symbol = "fgdb_apply::local::dp_transition_spec::prepare"         # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 "the exact §12.7 DP semantic transitions"
+sequence_effects = "atomically inserts or byte-matches the permanent DpRequestNonceIndex leaf before creating seed material; the same nonce with an identical request joins, while any changed query, parameters, snapshot, bindings, mechanism, accounting profile, authority, or output encoding returns a stable conflict before a charge request exists; same bound key means one debit, one protected seed, and one canonical output"  # [S] L922
+expected_state_schema_id = "DpRequestNonceIndex<Local>"                   # [S] the permanent nonce map Prepare inserts into or byte-matches (L922)
+authority_arm = "SourceUnspelled"                                         # [S] the arm spells no authority member
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no per-arm struct body spelled
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:prepare"    # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:abandon"               # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] shared member outer tag
+input_schema_id = "DpTransitionSpec<Local>"                               # [S]
+input_wire_tag = 0x0036                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] second in the L936 source order
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the AbandonedBeforeCharge record (L936)
+handler_symbol = "fgdb_apply::local::dp_transition_spec::abandon"         # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "only unarmed Prepared may abandon; the request machine admits exactly Prepared -> AbandonedBeforeCharge for this arm, and once ArmCharge has selected ChargeRequested no abandonment path exists"  # [S] L930/L936
+expected_state_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the Prepared record this arm terminates
+authority_arm = "SourceUnspelled"                                         # [S] the arm spells no authority member
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:abandon"    # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:arm-charge"            # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] shared member outer tag
+input_schema_id = "DpTransitionSpec<Local>"                               # [S]
+input_wire_tag = 0x0036                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] third in the L936 source order
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the ChargeRequested record (L936; L2701 DAG: ArmCharge -> command -> ChargeRequested record)
+handler_symbol = "fgdb_apply::local::dp_transition_spec::arm_charge"      # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "selects ChargeRequested and owns the exact pre-built PrivacyChargeOperationRecord before a linear ExternalPrivacyChargeSendGuard can contact the external registry; every identity/digest in the portable request must byte-match its local typed owner; timeout or crash after arming leaves ChargeRequested, and recovery queries/retries the same operation ID and bytes"  # [S] L930
+expected_state_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the Prepared record this arm advances
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: the owned PrivacyChargeOperationRecord<Local> carries authority_bound_header (L930)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:arm-charge" # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:start"                 # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] shared member outer tag
+input_schema_id = "DpTransitionSpec<Local>"                               # [S]
+input_wire_tag = 0x0036                                                   # [C]
+inner_wire_tag = 0x0004                                                   # [S] fourth in the L936 source order
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the Computing(generation) record (L936; L2701 DAG: compute-lease basis -> Start -> command -> applied lease/Computing record)
+handler_symbol = "fgdb_apply::local::dp_transition_spec::start"           # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "consumes the compute-lease basis and selects ChargedIdle -> Computing(generation); DpComputeOwnerLease adds owner/resource reservation and strongly selects the signed PrivacyExecutionLease, and the nonserializable DpSensitiveAccessGuard exists only from the current Computing record plus matching admission/charge/seed/complete authority/execution lease"  # [S] L936/L938/L2701
+expected_state_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the ChargedIdle record this arm advances
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: the selected PrivacyExecutionLease<Local> carries authority_bound_header (L938)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:start"      # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:yield"                 # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] shared member outer tag
+input_schema_id = "DpTransitionSpec<Local>"                               # [S]
+input_wire_tag = 0x0036                                                   # [C]
+inner_wire_tag = 0x0005                                                   # [S] fifth in the L936 source order
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the ChargedIdle record this arm returns to (L936)
+handler_symbol = "fgdb_apply::local::dp_transition_spec::yield"           # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "returns Computing to ChargedIdle without committing a result; from Computing the request machine admits only ChargedIdle, Computing(generation+1), or ResultCommitted, and no state is Delivered/Acknowledged/Released"  # [S] L936
+expected_state_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the current Computing record
+authority_arm = "SourceUnspelled"                                         # [S] the arm spells no authority member
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:yield"      # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:reclaim"               # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] shared member outer tag
+input_schema_id = "DpTransitionSpec<Local>"                               # [S]
+input_wire_tag = 0x0036                                                   # [C]
+inner_wire_tag = 0x0006                                                   # [S] sixth in the L936 source order
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the Computing(generation+1) record (L936)
+handler_symbol = "fgdb_apply::local::dp_transition_spec::reclaim"         # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "requires exact expiry/fencing evidence and checked generation increment: Computing(generation) -> Computing(generation+1); the reclaimed generation's lease is fenced before a successor lease exists"  # [S] L936/L938/L2701
+expected_state_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the current Computing record
+authority_arm = "SourceUnspelled"                                         # [S] the required expiry/fencing evidence carries no spelled schema name (L938)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:reclaim"    # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:commit-result"         # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] shared member outer tag
+input_schema_id = "DpTransitionSpec<Local>"                               # [S]
+input_wire_tag = 0x0036                                                   # [C]
+inner_wire_tag = 0x0007                                                   # [S] seventh in the L936 source order
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "DpCommittedOutput<Local>"                             # [S] CommitResult atomically constructs the semantic DpCommittedOutput/ResultCommitted detachment (L940)
+applied_record_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the ResultCommitted record storing {charge_binding_ref,seed_envelope_ref,committed_output_ref,delivery_id,result_detachment_commitment} (L936)
+handler_symbol = "fgdb_apply::local::dp_transition_spec::commit_result"   # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "atomically constructs the semantic DpCommittedOutput/ResultCommitted detachment plus the Protocol PendingVisibility owner and resource escrow in one manifest publication; neither plane strongly points back to its owner; ResultCommitted never stores a strong protocol-retention ref back from semantic state, required audit creates no lease/capability, and later delivery maintenance never changes the DP request and cannot redraw/recharge"  # [S] L940/L936
+expected_state_schema_id = "DpRequestRecord<Local>"                       # [S-derived] the current Computing record binding the DpOutputCandidate
+authority_arm = "SourceUnspelled"                                         # [S] the DpOutputCandidate binds charge/execution/admission/release evidence; no single authority member is spelled (L940)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "AtomicProtocolDetach{cpcr:cc:local:dp-transition-spec:commit-result}"  # [S] L940 "in one manifest publication" across the Semantic and Protocol planes
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:commit-result"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F] the Protocol-plane PendingVisibility owner is the detached counterpart, conserved by the cpcr recipe
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:dp-transition-spec:compact"               # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0036                                                   # [S] shared member outer tag
+input_schema_id = "DpTransitionSpec<Local>"                               # [S]
+input_wire_tag = 0x0036                                                   # [C]
+inner_wire_tag = 0x0008                                                   # [S] eighth in the L936 source order
+body_schema_id = "DpTransitionSpec<Local>"                                # [S]
+result_schema_id = "DpSpentTombstone"                                     # [S] the permanent tombstone the index retains after compaction (L942)
+applied_record_schema_id = "DpSpentTombstone"                             # [S-derived] the DpRequestIndex entry becomes the permanent tombstone
+handler_symbol = "fgdb_apply::local::dp_transition_spec::compact"         # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "replaces a terminal Detailed entry with the permanent DpSpentTombstone retaining key, operation, debit/receipt, seed commitment, output/no-output commitment, and result disposition commitment; compaction cannot select a charged nonterminal state or release an independently retained result/forensic object; backup/restore, profile rotation, compaction, and GC retain permanent Spent commitments"  # [S] L942/L922
+expected_state_schema_id = "DpRequestIndex<Local>"                        # [S] the index mapping the key to Detailed or the permanent tombstone (L942)
+authority_arm = "SourceUnspelled"                                         # [S] the arm spells no authority member
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:dp-transition-spec:compact"    # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][F]
+written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
+checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
+backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

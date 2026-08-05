@@ -85,6 +85,17 @@ fn source_forced_seed_population_is_present() {
         "ResourceLedgerTransitionSpec",
         "EscrowRightsTransitionSpec",
         "ExpiryEpochAdvanceSpec",
+        "PolicyTransitionSpec",
+        "RevocationTransitionSpec",
+        "TimeIssuanceAdmissionFreezeSpec",
+        "TimeAuthorityRotationIntentSpec",
+        "TimeAuthorityIssuanceCloseSpec",
+        "TimeAuthorityIssuanceFenceAuthorizeSpec",
+        "TimeAuthorityRegistryTransitionAuthorizeSpec",
+        "TimeAuthorityProfileTransitionSpec",
+        "TimeAuthorityProfileRetirementSpec",
+        "PrivacyContinuityImportSpec",
+        "DpTransitionSpec",
     ] {
         assert!(
             registry
@@ -95,8 +106,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 50,
-        "the population may only grow from the landed F1-F8 rows"
+        registry.classifications.len() >= 61,
+        "the population may only grow from the landed F1-F9 rows"
     );
 }
 
