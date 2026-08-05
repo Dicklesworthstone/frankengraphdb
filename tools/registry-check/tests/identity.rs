@@ -11110,6 +11110,42 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "GlobalRestoreServiceFinalCertificate",
                     "canonical_signature_set"
                 )
+                // fgdb-a20-restore-promotion-ivsp: the catalog reservation
+                // receipt's eight precedent-shaped value fields (source order
+                // a20:2581), landed beside the schema's reserved logical kind
+                // and younger than the historical witness for the same reason.
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "restore_or_transition_id"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "target_incarnation"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "service_visibility_epoch"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "manifest_digest"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "reservation_id"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "reservation_digest"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "endpoint_set_commitment"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "authority_signatures"
+                )
                 | ("RestoreServicePromotionManifest", "restore_id")
                 | ("RestoreServicePromotionManifest", "database_id")
                 | (
@@ -12018,7 +12054,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 808,
+        pre_erratum.fields.len() + 816,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
