@@ -83,7 +83,10 @@ impl core::fmt::Display for ValidationRejection {
 /// - `Ok(())` licenses publication of exactly this draft;
 /// - `Err` aborts the attempt with no durable trace, no consumed sequence,
 ///   and no coordinator poisoning.
-pub trait CommitValidator {
+/// `Debug` is a supertrait because the installed validator is a field of
+/// [`CommitCoordinator`], which derives `Debug`: a validator whose identity
+/// cannot appear in the coordinator's debug output would be invisible state.
+pub trait CommitValidator: core::fmt::Debug {
     /// Judge one draft. Must be a deterministic function of the draft and
     /// state this validator was explicitly constructed with.
     fn validate(&mut self, draft: &CommitDraft<'_>) -> Result<(), ValidationRejection>;

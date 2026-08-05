@@ -255,7 +255,7 @@ pub struct CommitCoordinator<V: Vfs = UnixVfs> {
     /// before the first durable byte. Opens as the deterministic
     /// [`PassThroughValidator`]; the w4 validator stack replaces the instance
     /// via [`CommitCoordinator::set_validator`], never the seam.
-    validator: Box<dyn CommitValidator + Send>,
+    validator: Box<dyn CommitValidator + Send + Sync>,
     discarded_tail_bytes: usize,
     poisoned: bool,
     capsule_directory_parent_sync_pending: bool,
@@ -391,7 +391,7 @@ impl<V: Vfs> CommitCoordinator<V> {
     /// constraints, durable-quota ledger) plugs into the protocol. Replacing
     /// the validator affects only future drafts: verdicts already rendered
     /// licensed exactly the drafts they saw.
-    pub fn set_validator(&mut self, validator: Box<dyn CommitValidator + Send>) {
+    pub fn set_validator(&mut self, validator: Box<dyn CommitValidator + Send + Sync>) {
         self.validator = validator;
     }
 

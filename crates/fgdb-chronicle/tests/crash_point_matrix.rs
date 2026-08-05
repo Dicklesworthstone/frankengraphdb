@@ -1377,6 +1377,7 @@ fn truncation_anywhere_in_the_final_entry_recovers_the_prefix() {
 // ---------------------------------------------------------------------------
 
 /// Rejects every draft under a fixture law, counting consultations.
+#[derive(Debug)]
 struct RejectAll {
     consulted: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
@@ -1397,6 +1398,7 @@ impl fgdb_chronicle::validate::CommitValidator for RejectAll {
 
 /// Records every draft it approves, so the test can compare what the seam saw
 /// against what the commit published.
+#[derive(Debug)]
 struct RecordEveryDraft {
     seen: std::sync::Arc<std::sync::Mutex<Vec<(u64, ObjectId, Vec<u8>, u64)>>>,
 }
