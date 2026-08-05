@@ -11085,6 +11085,24 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 // common-header scalar fields (source order a20:2575), landed
                 // beside the pre-existing target_posture/authority_profile rows
                 // and younger than the historical witness for the same reason.
+                // fgdb-a20-restore-promotion-ivsp: the final certificate's five
+                // remaining value fields (source order a20:2597), landed beside
+                // the pre-existing certificate reference rows and younger than
+                // the historical witness for the same reason.
+                | ("GlobalRestoreServiceFinalCertificate", "restore_id")
+                | (
+                    "GlobalRestoreServiceFinalCertificate",
+                    "manifest_profile_and_receipt_digests"
+                )
+                | ("GlobalRestoreServiceFinalCertificate", "ready_ack_commitment")
+                | (
+                    "GlobalRestoreServiceFinalCertificate",
+                    "service_visibility_epoch"
+                )
+                | (
+                    "GlobalRestoreServiceFinalCertificate",
+                    "canonical_signature_set"
+                )
                 | ("RestoreServicePromotionManifest", "restore_id")
                 | ("RestoreServicePromotionManifest", "database_id")
                 | (
@@ -11993,7 +12011,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 803,
+        pre_erratum.fields.len() + 808,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

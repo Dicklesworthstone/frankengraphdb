@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3735
+target_count = 3740
 projection_fallback_count = 141
-target_source_assignment_sha256 = "61195b78531d3b3d36e5bd45bee1f4308b42f7a5f2d0a024e49238c737f4713e"
+target_source_assignment_sha256 = "56acf289ffa1fbd3dfa7b702c582a4f23cd546f6fa44842e0de9fa8083c3e934"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -287,8 +287,8 @@ predecessor = "a07"
 successor = "a09"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 112
-top_level_candidate_ids_sha256 = "8891ad276c2be5ac38d4dbfc7d3786acfb7c76539c689bb8070a60b5655e7433"
+top_level_candidate_count = 113
+top_level_candidate_ids_sha256 = "b0520acedc8ffd55be1c5231be7f78c771134b6d7e5c66ee599a43bc931bc3f5"
 field_candidate_count = 1101
 field_candidate_ids_sha256 = "fb474c3990a48614b1a4c097fbf3e88a1a348e909412558b0d96285ec8c23d5b"
 union_candidate_count = 42
@@ -18880,6 +18880,88 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the CertificateAttemptRecord that produced this final certificate; retained while the certificate is retained, and order 16 <= 44 keeps the edge backward-only (a20:2597)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-final-certificate-restore-id"
+containing_schema = "GlobalRestoreServiceFinalCertificate"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-meta"
+retention_and_cut_rule = "portable restore operation identity binding this final certificate to one restore; comparison input retained and cut with the certificate (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-final-certificate-manifest-profile-and-receipt-digests"
+containing_schema = "GlobalRestoreServiceFinalCertificate"
+field_tag = 0x0003
+stable_name = "manifest_profile_and_receipt_digests"
+exact_wire_type = "digest256"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-meta"
+retention_and_cut_rule = "canonically-ordered digests of the promotion manifest, its authority profile, and the composite promotion receipt this finalize verified; comparison inputs retained and cut with the certificate (a20:2593,2597)"
+version_status = "reserved"
+max_size_bytes = 96
+digest_class = "target"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-final-certificate-ready-ack-commitment"
+containing_schema = "GlobalRestoreServiceFinalCertificate"
+field_tag = 0x0004
+stable_name = "ready_ack_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-meta"
+retention_and_cut_rule = "commitment over the exact sorted RestoreShardServiceReadyAck evidence set the finalize verified; comparison input retained and cut with the certificate (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-final-certificate-service-visibility-epoch"
+containing_schema = "GlobalRestoreServiceFinalCertificate"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-meta"
+retention_and_cut_rule = "service visibility epoch this final certificate is issued under; every later carrier must match it exactly, so the comparison input is retained and cut with the certificate (a20:2597,2607)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-final-certificate-canonical-signature-set"
+containing_schema = "GlobalRestoreServiceFinalCertificate"
+field_tag = 0x0009
+stable_name = "canonical_signature_set"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-meta"
+retention_and_cut_rule = "canonically sorted authority signature set over the final-certificate transcript; current-member signatures alone are never a trust root, so validation still resolves the pinned configuration evidence first (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[field]]
 slice_id = "a20"
@@ -52213,7 +52295,7 @@ generic_signature = ""
 source_key = "top|GlobalBeginTerminalSpec"
 source_kind = "confirmed"
 identity_class = "unclassified"
-source_locations = ["a07:1714"]
+source_locations = ["a07:1714", "a07:1718"]
 
 [[top_level_candidate]]
 row_id = "a06:top-level-candidate:global-branch-key-distribution-plan-af01ba7db241d74b"
@@ -59443,7 +59525,17 @@ generic_signature = ""
 source_key = "top|ShardKeyDestroyApplySpec"
 source_kind = "confirmed"
 identity_class = "unclassified"
-source_locations = ["a06:1674"]
+source_locations = ["a06:1674", "a08:1874"]
+
+[[top_level_candidate]]
+row_id = "a08:top-level-candidate:shard-key-material-activate-spec-be17f8e477d709d5"
+slice_id = "a08"
+symbol = "ShardKeyMaterialActivateSpec"
+generic_signature = ""
+source_key = "top|ShardKeyMaterialActivateSpec"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a08:1874"]
 
 [[top_level_candidate]]
 row_id = "a06:top-level-candidate:shard-key-material-availability-certificate-34241695efd425ae"
@@ -59473,7 +59565,7 @@ generic_signature = ""
 source_key = "top|ShardKeyMaterialStageSpec"
 source_kind = "ambiguous"
 identity_class = "unclassified"
-source_locations = ["a06:1666"]
+source_locations = ["a06:1666", "a08:1874"]
 
 [[top_level_candidate]]
 row_id = "a06:top-level-candidate:shard-key-physical-destruction-completion-certificate-70145b5fc0c453cc"
@@ -59493,7 +59585,7 @@ generic_signature = ""
 source_key = "top|ShardKeyPhysicalDestructionCompletionSpec"
 source_kind = "confirmed"
 identity_class = "unclassified"
-source_locations = ["a06:1674"]
+source_locations = ["a06:1674", "a08:1874"]
 
 [[top_level_candidate]]
 row_id = "a06:top-level-candidate:shard-key-zero-reference-certificate-857ea2f5d347529f"
@@ -59513,7 +59605,7 @@ generic_signature = ""
 source_key = "top|ShardKeyZeroReferenceSpec"
 source_kind = "ambiguous"
 identity_class = "unclassified"
-source_locations = ["a06:1672"]
+source_locations = ["a06:1672", "a08:1874"]
 
 [[top_level_candidate]]
 row_id = "a06:top-level-candidate:shard-logical-state-root-3eb4d7da5c12fe5c"
@@ -83613,6 +83705,46 @@ row_id = "a20:target:field-restore-service-promotion-manifest-threshold-signatur
 target_row_id = "a20:field:restore-service-promotion-manifest-threshold-signatures"
 slice_id = "a20"
 source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.threshold_signatures|threshold_signatures"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-final-certificate-restore-id"
+target_row_id = "a20:field:global-restore-service-final-certificate-restore-id"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-final-certificate-manifest-profile-and-receipt-digests"
+target_row_id = "a20:field:global-restore-service-final-certificate-manifest-profile-and-receipt-digests"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.manifest_profile_and_receipt_digests|manifest_profile_and_receipt_digests"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-final-certificate-ready-ack-commitment"
+target_row_id = "a20:field:global-restore-service-final-certificate-ready-ack-commitment"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.ready_ack_commitment|ready_ack_commitment"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-final-certificate-service-visibility-epoch"
+target_row_id = "a20:field:global-restore-service-final-certificate-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-final-certificate-canonical-signature-set"
+target_row_id = "a20:field:global-restore-service-final-certificate-canonical-signature-set"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.canonical_signature_set|canonical_signature_set"
 target_kind = "field"
 definition_status = "declared"
 
