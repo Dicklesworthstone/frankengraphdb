@@ -44,6 +44,22 @@
 //! assertions here are on CORRECTNESS and a catastrophe ceiling only. If you
 //! want a threshold gate, the op-count witnesses under fgdb-drwe are the
 //! instrument; do not promote these.
+//!
+//! **UBS DISPOSITION, recorded rather than silently carried.** `ubs` reports two
+//! CRITICALs on this file: `Instant::now()` flagged as "security token generated
+//! with non-cryptographic randomness". Both are false positives and are being
+//! kept, not suppressed. The heuristic fires because the file constructs
+//! `DatabaseKeys` (making it "security-sensitive context") and calls
+//! `Instant::now()`; but no token, key, nonce or salt here derives from the
+//! clock — the constants in `keys()` are fixed test-fixture bytes, the same
+//! shape `tests/spine.rs` uses, and `Instant::now()` is only ever the start of a
+//! measurement interval. Every other file I have landed this session was made
+//! ubs-clean by a rename where the rename genuinely improved it; here the only
+//! way to satisfy the scanner would be to obscure the timing calls that are the
+//! entire point of the file, which trades real clarity for a green scanner. That
+//! is the wrong trade, so the finding is reviewed, rejected, and written down —
+//! a reader who runs `ubs` and sees two CRITICALs should find this paragraph
+//! rather than wonder whether anyone looked.
 
 use asupersync::cx::Cx;
 use fgdb::{Database, DatabaseKeys, WriteBatch};
@@ -215,5 +231,147 @@ fn warm_point_read_latency_distribution() {
             "{label} p99 is {p99:?}, past the {CATASTROPHE:?} catastrophe ceiling; \
              full report {report:?}"
         );
+    }
+}
+
+/// §17's RECOVERY gate, as a scaling question rather than a constant.
+///
+/// §17: "Recovery (clean shutdown / crash @ 1 TB) — < 1 s / < 30 s to first
+/// query (anchor-mapped, capsule tail replay)". The gate is stated at 1 TB, so
+/// the number that matters is not how long one small reopen takes — it is
+/// **what reopen cost does as history grows**. A constant measured at one size
+/// cannot answer that, and a reopen that is O(history) fails the gate at scale
+/// however fast it looks small.
+///
+/// So this sweeps BATCH COUNT, not edge count. Recovery is described as capsule
+/// *tail* replay, so the tail length is the independent variable; adding edges
+/// inside one batch would grow the graph without lengthening the thing recovery
+/// actually walks.
+///
+/// **MEASURED 2026-08-04:**
+///
+/// | batches | reopen | per batch | first query |
+/// |---|---|---|---|
+/// | 1 | 5.30 ms | 5.30 ms | 5.6 µs |
+/// | 4 | 18.12 ms | 4.53 ms | 9.2 µs |
+/// | 16 | 65.65 ms | 4.10 ms | 23.4 µs |
+/// | 64 | 271.20 ms | 4.24 ms | 89.9 µs |
+///
+/// **RECOVERY IS LINEAR IN THE CAPSULE TAIL.** Per-batch cost is flat at
+/// ~4.1–5.3 ms across a 64× range, so reopen is O(commits). That is not
+/// superlinear — the shape assertion below passes, and correctly — but linear is
+/// already fatal at the scale §17 states the gate:
+///
+/// > §17: "Recovery (clean shutdown / crash @ 1 TB) — **< 1 s** to first query"
+///
+/// At ~4.2 ms per commit, a 1-second recovery budget buys **≈ 238 commits**. A
+/// 1 TB database has incomparably more history than that. So the gate is not
+/// missed by a tuning factor; it is missed by whatever ratio the real commit
+/// count bears to 238, and no constant-factor optimisation closes it. Anchor
+/// mapping and checkpointing — the mechanisms §17's own parenthetical names —
+/// are what make recovery sublinear, and neither exists yet.
+///
+/// FIRST QUERY GROWS TOO, 5.6 µs → 89.9 µs across the same sweep, roughly linear
+/// in commit count. Consistent with the tier-D witnesses: more commits means
+/// more blocks to merge, and the read path examines all of them.
+///
+/// SECONDARY OBSERVATION, deliberately not turned into a gate: the 85 commits
+/// this test writes take ~13.9 s in total, ~163 ms each. That is per-COMMIT
+/// cost, almost certainly fsync-dominated, and it says nothing directly about
+/// §17's ≥2M edge-inserts/s figure, which is a per-EDGE rate a batched write
+/// would amortise. Recorded because it is a large number nobody had measured,
+/// and flagged as not-the-ingest-gate so it does not get quoted as one.
+///
+/// The assertions are on SHAPE and correctness, plus a catastrophe ceiling —
+/// never a threshold. Same reasoning as the latency witness above: on a shared
+/// unpinned box a real threshold is a flaky gate, and §17 activates its gates
+/// only under a pinned manifest that does not exist here.
+#[test]
+fn recovery_cost_versus_capsule_tail_length() {
+    const BATCHES: [usize; 4] = [1, 4, 16, 64];
+
+    let cx = Cx::for_testing();
+    let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
+
+    let mut report = Vec::new();
+    for batches in BATCHES {
+        let dir = scratch(&format!("recovery-{batches}"));
+        let mut db = Database::create(&commit, &dir, keys()).expect("creates");
+        batch_writes(&commit, &mut db, batches);
+        drop(db);
+
+        // RECOVERY: the reopen itself.
+        let start = Instant::now();
+        let db = Database::open(&commit, &dir, keys()).expect("reopens");
+        let reopen = start.elapsed();
+
+        // TIME TO FIRST QUERY, which is what §17 actually gates — an open that
+        // defers all its work to the first read has not recovered, it has
+        // postponed. Measuring both separates those.
+        let start = Instant::now();
+        let found = db.neighbours(VId(1), KNOWS).expect("first query");
+        let first_query = start.elapsed();
+
+        assert_eq!(
+            found.len(),
+            batches,
+            "the {batches}-batch database lost edges across recovery"
+        );
+        report.push((batches, reopen, first_query));
+    }
+
+    // NON-VACUITY: a reopen too fast to measure means the clock is not
+    // resolving it, not that recovery is free.
+    for (batches, reopen, _) in &report {
+        assert!(
+            *reopen > Duration::ZERO,
+            "{batches}-batch reopen measured as zero — the clock is not \
+             resolving it; report {report:?}"
+        );
+    }
+
+    // THE SHAPE. Recovery cost per batch must not GROW as the tail lengthens:
+    // that would be superlinear recovery, which is the defect §17's 1 TB
+    // framing exists to catch and which no single-size measurement can see.
+    // Compared per-batch rather than absolutely, since a longer tail legitimately
+    // costs more in total.
+    let per_batch =
+        |(batches, reopen, _): &(usize, Duration, Duration)| reopen.as_nanos() / *batches as u128;
+    let smallest = per_batch(&report[0]);
+    let largest = per_batch(&report[report.len() - 1]);
+    assert!(
+        largest <= smallest.saturating_mul(4),
+        "per-batch recovery cost grew from {smallest} ns at {} batches to \
+         {largest} ns at {} batches — recovery is superlinear in the capsule \
+         tail, which fails §17's gate at any interesting size however fast the \
+         small case looks; report {report:?}",
+        report[0].0,
+        report[report.len() - 1].0
+    );
+
+    // CATASTROPHE CEILING ONLY, absurd next to §17's 1 s.
+    const CATASTROPHE: Duration = Duration::from_secs(5);
+    for (batches, reopen, first_query) in &report {
+        assert!(
+            *reopen < CATASTROPHE && *first_query < CATASTROPHE,
+            "{batches}-batch recovery is pathological: reopen {reopen:?}, first \
+             query {first_query:?}; report {report:?}"
+        );
+    }
+}
+
+/// Commit `batches` separate write batches, each adding one edge from vertex 1.
+///
+/// Separate batches on purpose: recovery replays a capsule tail, so the tail is
+/// lengthened by commits, not by edges inside one commit.
+fn batch_writes(commit: &fgdb_types::context::CommitCx, db: &mut Database, batches: usize) {
+    for b in 0..batches {
+        let mut batch = WriteBatch::new(KNOWS);
+        if b == 0 {
+            batch.create_vertex(VId(1), vec![], vec![]);
+        }
+        batch.create_vertex(VId(2000 + b as u128), vec![], vec![]);
+        batch.add_edge(EId(b as u128 + 1), VId(1), VId(2000 + b as u128), vec![]);
+        db.write(commit, batch).expect("commits");
     }
 }
