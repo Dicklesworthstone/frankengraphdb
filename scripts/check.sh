@@ -1065,9 +1065,25 @@ run_ubs() {
 # nonsensical here, and Doctrine #1 forbids the `ring`/`openssl` helpers the
 # scanner recommends. Adjudicated false-positive and pinned at exactly 2 so a
 # THIRD finding in this class fails closed like any other unadjudicated drift.
+# MOVED 2026-08-05 (fgdb-j8lt): panic 132 -> 137, +5, and it is TREE MOVEMENT
+# that skipped the update-in-same-commit protocol: two commits landed after
+# the fgdb-84p2 re-pin's measurement root (27bf649-based) without touching
+# this table. ATTRIBUTED BY COMMIT DIFFERENTIAL, additions grepped per commit
+# over '*.rs', removals zero everywhere in between:
+#   * 9b80da3 (+2): two test-harness `poll_ready` helpers in the Vfs-generic
+#     CommitCoordinator work panic when a future suspends over a ready-only
+#     source — deliberate cannot-happen assertions in test code.
+#   * 8876ea4 (+3): the FaultVfs crash-matrix campaigns assert a typed ENOSPC
+#     Io error, a TornWrite fault kind, and a refused open-after-hole — all
+#     three `panic!`s are test-only mismatch arms carrying diagnostics.
+# Re-measured with the gate's own invocation (ubs v5.3.8, --only=rust --ci,
+# 230 tracked sources, quiet clone at eb397ee): panic 137 while timing-safe
+# (164), JWT (122) and randomness (2) match baseline EXACTLY; the partition
+# closes at 137+164+122+2 = 425 = the reported Critical total. Same tool
+# version as the baseline-setting run, so this is not detector drift.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=164"
-  "panic!/unreachable!/todo!/unimplemented!=132"
+  "panic!/unreachable!/todo!/unimplemented!=137"
   "JWT decode, validation bypass, or missing claim binding=122"
   "Security-sensitive non-crypto randomness=2"
 )
