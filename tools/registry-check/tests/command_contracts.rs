@@ -135,6 +135,14 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:configuration-transition-spec:commit-joint",
         "cc:local:configuration-transition-spec:commit-new",
         "cc:local:configuration-transition-spec:commit-retirement-floor",
+        // F5c durable-format transition (frozen ordinal 0x001a). Five arms of one
+        // member, inner tags minted from L1218 source order — no wire_types.toml
+        // reservation constrains this family, unlike the F3 armed members.
+        "cc:local:format-transition-spec:advertise-target",
+        "cc:local:format-transition-spec:activate-write-epoch",
+        "cc:local:format-transition-spec:record-first-target-write",
+        "cc:local:format-transition-spec:rewrite-equivalent",
+        "cc:local:format-transition-spec:retire-old-decoder",
     ] {
         assert!(
             registry
@@ -145,7 +153,7 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 33,
+        registry.contracts.len() >= 38,
         "the population may only grow from the landed F1-F4/F5a/F5b rows"
     );
 }

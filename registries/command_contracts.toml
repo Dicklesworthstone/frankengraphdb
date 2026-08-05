@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 6
+registry_epoch = 7
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1092,6 +1092,183 @@ consumed_state_slots = [ "SemanticPayload|Local|conflict_index" ]               
 written_state_slots = [ "SemanticPayload|Local|conflict_index" ]                    # [C][F]
 checkpoint_floor_classes = [ "conflict-index" ]                           # [C][F]
 backup_restore_gc_classes = [ "conflict-index" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F5c durable-format transition — frozen ordinal 26. `FormatTransitionSpec<Role>`
+# is spelled at L1218 as "the closed **Semantic** ordered union" with FIVE arms;
+# rows are per concrete inner tag (L294) sharing the member's outer tag, and the
+# inner tags are minted from the L1218 SOURCE ORDER (no wire_types.toml
+# reservation exists for this family — MEASURED 0 hits — so unlike the F3
+# attempt-registration and outcome-compaction arms these are a fresh mint).
+#
+# SPELLING: L1218 ends "Local uses `LocalFormatTransitionSpec`", which is the
+# dual spelling ruling I-6 resolved — `FormatTransitionSpec<Role>` is canonical,
+# so input/body carry `FormatTransitionSpec<Local>` and the L1218 Local alias is
+# not minted as a second name.
+#
+# THE APPLIED STATE IS ONE OBJECT AND THE FIVE ARMS EACH ADVANCE ONE OF ITS
+# FIELDS, which is why this family is one member rather than five. L1216 spells
+# `FormatCompatibilityState<Role>` as "rooted in Local/Meta canonical state",
+# recording {generation, active_read_epoch_set, active_write_epoch, target_epoch?,
+# phase, exact_voter_storage_reader_support_matrix_ref, first_target_write_position?,
+# rewrite_generation?, old_decoder_retention_floor, body_digest}. Mapping, and it
+# is 1:1: AdvertiseTarget -> target_epoch + support_matrix_ref; ActivateWriteEpoch
+# -> active_write_epoch; RecordFirstTargetWrite -> first_target_write_position;
+# RewriteEquivalent -> rewrite_generation; RetireOldDecoder ->
+# old_decoder_retention_floor + active_read_epoch_set. Every row therefore CASes
+# the same expected/applied schema and differs only in which field it moves.
+#
+# NO ARM SPELLS AN AUTHORITY, FREEZE, OR GATE MEMBER. L1218's five bodies are
+# reproduced in full above and carry none, so authority_arm takes the
+# SourceUnspelled sentinel (the F5b precedent for a body whose exact spelling
+# names no separate authority field) and both audit arms are "Forbidden" by
+# absence — the same [S absent] reading F3 applied to LocalOutcomeCompactionSpec.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:format-transition-spec:advertise-target"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001a                                                   # [S] frozen dense ordinal 26
+input_schema_id = "FormatTransitionSpec<Local>"                           # [S] L1218 union; I-6 canonical spelling
+input_wire_tag = 0x001a                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] AdvertiseTarget is first in L1218 source order
+body_schema_id = "FormatTransitionSpec<Local>"                            # [S]
+result_schema_id = "FormatCompatibilityState<Local>"                      # [S-derived] L1216 the rooted canonical state this family advances
+applied_record_schema_id = "FormatCompatibilityState<Local>"              # [S] L1216: advances target_epoch and the support-matrix ref
+handler_symbol = "fgdb_apply::local::format_transition_spec::advertise_target"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1218 "the closed **Semantic** ordered union"
+sequence_effects = "advertises the target epoch with the exact current and prospective configuration refs, member capability refs, support matrix and required transforms; a member advertisement is accepted only after its bytes and its implementation-generated decoder/encoder conformance suite agree (L1216); establishes no write epoch and no irreversible cutoff"  # [S] L1216/L1218
+expected_state_schema_id = "FormatCompatibilityState<Local>"              # [S] exact_current_and_prospective_configuration_refs pins the current state
+authority_arm = "SourceUnspelled"                                         # [S] the exact L1218 body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled arm
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent from the fully spelled arm
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S] no detach spelled
+construction_dag_recipe_id = "dag:cc:local:format-transition-spec:advertise-target"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|format_compatibility_state", "SemanticPayload|Local|configuration_state" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|format_compatibility_state" ]  # [C][F]
+checkpoint_floor_classes = [ "format-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "format-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:format-transition-spec:activate-write-epoch"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001a                                                   # [S] shared member outer tag
+input_schema_id = "FormatTransitionSpec<Local>"                           # [S]
+input_wire_tag = 0x001a                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] second in L1218 source order
+body_schema_id = "FormatTransitionSpec<Local>"                            # [S]
+result_schema_id = "FormatCompatibilityState<Local>"                      # [S-derived]
+applied_record_schema_id = "FormatCompatibilityState<Local>"              # [S] advances active_write_epoch
+handler_symbol = "fgdb_apply::local::format_transition_spec::activate_write_epoch"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "CASes expected_old_write_epoch to target_write_epoch under the advertisement, the bootstrap transition plan, and a decode proof covering ALL current and joint quorums; contains no guessed future position — its applied command record supplies the assigned activation_applied_position that every later activation reference authenticates"  # [S] L1218 verbatim on the position rule
+expected_state_schema_id = "FormatCompatibilityState<Local>"              # [S] expected_old_write_epoch
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:format-transition-spec:activate-write-epoch"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|format_compatibility_state", "Consensus|Local|joint_quorum_decode_proof" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|format_compatibility_state" ]  # [C][F]
+checkpoint_floor_classes = [ "format-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "format-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:format-transition-spec:record-first-target-write"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001a                                                   # [S] shared member outer tag
+input_schema_id = "FormatTransitionSpec<Local>"                           # [S]
+input_wire_tag = 0x001a                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] third in L1218 source order
+body_schema_id = "FormatTransitionSpec<Local>"                            # [S]
+result_schema_id = "FormatCompatibilityState<Local>"                      # [S-derived]
+applied_record_schema_id = "FormatCompatibilityState<Local>"              # [S] advances first_target_write_position
+handler_symbol = "fgdb_apply::local::format_transition_spec::record_first_target_write"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "records the first AUTHORITATIVE ESCAPE of target-format bytes against the escape receipt, requiring expected_latch_state Escaped; L1216 makes this the irreversible cutoff — pre-arm encoding is legal only in an isolated whole-inode-fenced unowned staging area absent from prepared ownership, receipts, consensus, authenticated indexes, reachability roots and service-visible paths"  # [S] L1216/L1218
+expected_state_schema_id = "FormatCompatibilityState<Local>"              # [S] expected_latch_state:Escaped
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+authority_evidence_target_schema_id = "FormatFirstTargetEscapeReceipt<Local>"  # [S] L1218 escape_receipt_ref:StrongRef<FormatFirstTargetEscapeReceipt<Role>>
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:format-transition-spec:record-first-target-write"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|format_compatibility_state", "SemanticPayload|Local|format_first_target_escape_receipt" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|format_compatibility_state" ]  # [C][F]
+checkpoint_floor_classes = [ "format-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "format-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:format-transition-spec:rewrite-equivalent"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001a                                                   # [S] shared member outer tag
+input_schema_id = "FormatTransitionSpec<Local>"                           # [S]
+input_wire_tag = 0x001a                                                   # [C]
+inner_wire_tag = 0x0004                                                   # [S] fourth in L1218 source order
+body_schema_id = "FormatTransitionSpec<Local>"                            # [S]
+result_schema_id = "FormatCompatibilityState<Local>"                      # [S-derived]
+applied_record_schema_id = "FormatCompatibilityState<Local>"              # [S] advances rewrite_generation
+handler_symbol = "fgdb_apply::local::format_transition_spec::rewrite_equivalent"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "rewrites a BOUNDED object set from source_epoch to target_epoch under semantic-equivalence proof refs and a physical publication plan; the bound is part of the command, so a rewrite is never an open-ended sweep"  # [S] L1218
+expected_state_schema_id = "FormatCompatibilityState<Local>"              # [S] activation_ref pins the activation this rewrite descends from
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:format-transition-spec:rewrite-equivalent"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|format_compatibility_state" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|format_compatibility_state" ]  # [C][F]
+checkpoint_floor_classes = [ "format-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "format-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:format-transition-spec:retire-old-decoder"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001a                                                   # [S] shared member outer tag
+input_schema_id = "FormatTransitionSpec<Local>"                           # [S]
+input_wire_tag = 0x001a                                                   # [C]
+inner_wire_tag = 0x0005                                                   # [S] fifth in L1218 source order
+body_schema_id = "FormatTransitionSpec<Local>"                            # [S]
+result_schema_id = "FormatCompatibilityState<Local>"                      # [S-derived]
+applied_record_schema_id = "FormatCompatibilityState<Local>"              # [S] advances old_decoder_retention_floor and narrows active_read_epoch_set
+handler_symbol = "fgdb_apply::local::format_transition_spec::retire_old_decoder"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "retires the old decoder only against checkpoint and config-floor refs, a COMPLETE reachable-object scan, the backup/restore replay-capability promise floors, and all-member target-only support; retiring while any retained artifact still needs the old decoder is exactly what those floors refuse"  # [S] L1218
+expected_state_schema_id = "FormatCompatibilityState<Local>"              # [S] old_epoch/target_epoch against the recorded state
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:format-transition-spec:retire-old-decoder"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|format_compatibility_state", "SemanticPayload|Local|checkpoint_floor", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|format_compatibility_state" ]  # [C][F]
+checkpoint_floor_classes = [ "format-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "format-epoch" ]                            # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

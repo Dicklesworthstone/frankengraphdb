@@ -78,8 +78,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 28,
-        "the population may only grow from the landed F1-F4/F5a/F5b rows"
+        registry.classifications.len() >= 29,
+        "the population may only grow from the landed F1-F4/F5a/F5b/F5c rows"
     );
 }
 

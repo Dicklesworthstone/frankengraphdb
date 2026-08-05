@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 6
+registry_epoch = 7
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -307,4 +307,19 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:local-conflict-compaction-spec"
 source_location = "a03:1480"
 statement = "LocalConflictCompactionSpec may replace detail only when every possible future transaction has a start/snapshot beyond the selected entry's closed overlap interval and no live witness can add an edge."
+status = "registered"
+
+# --- F5c durable-format transition (frozen ordinal 26). An ARMED member, so the
+# --- row binds the MEMBER-ROOT id and the validator resolves it through family
+# --- resolution against the five "{root}:{arm}" contract rows (round-12 T4).
+# --- The canonical spelling is FormatTransitionSpec<Role> per ruling I-6; L1218's
+# --- closing "Local uses LocalFormatTransitionSpec" is the dual spelling that
+# --- ruling resolved, and the alias is deliberately NOT minted as a second row.
+
+[[classification]]
+type_name = "FormatTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:format-transition-spec"
+source_location = "a02:1218"
+statement = "FormatTransitionSpec<Role> is the closed Semantic ordered union AdvertiseTarget; ActivateWriteEpoch; RecordFirstTargetWrite; RewriteEquivalent; RetireOldDecoder. ActivateWriteEpoch contains no guessed future position; its applied command record supplies the assigned activation_applied_position, which every later activation reference authenticates."
 status = "registered"
