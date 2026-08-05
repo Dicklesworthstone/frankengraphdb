@@ -67,6 +67,7 @@ fn source_forced_seed_population_is_present() {
         "CheckpointInstallSpec",
         "InitialConfigFloorInstallSpec",
         "HistoryCutActivationSpec",
+        "ConfigurationTransitionSpec",
     ] {
         assert!(
             registry
@@ -77,8 +78,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 27,
-        "the population may only grow from the landed F1-F4/F5a rows"
+        registry.classifications.len() >= 28,
+        "the population may only grow from the landed F1-F4/F5a/F5b rows"
     );
 }
 

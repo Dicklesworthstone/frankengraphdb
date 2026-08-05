@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 5
+registry_epoch = 6
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -103,6 +103,17 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:history-cut-activation-spec"
 source_location = "a12:1972"
 statement = "HistoryCutActivationSpec is the sole local strengthening path and atomically replaces the provisional retention-map entry with the activated cut set."
+status = "registered"
+
+# --- F5b configuration transition. The four phase rows above are one closed
+# --- family, so the classification binds the family member root.
+
+[[classification]]
+type_name = "ConfigurationTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:configuration-transition-spec"
+source_location = "a10:1920"
+statement = "ConfigurationTransitionSpec has exactly the source-ordered ProposeJoint, CommitJoint, CommitNew, and CommitRetirementFloor phases; every phase is a separate command."
 status = "registered"
 
 # --- F4 tranche (allocation escape and finalization). Armed families bind

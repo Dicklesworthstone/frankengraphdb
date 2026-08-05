@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 5
+registry_epoch = 6
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -272,6 +272,127 @@ consumed_state_slots = [ "SemanticPayload|Local|retention_map" ]          # [C][
 written_state_slots = [ "SemanticPayload|Local|retention_map" ]           # [C][F]
 checkpoint_floor_classes = [ "retention-cut" ]                            # [C][F]
 backup_restore_gc_classes = [ "retention-cut" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F5b configuration transition — frozen ordinal 25. The closed phase union
+# is source-ordered; each phase is a distinct semantic command and shares its
+# ConfigurationTransitionSpec outer tag.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:configuration-transition-spec:propose-joint"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0019                                                   # [S] frozen dense ordinal 25
+input_schema_id = "ConfigurationTransitionSpec"                          # [S] L1920 exact Local body
+input_wire_tag = 0x0019                                                   # [C]
+inner_wire_tag = 0x0001                                                   # [S] ProposeJoint is first in L1920 source order
+body_schema_id = "ConfigurationTransitionSpec"                           # [S]
+result_schema_id = "ConfigPayloadFloor"                                  # [S] L1077 applied configuration transition floor
+applied_record_schema_id = "ConfigPayloadFloor"                          # [S] L1077 exact applied record
+handler_symbol = "fgdb_apply::local::configuration_transition_spec::propose_joint"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1079 reconfiguration transition
+sequence_effects = "proposes the joint configuration from the exact current basis and candidate closure, establishing the source-ordered reconfiguration chain without permitting retirement"  # [S] L1077/L1079
+expected_state_schema_id = "LogicalStatePayload"                          # [S] L1077 expected prefix and basis state
+authority_arm = "SourceUnspelled"                                         # [S] exact L1920 body names no separate authority field
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1920 direct field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:configuration-transition-spec:propose-joint"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+checkpoint_floor_classes = [ "configuration", "configuration-floor" ]   # [C][F]
+backup_restore_gc_classes = [ "configuration", "configuration-floor" ]  # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:configuration-transition-spec:commit-joint"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0019                                                   # [S] frozen dense ordinal 25
+input_schema_id = "ConfigurationTransitionSpec"                          # [S] L1920 exact Local body
+input_wire_tag = 0x0019                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] CommitJoint is second in L1920 source order
+body_schema_id = "ConfigurationTransitionSpec"                           # [S]
+result_schema_id = "ConfigPayloadFloor"                                  # [S] L1077 applied configuration transition floor
+applied_record_schema_id = "ConfigPayloadFloor"                          # [S] L1077 exact applied record
+handler_symbol = "fgdb_apply::local::configuration_transition_spec::commit_joint"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1079 typed Raft transition increments LogicalCommandSeq
+sequence_effects = "commits the joint configuration only after the candidate closure transfer and basis-floor verification; this typed Raft transition increments LogicalCommandSeq"  # [S] L1079
+expected_state_schema_id = "LogicalStatePayload"                          # [S] L1077 expected prefix and basis state
+authority_arm = "SourceUnspelled"                                         # [S] exact L1920 body names no separate authority field
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1920 direct field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:configuration-transition-spec:commit-joint"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+checkpoint_floor_classes = [ "configuration", "configuration-floor" ]   # [C][F]
+backup_restore_gc_classes = [ "configuration", "configuration-floor" ]  # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:configuration-transition-spec:commit-new"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0019                                                   # [S] frozen dense ordinal 25
+input_schema_id = "ConfigurationTransitionSpec"                          # [S] L1920 exact Local body
+input_wire_tag = 0x0019                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] CommitNew is third in L1920 source order
+body_schema_id = "ConfigurationTransitionSpec"                           # [S]
+result_schema_id = "ConfigPayloadFloor"                                  # [S] L1077 applied configuration transition floor
+applied_record_schema_id = "ConfigPayloadFloor"                          # [S] L1077 exact applied record
+handler_symbol = "fgdb_apply::local::configuration_transition_spec::commit_new"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1079 typed Raft transition increments LogicalCommandSeq
+sequence_effects = "commits the prospective configuration after joint commitment and retains the typed floor through the CommitNew prefix; this typed Raft transition increments LogicalCommandSeq"  # [S] L1079
+expected_state_schema_id = "LogicalStatePayload"                          # [S] L1077 expected prefix and basis state
+authority_arm = "SourceUnspelled"                                         # [S] exact L1920 body names no separate authority field
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1920 direct field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:configuration-transition-spec:commit-new"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+checkpoint_floor_classes = [ "configuration", "configuration-floor" ]   # [C][F]
+backup_restore_gc_classes = [ "configuration", "configuration-floor" ]  # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:configuration-transition-spec:commit-retirement-floor"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0019                                                   # [S] frozen dense ordinal 25
+input_schema_id = "ConfigurationTransitionSpec"                          # [S] L1920 exact Local body
+input_wire_tag = 0x0019                                                   # [C]
+inner_wire_tag = 0x0004                                                   # [S] CommitRetirementFloor is fourth in L1920 source order
+body_schema_id = "ConfigurationTransitionSpec"                           # [S]
+result_schema_id = "ConfigPayloadFloor"                                  # [S] L1077 applied configuration transition floor
+applied_record_schema_id = "ConfigPayloadFloor"                          # [S] L1077 exact applied record
+handler_symbol = "fgdb_apply::local::configuration_transition_spec::commit_retirement_floor"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1079 typed Raft transition increments LogicalCommandSeq
+sequence_effects = "commits the final retirement floor only when the prospective durability set can recover through CommitNew and every mandatory retained, protected retry, accounting, and idempotency closure; old members remain unable to leave, discard payload, or advance GC until it is committed and acknowledged"  # [S] L1079
+expected_state_schema_id = "LogicalStatePayload"                          # [S] L1077 expected prefix and basis state
+authority_arm = "SourceUnspelled"                                         # [S] exact L1920 body names no separate authority field
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze arm spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1920 direct field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:configuration-transition-spec:commit-retirement-floor"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|logical_state_payload", "SemanticPayload|Local|configuration_state", "SemanticPayload|Local|config_payload_floor" ]  # [C][F]
+checkpoint_floor_classes = [ "configuration", "configuration-floor" ]   # [C][F]
+backup_restore_gc_classes = [ "configuration", "configuration-floor" ]  # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

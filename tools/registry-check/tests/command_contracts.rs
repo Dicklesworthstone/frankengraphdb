@@ -130,6 +130,11 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:checkpoint-install-spec",
         "cc:local:initial-config-floor-install-spec",
         "cc:local:history-cut-activation-spec",
+        // F5b configuration transition (frozen ordinal 0x0019)
+        "cc:local:configuration-transition-spec:propose-joint",
+        "cc:local:configuration-transition-spec:commit-joint",
+        "cc:local:configuration-transition-spec:commit-new",
+        "cc:local:configuration-transition-spec:commit-retirement-floor",
     ] {
         assert!(
             registry
@@ -140,8 +145,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 29,
-        "the population may only grow from the landed F1-F4/F5a rows"
+        registry.contracts.len() >= 33,
+        "the population may only grow from the landed F1-F4/F5a/F5b rows"
     );
 }
 
@@ -159,6 +164,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:local-outcome-compaction-spec", 2),
         ("cc:local:allocation-reservation-transition-spec", 2),
         ("cc:local:finalization-allocation-disposition-spec", 2),
+        ("cc:local:configuration-transition-spec", 4),
     ] {
         let family: Vec<_> = registry
             .contracts
