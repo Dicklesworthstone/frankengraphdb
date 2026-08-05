@@ -79,9 +79,10 @@ pub struct LdfiTarget {
 /// 8876ea4): the file-level dual-root boundaries flipped to reachable with
 /// witnesses in `root_store_durability.rs`. `directory-sync` followed the
 /// same day when fgdb-3a3u landed the dirent model, retiring the
-/// `DIRENT_MODEL` cluster; the remaining unreachable rows name the beads
-/// that own their gaps.
-const DUAL_ROOT_MACHINERY: &str = "fgdb-1dgm";
+/// `DIRENT_MODEL` cluster, and the two remaining dual-root boundaries
+/// (certificate, external-CAS) flipped when fgdb-1dgm landed the evidence
+/// reread and continuity seam (45ea028), retiring `DUAL_ROOT_MACHINERY`;
+/// the remaining unreachable rows name the bead that owns their gap.
 const W12: &str = "fgdb-verif-sim-q97e";
 
 const fn later(bead: &'static str) -> Reachability {
@@ -142,15 +143,23 @@ pub static TARGETS: &[LdfiTarget] = &[
     LdfiTarget {
         id: "dual-root-certificate-boundary",
         source_phrase: "certificate ... boundary in dual-root publication",
-        // No certificate exists in the landed dual-slot protocol; the
-        // boundary cannot be faulted because it cannot be reached.
-        reachability: later(DUAL_ROOT_MACHINERY),
+        // The certificate machinery exists since 45ea028:
+        // `RootStore::publish_evidenced` mints `RootPublicationEvidence`
+        // from a post-barrier reread, so a fault on the publish flush
+        // (bit_flip) makes the reread refuse and no evidence exists —
+        // witnessed in `tests/sim_ldfi.rs`
+        // (`damaged_publish_bytes_mint_no_certificate_*`).
+        reachability: Reachability::Reachable,
     },
     LdfiTarget {
         id: "dual-root-external-cas-boundary",
         source_phrase: "external-CAS ... boundary in dual-root publication",
-        // Same: the landed protocol has no external CAS interaction.
-        reachability: later(DUAL_ROOT_MACHINERY),
+        // `RootStore::publish_with_continuity` (45ea028) revalidates the
+        // exact external head before the irreversible slot write, through
+        // the `ContinuityAuthority` seam a lab CAS register implements —
+        // stale, forked, and absent heads are injectable data, witnessed in
+        // `tests/sim_ldfi.rs` (`a_stale_forked_or_absent_continuity_head_*`).
+        reachability: Reachability::Reachable,
     },
     LdfiTarget {
         id: "dual-root-physical-side-effect-boundary",

@@ -132,7 +132,10 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
     //   directory-sync — witnessed by the dirent-durability section of
     //     `lab_vfs.rs` (fgdb-3a3u: a lying directory sync settles nothing
     //     and the armed loss takes the name at crash; the honest control
-    //     keeps it).
+    //     keeps it);
+    //   dual-root certificate + external-CAS boundaries — witnessed below in
+    //     this file (fgdb-1dgm: `damaged_publish_bytes_mint_no_certificate_*`,
+    //     `a_stale_forked_or_absent_continuity_head_*`).
     let witnessed: BTreeSet<&str> = [
         "d1-file-write",
         "d1-file-sync",
@@ -140,6 +143,8 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
         "d2-file-sync",
         "directory-sync",
         "dual-root-ordered-boundary",
+        "dual-root-certificate-boundary",
+        "dual-root-external-cas-boundary",
         "dual-root-physical-side-effect-boundary",
     ]
     .into_iter()
@@ -167,7 +172,7 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, RootSlot};
-use fgdb_chronicle::store::{RootStore, StoreError};
+use fgdb_chronicle::store::{ContinuityAuthority, ContinuityHead, RootStore, StoreError};
 use fgdb_sim::vfs::{FaultKind, FaultPlan, FaultVfs, Trigger};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 
@@ -372,5 +377,152 @@ fn enospc_refuses_the_publish_and_the_prior_root_survives() {
             intact.current(cx).await.expect("new root").slot_generation,
             2
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The witnesses for the remaining dual-root rows (bead fgdb-1dgm). The
+// certificate and external-CAS machinery landed in 45ea028
+// (`publish_evidenced` / `publish_with_continuity`); a row may say Reachable
+// only because these tests inject at its boundary.
+// ---------------------------------------------------------------------------
+
+/// THE CERTIFICATE-BOUNDARY WITNESS: one bit of the publish flush is flipped,
+/// the barrier reports success, and the post-barrier evidence reread refuses —
+/// no `RootPublicationEvidence` exists, and recovery still selects the prior
+/// generation. A faultless twin proves the same workload mints evidence for
+/// generation 2 when the flush is honest, so the refusal is attributable to
+/// the damage and not to the workload.
+#[test]
+fn damaged_publish_bytes_mint_no_certificate_and_the_prior_root_survives() {
+    let faulted_dir = scratch_dir("bitflip-evidence");
+    let control_dir = scratch_dir("bitflip-evidence-control");
+    under_lab(92, move |cx| async move {
+        let cx = &cx;
+        // Eligible flushes: create's is #1, publish's is #2 (directory syncs
+        // consume nothing — same arithmetic the lying-sync witness pins).
+        let vfs = FaultVfs::unix(FaultPlan {
+            bit_flip: Trigger::Nth(2),
+            ..FaultPlan::faultless()
+        });
+        let store = RootStore::with_vfs(vfs.clone(), &faulted_dir);
+        store.create(cx, &root_slot(1)).await.expect("genesis");
+
+        let refused = store.publish_evidenced(cx, &root_slot(2)).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(StoreError::PublicationNotObservable {
+                    expected_generation: 2
+                })
+            ),
+            "damaged published bytes must mint no evidence; got {refused:?}"
+        );
+        let events = vfs.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly the planned flip fired: {events:?}"
+        );
+        assert!(matches!(events[0].kind, FaultKind::BitFlip { .. }));
+        assert_eq!(
+            events[0].path,
+            store.path(),
+            "the 2nd eligible flush must be the publish barrier on manifest.root"
+        );
+
+        let recovered = store.current(cx).await.expect("prior root recovers");
+        assert_eq!(
+            recovered.slot_generation, 1,
+            "the ordering wrote the slot nobody depended on, so the damage \
+             cost only the new generation"
+        );
+
+        let control = RootStore::with_vfs(FaultVfs::unix(FaultPlan::faultless()), &control_dir);
+        control.create(cx, &root_slot(1)).await.expect("genesis");
+        let evidence = control
+            .publish_evidenced(cx, &root_slot(2))
+            .await
+            .expect("with an honest flush the same workload mints evidence");
+        assert_eq!(evidence.slot_generation, 2);
+    });
+}
+
+/// A lab continuity authority: the registered external-authority model in its
+/// smallest useful form — a CAS register whose head the test sets exactly.
+/// `None` models an outage; the store must treat every non-`Ok` as
+/// fail-closed, so this is the complete behaviour space the boundary has.
+struct LabContinuityRegister(Option<ContinuityHead>);
+
+impl ContinuityAuthority for LabContinuityRegister {
+    async fn current_head(&self, _cx: &CommitCx) -> std::io::Result<ContinuityHead> {
+        self.0
+            .ok_or_else(|| std::io::Error::other("continuity authority unreachable"))
+    }
+}
+
+/// THE EXTERNAL-CAS-BOUNDARY WITNESS: a stale head, a forked head, and an
+/// absent authority each refuse the publication BEFORE the irreversible slot
+/// write — the root file is byte-identical after every refusal — and the
+/// matching head then admits the same slot, so the refusals were the
+/// authority's doing and not a poisoned store.
+#[test]
+fn a_stale_forked_or_absent_continuity_head_refuses_before_the_slot_write() {
+    let dir = scratch_dir("continuity-refusals");
+    under_lab(93, move |cx| async move {
+        let cx = &cx;
+        let store = RootStore::with_vfs(FaultVfs::unix(FaultPlan::faultless()), &dir);
+        store.create(cx, &root_slot(1)).await.expect("genesis");
+        let pristine = std::fs::read(store.path()).expect("baseline bytes");
+
+        // root_slot carries continuity_cas_version 12 and digest [0xc3; 32].
+        let matching = ContinuityHead {
+            cas_version: 12,
+            cluster_incarnation_continuity_digest: [0xc3; 32],
+        };
+        let stale = LabContinuityRegister(Some(ContinuityHead {
+            cas_version: 11,
+            ..matching
+        }));
+        let advanced = LabContinuityRegister(Some(ContinuityHead {
+            cas_version: 13,
+            ..matching
+        }));
+        let forked = LabContinuityRegister(Some(ContinuityHead {
+            cluster_incarnation_continuity_digest: [0xee; 32],
+            ..matching
+        }));
+        let absent = LabContinuityRegister(None);
+
+        for (name, authority) in [
+            ("stale", &stale),
+            ("advanced", &advanced),
+            ("forked", &forked),
+            ("absent", &absent),
+        ] {
+            let refused = store
+                .publish_with_continuity(cx, &root_slot(2), authority)
+                .await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(StoreError::ContinuityVersionSkew { .. }
+                        | StoreError::ContinuityForked { .. }
+                        | StoreError::ContinuityUnavailable(_))
+                ),
+                "{name}: expected a continuity refusal, got {refused:?}"
+            );
+            assert_eq!(
+                std::fs::read(store.path()).expect("bytes after refusal"),
+                pristine,
+                "{name}: the refusal must precede the irreversible write"
+            );
+        }
+
+        let evidence = store
+            .publish_with_continuity(cx, &root_slot(2), &LabContinuityRegister(Some(matching)))
+            .await
+            .expect("the matching head admits the same slot");
+        assert_eq!(evidence.slot_generation, 2);
     });
 }
