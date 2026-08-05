@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 8
+registry_epoch = 9
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1627,6 +1627,307 @@ consumed_state_slots = [ "SemanticPayload|Local|remote_configuration_trust_root"
 written_state_slots = [ "SemanticPayload|Local|remote_configuration_trust_root" ]   # [C][F]
 checkpoint_floor_classes = [ "remote-trust" ]                             # [C][F]
 backup_restore_gc_classes = [ "remote-trust" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F7 branches-and-merge — frozen ordinals 31-40, the round-10 frozen order in
+# defining-site sequence (L2002 -> L2031 -> L465/467 -> L457 -> L1012):
+# BranchEpochBoundaryReserveSpec; BranchForkSpec<Local>; BranchGrantSpec<Local>;
+# BranchEpochBoundaryCancelSpec; BranchEpochBoundaryAbandonSpec; BranchRetireSpec;
+# BranchRetireFinalizeSpec; MergeRejectSpec; MergePrepareSpec; MergeExecuteSpec.
+# All ten are ARMLESS: the freeze proposal annotates no inner arms, and the
+# L2002 operation enum (Fork|SnapshotGrant|...) is a body field, never a
+# command-union arm. FRESH MINT: no wire_types.toml reservation names any of
+# the ten (MEASURED 0 hits), the F5c precedent.
+#
+# MergePrepareSpec is ordered semantic per ruling I-5: L457 controls, and
+# L2033's "Pre-order" is the benign built-before-ordering sense (the L1888
+# Topology*Specs reading), not the pre-order-evidence exclusion.
+#
+# Several bodies are unspelled (Cancel/Abandon legality prose at L2031, the
+# retire pair at L465/467, MergeReject at L457, MergeExecute at L1012), so
+# those rows carry T6 SourceUnspelled sentinels on body-dependent keys —
+# legal only on reserved rows, corrected when spelled.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:branch-epoch-boundary-reserve-spec"       # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x001f                                                   # [S] frozen dense ordinal 31
+input_schema_id = "BranchEpochBoundaryReserveSpec"                        # [S] L2002 exact body; "is ordered first"
+input_wire_tag = 0x001f                                                   # [C]
+body_schema_id = "BranchEpochBoundaryReserveSpec"                         # [S]
+result_schema_id = "BranchEpochBoundaryReservation"                       # [S] L2002 "Apply validates current state and creates immutable BranchEpochBoundaryReservation"
+applied_record_schema_id = "BranchEpochBoundaryHoldRoot"                  # [S] L2002 the exclusive branch head-and-epoch hold every branch mutation consults
+handler_symbol = "fgdb_apply::local::branch_epoch_boundary_reserve_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 F7 family projection
+sequence_effects = "is ordered first, before any bundle exists: apply validates the expected head, envelope epoch, write epoch, and boundary-index absence, then creates the immutable Active reservation whose exclusive hold root conflicting work waits on or rejects against while disjoint commands proceed; expensive key closures never depend on a future install sequence"  # [S] L2002
+expected_state_schema_id = "BranchEpochBoundaryHoldRoot"                  # [S-derived] expected_boundary_index_absence is checked against the hold root
+authority_arm = "SourceUnspelled"                                         # [S] the exact L2002 body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L2002 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:branch-epoch-boundary-reserve-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]   # [C][F]
+checkpoint_floor_classes = [ "branch-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:branch-fork-spec"                         # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0020                                                   # [S] frozen dense ordinal 32
+input_schema_id = "BranchForkSpec<Local>"                                 # [S] L2031 BranchForkSpec<Role:AuthorityOwningRole>; I-6 role-generic canonical spelling
+input_wire_tag = 0x0020                                                   # [C]
+body_schema_id = "BranchForkSpec<Local>"                                  # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: L453/L2031 install "the already-known manifests/registries" by prose only; no result schema is spelled
+applied_record_schema_id = "BranchEpochBoundaryReservation"               # [S-derived] apply consumes the Active reservation and releases its holds atomically
+handler_symbol = "fgdb_apply::local::branch_fork_spec"                    # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "deterministic apply creates no key material, ciphertext, placement, envelope, epoch, grant, or manifest and performs no ambient physical selection: it byte-validates the complete pre-built bundle, availability certificate, Active reservation, held head/epochs, closure disjointness, and isolation laws, then atomically installs the already-known manifests/registries, consumes the reservation, and releases its holds; the actual install sequence is assigned by the ordinary order supplement and recorded only in applied lifecycle/provenance"  # [S] L453/L2031
+expected_state_schema_id = "BranchEpochBoundaryReservation"               # [S] required_reservation_state:Active plus expected parent head/epochs
+authority_arm = "SourceUnspelled"                                         # [S] the exact L2031 body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L2031 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05); the bundle availability certificate is a spelled input precondition (L2031)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:branch-fork-spec"              # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_registry", "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]  # [C][F] "branch registry" is the plan's own state name (L465)
+checkpoint_floor_classes = [ "branch-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:branch-grant-spec"                        # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0021                                                   # [S] frozen dense ordinal 33
+input_schema_id = "BranchGrantSpec<Local>"                                # [S] L2031 "the analogous" body over BranchGrantBundle<Role>
+input_wire_tag = 0x0021                                                   # [C]
+body_schema_id = "BranchGrantSpec<Local>"                                 # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: installed grant manifests/registries are prose-named only
+applied_record_schema_id = "BranchEpochBoundaryReservation"               # [S-derived] consumes the Active reservation and releases holds
+handler_symbol = "fgdb_apply::local::branch_grant_spec"                   # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "validates the complete grant bundle, certificate, Active reservation, held basis, closure disjointness, and grant subset laws, installs the known manifests/registries, consumes the reservation, and releases its holds atomically; snapshot issue and revocation encode close, frozen root, then double rotation, while advancing issue may bind the exact active root/epoch without rotation; once a grant or revocation is externally published, recovery must complete the matching install and timeout cannot release the hold"  # [S] L2031
+expected_state_schema_id = "BranchEpochBoundaryReservation"               # [S] required_reservation_state:Active plus expected head/epochs
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L2031 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05); the bundle availability certificate is a spelled input precondition (L2031)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:branch-grant-spec"             # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_registry", "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]  # [C][F]
+checkpoint_floor_classes = [ "branch-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:branch-epoch-boundary-cancel-spec"        # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0022                                                   # [S] frozen dense ordinal 34
+input_schema_id = "BranchEpochBoundaryCancelSpec"                         # [S] L2031 (legality prose; struct body unspelled)
+input_wire_tag = 0x0022                                                   # [C]
+body_schema_id = "BranchEpochBoundaryCancelSpec"                          # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: no result schema spelled
+applied_record_schema_id = "BranchEpochBoundaryReservation"               # [S-derived] terminalizes the Active reservation and releases its holds
+handler_symbol = "fgdb_apply::local::branch_epoch_boundary_cancel_spec"   # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "legal only before any bundle, prepared owner, certificate, or wrap exists; requires NoBoundaryClosureProof and releases the reservation's exclusive holds"  # [S] L2031
+expected_state_schema_id = "BranchEpochBoundaryReservation"               # [S-derived] the Active reservation it cancels
+authority_arm = "NoBoundaryClosureProof"                                  # [S-derived] C-h tier 3: the cancel is evidence-authorized by the closure-absence proof
+authority_evidence_target_schema_id = "NoBoundaryClosureProof"            # [S] L2031 exact required evidence
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:branch-epoch-boundary-cancel-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]   # [C][F]
+checkpoint_floor_classes = [ "branch-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:branch-epoch-boundary-abandon-spec"       # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0023                                                   # [S] frozen dense ordinal 35
+input_schema_id = "BranchEpochBoundaryAbandonSpec"                        # [S] L2031 (legality prose; struct body unspelled)
+input_wire_tag = 0x0023                                                   # [C]
+body_schema_id = "BranchEpochBoundaryAbandonSpec"                         # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "BranchEpochBoundaryReservation"               # [S-derived] terminalizes the reservation after construction
+handler_symbol = "fgdb_apply::local::branch_epoch_boundary_abandon_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "legal after construction only with complete signer/prepared closure, no install order, candidate, or external grant publication, and typed cleanup/zeroization evidence; once a grant or revocation is externally published the matching install must complete instead, and timeout cannot release the hold"  # [S] L2031
+expected_state_schema_id = "BranchEpochBoundaryReservation"               # [S-derived] the Active reservation it abandons
+authority_arm = "SourceUnspelled"                                         # T6: the typed cleanup/zeroization evidence carries no spelled schema name
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:branch-epoch-boundary-abandon-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_epoch_boundary_hold_root" ]   # [C][F]
+checkpoint_floor_classes = [ "branch-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-epoch" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:branch-retire-spec"                       # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0024                                                   # [S] frozen dense ordinal 36
+input_schema_id = "BranchRetireSpec"                                      # [S] L465 "an ordinary semantic control command with its own terminal audit gate and command_contracts.toml row" (struct body unspelled)
+input_wire_tag = 0x0024                                                   # [C]
+body_schema_id = "BranchRetireSpec"                                       # [S]
+result_schema_id = "BranchRetireTombstone"                                # [S] L465 "atomically installs a permanent BranchRetireTombstone in the branch registry"
+applied_record_schema_id = "BranchRetireTombstone"                        # [S] the permanent registry entry; exact authorized retry is idempotent against it
+handler_symbol = "fgdb_apply::local::branch_retire_spec"                  # [C][F]
+transition_class = "Semantic"                                             # [S] L465 verbatim
+sequence_effects = "phase one of two-phase retirement: validates the authorized retire request against the current branch head, envelope/write-key epochs, and registry generation, atomically installs the permanent tombstone (unknown branch, stale head, epoch mismatch, or already-installed tombstone fails closed; exact retry is idempotent); from visibility the branch admits no new writes, forks, merges-as-target, grants, subscriptions, statements, or snapshot acquisitions while history reachable elsewhere is untouched; outstanding cursors take the typed GAP no-successor terminal arm, and the same capsule carries the ResourceLedgerState branch-count release and the EscrowRightsTransitionSpec::RetireBranchOverlay burn with an exact conservation proof"  # [S] L465
+expected_state_schema_id = "SourceUnspelled"                              # T6: the validated branch-registry state carries no spelled schema name
+authority_arm = "SourceUnspelled"                                         # T6: "an authorized retire request" spells no authority schema
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L465 "its own terminal audit gate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:branch-retire-spec"            # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_registry" ]        # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_registry" ]         # [C][F]
+checkpoint_floor_classes = [ "branch-lifecycle" ]                         # [C][F]
+backup_restore_gc_classes = [ "branch-lifecycle" ]                        # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:branch-retire-finalize-spec"              # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0025                                                   # [S] frozen dense ordinal 37
+input_schema_id = "BranchRetireFinalizeSpec"                              # [S] L467 (struct body unspelled)
+input_wire_tag = 0x0025                                                   # [C]
+body_schema_id = "BranchRetireFinalizeSpec"                               # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: "the branch's retention cut" is prose-named only
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::branch_retire_finalize_spec"         # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "phase two, gated on drain that is proved, never waited out: only after every covering retention floor, snapshot/delivery lease, backup pin/legal hold, remote-retention consumer grant, current/prospective configuration floor, and in-flight merge naming the branch has passed the retired head or been terminally disposed may it activate the branch's retention cut and enter the branch's envelope root and write-key epochs into the staged KeyDestroyProposal/KeyDestroyFinalizeSpec destruction pipeline; past the finalize cut a merge naming the branch as source takes the proved cut's HistoryUnavailable contract"  # [S] L467
+expected_state_schema_id = "BranchRetireTombstone"                        # [S-derived] phase two consumes phase one's installed tombstone
+authority_arm = "SourceUnspelled"                                         # T6: the drain proof is established by generated walkers with no spelled evidence schema
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:branch-retire-finalize-spec"   # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_registry", "SemanticPayload|Local|retention_map" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_registry", "SemanticPayload|Local|retention_map" ]   # [C][F]
+checkpoint_floor_classes = [ "branch-lifecycle", "retention-cut" ]        # [C][F] L467: activates the branch's retention cut
+backup_restore_gc_classes = [ "branch-lifecycle", "retention-cut" ]       # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:merge-reject-spec"                        # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0026                                                   # [S] frozen dense ordinal 38
+input_schema_id = "MergeRejectSpec"                                       # [S] L457 "a typed MergeRejectSpec control command" (struct body unspelled)
+input_wire_tag = 0x0026                                                   # [C]
+body_schema_id = "MergeRejectSpec"                                        # [S]
+result_schema_id = "BranchMergeLedgerRoot"                                # [S] L457 installs Rejected{stable_reason_digest} for the token
+applied_record_schema_id = "BranchMergeLedgerRoot"                        # [S] the token's outcome entry
+handler_symbol = "fgdb_apply::local::merge_reject_spec"                   # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "a deterministic pre-effect rejection: installs Rejected with the stable reason digest for the prepared merge token; a retry with the capability returns the original outcome even if the target head has since advanced"  # [S] L457
+expected_state_schema_id = "BranchMergeLedgerRoot"                        # [S-derived] the InFlight entry it terminalizes
+authority_arm = "SourceUnspelled"                                         # T6: no struct body spelled anywhere
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:merge-reject-spec"             # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]   # [C][F]
+checkpoint_floor_classes = [ "branch-merge" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-merge" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:merge-prepare-spec"                       # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0027                                                   # [S] frozen dense ordinal 39; ordered semantic per ruling I-5 (L457 controls; L2033's "Pre-order" is built-before-ordering, the L1888 sense)
+input_schema_id = "MergePrepareSpec"                                      # [S] L457/L2033 exact body
+input_wire_tag = 0x0027                                                   # [C]
+body_schema_id = "MergePrepareSpec"                                       # [S]
+result_schema_id = "BranchMergeLedgerRoot"                                # [S] L2033 the ledger first maps {tenant,principal,target,client_request_nonce} to token plus replay ref
+applied_record_schema_id = "BranchMergeLedgerRoot"                        # [S] the InFlight outcome entry retaining the replay record
+handler_symbol = "fgdb_apply::local::merge_prepare_spec"                  # [C][F]
+transition_class = "Semantic"                                             # [S] ruling I-5
+sequence_effects = "graph-effect-free: durably maps the caller/target-scoped nonce to the pre-minted unguessable token and exact canonical capability bytes (deterministic apply invents neither — the coordinator used production entropy before ordering); replay header/body, target, token, request, idempotency-key digest, verifier key/profile/window, policy/revocation, and authority must byte-match the spec; a same-nonce-and-request retry returns the record's original bytes even if the retry proposed a different candidate, and conflicting commitment reuse is rejected; evaluation/charging cannot begin until the capability is acknowledged and resubmitted"  # [S] L457/L2033
+expected_state_schema_id = "BranchMergeLedgerRoot"                        # [S] expected_merge_index_absence_or_matching_retry
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: capability_replay_ref's MergeOutcomeCapabilityReplayRecord basis carries authority_bound_header (L1012)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L2033 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:merge-prepare-spec"            # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]   # [C][F]
+checkpoint_floor_classes = [ "branch-merge" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-merge" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:merge-execute-spec"                       # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0028                                                   # [S] frozen dense ordinal 40
+input_schema_id = "MergeExecuteSpec"                                      # [S] L1012 (struct body unspelled beyond the carried Execute record)
+input_wire_tag = 0x0028                                                   # [C]
+body_schema_id = "MergeExecuteSpec"                                       # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the merge effect itself rides the target-branch CommitCommand (L3260); no execute result schema is spelled
+applied_record_schema_id = "BranchMergeLedgerRoot"                        # [S-derived] the token's outcome state the execution path advances
+handler_symbol = "fgdb_apply::local::merge_execute_spec"                  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "strongly carries the Execute-arm MergeCapabilityOperationAuthorizationRecord before evaluation or charging; Execute byte-matches the validation subject, current membership, capability, request, header, and target, and neither a ledger token nor a status handle can replace the record"  # [S] L1012
+expected_state_schema_id = "BranchMergeLedgerRoot"                        # [S-derived] the prepared InFlight entry
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: the carried authorization record's header (L1012)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:merge-execute-spec"            # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]   # [C][F]
+checkpoint_floor_classes = [ "branch-merge" ]                             # [C][F]
+backup_restore_gc_classes = [ "branch-merge" ]                            # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

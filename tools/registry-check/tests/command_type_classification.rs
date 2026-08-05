@@ -74,6 +74,14 @@ fn source_forced_seed_population_is_present() {
         "ValidateRemoteConfigurationAnchorSpec",
         "RemoteRetentionGrantSpec",
         "RetentionAuthorityTransferAdoptionSpec",
+        "BranchEpochBoundaryReserveSpec",
+        "BranchForkSpec",
+        "BranchGrantSpec",
+        "BranchRetireSpec",
+        "BranchRetireFinalizeSpec",
+        "MergeRejectSpec",
+        "MergePrepareSpec",
+        "MergeExecuteSpec",
     ] {
         assert!(
             registry
@@ -84,8 +92,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 37,
-        "the population may only grow from the landed F1-F6 rows"
+        registry.classifications.len() >= 47,
+        "the population may only grow from the landed F1-F7 rows"
     );
 }
 

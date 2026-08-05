@@ -160,6 +160,19 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:remote-retention-control-spec:adopt-legacy-authority-transfer",
         "cc:local:advance-remote-configuration-evidence-spec",
         "cc:local:validate-remote-configuration-anchor-spec",
+        // F7 branches-and-merge (frozen ordinals 0x001f-0x0028). Ten armless
+        // rows, fresh dense mint (measured 0 wire_types.toml hits);
+        // MergePrepareSpec is ordered semantic per ruling I-5.
+        "cc:local:branch-epoch-boundary-reserve-spec",
+        "cc:local:branch-fork-spec",
+        "cc:local:branch-grant-spec",
+        "cc:local:branch-epoch-boundary-cancel-spec",
+        "cc:local:branch-epoch-boundary-abandon-spec",
+        "cc:local:branch-retire-spec",
+        "cc:local:branch-retire-finalize-spec",
+        "cc:local:merge-reject-spec",
+        "cc:local:merge-prepare-spec",
+        "cc:local:merge-execute-spec",
     ] {
         assert!(
             registry
@@ -170,8 +183,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 49,
-        "the population may only grow from the landed F1-F6 rows"
+        registry.contracts.len() >= 59,
+        "the population may only grow from the landed F1-F7 rows"
     );
 }
 

@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 8
+registry_epoch = 9
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -393,4 +393,88 @@ type_name = "RetentionAuthorityTransferAdoptionSpec"
 class = "PreOrderArtifact"
 source_location = "a04:1582"
 statement = "C11: the AdoptLegacyAuthorityTransfer arm reaches RetentionAuthorityTransferAdoptionSpec via StrongRef<RetentionAuthorityTransferAdoptionSpec>, the pre-order body shape; the ordered input is RemoteRetentionControlSpec."
+status = "registered"
+
+# --- F7 branches-and-merge (frozen ordinals 31-40). All ten are armless rows;
+# --- MergePrepareSpec is ordered semantic per ruling I-5 (L457 controls, and
+# --- L2033's "Pre-order" is the benign built-before-ordering sense).
+
+[[classification]]
+type_name = "BranchEpochBoundaryReserveSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:branch-epoch-boundary-reserve-spec"
+source_location = "a13:2002"
+statement = "BranchEpochBoundaryReserveSpec is ordered first; apply validates current state and creates the immutable Active BranchEpochBoundaryReservation whose exclusive hold root every branch mutation and key transition consults, so expensive key closures never depend on a future install sequence."
+status = "registered"
+
+[[classification]]
+type_name = "BranchForkSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:branch-fork-spec"
+source_location = "a13:2031"
+statement = "BranchForkSpec<Role:AuthorityOwningRole> consumes the Active boundary reservation and a complete pre-built fork bundle; deterministic apply creates no key material and atomically installs the already-known manifests/registries, consuming the reservation and releasing its holds."
+status = "registered"
+
+[[classification]]
+type_name = "BranchGrantSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:branch-grant-spec"
+source_location = "a13:2031"
+statement = "BranchGrantSpec<Role:AuthorityOwningRole> is the analogous grant install over BranchGrantBundle; snapshot issue and revocation encode close, frozen root, then double rotation, and a published grant or revocation forces recovery to complete the matching install."
+status = "registered"
+
+[[classification]]
+type_name = "BranchEpochBoundaryCancelSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:branch-epoch-boundary-cancel-spec"
+source_location = "a13:2031"
+statement = "BranchEpochBoundaryCancelSpec is legal before any bundle, prepared owner, certificate, or wrap exists and requires NoBoundaryClosureProof."
+status = "registered"
+
+[[classification]]
+type_name = "BranchEpochBoundaryAbandonSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:branch-epoch-boundary-abandon-spec"
+source_location = "a13:2031"
+statement = "BranchEpochBoundaryAbandonSpec is legal after construction only with complete signer/prepared closure, no install order/candidate/external grant publication, and typed cleanup/zeroization evidence."
+status = "registered"
+
+[[classification]]
+type_name = "BranchRetireSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:branch-retire-spec"
+source_location = "a13:465"
+statement = "BranchRetireSpec is an ordinary semantic control command with its own terminal audit gate and command_contracts.toml row; it atomically installs a permanent BranchRetireTombstone, fails closed on unknown branch, stale head, epoch mismatch, or an already-installed tombstone, and exact retry is idempotent."
+status = "registered"
+
+[[classification]]
+type_name = "BranchRetireFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:branch-retire-finalize-spec"
+source_location = "a13:467"
+statement = "Phase two is gated on drain that is proved, never waited out; only then may BranchRetireFinalizeSpec activate the branch's retention cut and enter the branch's envelope root and write-key epochs into the staged key-destruction pipeline."
+status = "registered"
+
+[[classification]]
+type_name = "MergeRejectSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:merge-reject-spec"
+source_location = "a13:457"
+statement = "A deterministic pre-effect rejection uses a typed MergeRejectSpec control command to install Rejected with a stable reason digest."
+status = "registered"
+
+[[classification]]
+type_name = "MergePrepareSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:merge-prepare-spec"
+source_location = "a13:457"
+statement = "The graph-effect-free MergePrepareSpec durably maps the caller/target-scoped nonce to the preidentified stable token and exact canonical capability bytes; ordered semantic per ruling I-5 — L457 controls and L2033's Pre-order is built-before-ordering, not the pre-order-evidence exclusion."
+status = "registered"
+
+[[classification]]
+type_name = "MergeExecuteSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:merge-execute-spec"
+source_location = "a13:1012"
+statement = "MergeExecuteSpec strongly carries the Execute-arm MergeCapabilityOperationAuthorizationRecord before evaluation or charging; neither a ledger token nor a status handle can replace it."
 status = "registered"
