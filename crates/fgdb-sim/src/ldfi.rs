@@ -77,10 +77,10 @@ pub struct LdfiTarget {
 /// fgdb-1xtp's rows were re-derived 2026-08-05 after its three steps landed
 /// (async migration 9b80da3, FaultVfs bac511b, crash-matrix re-expression
 /// 8876ea4): the file-level dual-root boundaries flipped to reachable with
-/// witnesses in `root_store_durability.rs`, and the two clusters that stayed
-/// unreachable now name the beads that actually own their gaps instead of a
-/// discharged one.
-const DIRENT_MODEL: &str = "fgdb-3a3u";
+/// witnesses in `root_store_durability.rs`. `directory-sync` followed the
+/// same day when fgdb-3a3u landed the dirent model, retiring the
+/// `DIRENT_MODEL` cluster; the remaining unreachable rows name the beads
+/// that own their gaps.
 const DUAL_ROOT_MACHINERY: &str = "fgdb-1dgm";
 const W12: &str = "fgdb-verif-sim-q97e";
 
@@ -118,13 +118,14 @@ pub static TARGETS: &[LdfiTarget] = &[
     LdfiTarget {
         id: "directory-sync",
         source_phrase: "every file/directory action in D1/D2",
-        // The SEAM now exists — chronicle syncs directories through the Vfs
-        // (9b80da3) and FaultVfs opens directory handles (8876ea4) — but a
-        // directory sync carries no dirty sectors, so no fault class can fire
-        // on it: dirents are unmodelled. Reachable means "can be FAULTED",
-        // not "can be called", so this stays unreachable until the fault
-        // model represents dirent durability.
-        reachability: later(DIRENT_MODEL),
+        // FaultVfs models dirent durability (fgdb-3a3u): namespace operations
+        // stay pending until their parent directory honestly syncs,
+        // `FaultPlan::dirent_lie` can lie at exactly that barrier, and
+        // `FaultPlan::dirent_loss` decides per pending operation whether a
+        // crash rolls the name back. Witnessed in `tests/lab_vfs.rs` (a
+        // lying directory sync loses a synced file's name across a crash;
+        // the honest control keeps it).
+        reachability: Reachability::Reachable,
     },
     // "every ordered, certificate, external-CAS, or physical side-effect
     //  boundary in dual-root publication"

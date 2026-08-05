@@ -128,12 +128,17 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
     //     `durability_semantics_e2e.rs` (fsync lies, interior tear, ENOSPC,
     //     bit flip, all through the real commit path);
     //   dual-root ordered + physical boundaries — witnessed below in this
-    //     file (`a_lying_publish_sync_*`, `enospc_refuses_the_publish_*`).
+    //     file (`a_lying_publish_sync_*`, `enospc_refuses_the_publish_*`);
+    //   directory-sync — witnessed by the dirent-durability section of
+    //     `lab_vfs.rs` (fgdb-3a3u: a lying directory sync settles nothing
+    //     and the armed loss takes the name at crash; the honest control
+    //     keeps it).
     let witnessed: BTreeSet<&str> = [
         "d1-file-write",
         "d1-file-sync",
         "d2-file-write",
         "d2-file-sync",
+        "directory-sync",
         "dual-root-ordered-boundary",
         "dual-root-physical-side-effect-boundary",
     ]
@@ -243,13 +248,19 @@ fn root_slot(generation: u64) -> RootSlot {
     }
 }
 
-/// THE ORDERED-BOUNDARY WITNESS: the sync that makes a publish durable LIES,
-/// the publish is acknowledged, and after a crash recovery selects the PRIOR
-/// generation — cleanly, because the ordering wrote the slot nobody was
-/// depending on. A faultless twin proves the workload publishes generation 2
-/// when the barrier is honest, so the regression is attributable to the lie.
+/// THE ORDERED-BOUNDARY WITNESS: the sync that makes a publish durable LIES.
+/// Since the evidence reread landed (45ea028, fgdb-1dgm), the store itself
+/// catches the lie — the post-barrier reread goes through the same Vfs, sees
+/// the durable bytes, and refuses with `PublicationNotObservable` instead of
+/// letting the caller believe an unobservable publication. Before AND after a
+/// crash, recovery selects the PRIOR generation — cleanly, because the
+/// ordering wrote the slot nobody was depending on. A faultless twin proves
+/// the workload publishes generation 2 when the barrier is honest, so the
+/// refusal is attributable to the lie. (The pre-45ea028 contract this witness
+/// originally pinned — lie acknowledged, generation lost silently at crash —
+/// is exactly what the reread exists to remove: fgdb-bh1n.)
 #[test]
-fn a_lying_publish_sync_loses_the_acknowledged_generation_cleanly() {
+fn a_lying_publish_sync_is_caught_by_the_reread_and_loses_cleanly() {
     let faulted_dir = scratch_dir("lying-publish");
     let control_dir = scratch_dir("lying-publish-control");
     under_lab(90, move |cx| async move {
@@ -261,10 +272,16 @@ fn a_lying_publish_sync_loses_the_acknowledged_generation_cleanly() {
         });
         let store = RootStore::with_vfs(vfs.clone(), &faulted_dir);
         store.create(cx, &root_slot(1)).await.expect("genesis");
-        store
-            .publish(cx, &root_slot(2))
-            .await
-            .expect("the publish is ACKNOWLEDGED — that is the point");
+        let refused = store.publish(cx, &root_slot(2)).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(StoreError::PublicationNotObservable {
+                    expected_generation: 2
+                })
+            ),
+            "the reread must catch the lying barrier and refuse typed; got {refused:?}"
+        );
 
         let events = vfs.events();
         assert_eq!(events.len(), 1, "exactly the planned lie fired: {events:?}");
@@ -275,12 +292,18 @@ fn a_lying_publish_sync_loses_the_acknowledged_generation_cleanly() {
             "the 2nd eligible sync must be the publish barrier on manifest.root"
         );
 
-        vfs.crash();
+        let pre_crash = store.current(cx).await.expect("store still opens");
+        assert_eq!(
+            pre_crash.slot_generation, 1,
+            "a refused publication must leave the prior generation selected"
+        );
+
+        vfs.crash().await.expect("crash rollback");
         let reopened = RootStore::with_vfs(vfs.clone(), &faulted_dir);
         let recovered = reopened.current(cx).await.expect("recovery still opens");
         assert_eq!(
             recovered.slot_generation, 1,
-            "the acknowledged generation 2 never reached the platter, and its \
+            "the lied-about generation 2 never reached the platter, and its \
              loss is CLEAN because the ordering damaged only the inactive slot"
         );
 

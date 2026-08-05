@@ -968,7 +968,7 @@ fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
              per-commit trigger arithmetic the whole section relies on"
         );
 
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let reopened = open_faulted(cx, &vfs, &dir).await;
         assert_eq!(
             reopened.chain().len(),
@@ -1021,7 +1021,7 @@ fn a_d1_fsync_lie_makes_the_committed_marker_fail_closed_at_read() {
             "the 5th eligible sync must be commit 3's capsule D1"
         );
 
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let reopened = open_faulted(cx, &vfs, &dir).await;
         assert_eq!(
             reopened.chain().len(),
@@ -1119,7 +1119,7 @@ fn enospc_at_either_barrier_refuses_typed_and_recovery_resumes() {
 
             // Space returns (a faultless model over the same directory): the
             // committed prefix is intact and the abandoned sequence is reused.
-            vfs.crash();
+            vfs.crash().await.expect("crash rollback");
             drop(faulted);
             let recovered_vfs = FaultVfs::unix(FaultPlan::faultless());
             let mut recovered = open_faulted(cx, &recovered_vfs, &dir).await;
@@ -1203,7 +1203,7 @@ fn an_interior_tear_inside_the_d2_flush_is_corruption_not_a_tail() {
         };
         assert!(end > start, "the tear names the hole it made");
 
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let damaged = std::fs::read(&log_path).expect("durable log");
         let result = match CommitCoordinator::open_with_vfs(
             cx,
@@ -1288,7 +1288,7 @@ fn a_flipped_bit_in_a_durable_capsule_heals_through_the_erasure_code() {
             .count();
         assert_eq!(differing, 1, "exactly one byte differs — the flipped one");
 
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let reopened = open_faulted(cx, &vfs, &dir).await;
         assert_eq!(reopened.chain().len(), 3);
         assert_eq!(

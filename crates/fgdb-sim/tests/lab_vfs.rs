@@ -105,7 +105,7 @@ fn a_faultless_plan_injects_nothing() {
     runtime().block_on(async {
         let bytes = sector_pattern(4);
         write_and_sync(&vfs, &path, &bytes).await.expect("sync");
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let durable = vfs.read(&path).await.expect("read after crash");
         assert_eq!(durable, bytes, "a faultless plan must be byte-transparent");
     });
@@ -136,7 +136,7 @@ fn a_lying_sync_reports_success_and_persists_nothing() {
         write_and_sync(&vfs, &path, &bytes)
             .await
             .expect("the lie reports success");
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let durable = vfs.read(&path).await.expect("read after crash");
         assert!(
             durable.is_empty(),
@@ -202,7 +202,7 @@ fn a_later_honest_sync_writes_what_the_lie_left_dirty() {
         asupersync::fs::VfsFile::sync_all(&file)
             .await
             .expect("honest sync");
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
 
         let durable = vfs.read(&path).await.expect("read after crash");
         assert_eq!(durable.len(), 2 * SECTOR);
@@ -248,7 +248,7 @@ fn nth_zero_never_fires() {
         write_and_sync(&vfs, &path, &bytes)
             .await
             .expect("an Nth(0) plan must not lie, tear, or fail the sync");
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let durable = vfs.read(&path).await.expect("read after crash");
         assert_eq!(
             durable, bytes,
@@ -276,7 +276,7 @@ fn a_torn_write_loses_an_interior_sector_and_keeps_the_bytes_after_it() {
     let bytes = sector_pattern(5);
     runtime().block_on(async {
         write_and_sync(&vfs, &path, &bytes).await.expect("sync");
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
 
         let events = vfs.events();
         assert_eq!(events.len(), 1, "expected exactly one tear: {events:?}");
@@ -332,7 +332,7 @@ fn a_torn_write_needs_an_interior_sector_to_lose() {
     let bytes = sector_pattern(2);
     runtime().block_on(async {
         write_and_sync(&vfs, &path, &bytes).await.expect("sync");
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let durable = vfs.read(&path).await.expect("read after crash");
         assert_eq!(durable, bytes);
     });
@@ -361,7 +361,7 @@ fn a_bit_flip_damages_exactly_one_bit_of_durable_data() {
     let bytes = sector_pattern(2);
     runtime().block_on(async {
         write_and_sync(&vfs, &path, &bytes).await.expect("sync");
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
 
         let events = vfs.events();
         assert_eq!(events.len(), 1, "expected exactly one flip: {events:?}");
@@ -428,7 +428,7 @@ fn out_of_space_refuses_the_flush_and_leaves_the_bytes_dirty() {
             "a refused flush must leave every byte dirty"
         );
 
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         let durable = vfs.read(&path).await.expect("read after crash");
         assert!(
             durable.is_empty(),
@@ -467,7 +467,7 @@ fn a_handle_does_not_survive_a_crash() {
             .expect("write");
 
         assert_eq!(vfs.generation(), 0);
-        vfs.crash();
+        vfs.crash().await.expect("crash rollback");
         assert_eq!(vfs.generation(), 1);
 
         // The pre-crash handle is gone: its unsynced bytes cannot leak across
@@ -555,4 +555,248 @@ fn a_different_seed_injects_a_different_schedule() {
 /// and not a magic number derived from anything.
 const fn seed_1xtp() -> u64 {
     0x1774_7000_0000_0001
+}
+
+// ---------------------------------------------------------------------------
+// Dirent durability (fgdb-3a3u)
+// ---------------------------------------------------------------------------
+
+/// The pending dirent count of a lie, or `None` for any other fault. Same
+/// destructure-without-a-panic-token shape as [`torn_range`].
+fn dirent_lie_pending(kind: FaultKind) -> Option<u64> {
+    match kind {
+        FaultKind::DirentSyncLie { pending_ops } => Some(pending_ops),
+        _ => None,
+    }
+}
+
+/// Opens `dir` and syncs it — the dirent barrier as chronicle spells it.
+async fn sync_dir<V: Vfs>(vfs: &FaultVfs<V>, dir: &Path) -> std::io::Result<()> {
+    let handle = vfs.open(dir, &OpenOptions::new().read(true)).await?;
+    asupersync::fs::VfsFile::sync_all(&handle).await
+}
+
+#[test]
+fn an_unsynced_dirent_loses_a_synced_files_name_across_a_crash() {
+    let dir = scratch_dir("dirent-unsynced");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_loss: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let bytes = sector_pattern(2);
+        // The file's CONTENTS are honestly durable...
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        let visible = vfs.read(&path).await.expect("pre-crash read");
+        assert_eq!(visible, bytes, "the synced contents are on the platter");
+        // ...but the parent directory was never synced, so the NAME is not.
+        vfs.crash().await.expect("crash rollback");
+        let error = vfs
+            .read(&path)
+            .await
+            .expect_err("the name must not survive the crash");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "fsync-the-file-forget-the-directory must lose the file"
+        );
+    });
+    let events = vfs.events();
+    assert_eq!(events.len(), 1, "exactly the loss: {events:?}");
+    assert_eq!(events[0].path, path, "the event names the vanished file");
+    assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+    assert_eq!(events[0].kind.class(), "dirent-loss");
+}
+
+#[test]
+fn an_honest_directory_sync_makes_the_name_immune_to_loss() {
+    let dir = scratch_dir("dirent-honest");
+    let path = dir.join("log");
+    // Loss on every pending operation — but a settled operation is not
+    // pending, which is exactly what this control witnesses.
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_loss: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let bytes = sector_pattern(2);
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        assert_eq!(vfs.pending_dirent_ops(), 1, "the create owes the parent");
+        sync_dir(&vfs, &dir).await.expect("dir sync");
+        assert_eq!(vfs.pending_dirent_ops(), 0, "the honest sync settles it");
+        vfs.crash().await.expect("crash rollback");
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(durable, bytes, "file sync + dir sync must survive a crash");
+    });
+    assert!(
+        vfs.events().is_empty(),
+        "a settled name cannot be lost: {:?}",
+        vfs.events()
+    );
+}
+
+#[test]
+fn a_lying_directory_sync_settles_nothing() {
+    let dir = scratch_dir("dirent-lie");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_lie: Trigger::Always,
+        dirent_loss: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let bytes = sector_pattern(2);
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        // The caller is told the namespace is durable.
+        sync_dir(&vfs, &dir).await.expect("the lie reports success");
+        assert_eq!(
+            vfs.pending_dirent_ops(),
+            1,
+            "the lie must settle nothing, exactly as an fsync lie leaves \
+             sectors dirty"
+        );
+        vfs.crash().await.expect("crash rollback");
+        let error = vfs
+            .read(&path)
+            .await
+            .expect_err("the lied-about name must not survive");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    });
+
+    let events = vfs.events();
+    assert_eq!(events.len(), 2, "the lie, then the loss: {events:?}");
+    assert_eq!(
+        events[0].path, dir,
+        "the lie must name the DIRECTORY, not the file"
+    );
+    assert_eq!(
+        dirent_lie_pending(events[0].kind),
+        Some(1),
+        "one pending operation was lied about: {events:?}"
+    );
+    assert_eq!(events[0].kind.class(), "dirent-sync-lie");
+    assert_eq!(events[1].kind, FaultKind::DirentLoss { op: "created" });
+}
+
+#[test]
+fn a_directory_sync_with_nothing_pending_consumes_no_trigger() {
+    let dir = scratch_dir("dirent-noop");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_lie: Trigger::Nth(1),
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        // Nothing is pending: this sync must be an honest no-op that does
+        // NOT advance the eligibility counter.
+        sync_dir(&vfs, &dir).await.expect("no-op dir sync");
+        assert!(
+            vfs.events().is_empty(),
+            "a no-op dir sync consumed a trigger: {:?}",
+            vfs.events()
+        );
+        // The first ELIGIBLE sync is the one Nth(1) fires on.
+        write_and_sync(&vfs, &path, &sector_pattern(1))
+            .await
+            .expect("sync");
+        sync_dir(&vfs, &dir).await.expect("dir sync");
+        assert_eq!(
+            vfs.events().len(),
+            1,
+            "Nth(1) must fire on the first eligible sync: {:?}",
+            vfs.events()
+        );
+    });
+}
+
+#[test]
+fn an_unsynced_rename_reverts_and_restores_the_clobbered_destination() {
+    let dir = scratch_dir("dirent-rename");
+    let source = dir.join("manifest.tmp");
+    let target = dir.join("manifest.root");
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_loss: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let old = sector_pattern(1);
+        let new = sector_pattern(2);
+        // Both names durable first.
+        write_and_sync(&vfs, &target, &old).await.expect("sync old");
+        write_and_sync(&vfs, &source, &new).await.expect("sync new");
+        sync_dir(&vfs, &dir).await.expect("dir sync");
+        // The rename-over is applied but its dirents never synced.
+        vfs.rename(&source, &target).await.expect("rename");
+        let visible = vfs.read(&target).await.expect("pre-crash read");
+        assert_eq!(visible, new, "pre-crash readers see the new namespace");
+        vfs.crash().await.expect("crash rollback");
+        let reverted = vfs.read(&target).await.expect("target after crash");
+        assert_eq!(reverted, old, "the clobbered destination must reappear");
+        let restored = vfs.read(&source).await.expect("source after crash");
+        assert_eq!(
+            restored, new,
+            "the renamed file must be back at its old name"
+        );
+    });
+}
+
+#[test]
+fn an_unsynced_removal_restores_the_durable_bytes() {
+    let dir = scratch_dir("dirent-remove");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_loss: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let bytes = sector_pattern(2);
+        write_and_sync(&vfs, &path, &bytes).await.expect("sync");
+        sync_dir(&vfs, &dir).await.expect("dir sync");
+        vfs.remove_file(&path).await.expect("remove");
+        let error = vfs.read(&path).await.expect_err("pre-crash unlink shows");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        vfs.crash().await.expect("crash rollback");
+        let durable = vfs.read(&path).await.expect("read after crash");
+        assert_eq!(durable, bytes, "an unsettled removal never happened");
+    });
+}
+
+#[test]
+fn a_synced_rename_and_removal_stay_applied_across_a_crash() {
+    let dir = scratch_dir("dirent-settled");
+    let source = dir.join("a");
+    let target = dir.join("b");
+    let removed = dir.join("c");
+    // Loss armed on every pending operation: only settlement protects.
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_loss: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        let bytes = sector_pattern(1);
+        write_and_sync(&vfs, &source, &bytes).await.expect("sync a");
+        write_and_sync(&vfs, &removed, &bytes)
+            .await
+            .expect("sync c");
+        sync_dir(&vfs, &dir).await.expect("dir sync");
+        vfs.rename(&source, &target).await.expect("rename");
+        vfs.remove_file(&removed).await.expect("remove");
+        sync_dir(&vfs, &dir).await.expect("settling dir sync");
+        assert_eq!(vfs.pending_dirent_ops(), 0, "everything settled");
+        vfs.crash().await.expect("crash rollback");
+        let durable = vfs.read(&target).await.expect("target after crash");
+        assert_eq!(durable, bytes, "a settled rename must survive");
+        let gone = vfs.read(&source).await.expect_err("source stays gone");
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+        let also_gone = vfs.read(&removed).await.expect_err("removal stays");
+        assert_eq!(also_gone.kind(), std::io::ErrorKind::NotFound);
+    });
 }

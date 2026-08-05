@@ -105,6 +105,24 @@ fn candidates(plan: FaultPlan) -> Vec<(&'static str, FaultPlan)> {
             },
         ));
     }
+    if plan.dirent_lie != Trigger::Never {
+        out.push((
+            "dropped the dirent-lie class",
+            FaultPlan {
+                dirent_lie: Trigger::Never,
+                ..plan
+            },
+        ));
+    }
+    if plan.dirent_loss != Trigger::Never {
+        out.push((
+            "dropped the dirent-loss class",
+            FaultPlan {
+                dirent_loss: Trigger::Never,
+                ..plan
+            },
+        ));
+    }
 
     // 2. Drop the space budget.
     if plan.space_budget.is_some() {
@@ -141,6 +159,24 @@ fn candidates(plan: FaultPlan) -> Vec<(&'static str, FaultPlan)> {
             "weakened the bit flip to fire once",
             FaultPlan {
                 bit_flip: Trigger::Nth(1),
+                ..plan
+            },
+        ));
+    }
+    if plan.dirent_lie == Trigger::Always {
+        out.push((
+            "weakened the dirent lie to fire once",
+            FaultPlan {
+                dirent_lie: Trigger::Nth(1),
+                ..plan
+            },
+        ));
+    }
+    if plan.dirent_loss == Trigger::Always {
+        out.push((
+            "weakened the dirent loss to fire once",
+            FaultPlan {
+                dirent_loss: Trigger::Nth(1),
                 ..plan
             },
         ));

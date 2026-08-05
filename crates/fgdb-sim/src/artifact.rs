@@ -372,13 +372,15 @@ impl Replay {
             None => "none".to_string(),
         };
         format!(
-            "{}:{:#x}:{}:{}:{}:{}:{}",
+            "{}:{:#x}:{}:{}:{}:{}:{}:{}:{}",
             self.scenario.id(),
             self.plan.seed,
             self.plan.sector_bytes,
             encode_trigger(self.plan.fsync_lie),
             encode_trigger(self.plan.torn_write),
             encode_trigger(self.plan.bit_flip),
+            encode_trigger(self.plan.dirent_lie),
+            encode_trigger(self.plan.dirent_loss),
             budget,
         )
     }
@@ -390,8 +392,8 @@ impl Replay {
     /// Returns a message naming the first field that did not parse.
     //
     // Not a JWT decode. This parses our own replay descriptor —
-    // "scenario:seed:sector:lie:torn:flip:budget", seven colon-separated
-    // fields — and there is no token, signature, key, claim set or expiry
+    // "scenario:seed:sector:lie:torn:flip:dirent-lie:dirent-loss:budget",
+    // nine colon-separated fields — and there is no token, signature, key, claim set or expiry
     // anywhere in it. MEASURED: zero occurrences of `jsonwebtoken` in any
     // manifest in this workspace, and doctrine 1's closed dependency universe
     // forbids adding one, so a JWT finding here is a false positive BY
@@ -401,9 +403,20 @@ impl Replay {
     // ubs:ignore
     pub fn decode(text: &str) -> Result<Self, String> {
         let parts: Vec<&str> = text.split(':').collect();
-        let [scenario, seed, sector, lie, torn, flip, budget] = parts.as_slice() else {
+        let [
+            scenario,
+            seed,
+            sector,
+            lie,
+            torn,
+            flip,
+            dirent_lie,
+            dirent_loss,
+            budget,
+        ] = parts.as_slice()
+        else {
             return Err(format!(
-                "expected 7 colon-separated fields, got {}",
+                "expected 9 colon-separated fields, got {}",
                 parts.len()
             ));
         };
@@ -423,6 +436,8 @@ impl Replay {
                 fsync_lie: decode_trigger(lie)?,
                 torn_write: decode_trigger(torn)?,
                 bit_flip: decode_trigger(flip)?,
+                dirent_lie: decode_trigger(dirent_lie)?,
+                dirent_loss: decode_trigger(dirent_loss)?,
                 space_budget: if *budget == "none" {
                     None
                 } else {
@@ -570,7 +585,12 @@ async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Res
             format!("sync failed: {error}"),
         ));
     }
-    vfs.crash();
+    vfs.crash().await.map_err(|error| {
+        Failure::new(
+            FailureKind::IoFailed,
+            format!("crash rollback failed: {error}"),
+        )
+    })?;
 
     let durable = vfs.read(&path).await.map_err(|error| {
         Failure::new(

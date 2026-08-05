@@ -71,11 +71,47 @@
 //!   between handles; here, dirty bytes are visible only through the handle
 //!   that wrote them. The model is deliberately stricter than reality: it can
 //!   only make a test fail that reality would also fail, never the reverse.
-//! * **Dirent durability.** A directory can be opened and synced — chronicle's
-//!   D1 and D2 both owe directory barriers, and refusing the open would make
-//!   the real commit path undrivable — but the sync is an honest no-op that
-//!   consumes no trigger counts: the model does not represent dirents, so the
-//!   namespace-loss crash arms remain `CrashPoint`'s to express.
+//! * **Dirent tearing.** Namespace loss is modelled whole-operation (see
+//!   below): a crash loses an unsynced dirent operation entirely or not at
+//!   all. A half-applied rename (both names present, or neither) is a
+//!   journal-implementation artifact this model does not represent.
+//! * **`create_dir`/`remove_dir`/`hard_link` durability.** Directory-tree
+//!   shape and extra links are applied straight to the backing store and
+//!   survive every crash; only *file* dirents (create, rename, remove) are
+//!   modelled. Chronicle creates its database directory once at open and
+//!   never links; modelling those would add surface no landed campaign can
+//!   drive.
+//!
+//! # Dirent durability (fgdb-3a3u)
+//!
+//! A file sync makes an inode's *contents* durable; it does not make the
+//! *name* by which recovery finds that inode durable — that is the parent
+//! directory's sync. So namespace operations are tracked as **pending dirent
+//! operations** against their parent directory:
+//!
+//! * creating a file (an open that brings it into existence, including
+//!   [`Vfs::write`]), renaming, and removing all record a pending operation
+//!   owing a sync to the affected parent directory (both parents, for a
+//!   cross-directory rename);
+//! * the backing store is updated immediately — pre-crash readers see the
+//!   new namespace exactly as a page cache would show it;
+//! * an **honest directory sync** settles every pending operation owing that
+//!   directory (and syncs the backing directory);
+//! * a **lying directory sync** ([`FaultPlan::dirent_lie`]) reports success
+//!   and settles nothing — the names are still volatile;
+//! * at [`FaultVfs::crash`], each still-pending operation is put to
+//!   [`FaultPlan::dirent_loss`]: a loser is rolled back against the backing
+//!   store (a created file's name vanishes even if its contents were
+//!   honestly synced — the classic fsync-the-file, forget-the-directory bug;
+//!   a rename reverts, restoring any clobbered destination's durable bytes;
+//!   a removed file reappears with its durable bytes), while a survivor was
+//!   committed by the journal anyway — the measured common case, and why an
+//!   ENOSPC-refused capsule's residue outlives a faultless crash.
+//!
+//! A directory sync with nothing pending stays an honest no-op consuming no
+//! trigger counts, so the landed campaigns' `Nth` arithmetic over file syncs
+//! is untouched: `dirent_lie` and `dirent_loss` have their own eligibility
+//! counters.
 //!
 //! (This fence was briefly demoted to `text` when the doc target failed with
 //! `E0463: can't find crate for fgdb_chronicle` against `src/lib.rs:31` — the
@@ -94,7 +130,10 @@
 //! };
 //! let vfs = FaultVfs::unix(plan);
 //! // ... drive the database through `vfs`, then:
-//! vfs.crash();
+//! # async fn drive(vfs: fgdb_sim::vfs::FaultVfs) -> std::io::Result<()> {
+//! vfs.crash().await?;
+//! # Ok(())
+//! # }
 //! for event in vfs.events() {
 //!     println!("{event:?}");
 //! }
@@ -162,6 +201,18 @@ pub struct FaultPlan {
     pub torn_write: Trigger,
     /// One bit flipped in what a flush just wrote.
     pub bit_flip: Trigger,
+    /// A directory sync that returns success while settling none of the
+    /// pending dirent operations owing that directory. Eligible only when at
+    /// least one operation is pending, on its own counter — file syncs and
+    /// directory syncs never share `Nth` arithmetic.
+    pub dirent_lie: Trigger,
+    /// A pending dirent operation actually lost at [`FaultVfs::crash`],
+    /// decided per pending operation on its own counter. `Never` (the
+    /// default) models a journal that happened to commit the namespace
+    /// update anyway — the measured common case, and what keeps a faultless
+    /// plan namespace-transparent. An operation an honest directory sync
+    /// settled is immune: durable names cannot be lost.
+    pub dirent_loss: Trigger,
     /// Total bytes that may reach the backing store before flushes fail with
     /// ENOSPC. `None` is unlimited.
     pub space_budget: Option<u64>,
@@ -178,6 +229,8 @@ impl FaultPlan {
             fsync_lie: Trigger::Never,
             torn_write: Trigger::Never,
             bit_flip: Trigger::Never,
+            dirent_lie: Trigger::Never,
+            dirent_loss: Trigger::Never,
             space_budget: None,
         }
     }
@@ -233,6 +286,20 @@ pub enum FaultKind {
         /// Bytes the budget still allowed.
         remaining: u64,
     },
+    /// A directory sync returned success while settling none of the dirent
+    /// operations owing that directory. They stay pending: a later honest
+    /// sync still settles them, and a crash can still lose them.
+    DirentSyncLie {
+        /// Pending dirent operations the caller believed durable that are not.
+        pending_ops: u64,
+    },
+    /// A pending dirent operation was lost at crash and rolled back against
+    /// the backing store. The event's path is the name that vanished.
+    DirentLoss {
+        /// Which namespace operation was lost: "created", "renamed", or
+        /// "removed".
+        op: &'static str,
+    },
 }
 
 impl FaultKind {
@@ -248,6 +315,8 @@ impl FaultKind {
             Self::TornWrite { .. } => "torn-write",
             Self::BitFlip { .. } => "bit-flip",
             Self::OutOfSpace { .. } => "out-of-space",
+            Self::DirentSyncLie { .. } => "dirent-sync-lie",
+            Self::DirentLoss { .. } => "dirent-loss",
         }
     }
 }
@@ -272,13 +341,59 @@ enum Class {
     FsyncLie = 0,
     TornWrite = 1,
     BitFlip = 2,
+    DirentLie = 3,
+    DirentLoss = 4,
+}
+
+/// One namespace operation applied to the backing store whose durability is
+/// still owed to one or two parent-directory syncs.
+struct NamespaceOp {
+    /// Parent directories that must honestly sync before this operation is
+    /// durable. Two entries only for a cross-directory rename.
+    owing: Vec<PathBuf>,
+    kind: NamespaceKind,
+}
+
+enum NamespaceKind {
+    /// `path` came into existence. Loss-undo removes it: the name was never
+    /// durable, even if the file's contents were honestly synced.
+    Created { path: PathBuf },
+    /// `from` became `to`. Loss-undo renames back and, when the rename
+    /// clobbered an existing `to`, restores that file's durable bytes.
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+        replaced: Option<Vec<u8>>,
+    },
+    /// `path` was unlinked. Loss-undo restores its durable bytes.
+    Removed { path: PathBuf, durable: Vec<u8> },
+}
+
+impl NamespaceKind {
+    /// The stable operation name a [`FaultKind::DirentLoss`] event reports.
+    const fn op_name(&self) -> &'static str {
+        match self {
+            Self::Created { .. } => "created",
+            Self::Renamed { .. } => "renamed",
+            Self::Removed { .. } => "removed",
+        }
+    }
+
+    /// The name the loss makes vanish (or reappear, for a removal).
+    fn vanished_path(&self) -> &Path {
+        match self {
+            Self::Created { path } | Self::Removed { path, .. } => path,
+            Self::Renamed { to, .. } => to,
+        }
+    }
 }
 
 struct LabState {
     plan: FaultPlan,
     rng: u64,
-    eligible: [u64; 3],
+    eligible: [u64; 5],
     events: Vec<FaultEvent>,
+    namespace: Vec<NamespaceOp>,
     flushed_bytes: u64,
     generation: u64,
     seq: u64,
@@ -300,6 +415,8 @@ impl LabState {
             Class::FsyncLie => self.plan.fsync_lie,
             Class::TornWrite => self.plan.torn_write,
             Class::BitFlip => self.plan.bit_flip,
+            Class::DirentLie => self.plan.dirent_lie,
+            Class::DirentLoss => self.plan.dirent_loss,
         }
     }
 
@@ -360,8 +477,9 @@ impl Lab {
             state: Mutex::new(LabState {
                 plan,
                 rng: plan.seed,
-                eligible: [0; 3],
+                eligible: [0; 5],
                 events: Vec::new(),
+                namespace: Vec::new(),
                 flushed_bytes: 0,
                 generation: 0,
                 seq: 0,
@@ -443,8 +561,78 @@ impl<V: Vfs> FaultVfs<V> {
     /// operation, so unsynced bytes cannot leak across the crash by a caller
     /// that kept its file open. A fresh [`Vfs::open`] afterwards reads the
     /// backing store, which holds exactly what was honestly synced.
-    pub fn crash(&self) {
-        self.lab.lock().generation += 1;
+    ///
+    /// Each pending dirent operation — a namespace change whose parent
+    /// directory never honestly synced — is put to [`FaultPlan::dirent_loss`],
+    /// oldest first so the eligibility counter is stable. Losers are rolled
+    /// back against the backing store, newest first; survivors were committed
+    /// by the journal anyway and are durable from here on (see the module's
+    /// dirent-durability section).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store refuses a rollback operation.
+    /// That is harness breakage, not a simulated fault, and swallowing it
+    /// would hand later assertions a namespace neither durable nor volatile.
+    pub async fn crash(&self) -> io::Result<()> {
+        let lost = {
+            let mut lab = self.lab.lock();
+            lab.generation += 1;
+            let pending = std::mem::take(&mut lab.namespace);
+            let mut lost = Vec::new();
+            for op in pending {
+                if lab.fires(Class::DirentLoss) {
+                    lab.record(
+                        op.kind.vanished_path(),
+                        FaultKind::DirentLoss {
+                            op: op.kind.op_name(),
+                        },
+                    );
+                    lost.push(op);
+                }
+            }
+            lost
+        };
+        for op in lost.into_iter().rev() {
+            match op.kind {
+                NamespaceKind::Created { path } => {
+                    match self.backing.remove_file(&path).await {
+                        Ok(()) => {}
+                        // Already absent (e.g. a later, also-lost removal was
+                        // rolled back first): the name is gone either way.
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                NamespaceKind::Renamed { from, to, replaced } => {
+                    self.backing.rename(&to, &from).await?;
+                    if let Some(durable) = replaced {
+                        self.backing.write(&to, &durable).await?;
+                    }
+                }
+                NamespaceKind::Removed { path, durable } => {
+                    self.backing.write(&path, &durable).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Dirent operations recorded and not yet settled by an honest sync of
+    /// every parent directory owing them.
+    #[must_use]
+    pub fn pending_dirent_ops(&self) -> usize {
+        self.lab.lock().namespace.len()
+    }
+
+    fn record_namespace(&self, owing: Vec<PathBuf>, kind: NamespaceKind) {
+        // An operation with no parent to sync (a root-level path) has no
+        // barrier to model; it is durable the moment the backing store
+        // applied it, which the caller already did.
+        if owing.is_empty() {
+            return;
+        }
+        self.lab.lock().namespace.push(NamespaceOp { owing, kind });
     }
 
     /// How many crashes have been simulated.
@@ -482,6 +670,7 @@ pub struct FaultFile<V: Vfs> {
     lab: Arc<Lab>,
     path: PathBuf,
     generation: u64,
+    is_dir: bool,
     state: Mutex<FileState>,
 }
 
@@ -547,8 +736,56 @@ impl<V: Vfs> FaultFile<V> {
             .collect()
     }
 
+    /// The directory half of the sync surface: settle or lie about the
+    /// pending dirent operations owing this directory.
+    async fn sync_dirents(&self) -> io::Result<()> {
+        let pending_ops = {
+            let lab = self.lab.lock();
+            lab.namespace
+                .iter()
+                .filter(|op| op.owing.contains(&self.path))
+                .count() as u64
+        };
+        if pending_ops == 0 {
+            // Nothing owes this directory, so no fault class is eligible: an
+            // honest no-op must not consume a trigger count. This is also
+            // what keeps the landed campaigns' file-sync arithmetic intact.
+            return Ok(());
+        }
+
+        {
+            let mut lab = self.lab.lock();
+            if lab.fires(Class::DirentLie) {
+                lab.record(&self.path, FaultKind::DirentSyncLie { pending_ops });
+                // Return success having settled nothing: the operations stay
+                // pending, exactly as an fsync lie leaves sectors dirty.
+                return Ok(());
+            }
+        }
+
+        // Honest: every pending operation stops owing this directory, and an
+        // operation owing nothing further is durable. Matching is by the
+        // path this handle was opened with — the same spelling callers pass
+        // when they create under a directory and then sync it.
+        {
+            let mut lab = self.lab.lock();
+            for op in &mut lab.namespace {
+                op.owing.retain(|dir| dir != &self.path);
+            }
+            lab.namespace.retain(|op| !op.owing.is_empty());
+        }
+        let directory = self
+            .backing
+            .open(&self.path, &OpenOptions::new().read(true))
+            .await?;
+        directory.sync_all().await
+    }
+
     async fn flush_through(&self) -> io::Result<()> {
         self.alive()?;
+        if self.is_dir {
+            return self.sync_dirents().await;
+        }
 
         let sector_bytes = {
             let lab = self.lab.lock();
@@ -838,22 +1075,32 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
     type File = FaultFile<V>;
 
     async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File> {
+        // Existence is sampled before the delegated open: `OpenOptions` has
+        // no getters, so "did this open create the file" is observable only
+        // as before-absent/after-present. A directory opens only to be
+        // synced (`sync_directory` is how a dirent barrier is expressed over
+        // a `Vfs`); its handle carries an empty image, nothing can go dirty
+        // through it, and its sync is the dirent settle/lie surface. Reading
+        // a directory as bytes would be EISDIR, which is why it cannot share
+        // the file arm below.
+        let before = self.backing.metadata(path).await;
+        let existed = before.is_ok();
+        let is_directory = before
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(false);
         // Delegate the open itself so create/create_new/truncate/mode all keep
         // their real semantics, including their real errors.
         drop(self.backing.open(path, opts).await?);
-        // A directory opens only to be synced (`sync_directory` is how a
-        // dirent barrier is expressed over a `Vfs`). Its contents are dirents,
-        // which this model does not represent — dirent-level loss is in the
-        // not-modelled list — so the handle carries an empty image, nothing
-        // can go dirty through it, and a sync through it is an honest no-op
-        // that consumes no trigger counts. Reading a directory as bytes would
-        // be EISDIR, which is why this cannot share the file arm below.
-        let is_directory = self
-            .backing
-            .metadata(path)
-            .await
-            .map(|metadata| metadata.file_type().is_dir())
-            .unwrap_or(false);
+        if !existed && self.backing.metadata(path).await.is_ok() {
+            // The open brought the file into existence: its dirent owes the
+            // parent directory a sync before the name is durable.
+            self.record_namespace(
+                path.parent().map(Path::to_path_buf).into_iter().collect(),
+                NamespaceKind::Created {
+                    path: path.to_path_buf(),
+                },
+            );
+        }
         let image = if is_directory {
             Vec::new()
         } else {
@@ -869,6 +1116,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             lab: Arc::clone(&self.lab),
             path: path.to_path_buf(),
             generation,
+            is_dir: is_directory,
             state: Mutex::new(FileState {
                 image,
                 dirty: BTreeSet::new(),
@@ -910,11 +1158,53 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
     }
 
     async fn remove_file(&self, path: &Path) -> io::Result<()> {
-        self.backing.remove_file(path).await
+        // The durable bytes are sampled before the unlink so a crash can
+        // restore them: an unsettled removal never happened, namespace-wise.
+        let durable = match self.backing.read(path).await {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        self.backing.remove_file(path).await?;
+        if let Some(durable) = durable {
+            self.record_namespace(
+                path.parent().map(Path::to_path_buf).into_iter().collect(),
+                NamespaceKind::Removed {
+                    path: path.to_path_buf(),
+                    durable,
+                },
+            );
+        }
+        Ok(())
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.backing.rename(from, to).await
+        // A rename touches two dirents: the unlink under `from`'s parent and
+        // the link under `to`'s parent. It is durable only once every
+        // distinct parent involved has honestly synced. A clobbered `to` has
+        // its durable bytes sampled first, so a crash restores both names.
+        let replaced = match self.backing.read(to).await {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        self.backing.rename(from, to).await?;
+        let mut owing: Vec<PathBuf> = from
+            .parent()
+            .into_iter()
+            .chain(to.parent())
+            .map(Path::to_path_buf)
+            .collect();
+        owing.dedup();
+        self.record_namespace(
+            owing,
+            NamespaceKind::Renamed {
+                from: from.to_path_buf(),
+                to: to.to_path_buf(),
+                replaced,
+            },
+        );
+        Ok(())
     }
 
     async fn copy(&self, src: &Path, dst: &Path) -> io::Result<u64> {
