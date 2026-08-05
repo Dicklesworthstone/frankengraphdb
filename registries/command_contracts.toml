@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 11
+registry_epoch = 12
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -2711,6 +2711,259 @@ consumed_state_slots = [ "SemanticPayload|Local|dp_request_index" ]       # [C][
 written_state_slots = [ "SemanticPayload|Local|dp_request_index" ]        # [C][F]
 checkpoint_floor_classes = [ "dp-request" ]                               # [C][F]
 backup_restore_gc_classes = [ "dp-request" ]                              # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F10 audit — frozen ordinals 55-60, SIX members per the round-10 frozen order:
+# AuditTicketAdmissionSpec (55); AuditTerminalFreezeSpec (56, ARMED, the three
+# L1834 arms Arm|BeginRelease|FinalizeRelease); AuditTerminalPlanAbandonSpec
+# <Local> (57, SEMANTIC per ruling I-4, the L1918 required row);
+# AuditTerminalSpec (58); AuditRecoverySpec (59); AuditCompletenessTransition-
+# Spec<Local> (60). AuditSigningAttemptSupersedeSpec stays MAINTENANCE per
+# I-4's sibling note (L1848 "nonsemantic maintenance input") and takes no row
+# here; AuditVisibilityAdvanceSpec is Protocol-plane maintenance (L982/L2713)
+# and AuditTicketResolutionBatchSpec is absent (L1918).
+#
+# FRESH MINT for the freeze arms: no wire_types.toml union_variant reservation
+# names AuditTerminalFreezeSpec (MEASURED: its only wire_types presence is the
+# LifecycleScaffoldingNotRequired consumer closure), so inner tags
+# 0x0001-0x0003 mint from the L1834 closed-union source order
+# Arm|BeginRelease|FinalizeRelease — the F5c/F8/F9 precedent, recorded so
+# nobody later mistakes it for a reservation match.
+#
+# GATE ARMS ARE SOURCE-SPLIT: the three freeze arms and PlanAbandon carry
+# terminal_audit_gate:LifecycleScaffoldingNotRequired verbatim (L1834/L1840,
+# and the a21:2619 consumer closure lists exactly these schemas); admission,
+# recovery, and completeness carry StructurallyInapplicable{AuditSystemAuthority}
+# (L982/L986/L2713 "cannot recurse through their own gate"); AuditTerminalSpec's
+# fully spelled 4-member body carries NO gate — it consumes the existing
+# pending ticket instead (L982/L2713).
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:audit-ticket-admission-spec"              # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0037                                                   # [S] frozen dense ordinal 55
+input_schema_id = "AuditTicketAdmissionSpec"                              # [S] L948/L2713 exact 5-member body {ticket_ref,expected_prior_continuity_ref,expected_prior_cas_version,returned_continuity_ref,external_cas_receipt_ref}
+input_wire_tag = 0x0037                                                   # [C]
+body_schema_id = "AuditTicketAdmissionSpec"                               # [S]
+result_schema_id = "AuditContinuityRecord"                                # [S] returned_continuity_ref: the direct TicketIssued CAS successor the import installs
+applied_record_schema_id = "AuditContinuityRecord"                        # [S-derived] the continuity chain the admission advances (ticket-index and unresolved commitments are its fields, L948)
+handler_symbol = "fgdb_apply::local::audit_ticket_admission_spec"         # [C][F]
+transition_class = "Semantic"                                             # [S] L982 verbatim: "Semantic AuditTicketAdmissionSpec"
+sequence_effects = "ticket issuance first CAS-adds a pending ticket externally, then orders its local import; admission verifies that the returned record and receipt are the direct TicketIssued CAS successor, advances the expected ticket sequence by one, adds exactly this ticket to the ticket-index and unresolved commitments, and changes no unrelated continuity field; orphan-ticket recovery uses the same relation, and protected processing begins only after the imported admission is audit-visible"  # [S] L948/L2713
+expected_state_schema_id = "AuditContinuityRecord"                        # [S] expected_prior_continuity_ref + expected_prior_cas_version
+authority_arm = "SourceUnspelled"                                         # [S] the exact 5-member body names no authority member; shard groups never originate one (L2713)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "StructurallyInapplicable{AuditSystemAuthority}"  # [S] L982/L2713: audit lifecycle transitions cannot recurse through their own gate
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-ticket-admission-spec"   # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-continuity" ]                         # [C][F]
+backup_restore_gc_classes = [ "audit-continuity" ]                        # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:audit-terminal-freeze-spec:arm"           # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0038                                                   # [S] frozen dense ordinal 56
+input_schema_id = "AuditTerminalFreezeSpec"                               # [S] L1834 "the closed lifecycle-scaffolding transition Arm|BeginRelease|FinalizeRelease"
+input_wire_tag = 0x0038                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] Arm is first in the L1834 source order (fresh mint)
+body_schema_id = "AuditTerminalFreezeSpec"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the installed hold/freeze state names no result schema
+applied_record_schema_id = "AuditTerminalFreezeRecord"                    # [S] the armed freeze record BeginRelease later consumes by StrongRef (L1834)
+handler_symbol = "fgdb_apply::local::audit_terminal_freeze_spec::arm"     # [C][F]
+transition_class = "Semantic"                                             # [S] lifecycle-scaffolding members land Semantic (the F1/F2 LocalBeginReservationSpec precedent); L1916 names freeze in the semantic family
+sequence_effects = "Arm apply atomically validates the complete basis, installs its control-terminal-basis hold, and freezes it before any terminal signature; the arm exists before the operation claim it may atomically create, so its wrapper is exactly NotRequired{evidence:LifecycleScaffolding{...}} prebuilt against the pending-ticket/request basis, never pointing to the future claim (L1708); arm scopes for Local are LocalControl and LocalBeginTerminal"  # [S] L1834/L1708/L950
+expected_state_schema_id = "SourceUnspelled"                              # T6: expected_index_absence_or_matching_retry names no schema; the terminal-attempt index carries no spelled name
+authority_arm = "SourceUnspelled"                                         # [S] the arm spells owner:TerminalAuditOwner and a ticket ref, no authority header; authorization rides the prebuilt LifecycleScaffolding evidence (L1708)
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no freeze member is spelled on the arm bodies themselves
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1834 verbatim: terminal_audit_gate:LifecycleScaffoldingNotRequired
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-terminal-freeze-spec:arm"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-terminal" ]                           # [C][F]
+backup_restore_gc_classes = [ "audit-terminal" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:audit-terminal-freeze-spec:begin-release" # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0038                                                   # [S] shared member outer tag
+input_schema_id = "AuditTerminalFreezeSpec"                               # [S]
+input_wire_tag = 0x0038                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] second in the L1834 source order
+body_schema_id = "AuditTerminalFreezeSpec"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "AuditTerminalFreezeRecord"                    # [S-derived] the freeze record whose index value BeginRelease moves Armed -> ReleasePending
+handler_symbol = "fgdb_apply::local::audit_terminal_freeze_spec::begin_release"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "BeginRelease first makes every signer in the complete eligible universe — or a registered blocking set proved to intersect every legal event and resolution threshold subset — durably reject new attempts/locks/shares for this freeze at the named journal generations, then selects ReleasePending without dropping the hold"  # [S] L1834
+expected_state_schema_id = "AuditTerminalFreezeRecord"                    # [S] armed_freeze_ref with expected_index_value:Armed and expected_terminal_attempt_index_generation
+authority_arm = "SourceUnspelled"                                         # [S] no authority header spelled; the blocking-set proof is a spelled input, not an authority member
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1834 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-terminal-freeze-spec:begin-release"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-terminal" ]                           # [C][F]
+backup_restore_gc_classes = [ "audit-terminal" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:audit-terminal-freeze-spec:finalize-release"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0038                                                   # [S] shared member outer tag
+input_schema_id = "AuditTerminalFreezeSpec"                               # [S]
+input_wire_tag = 0x0038                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] third in the L1834 source order
+body_schema_id = "AuditTerminalFreezeSpec"                                # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: Released is an index value, not a spelled result schema
+applied_record_schema_id = "AuditTerminalFreezeRecord"                    # [S-derived] the freeze record FinalizeRelease alone moves to Released
+handler_symbol = "fgdb_apply::local::audit_terminal_freeze_spec::finalize_release"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "FinalizeRelease byte-matches proof/freeze/ticket/domain/basis, unchanged generations, and the exact hold release recipe, and alone produces Released; Consumed remains an atomic terminal output; admitted Local mutation and W12 write use their ordered final-certification reservation holds instead, and all abandoned plan/attempt/lock/share evidence remains rooted through FinalizeRelease and the audit-retirement floor"  # [S] L1834/L1840
+expected_state_schema_id = "AuditTerminalFreezeRecord"                    # [S] release_pending_freeze_ref with expected_index_value:ReleasePending and the closed attempt/signer journal vector
+authority_arm = "SourceUnspelled"                                         # [S] no authority header spelled; NoTerminalSignatureOrOrderProof is a spelled input, not an authority member
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1834 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-terminal-freeze-spec:finalize-release"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-terminal" ]                           # [C][F]
+backup_restore_gc_classes = [ "audit-terminal" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:audit-terminal-plan-abandon-spec"         # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0039                                                   # [S] frozen dense ordinal 57
+input_schema_id = "AuditTerminalPlanAbandonSpec<Local>"                   # [S] L1840 "the exact freeze-backed Local-or-Meta Semantic input"; I-6 canonical spelling; required Local row at L1918
+input_wire_tag = 0x0039                                                   # [C]
+body_schema_id = "AuditTerminalPlanAbandonSpec<Local>"                    # [S]
+result_schema_id = "AuditTerminalPlanAbandonment"                         # [S] apply creates it and marks the semantic plan AbandonedForFreezeRelease
+applied_record_schema_id = "AuditTerminalPlanAbandonment"                 # [S]
+handler_symbol = "fgdb_apply::local::audit_terminal_plan_abandon_spec"    # [C][F]
+transition_class = "Semantic"                                             # [S] ruling I-4: SEMANTIC; L1840 verbatim "Semantic input"
+sequence_effects = "legal only while the freeze is ReleasePending, every concrete event attempt is either share-free or quorum-impossible and durably closed, no event/resolution/terminal order/candidate exists, and every otherwise eligible signer is release-fenced; apply creates AuditTerminalPlanAbandonment and marks the semantic plan AbandonedForFreezeRelease; it erases nothing and authorizes no replacement terminal, any event/resolution attempt/prepared terminal/order/candidate makes true plan abandonment permanently illegal, and admitted-write reservations cannot use this spec"  # [S] L1840
+expected_state_schema_id = "AuditTerminalFreezeRecord"                    # [S] release_pending_freeze_ref plus expected_attempt_index_entry and the per-signer release-fence vector
+authority_arm = "SourceUnspelled"                                         # [S] the exact body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1840 verbatim: terminal_audit_gate:LifecycleScaffoldingNotRequired
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-terminal-plan-abandon-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_terminal_freeze_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-terminal" ]                           # [C][F]
+backup_restore_gc_classes = [ "audit-terminal" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:audit-terminal-spec"                      # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003a                                                   # [S] frozen dense ordinal 58
+input_schema_id = "AuditTerminalSpec"                                     # [S] L982/L2713 exact 4-member body {ticket_ref,expected_pending_ticket_digest:WeakDigest,event_ref,terminal_resolution_ref}
+input_wire_tag = 0x003a                                                   # [C]
+body_schema_id = "AuditTerminalSpec"                                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the resolution effect names no result schema
+applied_record_schema_id = "AuditContinuityRecord"                        # [S-derived] resolving the pending ticket clears its unresolved commitment, a continuity field (L948)
+handler_symbol = "fgdb_apply::local::audit_terminal_spec"                 # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 audit family; the non-mutating/pre-effect terminal path
+sequence_effects = "consumes exactly the already-pending ticket and may not request another; it is the non-mutating and pre-effect terminal path, not a second mutation terminal, rejects every scope/outcome mismatch, and remains reserved for terminal paths that create no other durable semantic mutation (a pre-registration denial or abandoned BEGIN is instead resolved only by the begin-terminal path, L1706)"  # [S] L982/L2713/L1706
+expected_state_schema_id = "AuditTicket"                                  # [S-derived] expected_pending_ticket_digest binds the pending ticket
+authority_arm = "SourceUnspelled"                                         # [S] the exact body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "Forbidden"                                     # [S] absent from the fully spelled body — terminal consumes the existing ticket instead of carrying a gate (L2713)
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-terminal-spec"           # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-terminal" ]                           # [C][F]
+backup_restore_gc_classes = [ "audit-terminal" ]                          # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:audit-recovery-spec"                      # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003b                                                   # [S] frozen dense ordinal 59
+input_schema_id = "AuditRecoverySpec"                                     # [S] L982 "narrowly scoped" (struct body unspelled)
+input_wire_tag = 0x003b                                                   # [C]
+body_schema_id = "AuditRecoverySpec"                                      # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: no struct body spelled anywhere
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::audit_recovery_spec"                 # [C][F]
+transition_class = "Semantic"                                             # [S] L982 groups it with the audit lifecycle semantic transitions
+sequence_effects = "the narrowly scoped audit recovery input; orphan-ticket recovery uses the same direct-successor admission relation as AuditTicketAdmissionSpec (L948), and recovery semantic transitions use StructurallyInapplicable gates rather than recursing through their own gate"  # [S] L982/L948/L2713
+expected_state_schema_id = "SourceUnspelled"                              # T6
+authority_arm = "SourceUnspelled"                                         # T6
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "StructurallyInapplicable{AuditSystemAuthority}"  # [S] L982 verbatim: TerminalAuditGate::StructurallyInapplicable{AuditSystemAuthority} in the sequence-neutral wrapper
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-recovery-spec"           # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-continuity" ]                         # [C][F]
+backup_restore_gc_classes = [ "audit-continuity" ]                        # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:audit-completeness-transition-spec"       # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003c                                                   # [S] frozen dense ordinal 60
+input_schema_id = "AuditCompletenessTransitionSpec<Local>"                # [S] L986 <Role> exact body; I-6 canonical spelling
+input_wire_tag = 0x003c                                                   # [C]
+body_schema_id = "AuditCompletenessTransitionSpec<Local>"                 # [S]
+result_schema_id = "AuditContinuityRecord"                                # [S] returned_continuity_ref: the direct CompletenessChanged CAS successor the import installs
+applied_record_schema_id = "AuditContinuityRecord"                        # [S-derived] the continuity chain the completeness transition advances
+handler_symbol = "fgdb_apply::local::audit_completeness_transition_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S] L982/L2713 completeness semantic transition
+sequence_effects = "imports the exact CompletenessChanged successor/receipt pair locally through the same pipeline rules; the order is acyclic — no portable pre-CAS object owns a local reference and no continuity record points to its later receipt or import; the continuity status and future profile validator permanently exclude the recorded gap, no later operator, restore, or profile change may reassert completeness across it, and same-identity restore reconciles it before ticket-gated operations resume"  # [S] L986
+expected_state_schema_id = "AuditContinuityRecord"                        # [S] expected_prior_continuity_ref + expected_prior_cas_version
+authority_arm = "AuthorityBoundHeader<Local>"                             # [S-derived] C-h tier 2: the consumed AuditCompletenessTransitionOperationRecord<Local> carries authority_bound_header (L984)
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "StructurallyInapplicable{AuditSystemAuthority}"  # [S] L986 verbatim: terminal_audit_gate:StructurallyInapplicable{AuditSystemAuthority}
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:audit-completeness-transition-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|audit_continuity_record" ]   # [C][F]
+checkpoint_floor_classes = [ "audit-completeness" ]                       # [C][F]
+backup_restore_gc_classes = [ "audit-completeness" ]                      # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 11
+registry_epoch = 12
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -602,4 +602,61 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:dp-transition-spec"
 source_location = "a21:936"
 statement = "DpTransitionSpec<Role> has exactly Prepare, Abandon, ArmCharge, Start, Yield, Reclaim, CommitResult, and Compact; its u8 arm tags follow that source order. ChargeRefused, attach-to-ChargedIdle, ChargedMaterialPending, and UnavailableAfterCharge are selected only by PrivacyContinuityImportSpec charge bindings and exact restore/import dispositions, never by a DpTransitionSpec arm."
+status = "registered"
+
+# --- F10 audit (frozen ordinals 55-60). SIX members; AuditTerminalFreezeSpec
+# --- is ARMED (Arm|BeginRelease|FinalizeRelease, L1834), so its row binds the
+# --- member-root id (round-12 T4). AuditSigningAttemptSupersedeSpec stays
+# --- MAINTENANCE per I-4 (L1848 "nonsemantic maintenance input") and
+# --- AuditVisibilityAdvanceSpec is Protocol-plane maintenance — neither takes
+# --- a Semantic classification row here; both remain Phase B maintenance
+# --- rows. Warden §12 audit lines (948-986) anchor under the topical slice
+# --- a21; the freeze/abandon defining lines (1834/1840) are in a08's range.
+
+[[classification]]
+type_name = "AuditTicketAdmissionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:audit-ticket-admission-spec"
+source_location = "a21:2713"
+statement = "Exact AuditTicketAdmissionSpec is the 5-member CAS-import record; its validator requires the direct TicketIssued successor, exact sequence increment, exact ticket/unresolved addition, matching receipt/CAS versions, and no unrelated change; Semantic per L982 with a StructurallyInapplicable{AuditSystemAuthority} gate."
+status = "registered"
+
+[[classification]]
+type_name = "AuditTerminalFreezeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:audit-terminal-freeze-spec"
+source_location = "a08:1834"
+statement = "AuditTerminalFreezeSpec is the closed lifecycle-scaffolding transition Arm|BeginRelease|FinalizeRelease; Arm atomically validates the complete basis, installs its hold, and freezes it before any terminal signature; BeginRelease selects ReleasePending without dropping the hold; FinalizeRelease alone produces Released."
+status = "registered"
+
+[[classification]]
+type_name = "AuditTerminalPlanAbandonSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:audit-terminal-plan-abandon-spec"
+source_location = "a08:1840"
+statement = "AuditTerminalPlanAbandonSpec is the exact freeze-backed Local-or-Meta Semantic input, legal only while the freeze is ReleasePending; apply creates AuditTerminalPlanAbandonment and marks the semantic plan AbandonedForFreezeRelease; SEMANTIC per ruling I-4, with the required Local row spelled at L1918."
+status = "registered"
+
+[[classification]]
+type_name = "AuditTerminalSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:audit-terminal-spec"
+source_location = "a21:2713"
+statement = "Exact AuditTerminalSpec is the 4-member body consuming exactly the already-pending ticket; it is the non-mutating/pre-effect terminal path, not a second mutation terminal, may not request another ticket, and rejects every scope/outcome mismatch."
+status = "registered"
+
+[[classification]]
+type_name = "AuditRecoverySpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:audit-recovery-spec"
+source_location = "a21:982"
+statement = "Narrowly scoped AuditRecoverySpec is one of the audit lifecycle semantic transitions that cannot recurse through their own gate, carrying TerminalAuditGate::StructurallyInapplicable{AuditSystemAuthority} in its sequence-neutral wrapper; orphan-ticket recovery uses the same admission relation (L948)."
+status = "registered"
+
+[[classification]]
+type_name = "AuditCompletenessTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:audit-completeness-transition-spec"
+source_location = "a21:986"
+statement = "AuditCompletenessTransitionSpec<Role> imports the exact CompletenessChanged successor/receipt pair locally through the same pipeline rules with terminal_audit_gate:StructurallyInapplicable{AuditSystemAuthority}; the continuity status and future profile validator permanently exclude the recorded gap."
 status = "registered"

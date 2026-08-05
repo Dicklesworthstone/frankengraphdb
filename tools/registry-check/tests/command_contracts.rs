@@ -207,6 +207,18 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:dp-transition-spec:reclaim",
         "cc:local:dp-transition-spec:commit-result",
         "cc:local:dp-transition-spec:compact",
+        // F10 audit (frozen ordinals 0x0037-0x003c). AuditTerminalFreezeSpec's
+        // three inner tags are a fresh mint from the L1834 closed-union source
+        // order Arm|BeginRelease|FinalizeRelease (measured: no wire_types
+        // union_variant reservation names the family).
+        "cc:local:audit-ticket-admission-spec",
+        "cc:local:audit-terminal-freeze-spec:arm",
+        "cc:local:audit-terminal-freeze-spec:begin-release",
+        "cc:local:audit-terminal-freeze-spec:finalize-release",
+        "cc:local:audit-terminal-plan-abandon-spec",
+        "cc:local:audit-terminal-spec",
+        "cc:local:audit-recovery-spec",
+        "cc:local:audit-completeness-transition-spec",
     ] {
         assert!(
             registry
@@ -217,8 +229,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 84,
-        "the population may only grow from the landed F1-F9 rows"
+        registry.contracts.len() >= 92,
+        "the population may only grow from the landed F1-F10 rows"
     );
 }
 
@@ -241,6 +253,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:remote-retention-control-spec", 8),
         ("cc:local:escrow-rights-transition-spec", 5),
         ("cc:local:dp-transition-spec", 8),
+        ("cc:local:audit-terminal-freeze-spec", 3),
     ] {
         let family: Vec<_> = registry
             .contracts
