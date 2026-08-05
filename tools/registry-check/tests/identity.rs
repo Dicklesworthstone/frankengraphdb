@@ -11081,6 +11081,20 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "GlobalRestoreServiceCompletionSpec",
                     "expected_restore_registry_state"
                 )
+                // fgdb-a20-restore-promotion-ivsp: the promotion manifest's seven
+                // common-header scalar fields (source order a20:2575), landed
+                // beside the pre-existing target_posture/authority_profile rows
+                // and younger than the historical witness for the same reason.
+                | ("RestoreServicePromotionManifest", "restore_id")
+                | ("RestoreServicePromotionManifest", "database_id")
+                | (
+                    "RestoreServicePromotionManifest",
+                    "database_security_namespace_id"
+                )
+                | ("RestoreServicePromotionManifest", "cluster_incarnation")
+                | ("RestoreServicePromotionManifest", "service_visibility_epoch")
+                | ("RestoreServicePromotionManifest", "signer_set_epoch")
+                | ("RestoreServicePromotionManifest", "threshold_signatures")
         )
     };
     // The l6xd owner ruling makes these ten embedded AuthorityBoundHeader
@@ -11973,7 +11987,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // 795 -> 796 (fgdb-5ekk): SequenceNeutralSpec<Tag>.schema_version is
         // now source-spelled u16 at wrapper ordinal 0x0002 and claimed by the
         // existing post_erratum_a10_wrapper_field cohort.
-        pre_erratum.fields.len() + 796,
+        // 796 -> 803 (fgdb-a20-restore-promotion-ivsp): the promotion manifest's
+        // seven common-header scalar fields (restore_id, database_id,
+        // database_security_namespace_id, cluster_incarnation,
+        // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
+        // claimed by post_erratum_a20_field. The current field count carries
+        // them and the frozen reconstruction remains 225.
+        pre_erratum.fields.len() + 803,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

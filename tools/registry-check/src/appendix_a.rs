@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3728;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3735;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "328826759349f2d3d48f2decfb41e418dbaa6bd062a6b6709dc909cb731e4578";
+    "29e6f331058109c61b7e1b4d83f92397081bbeb3a6e5f662d6f441a66113758d";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 141;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "8c0b31086f70036b4c699e0b71536e95757cd90df6fc92c3fe7b286b2850c9f2";
+    "61195b78531d3b3d36e5bd45bee1f4308b42f7a5f2d0a024e49238c737f4713e";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15876,9 +15876,10 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            73,
-            "the coverage law must still evaluate a20's 73 uncovered keys after fgdb-peyc \
-             covers the BODY union, both arms, and all five arm-interior members"
+            66,
+            "the coverage law must still evaluate a20's 66 uncovered keys after \
+             fgdb-a20-restore-promotion-ivsp registers the promotion manifest's seven \
+             common-header scalar fields"
         );
 
         // CONFORMANT CONTROL: certify the universe and only the universe code
@@ -15892,7 +15893,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            73,
+            66,
             "certification must not change what the coverage law finds"
         );
     }

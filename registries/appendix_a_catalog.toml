@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3728
+target_count = 3735
 projection_fallback_count = 141
-target_source_assignment_sha256 = "8c0b31086f70036b4c699e0b71536e95757cd90df6fc92c3fe7b286b2850c9f2"
+target_source_assignment_sha256 = "61195b78531d3b3d36e5bd45bee1f4308b42f7a5f2d0a024e49238c737f4713e"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -19014,6 +19014,118 @@ role_predicate = "true"
 retention_and_cut_rule = "portable inline authority profile retained and cut with the signed promotion manifest (a20:2575)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-restore-id"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "portable restore operation identity binding every promotion stage to one restore; comparison input retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-database-id"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0002
+stable_name = "database_id"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "128-bit target database identity carried by value in the portable signed manifest; comparison input retained and cut with the manifest (a01:1443, a20:2575)"
+version_status = "reserved"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-database-security-namespace-id"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0003
+stable_name = "database_security_namespace_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "target security namespace identity carried by value in the portable signed manifest; comparison input retained and cut with the manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-cluster-incarnation"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0004
+stable_name = "cluster_incarnation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "target cluster incarnation the promotion binds to; comparison input retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-service-visibility-epoch"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "service visibility epoch under which the promoted service becomes observable; comparison input retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-signer-set-epoch"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0008
+stable_name = "signer_set_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "epoch of the threshold signer set that signed this manifest; comparison input for signature validation (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-threshold-signatures"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0009
+stable_name = "threshold_signatures"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "canonically-sorted threshold signature set over the manifest; lives/dies with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[field]]
 slice_id = "a20"
@@ -83445,6 +83557,62 @@ row_id = "a20:target:field-restore-service-promotion-manifest-target-posture"
 target_row_id = "a20:field:restore-service-promotion-manifest-target-posture"
 slice_id = "a20"
 source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.target_posture|target_posture"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-restore-id"
+target_row_id = "a20:field:restore-service-promotion-manifest-restore-id"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-database-id"
+target_row_id = "a20:field:restore-service-promotion-manifest-database-id"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.database_id|database_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-database-security-namespace-id"
+target_row_id = "a20:field:restore-service-promotion-manifest-database-security-namespace-id"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.database_security_namespace_id|database_security_namespace_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-cluster-incarnation"
+target_row_id = "a20:field:restore-service-promotion-manifest-cluster-incarnation"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.cluster_incarnation|cluster_incarnation"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-service-visibility-epoch"
+target_row_id = "a20:field:restore-service-promotion-manifest-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-signer-set-epoch"
+target_row_id = "a20:field:restore-service-promotion-manifest-signer-set-epoch"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.signer_set_epoch|signer_set_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-threshold-signatures"
+target_row_id = "a20:field:restore-service-promotion-manifest-threshold-signatures"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.threshold_signatures|threshold_signatures"
 target_kind = "field"
 definition_status = "declared"
 

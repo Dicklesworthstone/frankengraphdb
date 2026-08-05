@@ -11070,6 +11070,62 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "portable restore operation identity binding every promotion stage to one restore; comparison input retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0002
+stable_name = "database_id"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "128-bit target database identity carried by value in the portable signed manifest; comparison input retained and cut with the manifest (a01:1443, a20:2575)"
+version_status = "reserved"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0003
+stable_name = "database_security_namespace_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "target security namespace identity carried by value in the portable signed manifest; comparison input retained and cut with the manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0004
+stable_name = "cluster_incarnation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "target cluster incarnation the promotion binds to; comparison input retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
 field_tag = 0x0005
 stable_name = "target_posture"
 exact_wire_type = "RestoreServicePromotionManifestTargetPosture"
@@ -11084,6 +11140,20 @@ max_size_bytes = 1
 
 [[field]]
 containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "service visibility epoch under which the promoted service becomes observable; comparison input retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
 field_tag = 0x0007
 stable_name = "authority_profile"
 exact_wire_type = "RestorePromotionAuthorityProfile"
@@ -11095,6 +11165,34 @@ role_predicate = "true"
 retention_and_cut_rule = "portable inline authority profile retained and cut with the signed promotion manifest (a20:2575)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0008
+stable_name = "signer_set_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "epoch of the threshold signer set that signed this manifest; comparison input for signature validation (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0009
+stable_name = "threshold_signatures"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "canonically-sorted threshold signature set over the manifest; lives/dies with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[field]]
 containing_schema = "RestoreShardAbandonAck"
