@@ -71,6 +71,11 @@
 //!   between handles; here, dirty bytes are visible only through the handle
 //!   that wrote them. The model is deliberately stricter than reality: it can
 //!   only make a test fail that reality would also fail, never the reverse.
+//! * **Dirent durability.** A directory can be opened and synced — chronicle's
+//!   D1 and D2 both owe directory barriers, and refusing the open would make
+//!   the real commit path undrivable — but the sync is an honest no-op that
+//!   consumes no trigger counts: the model does not represent dirents, so the
+//!   namespace-loss crash arms remain `CrashPoint`'s to express.
 //!
 //! (This fence was briefly demoted to `text` when the doc target failed with
 //! `E0463: can't find crate for fgdb_chronicle` against `src/lib.rs:31` — the
@@ -836,10 +841,27 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
         // Delegate the open itself so create/create_new/truncate/mode all keep
         // their real semantics, including their real errors.
         drop(self.backing.open(path, opts).await?);
-        let image = match self.backing.read(path).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error),
+        // A directory opens only to be synced (`sync_directory` is how a
+        // dirent barrier is expressed over a `Vfs`). Its contents are dirents,
+        // which this model does not represent — dirent-level loss is in the
+        // not-modelled list — so the handle carries an empty image, nothing
+        // can go dirty through it, and a sync through it is an honest no-op
+        // that consumes no trigger counts. Reading a directory as bytes would
+        // be EISDIR, which is why this cannot share the file arm below.
+        let is_directory = self
+            .backing
+            .metadata(path)
+            .await
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(false);
+        let image = if is_directory {
+            Vec::new()
+        } else {
+            match self.backing.read(path).await {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => return Err(error),
+            }
         };
         let generation = self.lab.lock().generation;
         Ok(FaultFile {

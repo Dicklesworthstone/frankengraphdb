@@ -31,7 +31,7 @@ use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_contain
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
 use crate::store::{sync_created_entry, sync_directory, sync_file};
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
-use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use asupersync::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use fgdb_crypto::Digest;
 use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
@@ -677,20 +677,27 @@ impl<V: Vfs> CommitCoordinator<V> {
         // ---- The marker. Every structural and framing law was checked before
         // D1, so a log entry that exists is an entry recovery can decode.
         let log_path = self.log_path();
+        // The log is append-only by protocol, not by open mode. O_APPEND's
+        // write-position atomicity is not load-bearing under the exclusive
+        // writer lease, and an append-mode cursor is the one piece of open
+        // state a `Vfs` implementation cannot observe (`OpenOptions` exposes
+        // no getters) — so the position is taken explicitly, where every
+        // implementation of the trait can honour it.
         let (mut log, log_created) = match self
             .vfs
-            .open(&log_path, &OpenOptions::new().append(true).create_new(true))
+            .open(&log_path, &OpenOptions::new().write(true).create_new(true))
             .await
         {
             Ok(file) => (file, true),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
                 self.vfs
-                    .open(&log_path, &OpenOptions::new().append(true))
+                    .open(&log_path, &OpenOptions::new().write(true))
                     .await?,
                 false,
             ),
             Err(error) => return Err(error.into()),
         };
+        log.seek(std::io::SeekFrom::End(0)).await?;
 
         // Past this point the durable log MAY contain this entry, so this
         // coordinator can no longer know the truth by looking at itself. It is

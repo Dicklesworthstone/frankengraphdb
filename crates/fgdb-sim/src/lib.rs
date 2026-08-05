@@ -157,8 +157,8 @@ impl From<CommitError> for ReplayError {
 /// own crash point through, so this wrapper has exactly one consumer — the
 /// verification suites — and moving it would put an unused function in the
 /// engine's public surface.
-pub async fn commit_capsule(
-    coordinator: &mut CommitCoordinator,
+pub async fn commit_capsule<V: asupersync::fs::Vfs>(
+    coordinator: &mut CommitCoordinator<V>,
     cx: &CommitCx,
     capsule: &PreparedCapsule,
     head_updates: Vec<fgdb_chronicle::marker::HeadUpdate>,
@@ -189,9 +189,9 @@ pub struct Replayed {
 
 /// Materialize the durable commit stream into graph state, discarding the
 /// index. Kept for callers that only want the graph.
-pub async fn materialize(
+pub async fn materialize<V: asupersync::fs::Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator,
+    coordinator: &CommitCoordinator<V>,
 ) -> Result<ReferenceDatabase, ReplayError> {
     replay(cx, coordinator)
         .await
@@ -217,9 +217,9 @@ pub async fn materialize(
 /// lane. Recovery is inside that lane — every marker it walks came out of the
 /// recovered chain, which holds only entries that reached D2 — so it can make
 /// the attestation honestly rather than needing a back door.
-pub async fn replay(
+pub async fn replay<V: asupersync::fs::Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator,
+    coordinator: &CommitCoordinator<V>,
 ) -> Result<Replayed, ReplayError> {
     let mut database = ReferenceDatabase::with_database_id(reference_database_id(cx, coordinator)?);
     let mut index = LocalDeltaBatchIndex::new();
@@ -292,9 +292,9 @@ pub async fn replay(
 /// may deliberately use the same key/namespace profile. Once the root stack owns
 /// `DatabaseId`, this derivation is replaced by that field without changing
 /// `ReferenceDatabase`'s contract.
-fn reference_database_id(
+fn reference_database_id<V: asupersync::fs::Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator,
+    coordinator: &CommitCoordinator<V>,
 ) -> Result<DatabaseId, ReplayError> {
     let canonical_dir = cx
         .with_restriction(|| std::fs::canonicalize(coordinator.database_dir()))

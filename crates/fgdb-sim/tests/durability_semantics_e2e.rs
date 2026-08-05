@@ -19,12 +19,13 @@
 use asupersync::fs::UnixVfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
-use fgdb_chronicle::commit::{CommitCoordinator, CrashPoint};
+use fgdb_chronicle::commit::{CommitCoordinator, CommitError, CrashPoint};
 use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId, RelationId,
     SchemaEpoch,
 };
 use fgdb_reference::{ReferenceDatabase, SnapshotError};
+use fgdb_sim::vfs::{FaultKind, FaultPlan, FaultVfs, Trigger};
 use fgdb_sim::{
     PreparedCapsule, ReplayError, commit_capsule, materialize, prepare_capsule, replay,
 };
@@ -820,4 +821,484 @@ fn input_order_does_not_change_a_capsules_identity() {
     assert_eq!(forward.object_id, backward.object_id);
     assert_eq!(forward.template_digest, backward.template_digest);
     assert_eq!(forward.bytes, backward.bytes);
+}
+
+// ---------------------------------------------------------------------------
+// The crash matrix, re-expressed over the FaultVfs (bead fgdb-w14j, fgdb-1xtp
+// step 3).
+//
+// `CrashPoint` models "the process stopped at instant X" by returning early
+// from inside the commit path — a test-only enum arm threaded through a
+// production signature. The tests below reach the same recovered states from
+// the OUTSIDE, through real storage faults injected by `FaultVfs`, and then
+// go where `CrashPoint` structurally cannot: a sync that lied, a flush that
+// tore an interior sector, a disk that filled mid-barrier, a bit that rotted
+// after landing.
+//
+// The instant-to-fault correspondence, stated so the equivalence is checkable
+// rather than implied:
+//
+//   CrashPoint arm                      fault expression here
+//   ---------------------------------   -----------------------------------
+//   AfterD1 (orphan, not committed)     fsync lie at D2, then crash()
+//   AfterMarkerBeforeD2 loss arm        ENOSPC at D2, then crash()
+//   clean restart                       faultless plan, then crash()
+//   (inexpressible by CrashPoint)       fsync lie at D1: ack'd commit whose
+//                                       capsule never landed — fails closed
+//   (inexpressible by CrashPoint)       interior tear inside D2's flush
+//   (inexpressible by CrashPoint)       bit rot in a durable capsule, healed
+//
+// The dirent-granular arms (AfterCapsuleFileSyncBeforeDirectorySync and kin)
+// remain `CrashPoint`'s to express: the fault model deliberately does not
+// represent dirents (see `fgdb_sim::vfs`'s not-modelled list), so NOTHING is
+// removed from the CrashPoint matrix until each arm's recovered state is
+// reachable this way and mutation-proven at least as strong — the bead's own
+// instruction.
+//
+// Per-commit trigger arithmetic every plan below relies on: a commit performs
+// exactly TWO trigger-eligible syncs — D1 (the capsule file) and D2 (the
+// commit log). Directory syncs carry no dirty sectors and consume no counts.
+// Each test asserts the injected event's PATH, so a drift in this arithmetic
+// fails loudly instead of silently faulting the wrong barrier.
+// ---------------------------------------------------------------------------
+
+fn capsule_disk_path(dir: &Path, oid: &ObjectId) -> PathBuf {
+    dir.join(fgdb_chronicle::commit::CAPSULE_DIR)
+        .join(format!("{}.capsule", hex(&oid.0)))
+}
+
+async fn open_faulted(cx: &CommitCx, vfs: &FaultVfs, dir: &Path) -> CommitCoordinator<FaultVfs> {
+    CommitCoordinator::open_with_vfs(cx, vfs.clone(), dir, keys())
+        .await
+        .expect("open through the fault model")
+}
+
+/// Commit all three fixtures through `coordinator`, asserting each ack.
+async fn three_commits_through<V: asupersync::fs::Vfs>(
+    coordinator: &mut CommitCoordinator<V>,
+    cx: &CommitCx,
+) {
+    for capsule in &three_commits() {
+        commit_capsule(coordinator, cx, capsule, vec![])
+            .await
+            .expect("commit through the fault model");
+    }
+}
+
+/// THE CONTROL, and the transparency law in one: a faultless plan must be
+/// byte-invisible. The same workload runs over `UnixVfs` and over a faultless
+/// `FaultVfs`, and the durable artifacts must be identical — log bytes, the
+/// capsule object set, and the materialized graph. Without this, every test
+/// below could be measuring the write-back model instead of the fault it
+/// injects.
+#[test]
+fn a_faultless_fault_model_is_byte_transparent_through_the_real_commit_path() {
+    let plain_dir = scratch_dir("vfs-control-plain");
+    let faulted_dir = scratch_dir("vfs-control-faulted");
+    under_lab(70, move |cx| async move {
+        let cx = &cx;
+        let mut plain = CommitCoordinator::open(cx, &plain_dir, keys())
+            .await
+            .expect("open plain");
+        three_commits_through(&mut plain, cx).await;
+        drop(plain);
+
+        let vfs = FaultVfs::unix(FaultPlan::faultless());
+        let mut faulted = open_faulted(cx, &vfs, &faulted_dir).await;
+        three_commits_through(&mut faulted, cx).await;
+        drop(faulted);
+
+        assert_eq!(vfs.events(), Vec::new(), "a faultless plan injects nothing");
+        assert!(
+            vfs.flushed_bytes() > 0,
+            "zero flushed bytes would mean the workload never went through \
+             the model, and every assertion here would be vacuous"
+        );
+        assert_eq!(
+            std::fs::read(plain_dir.join(fgdb_chronicle::commit::COMMIT_LOG_NAME)).expect("plain"),
+            std::fs::read(faulted_dir.join(fgdb_chronicle::commit::COMMIT_LOG_NAME))
+                .expect("faulted"),
+            "the durable log must be byte-identical through the fault model"
+        );
+        for capsule in &three_commits() {
+            assert_eq!(
+                std::fs::read(capsule_disk_path(&plain_dir, &capsule.object_id)).expect("plain"),
+                std::fs::read(capsule_disk_path(&faulted_dir, &capsule.object_id))
+                    .expect("faulted"),
+                "every capsule object must be byte-identical through the fault model"
+            );
+        }
+
+        let reopened = CommitCoordinator::open(cx, &faulted_dir, keys())
+            .await
+            .expect("reopen without the model");
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 3);
+    });
+}
+
+/// An fsync lie at D2: the writer is TOLD the marker is durable, acknowledges
+/// the commit, and the bytes never landed. `CrashPoint` cannot say this — its
+/// crashes always surface as errors, so the ack and the truth never diverge.
+/// After the crash, recovery must name the exact state the AfterD1 arm names:
+/// two commits, an orphan capsule, the sequence free — the acknowledged commit
+/// is gone, and the protocol's job is that its absence is CLEAN.
+#[test]
+fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
+    let dir = scratch_dir("vfs-d2-lie");
+    under_lab(71, move |cx| async move {
+        let cx = &cx;
+        // Two eligible syncs per commit: the 6th is commit 3's D2.
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::Nth(6),
+            ..FaultPlan::faultless()
+        });
+        let mut coordinator = open_faulted(cx, &vfs, &dir).await;
+        three_commits_through(&mut coordinator, cx).await; // commit 3 ACKS Ok
+        drop(coordinator);
+
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned lie fired: {events:?}");
+        assert!(
+            matches!(events[0].kind, FaultKind::FsyncLie { unflushed_bytes } if unflushed_bytes > 0)
+        );
+        assert_eq!(
+            events[0].path,
+            dir.join(fgdb_chronicle::commit::COMMIT_LOG_NAME),
+            "the 6th eligible sync must be the commit log's D2 — this pins the \
+             per-commit trigger arithmetic the whole section relies on"
+        );
+
+        vfs.crash();
+        let reopened = open_faulted(cx, &vfs, &dir).await;
+        assert_eq!(
+            reopened.chain().len(),
+            2,
+            "the acknowledged third commit never reached the platter"
+        );
+        assert_eq!(reopened.chain().verify(), Ok(()));
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(3)));
+        assert_eq!(
+            reopened.discarded_tail_bytes(),
+            0,
+            "the lie left the log clean — nothing was written, so nothing tears"
+        );
+        let third = three_commits()[2].clone();
+        assert_eq!(
+            reopened.orphan_capsules(cx).await.expect("scan"),
+            vec![third.object_id],
+            "D1 was honest, so the capsule survives as an orphan"
+        );
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 2);
+    });
+}
+
+/// An fsync lie at D1: the marker becomes durable while the capsule it names
+/// never landed. This inverts the marker-is-the-commit rule's usual failure
+/// direction — the commit IS in the chain, and what is missing is the bytes it
+/// promised were durable first. Recovery must fail CLOSED at read, naming the
+/// sequence, never serve a two-commit graph as if the third were absent, and
+/// never a three-commit graph over a hole.
+#[test]
+fn a_d1_fsync_lie_makes_the_committed_marker_fail_closed_at_read() {
+    let dir = scratch_dir("vfs-d1-lie");
+    under_lab(72, move |cx| async move {
+        let cx = &cx;
+        // The 5th eligible sync is commit 3's D1.
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::Nth(5),
+            ..FaultPlan::faultless()
+        });
+        let mut coordinator = open_faulted(cx, &vfs, &dir).await;
+        three_commits_through(&mut coordinator, cx).await; // commit 3 ACKS Ok
+        drop(coordinator);
+
+        let third = three_commits()[2].clone();
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned lie fired: {events:?}");
+        assert_eq!(
+            events[0].path,
+            capsule_disk_path(&dir, &third.object_id),
+            "the 5th eligible sync must be commit 3's capsule D1"
+        );
+
+        vfs.crash();
+        let reopened = open_faulted(cx, &vfs, &dir).await;
+        assert_eq!(
+            reopened.chain().len(),
+            3,
+            "D2 was honest, so the marker IS durable and IS the commit"
+        );
+        // The capsule path exists (creation reached the backing store) with
+        // none of its bytes (the sync lied). Presence is not durability.
+        assert!(reopened.capsule_exists(cx, third.object_id).await);
+        let result = materialize(cx, &reopened).await;
+        assert!(
+            matches!(&result, Err(ReplayError::Commit(CommitError::Capsule(_)))),
+            "a committed marker over never-landed capsule bytes must fail \
+             closed at read, not materialize around the hole; got {result:?}"
+        );
+    });
+}
+
+/// ENOSPC at each barrier. At D1 the refusal is typed, pre-marker, and leaves
+/// the coordinator usable; at D2 it poisons — the same taxonomy the
+/// `CrashPoint` matrix pins for its instants, now produced by the disk itself.
+/// In both arms recovery lands on the committed prefix and the database
+/// resumes once space returns.
+#[test]
+fn enospc_at_either_barrier_refuses_typed_and_recovery_resumes() {
+    // (budget_for, expect_poisoned): D1 = a budget the capsule flush already
+    // exceeds; D2 = exactly the capsule plus a sliver, so the marker flush is
+    // the one refused.
+    for (index, d2_arm) in [false, true].into_iter().enumerate() {
+        let dir = scratch_dir(&format!("vfs-enospc-{index}"));
+        under_lab(73 + index as u64, move |cx| async move {
+            let cx = &cx;
+            let capsules = three_commits();
+            let third = capsules[2].clone();
+
+            // Land the first two commits honestly, then measure the third
+            // capsule's container size from a twin directory — the container
+            // is deterministic, so the twin's byte length is THIS run's too.
+            let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_capsule(&mut coordinator, cx, &capsules[0], vec![])
+                .await
+                .expect("commit 1");
+            commit_capsule(&mut coordinator, cx, &capsules[1], vec![])
+                .await
+                .expect("commit 2");
+            drop(coordinator);
+            let twin_dir = scratch_dir(&format!("vfs-enospc-twin-{index}"));
+            let mut twin = CommitCoordinator::open(cx, &twin_dir, keys())
+                .await
+                .expect("open twin");
+            three_commits_through(&mut twin, cx).await;
+            drop(twin);
+            let capsule_len = std::fs::read(capsule_disk_path(&twin_dir, &third.object_id))
+                .expect("twin capsule")
+                .len() as u64;
+
+            // A fresh-file flush writes exactly the container's bytes, so the
+            // budget can be placed on either side of D1 to the byte.
+            let budget = if d2_arm {
+                capsule_len + 3
+            } else {
+                capsule_len - 1
+            };
+            let vfs = FaultVfs::unix(FaultPlan {
+                space_budget: Some(budget),
+                ..FaultPlan::faultless()
+            });
+            let mut faulted = open_faulted(cx, &vfs, &dir).await;
+            let refused = commit_capsule(&mut faulted, cx, &third, vec![]).await;
+            match &refused {
+                Err(CommitError::Io(error)) => assert_eq!(
+                    error.raw_os_error(),
+                    Some(28),
+                    "the refusal must be the kernel's own ENOSPC, got {error:?}"
+                ),
+                other => panic!("a full disk must surface as a typed Io error, got {other:?}"),
+            }
+            assert_eq!(
+                faulted.is_poisoned(),
+                d2_arm,
+                "pre-marker refusals leave the coordinator usable; a refusal \
+                 at D2 poisons, because the log may now disagree with memory"
+            );
+            let events = vfs.events();
+            assert_eq!(events.len(), 1, "exactly the planned refusal: {events:?}");
+            assert!(matches!(events[0].kind, FaultKind::OutOfSpace { .. }));
+            let expected_path = if d2_arm {
+                dir.join(fgdb_chronicle::commit::COMMIT_LOG_NAME)
+            } else {
+                capsule_disk_path(&dir, &third.object_id)
+            };
+            assert_eq!(events[0].path, expected_path);
+
+            // Space returns (a faultless model over the same directory): the
+            // committed prefix is intact and the abandoned sequence is reused.
+            vfs.crash();
+            drop(faulted);
+            let recovered_vfs = FaultVfs::unix(FaultPlan::faultless());
+            let mut recovered = open_faulted(cx, &recovered_vfs, &dir).await;
+            assert_eq!(recovered.chain().len(), 2);
+            assert_eq!(recovered.next_commit_seq(), Ok(CommitSeq(3)));
+            expect_graph_after(&materialize(cx, &recovered).await.expect("materializes"), 2);
+            if d2_arm {
+                // D1 landed the full container before D2 was refused, so the
+                // recommit deduplicates against its own durable capsule.
+                commit_capsule(&mut recovered, cx, &third, vec![])
+                    .await
+                    .expect("recommit once space returns");
+            } else {
+                // The refused D1 left the capsule path behind holding NONE of
+                // its bytes — the same residue a real ENOSPC leaves. A
+                // content-addressed path is immutable even when its bytes are
+                // wrong, so the recommit refuses rather than repairs; the
+                // residue is an orphan, and reclaiming it is what unblocks
+                // the sequence.
+                let refused_again = commit_capsule(&mut recovered, cx, &third, vec![]).await;
+                assert!(
+                    matches!(
+                        &refused_again,
+                        Err(CommitError::CapsulePathConflict { capsule_oid })
+                            if *capsule_oid == third.object_id
+                    ),
+                    "the residue must refuse typed, naming the identity; got {refused_again:?}"
+                );
+                assert_eq!(
+                    recovered.orphan_capsules(cx).await.expect("scan"),
+                    vec![third.object_id],
+                    "the residue is exactly one orphan — bytes nobody committed"
+                );
+                std::fs::remove_file(capsule_disk_path(&dir, &third.object_id))
+                    .expect("reclaim the orphan residue");
+                commit_capsule(&mut recovered, cx, &third, vec![])
+                    .await
+                    .expect("recommit after reclaiming the residue");
+            }
+            expect_graph_after(&materialize(cx, &recovered).await.expect("materializes"), 3);
+        });
+    }
+}
+
+/// An interior sector torn out of D2's flush: sectors landed on BOTH sides of
+/// a hole. `tear_log_tail_for_test` can only truncate a suffix, so the
+/// torn-tail rule's "missing bytes at the end versus wrong bytes in the
+/// middle" discrimination had never faced this shape inside the REAL commit
+/// path. It is corruption, not a tail: recovery must fail closed naming the
+/// sequence, and must leave the damaged bytes in place as evidence.
+#[test]
+fn an_interior_tear_inside_the_d2_flush_is_corruption_not_a_tail() {
+    let dir = scratch_dir("vfs-interior-tear");
+    under_lab(75, move |cx| async move {
+        let cx = &cx;
+        // Small sectors so a single log entry spans enough of them for an
+        // interior sector to exist (the tear's eligibility requirement — the
+        // first and last sectors of the flush always land).
+        let vfs = FaultVfs::unix(FaultPlan {
+            sector_bytes: 64,
+            torn_write: Trigger::Nth(6),
+            ..FaultPlan::faultless()
+        });
+        let mut coordinator = open_faulted(cx, &vfs, &dir).await;
+        three_commits_through(&mut coordinator, cx).await; // the tear is silent
+        drop(coordinator);
+
+        let log_path = dir.join(fgdb_chronicle::commit::COMMIT_LOG_NAME);
+        let events = vfs.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly the planned tear fired: {events:?}"
+        );
+        assert_eq!(
+            events[0].path, log_path,
+            "the 6th eligible flush is commit 3's D2"
+        );
+        let FaultKind::TornWrite { start, end } = events[0].kind else {
+            panic!("expected a torn write, got {:?}", events[0].kind);
+        };
+        assert!(end > start, "the tear names the hole it made");
+
+        vfs.crash();
+        let damaged = std::fs::read(&log_path).expect("durable log");
+        let result = match CommitCoordinator::open_with_vfs(
+            cx,
+            FaultVfs::unix(FaultPlan::faultless()),
+            &dir,
+            keys(),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a hole with valid bytes after it must refuse to open"),
+        };
+        assert!(
+            matches!(
+                &result,
+                CommitError::CorruptLogEntry { commit_seq: 3 }
+                    | CommitError::ChainDiverged { commit_seq: 3 }
+            ),
+            "an interior hole is damage inside a complete frame — corruption \
+             naming sequence 3, never a discardable tail; got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&log_path).expect("durable log"),
+            damaged,
+            "fail-closed recovery must preserve the corruption as evidence"
+        );
+    });
+}
+
+/// A single bit of a durable capsule rots after landing, and the read HEALS:
+/// the container is erasure-coded, the damaged symbol fails its MAC, is
+/// dropped, and the plaintext recovers exactly. This is the assertion that
+/// was structurally impossible before capsules were erasure-coded, and the
+/// one `CrashPoint` could never make — nothing about a process stopping can
+/// damage a byte that already landed.
+///
+/// The flip's location is seed-pinned into the symbol region: a flip in the
+/// container header fails closed instead of healing (that direction is
+/// covered by `a_rewritten_capsule_is_refused_rather_than_materialized`).
+#[test]
+fn a_flipped_bit_in_a_durable_capsule_heals_through_the_erasure_code() {
+    let dir = scratch_dir("vfs-bit-heal");
+    under_lab(76, move |cx| async move {
+        let cx = &cx;
+        // The 5th eligible flush-with-writes is commit 3's capsule D1.
+        let vfs = FaultVfs::unix(FaultPlan {
+            seed: 3,
+            bit_flip: Trigger::Nth(5),
+            ..FaultPlan::faultless()
+        });
+        let mut coordinator = open_faulted(cx, &vfs, &dir).await;
+        three_commits_through(&mut coordinator, cx).await;
+        drop(coordinator);
+
+        let third = three_commits()[2].clone();
+        let capsule_path = capsule_disk_path(&dir, &third.object_id);
+        let events = vfs.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly the planned flip fired: {events:?}"
+        );
+        assert_eq!(events[0].path, capsule_path);
+        assert!(matches!(events[0].kind, FaultKind::BitFlip { .. }));
+
+        // The damage is REAL on the platter — one byte differs from the
+        // deterministic container a twin run produces.
+        let twin_dir = scratch_dir("vfs-bit-heal-twin");
+        let mut twin = CommitCoordinator::open(cx, &twin_dir, keys())
+            .await
+            .expect("open twin");
+        three_commits_through(&mut twin, cx).await;
+        drop(twin);
+        let pristine =
+            std::fs::read(capsule_disk_path(&twin_dir, &third.object_id)).expect("twin capsule");
+        let damaged = std::fs::read(&capsule_path).expect("damaged capsule");
+        assert_eq!(damaged.len(), pristine.len());
+        let differing = damaged
+            .iter()
+            .zip(&pristine)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differing, 1, "exactly one byte differs — the flipped one");
+
+        vfs.crash();
+        let reopened = open_faulted(cx, &vfs, &dir).await;
+        assert_eq!(reopened.chain().len(), 3);
+        assert_eq!(
+            reopened
+                .read_capsule(cx, third.object_id)
+                .await
+                .expect("the erasure code heals one rotted bit"),
+            third.bytes,
+            "healing must recover the EXACT plaintext, not merely decode"
+        );
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 3);
+    });
 }
