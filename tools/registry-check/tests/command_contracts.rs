@@ -173,6 +173,17 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:merge-reject-spec",
         "cc:local:merge-prepare-spec",
         "cc:local:merge-execute-spec",
+        // F8 id-validtime-constraint-resource-escrow (frozen ordinals
+        // 0x0029-0x002b). EscrowRightsTransitionSpec's five inner tags are a
+        // fresh mint from L256 source order (measured 0 wire_types.toml
+        // hits); ExpiryEpochAdvanceSpec is included per ruling C4.
+        "cc:local:resource-ledger-transition-spec",
+        "cc:local:escrow-rights-transition-spec:transfer-atomic",
+        "cc:local:escrow-rights-transition-spec:reconfigure-domain",
+        "cc:local:escrow-rights-transition-spec:advance-quota-epoch",
+        "cc:local:escrow-rights-transition-spec:retire-branch-overlay",
+        "cc:local:escrow-rights-transition-spec:compact-terminal-evidence",
+        "cc:local:expiry-epoch-advance-spec",
     ] {
         assert!(
             registry
@@ -183,8 +194,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 59,
-        "the population may only grow from the landed F1-F7 rows"
+        registry.contracts.len() >= 66,
+        "the population may only grow from the landed F1-F8 rows"
     );
 }
 
@@ -205,6 +216,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:configuration-transition-spec", 4),
         ("cc:local:format-transition-spec", 5),
         ("cc:local:remote-retention-control-spec", 8),
+        ("cc:local:escrow-rights-transition-spec", 5),
     ] {
         let family: Vec<_> = registry
             .contracts

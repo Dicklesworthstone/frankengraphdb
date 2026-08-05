@@ -82,6 +82,9 @@ fn source_forced_seed_population_is_present() {
         "MergeRejectSpec",
         "MergePrepareSpec",
         "MergeExecuteSpec",
+        "ResourceLedgerTransitionSpec",
+        "EscrowRightsTransitionSpec",
+        "ExpiryEpochAdvanceSpec",
     ] {
         assert!(
             registry
@@ -92,8 +95,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 47,
-        "the population may only grow from the landed F1-F7 rows"
+        registry.classifications.len() >= 50,
+        "the population may only grow from the landed F1-F8 rows"
     );
 }
 

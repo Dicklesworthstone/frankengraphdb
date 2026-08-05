@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 9
+registry_epoch = 10
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1928,6 +1928,231 @@ consumed_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]  # [
 written_state_slots = [ "SemanticPayload|Local|branch_merge_ledger_root" ]   # [C][F]
 checkpoint_floor_classes = [ "branch-merge" ]                             # [C][F]
 backup_restore_gc_classes = [ "branch-merge" ]                            # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F8 id-validtime-constraint-resource-escrow — frozen ordinals 41-43:
+# ResourceLedgerTransitionSpec (41); EscrowRightsTransitionSpec (42, ARMED,
+# the five L256 arms); ExpiryEpochAdvanceSpec (43, included per ruling C4:
+# L266 spells "one registered ExpiryEpochAdvanceSpec control command per
+# configured epoch tick" and L268 defers exactly this row decision to G0,
+# which is the round-10 freeze). Valid-time and constraint contribute ZERO
+# rows per I-9 (no ValidTime*/Constraint*Spec is spelled anywhere), and
+# IdRangeGrantSpec stays excluded as a pre-order artifact (L1892).
+#
+# FRESH MINT for the escrow arms: no wire_types.toml union_variant reservation
+# names EscrowRightsTransitionSpec (MEASURED 0 hits), so inner tags
+# 0x0001-0x0005 are minted from the L256 source order TransferAtomic;
+# ReconfigureDomain; AdvanceQuotaEpoch; RetireBranchOverlay;
+# CompactTerminalEvidence — the F5c precedent, recorded here so nobody later
+# mistakes it for a reservation match.
+#
+# AUTHORITY IS PER-ARM: AdvanceQuotaEpoch and ExpiryEpochAdvanceSpec each
+# carry subject-bound rollback-resistant TimeValidationEvidence (L256/L266,
+# the C-h tier-3 shape the F3 OutcomeExpiry row established); the other four
+# escrow arms spell no authority member.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:resource-ledger-transition-spec"          # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0029                                                   # [S] frozen dense ordinal 41
+input_schema_id = "ResourceLedgerTransitionSpec"                          # [S] L1994 exact body {expected_basis,sorted_transition_refs,complete_transition_id_set_commitment,semantic_subject_basis,terminal_audit_gate}
+input_wire_tag = 0x0029                                                   # [C]
+body_schema_id = "ResourceLedgerTransitionSpec"                           # [S]
+result_schema_id = "ResourceLedgerState"                                  # [S-derived] the ledger the sorted transitions advance (L1058/L465)
+applied_record_schema_id = "ResourceLedgerState"                          # [S-derived]
+handler_symbol = "fgdb_apply::local::resource_ledger_transition_spec"     # [C][F]
+transition_class = "Semantic"                                             # [S] L1916 F8 family projection
+sequence_effects = "the standalone-control wrapper over sorted transition refs with a complete transition-id-set commitment: Reserve creates one active reservation, Charge consumes it completely and releases the deterministic unused remainder, Release/Expire/Transfer operate on a whole entry with Adjust for partial changes, Transfer conserves the vector globally; no timeout, disconnect, process death, logical delete, or stale cache releases an entry, and expiry fails while prepared ownership, final certification, result delivery, backup, or remote grants retain the subject; a generated enclosing-command matrix fixes legal operation tags"  # [S] L1994
+expected_state_schema_id = "ResourceLedgerState"                          # [S] expected_basis
+authority_arm = "SourceUnspelled"                                         # [S] the exact L1994 body names no authority member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1994 direct terminal_audit_gate field
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:resource-ledger-transition-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|resource_ledger_state" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Local|resource_ledger_state" ]   # [C][F]
+checkpoint_floor_classes = [ "resource-ledger" ]                          # [C][F]
+backup_restore_gc_classes = [ "resource-ledger" ]                         # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:escrow-rights-transition-spec:transfer-atomic"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002a                                                   # [S] frozen dense ordinal 42
+input_schema_id = "EscrowRightsTransitionSpec"                            # [S] L256 "the closed Local union"
+input_wire_tag = 0x002a                                                   # [C] = outer (T2)
+inner_wire_tag = 0x0001                                                   # [S] TransferAtomic is first in L256 source order (fresh mint)
+body_schema_id = "EscrowRightsTransitionSpec"                             # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: "exact retry returns the same record" names no record schema
+applied_record_schema_id = "SourceUnspelled"                              # T6: the escrow rights state carries no spelled schema name
+handler_symbol = "fgdb_apply::local::escrow_rights_transition_spec::transfer_atomic"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "atomic transfer CASes exact source/target generations and exact retry returns the same record; transfer conserves the rights vector (FG-INV-02 admits no silently dropped rights)"  # [S] L256
+expected_state_schema_id = "SourceUnspelled"                              # T6
+authority_arm = "SourceUnspelled"                                         # [S] the arm spells no authority member
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no per-arm struct body spelled
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:escrow-rights-transition-spec:transfer-atomic"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]    # [C][F]
+written_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]     # [C][F]
+checkpoint_floor_classes = [ "escrow-rights" ]                            # [C][F]
+backup_restore_gc_classes = [ "escrow-rights" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:escrow-rights-transition-spec:reconfigure-domain"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002a                                                   # [S] shared member outer tag
+input_schema_id = "EscrowRightsTransitionSpec"                            # [S]
+input_wire_tag = 0x002a                                                   # [C]
+inner_wire_tag = 0x0002                                                   # [S] second in L256 source order
+body_schema_id = "EscrowRightsTransitionSpec"                             # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::escrow_rights_transition_spec::reconfigure_domain"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "reconfiguration requires no unaccounted Held/InTransit custody or a complete migration mapping; tightening a bound fails unless burnable Available rights suffice"  # [S] L256
+expected_state_schema_id = "SourceUnspelled"                              # T6
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:escrow-rights-transition-spec:reconfigure-domain"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]    # [C][F]
+written_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]     # [C][F]
+checkpoint_floor_classes = [ "escrow-rights" ]                            # [C][F]
+backup_restore_gc_classes = [ "escrow-rights" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:escrow-rights-transition-spec:advance-quota-epoch"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002a                                                   # [S] shared member outer tag
+input_schema_id = "EscrowRightsTransitionSpec"                            # [S]
+input_wire_tag = 0x002a                                                   # [C]
+inner_wire_tag = 0x0003                                                   # [S] third in L256 source order
+body_schema_id = "EscrowRightsTransitionSpec"                             # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::escrow_rights_transition_spec::advance_quota_epoch"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "epoch quota reset is an ordered transition with subject-bound rollback-resistant TimeValidationEvidence; ambient time never mints rights, and old-epoch holds finish or block rollover"  # [S] L256
+expected_state_schema_id = "SourceUnspelled"                              # T6
+authority_arm = "TimeValidationEvidence"                                  # [S] L256 the required subject-bound rollback-resistant evidence (C-h tier 3, the F3 OutcomeExpiry precedent)
+authority_evidence_target_schema_id = "TimeValidationEvidence"            # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:escrow-rights-transition-spec:advance-quota-epoch"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]    # [C][F]
+written_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]     # [C][F]
+checkpoint_floor_classes = [ "escrow-rights" ]                            # [C][F]
+backup_restore_gc_classes = [ "escrow-rights" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:escrow-rights-transition-spec:retire-branch-overlay"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002a                                                   # [S] shared member outer tag
+input_schema_id = "EscrowRightsTransitionSpec"                            # [S]
+input_wire_tag = 0x002a                                                   # [C]
+inner_wire_tag = 0x0004                                                   # [S] fourth in L256 source order; the arm L465 orders from the BranchRetireSpec capsule
+body_schema_id = "EscrowRightsTransitionSpec"                             # [S]
+result_schema_id = "SourceUnspelled"                                      # T6
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::escrow_rights_transition_spec::retire_branch_overlay"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "burns a retiring branch's CoordinateLocal EscrowBranchSeed overlay rights with an exact before/after conservation proof; orderable only from the BranchRetireSpec capsule (L465 carries this arm alongside the branch-count release), so overlay capacity is burned by a registered transition or not at all"  # [S] L256/L465
+expected_state_schema_id = "SourceUnspelled"                              # T6
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled; the ordering constraint is capsule-carried
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:escrow-rights-transition-spec:retire-branch-overlay"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]    # [C][F]
+written_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]     # [C][F]
+checkpoint_floor_classes = [ "escrow-rights" ]                            # [C][F]
+backup_restore_gc_classes = [ "escrow-rights" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:escrow-rights-transition-spec:compact-terminal-evidence"  # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002a                                                   # [S] shared member outer tag
+input_schema_id = "EscrowRightsTransitionSpec"                            # [S]
+input_wire_tag = 0x002a                                                   # [C]
+inner_wire_tag = 0x0005                                                   # [S] fifth in L256 source order
+body_schema_id = "EscrowRightsTransitionSpec"                             # [S]
+result_schema_id = "EscrowOperationSummary"                               # [S] L256 replaces fully terminal records with their permanent EscrowOperationSummary evidence
+applied_record_schema_id = "SourceUnspelled"                              # T6: the escrow rights state carries no spelled schema name
+handler_symbol = "fgdb_apply::local::escrow_rights_transition_spec::compact_terminal_evidence"  # [C][F]
+transition_class = "Semantic"                                             # [S]
+sequence_effects = "replaces fully terminal Consumed/Released reservation, transfer, and operation records with their permanent EscrowOperationSummary evidence under the ordinary compaction floors; it neither mints nor burns rights and never touches Held or InTransit custody"  # [S] L256
+expected_state_schema_id = "SourceUnspelled"                              # T6
+authority_arm = "SourceUnspelled"                                         # [S] no authority member spelled
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:escrow-rights-transition-spec:compact-terminal-evidence"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]    # [C][F]
+written_state_slots = [ "SemanticPayload|Local|escrow_rights_state" ]     # [C][F]
+checkpoint_floor_classes = [ "escrow-rights" ]                            # [C][F]
+backup_restore_gc_classes = [ "escrow-rights" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:expiry-epoch-advance-spec"                # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x002b                                                   # [S] frozen dense ordinal 43; included per ruling C4 (L268 defers exactly this row decision to G0)
+input_schema_id = "ExpiryEpochAdvanceSpec"                                # [S] L266 "one registered ExpiryEpochAdvanceSpec control command per configured epoch tick" (struct body unspelled)
+input_wire_tag = 0x002b                                                   # [C]
+body_schema_id = "ExpiryEpochAdvanceSpec"                                 # [S]
+result_schema_id = "SourceUnspelled"                                      # T6: the expiry epoch state carries no spelled schema name
+applied_record_schema_id = "SourceUnspelled"                              # T6
+handler_symbol = "fgdb_apply::local::expiry_epoch_advance_spec"           # [C][F]
+transition_class = "Semantic"                                             # [S] L266 "an ordered transition"
+sequence_effects = "the sole sequencer-visible expiry artifact, one per configured epoch tick: no per-element retirement transaction is ever emitted; the advance mirrors the quota-epoch discipline and ambient time never advances an expiry epoch; a registered derivation consuming the tick emits one canonical retraction delta for every version newly expired at the epoch boundary, so every registered derivative equals batch evaluation at that boundary"  # [S] L266
+expected_state_schema_id = "SourceUnspelled"                              # T6
+authority_arm = "TimeValidationEvidence"                                  # [S] L266 subject-bound rollback-resistant evidence (C-h tier 3)
+authority_evidence_target_schema_id = "TimeValidationEvidence"            # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: no struct body spelled anywhere
+terminal_audit_gate_arm = "SourceUnspelled"                               # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:expiry-epoch-advance-spec"     # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|expiry_epoch_state" ]     # [C][F]
+written_state_slots = [ "SemanticPayload|Local|expiry_epoch_state" ]      # [C][F]
+checkpoint_floor_classes = [ "expiry-epoch" ]                             # [C][F]
+backup_restore_gc_classes = [ "expiry-epoch" ]                            # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

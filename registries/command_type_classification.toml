@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 9
+registry_epoch = 10
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -477,4 +477,33 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:merge-execute-spec"
 source_location = "a13:1012"
 statement = "MergeExecuteSpec strongly carries the Execute-arm MergeCapabilityOperationAuthorizationRecord before evaluation or charging; neither a ledger token nor a status handle can replace it."
+status = "registered"
+
+# --- F8 id-validtime-constraint-resource-escrow (frozen ordinals 41-43).
+# --- EscrowRightsTransitionSpec is ARMED, so its row binds the member-root id
+# --- (round-12 T4). Valid-time and constraint contribute ZERO rows per I-9;
+# --- IdRangeGrantSpec stays excluded as pre-order (L1892).
+
+[[classification]]
+type_name = "ResourceLedgerTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:resource-ledger-transition-spec"
+source_location = "a12:1994"
+statement = "ResourceLedgerTransitionSpec is the standalone-control wrapper over sorted transition refs with a complete transition-id-set commitment; transactions and exact lifecycle specs embed transition refs directly, and a generated enclosing-command matrix fixes legal operation tags."
+status = "registered"
+
+[[classification]]
+type_name = "EscrowRightsTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:escrow-rights-transition-spec"
+source_location = "a12:256"
+statement = "EscrowRightsTransitionSpec is the closed Local union TransferAtomic; ReconfigureDomain; AdvanceQuotaEpoch; RetireBranchOverlay; CompactTerminalEvidence. Epoch quota reset carries subject-bound rollback-resistant TimeValidationEvidence, RetireBranchOverlay is orderable only from the BranchRetireSpec capsule, and CompactTerminalEvidence neither mints nor burns rights."
+status = "registered"
+
+[[classification]]
+type_name = "ExpiryEpochAdvanceSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:expiry-epoch-advance-spec"
+source_location = "a12:266"
+statement = "The sequenced command stream observes expiry only as one registered ExpiryEpochAdvanceSpec control command per configured epoch tick — the sole sequencer-visible expiry artifact, an ordered transition carrying subject-bound rollback-resistant TimeValidationEvidence; included per ruling C4, with L268 deferring exactly this row decision to G0."
 status = "registered"
