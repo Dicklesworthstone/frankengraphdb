@@ -11146,6 +11146,33 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "ServiceCatalogPromotionReservationReceipt",
                     "authority_signatures"
                 )
+                // fgdb-a20-restore-promotion-ivsp: the shard operational ack's
+                // eight precedent-shaped value fields (source order a20:2599),
+                // landed beside the pre-existing ack reference rows and younger
+                // than the historical witness for the same reason.
+                | ("RestoreShardOperationalAck", "restore_id")
+                | (
+                    "RestoreShardOperationalAck",
+                    "final_certificate_identity"
+                )
+                | ("RestoreShardOperationalAck", "own_ready_ack_identity")
+                | (
+                    "RestoreShardOperationalAck",
+                    "terminalizing_projection_commitment"
+                )
+                | (
+                    "RestoreShardOperationalAck",
+                    "applied_shard_raft_index"
+                )
+                | (
+                    "RestoreShardOperationalAck",
+                    "service_visibility_epoch"
+                )
+                | (
+                    "RestoreShardOperationalAck",
+                    "root_slot_durability_digest"
+                )
+                | ("RestoreShardOperationalAck", "canonical_signature_set")
                 | ("RestoreServicePromotionManifest", "restore_id")
                 | ("RestoreServicePromotionManifest", "database_id")
                 | (
@@ -12054,7 +12081,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 816,
+        pre_erratum.fields.len() + 824,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

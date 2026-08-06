@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3748
+target_count = 3756
 projection_fallback_count = 141
-target_source_assignment_sha256 = "c0c3cc4358162cf14b1e9ac4e6a36c62c597aefa710207db7534c271a04c3961"
+target_source_assignment_sha256 = "f84204d4e0f9b61a81fea22b7c0131115ac82b9976c677696c6134a420d84aee"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -114472,5 +114472,199 @@ row_id = "a20:target:field-service-catalog-promotion-reservation-receipt-authori
 target_row_id = "a20:field:service-catalog-promotion-reservation-receipt-authority-signatures"
 slice_id = "a20"
 source_key = "field|ServiceCatalogPromotionReservationReceipt|ServiceCatalogPromotionReservationReceipt.authority_signatures|authority_signatures"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-restore-id"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "portable restore operation identity binding this shard operational acknowledgement to one restore; comparison input retained and cut with the ack (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-restore-id"
+target_row_id = "a20:field:restore-shard-operational-ack-restore-id"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-final-certificate-identity"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0002
+stable_name = "final_certificate_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only identity of the final Meta certificate this ack answers; the certificate itself is retained through final_certificate_ref evidence, never by this entry (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-final-certificate-identity"
+target_row_id = "a20:field:restore-shard-operational-ack-final-certificate-identity"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.final_certificate_identity|final_certificate_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-own-ready-ack-identity"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0003
+stable_name = "own_ready_ack_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only identity of this shard's own RestoreShardServiceReadyAck; the ack itself is pinned by the earlier ready evidence, not by this entry (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-own-ready-ack-identity"
+target_row_id = "a20:field:restore-shard-operational-ack-own-ready-ack-identity"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.own_ready_ack_identity|own_ready_ack_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-terminalizing-projection-commitment"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x000C
+stable_name = "terminalizing_projection_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "commitment over the terminalizing projection that byte-matches the post-close participant-complete root; comparison input retained and cut with the ack (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-terminalizing-projection-commitment"
+target_row_id = "a20:field:restore-shard-operational-ack-terminalizing-projection-commitment"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.terminalizing_projection_commitment|terminalizing_projection_commitment"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-applied-shard-raft-index"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x000D
+stable_name = "applied_shard_raft_index"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "shard Raft index of the applied-and-durable ParticipantComplete root this ack certifies; comparison input retained and cut with the ack (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-applied-shard-raft-index"
+target_row_id = "a20:field:restore-shard-operational-ack-applied-shard-raft-index"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.applied_shard_raft_index|applied_shard_raft_index"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-service-visibility-epoch"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x000E
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "service visibility epoch under which the shard reached Operational; comparison input retained and cut with the ack (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-service-visibility-epoch"
+target_row_id = "a20:field:restore-shard-operational-ack-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-root-slot-durability-digest"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x000F
+stable_name = "root_slot_durability_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "durability digest of the winning root slot backing the participant-complete root; comparison input retained and cut with the ack (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-root-slot-durability-digest"
+target_row_id = "a20:field:restore-shard-operational-ack-root-slot-durability-digest"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.root_slot_durability_digest|root_slot_durability_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-canonical-signature-set"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0011
+stable_name = "canonical_signature_set"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "canonically sorted authority signature set over the ack transcript; current-member signatures alone are never a trust root, so validation still resolves the pinned configuration evidence first (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-canonical-signature-set"
+target_row_id = "a20:field:restore-shard-operational-ack-canonical-signature-set"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.canonical_signature_set|canonical_signature_set"
 target_kind = "field"
 definition_status = "declared"
