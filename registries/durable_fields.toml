@@ -4034,6 +4034,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "portable restore operation identity binding this completion spec to one restore; comparison input retained and cut with the spec (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "GlobalRestoreServiceCompletionSpec"
 field_tag = 0x0002
 stable_name = "final_certificate_ref"
 exact_wire_type = "StrongRef"
@@ -4269,6 +4283,20 @@ max_size_bytes = 65536
 
 [[field]]
 containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "portable restore operation identity binding this finalize spec to one restore; comparison input retained and cut with the spec (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
 field_tag = 0x0002
 stable_name = "prepare_certificate_ref"
 exact_wire_type = "StrongRef"
@@ -4340,6 +4368,20 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "comparison-only Meta WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the finalize spec (a20:2597)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0008
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "service visibility epoch this finalize spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "GlobalRestoreServiceFinalizeSpec"
@@ -6343,6 +6385,20 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "LocalRestoreActivationSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this activation spec to one restore; comparison input retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "LocalRestoreActivationSpec"
 field_tag = 0x0002
 stable_name = "ready_certificate_ref"
 exact_wire_type = "StrongRef"
@@ -6383,6 +6439,20 @@ role_predicate = "role-local"
 retention_and_cut_rule = "closed profile-discriminated authority basis embedded by value; its DirectoryBound arm owns the only retaining interior edge, and the whole basis is retained and cut with the activation spec (a20:2603)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalRestoreActivationSpec"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "service visibility epoch this activation spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "LocalRestoreActivationSpec"
@@ -6576,6 +6646,20 @@ max_size_bytes = 65536
 
 [[field]]
 containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this completion spec to one restore; comparison input retained and cut with the spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "LocalRestoreServiceCompletionSpec"
 field_tag = 0x0002
 stable_name = "promotion_record_ref"
 exact_wire_type = "StrongRef"
@@ -6664,6 +6748,20 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this prepare spec to one restore; comparison input retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "LocalRestoreServicePrepareSpec"
 field_tag = 0x0002
 stable_name = "activation_certificate_ref"
 exact_wire_type = "StrongRef"
@@ -6707,6 +6805,20 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "service visibility epoch this prepare spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "LocalRestoreServicePrepareSpec"
 field_tag = 0x0007
 stable_name = "terminal_audit_gate"
 exact_wire_type = "TerminalAuditGate"
@@ -6718,6 +6830,20 @@ role_predicate = "role-local"
 retention_and_cut_rule = "shared closed terminal-audit gate carried by the prepare spec; embedded by value and retained/cut with LocalRestoreServicePrepareSpec, with no independent reachability edge (a20:2603)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalRestoreServicePromotionSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this promotion spec to one restore; comparison input retained and cut with the spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 32
 
 [[field]]
 containing_schema = "LocalRestoreServicePromotionSpec"
@@ -6777,6 +6903,20 @@ role_predicate = "role-local"
 retention_and_cut_rule = "comparison-only Local WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the promotion spec (a20:2605)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalRestoreServicePromotionSpec"
+field_tag = 0x0009
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "service visibility epoch this promotion spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "LocalRestoreServicePromotionSpec"
@@ -14207,6 +14347,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "portable restore operation identity binding this reopen-confirm spec to one restore; comparison input retained and cut with the spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "ShardRestoreReopenConfirmSpec"
 field_tag = 0x0002
 stable_name = "final_certificate_ref"
 exact_wire_type = "CertifiedRemoteStrongRef"
@@ -14249,6 +14403,20 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the exact shard independent reopen proof this confirmation consumes as the only transition out of the sealed pending state; retained while the confirm spec is retained and cut only with that spec, and order 40 <= 44 keeps the edge backward-only (a20:2599)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "service visibility epoch this reopen-confirm spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "ShardRestoreServiceOpenSpec"
@@ -14308,6 +14476,20 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "comparison-only shard-local WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the open spec (a20:2599)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardRestoreServiceOpenSpec"
+field_tag = 0x0005
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "service visibility epoch this open spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "ShardRestoreSourceLeaseProjection"

@@ -11214,6 +11214,35 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
                 | ("LocalRestoreServicePrepareSpec", "terminal_audit_gate")
                 | ("LocalRestoreServicePromotionSpec", "terminal_audit_gate")
+                // fgdb-a20-restore-promotion-ivsp: the Spec-family restore_id
+                // and service_visibility_epoch scalar members (source order
+                // a20:2597-2605), landed beside the schemas' reference rows
+                // and younger than the historical witness for the same reason.
+                | ("GlobalRestoreServiceCompletionSpec", "restore_id")
+                | ("GlobalRestoreServiceFinalizeSpec", "restore_id")
+                | ("LocalRestoreActivationSpec", "restore_id")
+                | ("LocalRestoreServiceCompletionSpec", "restore_id")
+                | ("LocalRestoreServicePrepareSpec", "restore_id")
+                | ("LocalRestoreServicePromotionSpec", "restore_id")
+                | ("ShardRestoreReopenConfirmSpec", "restore_id")
+                | (
+                    "GlobalRestoreServiceFinalizeSpec",
+                    "service_visibility_epoch"
+                )
+                | ("LocalRestoreActivationSpec", "service_visibility_epoch")
+                | (
+                    "LocalRestoreServicePrepareSpec",
+                    "service_visibility_epoch"
+                )
+                | (
+                    "LocalRestoreServicePromotionSpec",
+                    "service_visibility_epoch"
+                )
+                | (
+                    "ShardRestoreReopenConfirmSpec",
+                    "service_visibility_epoch"
+                )
+                | ("ShardRestoreServiceOpenSpec", "service_visibility_epoch")
                 | ("RestoreServicePromotionManifest", "restore_id")
                 | ("RestoreServicePromotionManifest", "database_id")
                 | (
@@ -12122,7 +12151,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 835,
+        pre_erratum.fields.len() + 848,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

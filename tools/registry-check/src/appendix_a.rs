@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3767;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3780;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "c0aa36ce5213a1ac3322d74cbbb88a697a92abfcf9b155e2291c05beff3fe6a6";
+    "449c64dea5f256cae1711987c6776fc8063516e47bde1e344146fe110740f352";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 141;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "15867f3181d82e5e4a9ef89bb9ff3ffbf78c4d428f0095f16abba47803555367";
+    "727c65141f415bb8d4dc764d4e3e89e9bf73e70ccbfcc2c61fdf6bafaed9c0f0";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15876,10 +15876,10 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            34,
-            "the coverage law must still evaluate a20's 34 uncovered keys after \
-             fgdb-a20-restore-promotion-ivsp registers the six Spec-family \
-             terminal_audit_gate members with their closure extension"
+            21,
+            "the coverage law must still evaluate a20's 21 uncovered keys after \
+             fgdb-a20-restore-promotion-ivsp registers the Spec-family \
+             restore_id and service_visibility_epoch scalar members"
         );
 
         // CONFORMANT CONTROL: certify the universe and only the universe code
@@ -15893,7 +15893,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            34,
+            21,
             "certification must not change what the coverage law finds"
         );
     }

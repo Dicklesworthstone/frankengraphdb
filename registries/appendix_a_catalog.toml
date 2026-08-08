@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3767
+target_count = 3780
 projection_fallback_count = 141
-target_source_assignment_sha256 = "15867f3181d82e5e4a9ef89bb9ff3ffbf78c4d428f0095f16abba47803555367"
+target_source_assignment_sha256 = "727c65141f415bb8d4dc764d4e3e89e9bf73e70ccbfcc2c61fdf6bafaed9c0f0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -114931,5 +114931,317 @@ row_id = "a20:target:field-local-restore-service-promotion-spec-terminal-audit-g
 target_row_id = "a20:field:local-restore-service-promotion-spec-terminal-audit-gate"
 slice_id = "a20"
 source_key = "field|LocalRestoreServicePromotionSpec|LocalRestoreServicePromotionSpec.terminal_audit_gate|terminal_audit_gate"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-completion-spec-restore-id"
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "portable restore operation identity binding this completion spec to one restore; comparison input retained and cut with the spec (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-completion-spec-restore-id"
+target_row_id = "a20:field:global-restore-service-completion-spec-restore-id"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceCompletionSpec|GlobalRestoreServiceCompletionSpec.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-finalize-spec-restore-id"
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "portable restore operation identity binding this finalize spec to one restore; comparison input retained and cut with the spec (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-finalize-spec-restore-id"
+target_row_id = "a20:field:global-restore-service-finalize-spec-restore-id"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalizeSpec|GlobalRestoreServiceFinalizeSpec.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-activation-spec-restore-id"
+containing_schema = "LocalRestoreActivationSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this activation spec to one restore; comparison input retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-local-restore-activation-spec-restore-id"
+target_row_id = "a20:field:local-restore-activation-spec-restore-id"
+slice_id = "a20"
+source_key = "field|LocalRestoreActivationSpec|LocalRestoreActivationSpec.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-completion-spec-restore-id"
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this completion spec to one restore; comparison input retained and cut with the spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-completion-spec-restore-id"
+target_row_id = "a20:field:local-restore-service-completion-spec-restore-id"
+slice_id = "a20"
+source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-prepare-spec-restore-id"
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this prepare spec to one restore; comparison input retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-prepare-spec-restore-id"
+target_row_id = "a20:field:local-restore-service-prepare-spec-restore-id"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-promotion-spec-restore-id"
+containing_schema = "LocalRestoreServicePromotionSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this promotion spec to one restore; comparison input retained and cut with the spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-promotion-spec-restore-id"
+target_row_id = "a20:field:local-restore-service-promotion-spec-restore-id"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePromotionSpec|LocalRestoreServicePromotionSpec.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:shard-restore-reopen-confirm-spec-restore-id"
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "portable restore operation identity binding this reopen-confirm spec to one restore; comparison input retained and cut with the spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-shard-restore-reopen-confirm-spec-restore-id"
+target_row_id = "a20:field:shard-restore-reopen-confirm-spec-restore-id"
+slice_id = "a20"
+source_key = "field|ShardRestoreReopenConfirmSpec|ShardRestoreReopenConfirmSpec.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-finalize-spec-service-visibility-epoch"
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0008
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "service visibility epoch this finalize spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-finalize-spec-service-visibility-epoch"
+target_row_id = "a20:field:global-restore-service-finalize-spec-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalizeSpec|GlobalRestoreServiceFinalizeSpec.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-activation-spec-service-visibility-epoch"
+containing_schema = "LocalRestoreActivationSpec"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "service visibility epoch this activation spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-local-restore-activation-spec-service-visibility-epoch"
+target_row_id = "a20:field:local-restore-activation-spec-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|LocalRestoreActivationSpec|LocalRestoreActivationSpec.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-prepare-spec-service-visibility-epoch"
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "service visibility epoch this prepare spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-prepare-spec-service-visibility-epoch"
+target_row_id = "a20:field:local-restore-service-prepare-spec-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-promotion-spec-service-visibility-epoch"
+containing_schema = "LocalRestoreServicePromotionSpec"
+field_tag = 0x0009
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "service visibility epoch this promotion spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-promotion-spec-service-visibility-epoch"
+target_row_id = "a20:field:local-restore-service-promotion-spec-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePromotionSpec|LocalRestoreServicePromotionSpec.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:shard-restore-reopen-confirm-spec-service-visibility-epoch"
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0006
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "service visibility epoch this reopen-confirm spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-shard-restore-reopen-confirm-spec-service-visibility-epoch"
+target_row_id = "a20:field:shard-restore-reopen-confirm-spec-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|ShardRestoreReopenConfirmSpec|ShardRestoreReopenConfirmSpec.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:shard-restore-service-open-spec-service-visibility-epoch"
+containing_schema = "ShardRestoreServiceOpenSpec"
+field_tag = 0x0005
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "service visibility epoch this open spec executes under; every later carrier must match it exactly, so the comparison input is retained and cut with the spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-shard-restore-service-open-spec-service-visibility-epoch"
+target_row_id = "a20:field:shard-restore-service-open-spec-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|ShardRestoreServiceOpenSpec|ShardRestoreServiceOpenSpec.service_visibility_epoch|service_visibility_epoch"
 target_kind = "field"
 definition_status = "declared"
