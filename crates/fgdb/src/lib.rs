@@ -100,10 +100,12 @@
 //! Tier D holds ADJACENCY BLOCKS and VERTEX ROW PATCHES. Edges answer through
 //! [`Database::neighbours`]; a vertex's labels and properties answer through
 //! [`Database::vertex`] (fgdb-3xoi). Deletes go through
-//! [`WriteBatch::delete_edge`] and [`WriteBatch::delete_vertex`] with
-//! engine-derived before-images (fgdb-p3ok). Edge properties, label-membership
-//! flips, and the columnar sealed forms arrive with `fgdb-w3-properties-gou`;
-//! the provenance envelopes and `NetEffectNormalForm` canonicalization with
+//! [`WriteBatch::delete_edge`] and [`WriteBatch::delete_vertex`], and vertex
+//! label/property updates through [`WriteBatch::set_vertex_label`] and
+//! [`WriteBatch::set_vertex_property`] — all with engine-derived before-images
+//! validated by the oracle at replay (fgdb-p3ok, fgdb-stb6). Edge properties
+//! and the columnar sealed forms arrive with `fgdb-w3-properties-gou`; the
+//! provenance envelopes and `NetEffectNormalForm` canonicalization with
 //! `fgdb-w5-effects-normal-form-819`.
 
 #![forbid(unsafe_code)]
@@ -476,6 +478,16 @@ enum PendingRow {
     DeleteVertex {
         vid: VId,
     },
+    SetLabel {
+        vid: VId,
+        label: LabelId,
+        member: bool,
+    },
+    SetProperty {
+        vid: VId,
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    },
 }
 
 impl WriteBatch {
@@ -525,6 +537,25 @@ impl WriteBatch {
     /// and the `before_version` are derived by the engine at commit time.
     pub fn delete_vertex(&mut self, vid: VId) -> &mut Self {
         self.rows.push(PendingRow::DeleteVertex { vid });
+        self
+    }
+
+    /// Set or clear `vid`'s membership in `label`. The durable row's
+    /// before-image is derived by the engine at commit time.
+    pub fn set_vertex_label(&mut self, vid: VId, label: LabelId, member: bool) -> &mut Self {
+        self.rows.push(PendingRow::SetLabel { vid, label, member });
+        self
+    }
+
+    /// Set (`Some`) or unset (`None`) one property of `vid`. The durable
+    /// row's before-image is derived by the engine at commit time.
+    pub fn set_vertex_property(
+        &mut self,
+        vid: VId,
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    ) -> &mut Self {
+        self.rows.push(PendingRow::SetProperty { vid, key, value });
         self
     }
 
@@ -739,6 +770,11 @@ impl Database {
             std::collections::BTreeSet::new();
         let mut prefix_deleted_vertices: std::collections::BTreeSet<VId> =
             std::collections::BTreeSet::new();
+        // Vertex CONTENT for update targets, seeded lazily from the merged
+        // committed row so an update's before-image reflects the batch
+        // prefix: (labels, props), both kept in canonical order.
+        let mut prefix_content: std::collections::BTreeMap<VId, VertexContent> =
+            std::collections::BTreeMap::new();
         for pending in batch.rows {
             let row = match pending {
                 PendingRow::Vertex { vid, labels, props } => {
@@ -751,6 +787,9 @@ impl Database {
                     };
                     birth_ordinal += 1;
                     prefix_versions.insert(ElementId::Vertex(vid), successor_version(None, &row)?);
+                    if let DeltaRow::CreateVertex { labels, props, .. } = &row {
+                        prefix_content.insert(vid, (labels.clone(), props.clone()));
+                    }
                     row
                 }
                 PendingRow::Edge {
@@ -821,11 +860,89 @@ impl Database {
                         prefix_deleted_edges.insert(*eid);
                     }
                     prefix_deleted_vertices.insert(vid);
+                    prefix_content.remove(&vid);
                     DeltaRow::DeleteVertex {
                         vid,
                         before_version,
                         sorted_retired_incident_edges: cascade.into_iter().collect(),
                     }
+                }
+                PendingRow::SetLabel { vid, label, member } => {
+                    let live_now = !prefix_deleted_vertices.contains(&vid)
+                        && (prefix_content.contains_key(&vid)
+                            || prefix_versions.contains_key(&ElementId::Vertex(vid))
+                            || self.writer.is_vertex_live(vid));
+                    if !live_now {
+                        return Err(WriteError::UnknownVertex { vid });
+                    }
+                    let (labels, _) =
+                        vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
+                    let before = labels.binary_search(&label).is_ok();
+                    let row = DeltaRow::LabelMembership {
+                        vid,
+                        label,
+                        before,
+                        after: member,
+                    };
+                    match labels.binary_search(&label) {
+                        Ok(at) => {
+                            if !member {
+                                labels.remove(at);
+                            }
+                        }
+                        Err(at) => {
+                            if member {
+                                labels.insert(at, label);
+                            }
+                        }
+                    }
+                    let elem = ElementId::Vertex(vid);
+                    let previous = prefix_versions
+                        .get(&elem)
+                        .or_else(|| self.snapshot.versions.get(&elem))
+                        .copied()
+                        .expect("a live vertex always has a version chain head");
+                    prefix_versions.insert(elem, successor_version(Some(previous), &row)?);
+                    row
+                }
+                PendingRow::SetProperty { vid, key, value } => {
+                    let live_now = !prefix_deleted_vertices.contains(&vid)
+                        && (prefix_content.contains_key(&vid)
+                            || prefix_versions.contains_key(&ElementId::Vertex(vid))
+                            || self.writer.is_vertex_live(vid));
+                    if !live_now {
+                        return Err(WriteError::UnknownVertex { vid });
+                    }
+                    let (_, props) = vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
+                    let position = props.binary_search_by_key(&key, |(k, _)| *k);
+                    let before = position.ok().map(|at| props[at].1.clone());
+                    let row = DeltaRow::Property {
+                        elem: ElementId::Vertex(vid),
+                        property: key,
+                        before,
+                        after: value.clone(),
+                    };
+                    match position {
+                        Ok(at) => match value {
+                            Some(value) => props[at].1 = value,
+                            None => {
+                                props.remove(at);
+                            }
+                        },
+                        Err(at) => {
+                            if let Some(value) = value {
+                                props.insert(at, (key, value));
+                            }
+                        }
+                    }
+                    let elem = ElementId::Vertex(vid);
+                    let previous = prefix_versions
+                        .get(&elem)
+                        .or_else(|| self.snapshot.versions.get(&elem))
+                        .copied()
+                        .expect("a live vertex always has a version chain head");
+                    prefix_versions.insert(elem, successor_version(Some(previous), &row)?);
+                    row
                 }
             };
             rows.push(row);
@@ -887,13 +1004,13 @@ impl Database {
                 ) {
                     next_birth_ordinal += 1;
                 }
-                fold_version(&mut new_versions, row)?;
                 folded
                     .apply(self.keys.block_keys(), frontier, row)
                     .map_err(|error| RebuildError::Fold {
                         commit_seq: frontier.0,
                         error,
                     })?;
+                fold_version(&mut new_versions, row)?;
             }
         }
         let (root, blocks, patches) = folded
@@ -1139,9 +1256,41 @@ fn fold_version(
         DeltaRow::DeleteEdge { eid, .. } => {
             versions.remove(&ElementId::Edge(*eid));
         }
+        DeltaRow::LabelMembership { vid, .. } => {
+            let elem = ElementId::Vertex(*vid);
+            let previous = *versions
+                .get(&elem)
+                .expect("the writer proved this vertex live before the version fold ran");
+            versions.insert(elem, successor_version(Some(previous), row)?);
+        }
+        DeltaRow::Property { elem, .. } => {
+            let previous = *versions
+                .get(elem)
+                .expect("the writer proved this element live before the version fold ran");
+            versions.insert(*elem, successor_version(Some(previous), row)?);
+        }
         _ => {}
     }
     Ok(())
+}
+
+/// One vertex's mutable batch-prefix content: `(labels, props)`, both in
+/// canonical order.
+type VertexContent = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
+
+/// The batch-prefix content entry for `vid`, seeded from the merged committed
+/// row on first touch, so an update's before-image reflects everything the
+/// batch prefix already did to that vertex.
+fn vertex_content_entry<'content>(
+    prefix_content: &'content mut std::collections::BTreeMap<VId, VertexContent>,
+    snapshot: &Snapshot,
+    vid: VId,
+) -> &'content mut VertexContent {
+    prefix_content.entry(vid).or_insert_with(|| {
+        let row = merge_vertex(&snapshot.patches, vid, snapshot.frontier)
+            .expect("liveness was proven before content is materialized");
+        (row.labels, row.props)
+    })
 }
 
 /// The pinned intent semantics this slice commits under.
@@ -1310,16 +1459,16 @@ async fn rebuild(
                 ) {
                     next_birth_ordinal += 1;
                 }
-                fold_version(&mut versions, row).map_err(|error| RebuildError::Decode {
-                    commit_seq: commit_seq.0,
-                    error,
-                })?;
                 writer
                     .apply(keys.block_keys(), commit_seq, row)
                     .map_err(|error| RebuildError::Fold {
                         commit_seq: commit_seq.0,
                         error,
                     })?;
+                fold_version(&mut versions, row).map_err(|error| RebuildError::Decode {
+                    commit_seq: commit_seq.0,
+                    error,
+                })?;
             }
         }
     }

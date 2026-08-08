@@ -32,7 +32,8 @@ use crate::vertex::{VertexPatchError, VertexRow, encode_patch, span_of_rows, ver
 use crate::{
     AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES, block_id, encode_block, validate_entry,
 };
-use fgdb_delta_types::{DeltaRow, RelationId};
+use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_types::CanonicalScalar;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,6 +56,18 @@ impl SealedBlock {
             last_seq: self.last_seq,
         }
     }
+}
+
+/// One vertex content transition the fold applies (fgdb-stb6).
+enum VertexContentUpdate {
+    Label {
+        label: LabelId,
+        member: bool,
+    },
+    Property {
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    },
 }
 
 /// A sealed vertex patch: its identity, its bytes, and the range it covers —
@@ -203,10 +216,12 @@ pub struct BlockWriter {
     /// defense-in-depth check over the history visible to this fold.
     spent: BTreeSet<EId>,
     sealed: Vec<SealedBlock>,
-    /// Vertex rows not yet sealed into a patch, keyed by stable identity —
-    /// the vertex half of the fold (fgdb-3xoi). The same memtable argument as
-    /// `live`: bounded, rebuildable by replay, never authoritative.
-    pending_vertices: BTreeMap<VId, VertexRow>,
+    /// Vertex rows not yet sealed into a patch, keyed by STATEMENT identity
+    /// `(vid, created_at)` — the vertex half of the fold (fgdb-3xoi), keyed
+    /// per version since FGSV V2 chains statements (fgdb-stb6). The same
+    /// memtable argument as `live`: bounded, rebuildable by replay, never
+    /// authoritative. BTreeMap order IS the patch's canonical row order.
+    pending_vertices: BTreeMap<(VId, CommitSeq), VertexRow>,
     /// The full row of every VId currently live in this fold.
     ///
     /// A map and not a set for the reason `live` carries edge births: a
@@ -365,9 +380,10 @@ impl BlockWriter {
                 // birth with the interval closed. Proven lawful here, before
                 // the first edge retires.
                 let same_commit_fold = row.created_at == seq
-                    && self.pending_vertices.get(vid).is_some_and(|pending| {
-                        pending.created_at == seq && pending.retired_at.is_none()
-                    });
+                    && self
+                        .pending_vertices
+                        .get(&(*vid, seq))
+                        .is_some_and(|pending| pending.retired_at.is_none());
                 let tombstone = if same_commit_fold {
                     None
                 } else {
@@ -381,21 +397,22 @@ impl BlockWriter {
                 }
                 match tombstone {
                     None => {
-                        let removed = self.pending_vertices.remove(vid);
+                        let removed = self.pending_vertices.remove(&(*vid, seq));
                         debug_assert!(
                             removed.is_some(),
                             "the fold requires the pending creation it was proven on"
                         );
                     }
                     Some(retired) => {
-                        if !self.pending_vertices.contains_key(vid)
+                        let key = (*vid, retired.created_at);
+                        if !self.pending_vertices.contains_key(&key)
                             && self.pending_vertices.len()
                                 >= usize::try_from(crate::vertex::MAX_PATCH_ROWS)
                                     .unwrap_or(usize::MAX)
                         {
                             self.seal_vertices(keys)?;
                         }
-                        self.pending_vertices.insert(*vid, retired);
+                        self.pending_vertices.insert(key, retired);
                     }
                 }
                 let removed = self.live_vertices.remove(vid);
@@ -434,17 +451,57 @@ impl BlockWriter {
                     // row would create a patch no conforming reader accepts.
                     self.seal_vertices(keys)?;
                 }
-                self.pending_vertices.insert(*vid, row.clone());
+                self.pending_vertices.insert((*vid, seq), row.clone());
                 self.live_vertices.insert(*vid, row);
                 let was_fresh = self.spent_vertices.insert(*vid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
+            DeltaRow::LabelMembership {
+                vid, label, after, ..
+            } => {
+                self.fold_vertex_update(
+                    keys,
+                    *vid,
+                    seq,
+                    VertexContentUpdate::Label {
+                        label: *label,
+                        member: *after,
+                    },
+                )?;
+            }
+            DeltaRow::Property {
+                elem,
+                property,
+                after,
+                ..
+            } => match elem {
+                ElementId::Vertex(vid) => {
+                    self.fold_vertex_update(
+                        keys,
+                        *vid,
+                        seq,
+                        VertexContentUpdate::Property {
+                            key: *property,
+                            value: after.clone(),
+                        },
+                    )?;
+                }
+                ElementId::Edge(eid) => {
+                    // Edge properties have no tier-D storage yet — the
+                    // block-hosted patch refs are `fgdb-w3-properties-gou`'s.
+                    // The row stays durable in the stream, and LIVENESS is
+                    // still enforced here so an unlawful stream refuses
+                    // instead of silently versioning a ghost.
+                    if !self.live.contains_key(eid) {
+                        return Err(WriteError::UnknownEdge { eid: *eid });
+                    }
+                }
+            },
             // Every other family is real and none of it belongs to the two
             // structures this tier holds (adjacency blocks and vertex row
-            // patches). Label flips, property transitions, valid time,
-            // counters, escrow, sketches, schema and constraints belong to
-            // structures that do not exist yet, and silently folding them
-            // would be worse than not storing them.
+            // patches). Valid time, counters, escrow, sketches, schema and
+            // constraints belong to structures that do not exist yet, and
+            // silently folding them would be worse than not storing them.
             _ => {}
         }
         self.last_seq = Some(seq);
@@ -619,6 +676,93 @@ impl BlockWriter {
         self.pending.clear();
         self.sealed.extend(sealed);
         Ok(first)
+    }
+
+    /// Fold one vertex content transition (fgdb-stb6): the live statement
+    /// retires at `seq` and its successor — identical birth, updated content
+    /// — begins there, the FGSV V2 chain shape. A transition inside the
+    /// statement's own creation commit folds IN PLACE: the intermediate
+    /// content never existed on any snapshot, exactly like the same-commit
+    /// delete fold. The writer APPLIES the after-image and does not verify
+    /// the before-image, for the cascade's reason: the row's image is checked
+    /// against materialized state by the materializer that produced it.
+    fn fold_vertex_update(
+        &mut self,
+        keys: (&[u8; 32], DatabaseSecurityNamespaceId),
+        vid: VId,
+        seq: CommitSeq,
+        update: VertexContentUpdate,
+    ) -> Result<(), WriteError> {
+        let current = self
+            .live_vertices
+            .get(&vid)
+            .cloned()
+            .ok_or(WriteError::UnknownVertex { vid })?;
+        let mut successor = current.clone();
+        match update {
+            VertexContentUpdate::Label { label, member } => {
+                match successor.labels.binary_search(&label) {
+                    Ok(at) => {
+                        if !member {
+                            successor.labels.remove(at);
+                        }
+                    }
+                    Err(at) => {
+                        if member {
+                            successor.labels.insert(at, label);
+                        }
+                    }
+                }
+            }
+            VertexContentUpdate::Property { key, value } => {
+                match successor.props.binary_search_by_key(&key, |(k, _)| *k) {
+                    Ok(at) => match value {
+                        Some(value) => successor.props[at].1 = value,
+                        None => {
+                            successor.props.remove(at);
+                        }
+                    },
+                    Err(at) => {
+                        if let Some(value) = value {
+                            successor.props.insert(at, (key, value));
+                        }
+                    }
+                }
+            }
+        }
+        if current.created_at == seq
+            && self
+                .pending_vertices
+                .get(&(vid, seq))
+                .is_some_and(|pending| pending.retired_at.is_none())
+        {
+            self.pending_vertices.insert((vid, seq), successor.clone());
+            self.live_vertices.insert(vid, successor);
+            return Ok(());
+        }
+        let mut tombstone = current;
+        tombstone.retired_at = Some(seq);
+        // Sealed-in-this-commit creations reach here and refuse as
+        // RetiredBeforeCreated (an empty interval), the same honest format
+        // answer the edge path gives a pathological stream.
+        crate::vertex::validate_patch_row(0, &tombstone).map_err(WriteError::Patch)?;
+        successor.created_at = seq;
+        successor.retired_at = None;
+        crate::vertex::validate_patch_row(0, &successor).map_err(WriteError::Patch)?;
+        let tombstone_key = (vid, tombstone.created_at);
+        let successor_key = (vid, seq);
+        let incoming = usize::from(!self.pending_vertices.contains_key(&tombstone_key))
+            + usize::from(!self.pending_vertices.contains_key(&successor_key));
+        if self.pending_vertices.len() + incoming
+            > usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX)
+        {
+            self.seal_vertices(keys)?;
+        }
+        self.pending_vertices.insert(tombstone_key, tombstone);
+        self.pending_vertices
+            .insert(successor_key, successor.clone());
+        self.live_vertices.insert(vid, successor);
+        Ok(())
     }
 
     /// Seal pending vertex rows into one canonical patch.

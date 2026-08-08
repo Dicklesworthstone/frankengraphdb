@@ -150,6 +150,22 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
     fifth.delete_vertex(VId(6)); // cascades EId(16)
     fifth.delete_vertex(VId(5)); // cascades EId(14), a cross-relation edge
     db.write(cx, fifth).await.expect("fifth batch commits");
+
+    // UPDATES (fgdb-stb6), every before-image engine-derived and validated by
+    // the oracle at replay (LabelBeforeMismatch / PropertyBeforeMismatch):
+    // change a property, unset one, add and remove labels — including a
+    // same-batch chain on one vertex so the derivation walks the prefix.
+    let mut sixth = WriteBatch::new(KNOWS);
+    sixth.set_vertex_property(
+        VId(1),
+        PropertyKeyId(7),
+        Some(CanonicalScalar::ucs_basic_text("lovelace").expect("admissible")),
+    );
+    sixth.set_vertex_property(VId(1), PropertyKeyId(9), None);
+    sixth.set_vertex_label(VId(1), LabelId(9), true);
+    sixth.set_vertex_label(VId(1), LabelId(3), false);
+    sixth.set_vertex_label(VId(3), LabelId(7), true);
+    db.write(cx, sixth).await.expect("sixth batch commits");
 }
 
 /// **THE DIFFERENTIAL: the engine's answer equals the oracle's, for every vertex

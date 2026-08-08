@@ -310,6 +310,94 @@ fn a_same_batch_create_and_delete_leaves_no_element() {
     });
 }
 
+/// **THE UPDATE LAW (fgdb-stb6): labels and properties CHANGE, the change is
+/// readable, and a reopen answers the updated state.** The before-images the
+/// durable rows carry are engine-derived and oracle-validated by the
+/// differential; this law pins the engine-side lifecycle.
+#[test]
+fn label_and_property_updates_are_readable_and_survive_a_reopen() {
+    let dir = scratch("updates");
+    under_lab(79, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        {
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(
+                VId(1),
+                vec![LabelId(3)],
+                vec![(key, CanonicalScalar::Int(1))],
+            );
+            db.write(cx, batch).await.expect("commits");
+
+            // Change a property, add a label, in separate commits.
+            let mut update = WriteBatch::new(KNOWS);
+            update.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(2)));
+            db.write(cx, update).await.expect("property update commits");
+            let mut label = WriteBatch::new(KNOWS);
+            label.set_vertex_label(VId(1), LabelId(5), true);
+            db.write(cx, label).await.expect("label update commits");
+
+            let row = db.vertex(VId(1)).expect("readable");
+            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
+            assert_eq!(row.labels, vec![LabelId(3), LabelId(5)]);
+
+            // Unset the property and remove the original label.
+            let mut clear = WriteBatch::new(KNOWS);
+            clear.set_vertex_property(VId(1), key, None);
+            clear.set_vertex_label(VId(1), LabelId(3), false);
+            db.write(cx, clear).await.expect("clears commit");
+            let row = db.vertex(VId(1)).expect("still readable");
+            assert!(row.props.is_empty());
+            assert_eq!(row.labels, vec![LabelId(5)]);
+
+            // Updating the absent is a typed refusal, before anything durable.
+            let frontier = db.frontier();
+            let mut ghost = WriteBatch::new(KNOWS);
+            ghost.set_vertex_property(VId(99), key, Some(CanonicalScalar::Int(3)));
+            assert!(matches!(
+                db.write(cx, ghost).await,
+                Err(WriteError::UnknownVertex { vid: VId(99) })
+            ));
+            assert_eq!(db.frontier(), frontier, "the refusal consumed no sequence");
+        }
+
+        // NOTHING crosses this line except `dir` and `keys()`.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let row = db.vertex(VId(1)).expect("the updated vertex survives");
+        assert!(row.props.is_empty());
+        assert_eq!(row.labels, vec![LabelId(5)]);
+    });
+}
+
+/// A create and its updates in ONE batch: the engine derives each row's
+/// before-image against the batch prefix, and the durable fold shows only the
+/// final content — the intermediate never existed on any snapshot.
+#[test]
+fn same_batch_create_and_update_shows_only_the_final_content() {
+    let dir = scratch("same-batch-update");
+    under_lab(80, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(1), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        batch.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(2)));
+        batch.set_vertex_label(VId(1), LabelId(9), true);
+        db.write(cx, batch).await.expect("commits");
+
+        let row = db.vertex(VId(1)).expect("readable");
+        assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
+        assert_eq!(row.labels, vec![LabelId(9)]);
+        drop(db);
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(
+            db.vertex(VId(1)).expect("survives").props,
+            vec![(key, CanonicalScalar::Int(2))]
+        );
+    });
+}
+
 /// The read is keyed on BOTH source and relation. Without these controls a read
 /// that ignored either would still pass the law above.
 #[test]
