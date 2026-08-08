@@ -104,6 +104,22 @@ fn shapes() -> Vec<(&'static str, Vec<Vec<DeltaRow>>)> {
         ],
     ));
 
+    // A vertex-delete cascade: the vertex row's tombstone supersede AND its
+    // incident edges' retirements, in one row, across a seal boundary.
+    shapes.push((
+        "vertex-delete-cascade",
+        vec![
+            vec![create_vertex(1, 0), create_vertex(2, 1)],
+            vec![create_edge(30, 1, 2, 2), create_edge(31, 2, 1, 3)],
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: fgdb_types::ids::ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(30), EId(31)],
+            }],
+            vec![create_vertex(3, 4), create_edge(32, 1, 3, 5)],
+        ],
+    ));
+
     shapes
 }
 

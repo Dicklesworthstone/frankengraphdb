@@ -117,6 +117,10 @@ pub enum WriteError {
         previous: CommitSeq,
         offered: CommitSeq,
     },
+    /// A `DeleteVertex` named a vertex this writer never saw created —
+    /// the vertex counterpart of [`WriteError::UnknownEdge`], refused for the
+    /// same replay-from-the-beginning reason.
+    UnknownVertex { vid: VId },
     /// A `CreateVertex` named a vertex this writer already holds live.
     ///
     /// Refused for the reason `EdgeAlreadyLive` is: a re-create of a live
@@ -156,6 +160,9 @@ impl core::fmt::Display for WriteError {
                 f,
                 "rows must arrive in commit order; {offered:?} follows {previous:?}"
             ),
+            Self::UnknownVertex { vid } => {
+                write!(f, "no live version of {vid:?} to retire")
+            }
             Self::VertexAlreadyLive { vid } => {
                 write!(f, "{vid:?} is already live; a re-create is not a version")
             }
@@ -200,8 +207,13 @@ pub struct BlockWriter {
     /// the vertex half of the fold (fgdb-3xoi). The same memtable argument as
     /// `live`: bounded, rebuildable by replay, never authoritative.
     pending_vertices: BTreeMap<VId, VertexRow>,
-    /// Every VId currently live in this fold.
-    live_vertices: BTreeSet<VId>,
+    /// The full row of every VId currently live in this fold.
+    ///
+    /// A map and not a set for the reason `live` carries edge births: a
+    /// `DeleteVertex` names only the VId, while the tombstone that retires a
+    /// SEALED row must restate the exact birth — ordinal, labels, properties —
+    /// and only the creation carried those.
+    live_vertices: BTreeMap<VId, VertexRow>,
     /// Every VId admitted while replaying this partition-local writer.
     spent_vertices: BTreeSet<VId>,
     sealed_patches: Vec<SealedPatch>,
@@ -219,7 +231,7 @@ impl BlockWriter {
             spent: BTreeSet::new(),
             sealed: Vec::new(),
             pending_vertices: BTreeMap::new(),
-            live_vertices: BTreeSet::new(),
+            live_vertices: BTreeMap::new(),
             spent_vertices: BTreeSet::new(),
             sealed_patches: Vec::new(),
             last_seq: None,
@@ -298,18 +310,68 @@ impl BlockWriter {
                 self.retire(keys, *eid, seq)?;
             }
             DeltaRow::DeleteVertex {
+                vid,
                 sorted_retired_incident_edges,
                 ..
             } => {
+                // THE VERTEX MUST BE LIVE, proven before any cascade member
+                // retires — the same atomicity argument as
+                // `preflight_retirements`: a refusal after the first edge
+                // retired would leave the writer half-applied. A delete this
+                // fold cannot resolve means the stream is not being replayed
+                // from the beginning, exactly as for `UnknownEdge`.
+                let row = self
+                    .live_vertices
+                    .get(vid)
+                    .cloned()
+                    .ok_or(WriteError::UnknownVertex { vid: *vid })?;
                 // THE CASCADE IS TAKEN FROM THE ROW, not recomputed from the live
                 // map. The row's image is checked against materialized state by the
                 // materializer that produced it; recomputing here would be a second
                 // opinion about which edges a deletion retires, and two opinions
                 // about one fact is how they drift.
                 self.preflight_retirements(sorted_retired_incident_edges, seq)?;
+                // The vertex's own retirement stages exactly like an edge's:
+                // created-and-deleted in one commit folds to NO row while the
+                // creation is still pending; anything else restates the exact
+                // birth with the interval closed. Proven lawful here, before
+                // the first edge retires.
+                let same_commit_fold = row.created_at == seq
+                    && self.pending_vertices.get(vid).is_some_and(|pending| {
+                        pending.created_at == seq && pending.retired_at.is_none()
+                    });
+                let tombstone = if same_commit_fold {
+                    None
+                } else {
+                    let mut retired = row;
+                    retired.retired_at = Some(seq);
+                    crate::vertex::validate_patch_row(0, &retired).map_err(WriteError::Patch)?;
+                    Some(retired)
+                };
                 for eid in sorted_retired_incident_edges {
                     self.retire(keys, *eid, seq)?;
                 }
+                match tombstone {
+                    None => {
+                        let removed = self.pending_vertices.remove(vid);
+                        debug_assert!(
+                            removed.is_some(),
+                            "the fold requires the pending creation it was proven on"
+                        );
+                    }
+                    Some(retired) => {
+                        if !self.pending_vertices.contains_key(vid)
+                            && self.pending_vertices.len()
+                                >= usize::try_from(crate::vertex::MAX_PATCH_ROWS)
+                                    .unwrap_or(usize::MAX)
+                        {
+                            self.seal_vertices(keys)?;
+                        }
+                        self.pending_vertices.insert(*vid, retired);
+                    }
+                }
+                let removed = self.live_vertices.remove(vid);
+                debug_assert!(removed.is_some(), "preflighted live vertex disappeared");
             }
             DeltaRow::CreateVertex {
                 vid,
@@ -318,7 +380,7 @@ impl BlockWriter {
                 props,
                 ..
             } => {
-                if self.live_vertices.contains(vid) {
+                if self.live_vertices.contains_key(vid) {
                     return Err(WriteError::VertexAlreadyLive { vid: *vid });
                 }
                 if self.spent_vertices.contains(vid) {
@@ -344,8 +406,8 @@ impl BlockWriter {
                     // row would create a patch no conforming reader accepts.
                     self.seal_vertices(keys)?;
                 }
-                self.pending_vertices.insert(*vid, row);
-                self.live_vertices.insert(*vid);
+                self.pending_vertices.insert(*vid, row.clone());
+                self.live_vertices.insert(*vid, row);
                 let was_fresh = self.spent_vertices.insert(*vid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }

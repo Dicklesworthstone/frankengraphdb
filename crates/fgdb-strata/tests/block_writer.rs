@@ -55,6 +55,18 @@ fn delete(eid: u128) -> DeltaRow {
     }
 }
 
+/// A bare vertex creation, so cascade fixtures satisfy the create-once law the
+/// oracle and (since the vertex fold) this writer both enforce.
+fn create_vertex_bare(vid: u128) -> DeltaRow {
+    DeltaRow::CreateVertex {
+        vid: VId(vid),
+        birth_ordinal: 900 + vid as u64,
+        labels: vec![],
+        props: vec![],
+        valid_time: None,
+    }
+}
+
 /// A creation and its retirement in one run become ONE entry with a finished
 /// interval — the block carries the whole version, so nothing is superseded.
 #[test]
@@ -242,6 +254,8 @@ fn a_refused_delete_does_not_advance_the_stream_frontier() {
 #[test]
 fn a_vertex_deletion_retires_its_declared_cascade() {
     let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("creates the vertex");
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
     w.apply(keys(), CommitSeq(1), &create(11, 3, 1))
@@ -283,6 +297,8 @@ fn a_vertex_deletion_retires_its_declared_cascade() {
 #[test]
 fn a_cascade_naming_an_unknown_edge_is_refused() {
     let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("creates the vertex");
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
     assert_eq!(
@@ -307,6 +323,8 @@ fn a_cascade_naming_an_unknown_edge_is_refused() {
 #[test]
 fn a_duplicate_cascade_edge_is_refused_atomically() {
     let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("creates the vertex");
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
     assert_eq!(
@@ -333,6 +351,8 @@ fn a_duplicate_cascade_edge_is_refused_atomically() {
 #[test]
 fn a_cascade_folds_its_same_commit_members_and_retires_the_rest() {
     let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("creates the vertex");
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates the earlier edge");
     w.apply(keys(), CommitSeq(4), &create(11, 3, 1))
@@ -604,6 +624,8 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
     // Non-adjacent duplicate: [10, 20, 10] is an order violation at the
     // second 10 (20 > 10), caught at preflight.
     let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("creates the vertex");
     w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
     w.apply(keys(), CommitSeq(2), &create(20, 1, 3))
@@ -631,6 +653,8 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
 
     // Unsorted (no duplicate): [20, 10] is the same contract breach.
     let mut w2 = writer();
+    w2.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("creates the vertex");
     w2.apply(keys(), CommitSeq(1), &create(10, 1, 2))
         .expect("creates");
     w2.apply(keys(), CommitSeq(2), &create(20, 1, 3))
@@ -652,4 +676,135 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
     );
     w2.apply(keys(), CommitSeq(4), &delete(20))
         .expect("the refusal left the writer usable");
+}
+
+// ---------------------------------------------------------------------------
+// Vertex-row retirement (fgdb-w3-tier-d-ctj increment over fgdb-3xoi)
+// ---------------------------------------------------------------------------
+
+fn create_vertex_row(vid: u128, ordinal: u64) -> DeltaRow {
+    DeltaRow::CreateVertex {
+        vid: VId(vid),
+        birth_ordinal: ordinal,
+        labels: vec![LabelId(3), LabelId(5)],
+        props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))],
+        valid_time: None,
+    }
+}
+
+fn delete_vertex_row(vid: u128, cascade: Vec<EId>) -> DeltaRow {
+    DeltaRow::DeleteVertex {
+        vid: VId(vid),
+        before_version: ObjectId([0u8; 32]),
+        sorted_retired_incident_edges: cascade,
+    }
+}
+
+/// A vertex retirement after its creation was sealed is a TOMBSTONE
+/// SUPERSEDE, exactly like an edge's: the later patch restates the EXACT
+/// birth — ordinal, labels, properties — with the interval closed, and the
+/// merged answer flips from the full row to nothing at the retirement.
+#[test]
+fn a_deleted_vertex_is_invisible_and_its_tombstone_restates_the_birth() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_row(1, 0))
+        .expect("creates");
+    let first = w
+        .seal_vertices(keys())
+        .expect("seals")
+        .expect("a patch exists");
+    w.apply(keys(), CommitSeq(6), &delete_vertex_row(1, vec![]))
+        .expect("retires");
+    let second = w
+        .seal_vertices(keys())
+        .expect("seals the tombstone")
+        .expect("a tombstone patch exists");
+
+    let first_rows = fgdb_strata::vertex::decode_patch(&first.bytes).expect("decodes");
+    let second_rows = fgdb_strata::vertex::decode_patch(&second.bytes).expect("decodes");
+    assert_eq!(first_rows.len(), 1);
+    assert_eq!(second_rows.len(), 1);
+    let (birth, tombstone) = (&first_rows[0], &second_rows[0]);
+    assert_eq!(birth.retired_at, None);
+    assert_eq!(tombstone.retired_at, Some(CommitSeq(6)));
+    let mut reopened_birth = tombstone.clone();
+    reopened_birth.retired_at = None;
+    assert_eq!(
+        &reopened_birth, birth,
+        "the tombstone must restate the exact birth"
+    );
+
+    let patches = vec![first_rows, second_rows];
+    assert_eq!(
+        fgdb_strata::vertex::merge_vertex(&patches, VId(1), CommitSeq(5))
+            .expect("visible before the retirement")
+            .labels,
+        vec![LabelId(3), LabelId(5)]
+    );
+    assert!(
+        fgdb_strata::vertex::merge_vertex(&patches, VId(1), CommitSeq(6)).is_none(),
+        "half-open: the vertex is gone AT the retirement sequence"
+    );
+}
+
+/// Created and deleted in one commit while the creation is still pending: the
+/// durable image is NO row at all — the same fold as an edge's, for the same
+/// empty-visibility-interval reason.
+#[test]
+fn a_same_commit_vertex_create_and_delete_folds_to_no_row() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(2), &create_vertex_row(1, 0))
+        .expect("creates");
+    w.apply(keys(), CommitSeq(2), &delete_vertex_row(1, vec![]))
+        .expect("deletes in the same commit");
+    assert_eq!(
+        w.pending_vertex_len(),
+        0,
+        "the fold removed the pending row"
+    );
+    assert!(
+        w.seal_vertices(keys()).expect("seal runs").is_none(),
+        "nothing to seal: the vertex is visible on no snapshot"
+    );
+    // The identity stays permanently spent: no resurrection after the fold.
+    assert_eq!(
+        w.apply(keys(), CommitSeq(3), &create_vertex_row(1, 1)),
+        Err(WriteError::VertexIdentitySpent { vid: VId(1) })
+    );
+}
+
+/// A `DeleteVertex` for a vertex this fold never saw is refused BEFORE any
+/// cascade member retires — a mid-cascade refusal would leave the writer
+/// half-applied, which is the exact state the edge preflight exists to
+/// prevent.
+#[test]
+fn deleting_an_unknown_vertex_is_refused_before_any_edge_retires() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("an unrelated live edge");
+    assert_eq!(
+        w.apply(keys(), CommitSeq(2), &delete_vertex_row(9, vec![EId(10)])),
+        Err(WriteError::UnknownVertex { vid: VId(9) })
+    );
+    // The cascade member did NOT retire: the edge still seals live.
+    let sealed = w.seal(keys()).expect("seals").expect("a block");
+    let entries = decode_block(&sealed.bytes).expect("decodes");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].retired_at, None, "the refusal was atomic");
+}
+
+/// A second delete of the same vertex is `UnknownVertex`: retirement removed
+/// it from the live map and the spent set forbids the re-create that could
+/// make it deletable again.
+#[test]
+fn a_vertex_retirement_is_final() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_row(1, 0))
+        .expect("creates");
+    w.apply(keys(), CommitSeq(2), &delete_vertex_row(1, vec![]))
+        .expect("retires");
+    assert_eq!(
+        w.apply(keys(), CommitSeq(3), &delete_vertex_row(1, vec![])),
+        Err(WriteError::UnknownVertex { vid: VId(1) })
+    );
 }
