@@ -1392,3 +1392,100 @@ fn a_tombstone_restates_the_properties_in_its_own_patch() {
             .expect("the history reopens whole");
     });
 }
+
+/// **THE TRANSPLANT LAW (V5, fgdb-da6b): a root refuses a block whose durable
+/// `partition_id` is another partition's.** Without this, moving one
+/// content-addressed file between partition directories would silently merge
+/// a foreign partition's history — well-formed, correctly addressed, and
+/// wrong.
+#[test]
+fn a_root_refuses_a_block_transplanted_from_another_partition() {
+    let dir = scratch_dir("partition-transplant");
+    under_lab(52, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let foreign = encode_block(9, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
+        let block_id = store.put(cx, &foreign).expect("stores block");
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(3),
+            blocks: vec![BlockRef {
+                block_id: block_id.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(2),
+            }],
+            vertex_patches: vec![],
+        };
+        assert!(matches!(
+            store.put_root(cx, &root),
+            Err(StoreError::MalformedRoot(
+                RootError::BlockPartitionMismatch {
+                    at: 0,
+                    root_partition: 0,
+                    block_partition: 9,
+                }
+            )),
+        ));
+
+        // CONTROL: the same content at the root's own partition admits — the
+        // refusal above is the partition law firing, not fixture debris.
+        let home = encode_block(0, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
+        let home_id = store.put(cx, &home).expect("stores block");
+        let root = PartitionRoot {
+            blocks: vec![BlockRef {
+                block_id: home_id.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(2),
+            }],
+            ..root
+        };
+        store.put_root(cx, &root).expect("the home block admits");
+    });
+}
+
+/// **THE JOINT DIGEST LAW (V5): a propertied block whose declared digest
+/// disowns its own rows is refused at admission**, where block and patch are
+/// first in hand together — the same seam as the row-count bijection. The
+/// splice targets the digest field itself: bytes the encoder cannot emit.
+#[test]
+fn admission_refuses_a_propertied_block_with_a_forged_digest() {
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_strata::edge_props::{encode_property_patch, property_patch_id};
+    use fgdb_types::CanonicalScalar;
+
+    let dir = scratch_dir("forged-joint-digest");
+    under_lab(53, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let rows = vec![vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))]];
+        let patch_bytes = encode_property_patch(&rows).expect("encodes");
+        let patch_id = property_patch_id(&K_OID, NAMESPACE, &patch_bytes);
+        let entries = vec![entry(1, 2, 1), entry(1, 3, 2)];
+        let mut bytes =
+            fgdb_strata::encode_block_with_properties(0, &entries, patch_id, &[1, 0], &rows)
+                .expect("encodes");
+        bytes[49] ^= 0x01; // forge the digest; content addressing follows the bytes
+        store
+            .put_edge_property_patch(cx, &patch_bytes)
+            .expect("patch stores");
+        let block_id = store.put(cx, &bytes).expect("block stores");
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(3),
+            blocks: vec![BlockRef {
+                block_id: block_id.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(2),
+            }],
+            vertex_patches: vec![],
+        };
+        assert!(matches!(
+            store.put_root(cx, &root),
+            Err(StoreError::Malformed(
+                fgdb_strata::BlockError::LogicalDigestMismatch { .. }
+            )),
+        ));
+    });
+}
