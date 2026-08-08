@@ -212,15 +212,15 @@ fn foreign_bytes_and_future_versions_are_refused_distinctly() {
 #[test]
 fn a_nonzero_property_patch_count_is_refused_until_the_machinery_lands() {
     let mut declared = encode_block(0, &sample()).expect("encodes");
-    // The count sits at bytes [39, 41) — after magic, format, rows,
-    // (src, relation, direction), and span count.
-    declared[39..41].copy_from_slice(&3u16.to_be_bytes());
+    // The count sits at bytes [47, 49) — after magic, format, partition,
+    // rows, (src, relation, direction), and span count (V5 layout).
+    declared[47..49].copy_from_slice(&3u16.to_be_bytes());
     assert_eq!(
         decode_block(&declared),
         Err(BlockError::PropertyPatchesNotYetImplemented { declared: 3 })
     );
 
-    declared[39..41].copy_from_slice(&0u16.to_be_bytes());
+    declared[47..49].copy_from_slice(&0u16.to_be_bytes());
     assert_eq!(
         decode_block(&declared).expect("the reserved zero decodes"),
         sample(),
@@ -301,13 +301,13 @@ fn trailing_bytes_are_refused() {
 #[test]
 fn an_implausible_entry_count_is_refused_before_allocating() {
     let mut bytes = encode_block(0, &sample()).expect("encodes");
-    bytes[6..10].copy_from_slice(&u32::MAX.to_be_bytes());
+    bytes[14..18].copy_from_slice(&u32::MAX.to_be_bytes());
     assert_eq!(
         decode_block(&bytes),
         Err(BlockError::ImplausibleEntryCount { declared: u32::MAX })
     );
     // And the bound is the declared one, not an accident of the input's length.
-    bytes[6..10].copy_from_slice(&(MAX_BLOCK_ENTRIES + 1).to_be_bytes());
+    bytes[14..18].copy_from_slice(&(MAX_BLOCK_ENTRIES + 1).to_be_bytes());
     assert!(matches!(
         decode_block(&bytes),
         Err(BlockError::ImplausibleEntryCount { .. })
@@ -855,4 +855,59 @@ fn the_fixture_builds_the_run_the_byte_economy_witnesses_assume() {
         run,
         "the measured bytes must round-trip to the fixture"
     );
+}
+
+// ---------------------------------------------------------------------------
+// V5: partition_id and the canonical logical digest (fgdb-da6b)
+// ---------------------------------------------------------------------------
+
+/// The partition rides the header durably and distinctly: two blocks that
+/// differ ONLY by partition are different byte strings, and the field decodes
+/// from where the layout says it lives.
+#[test]
+fn the_partition_id_is_durable_and_distinct() {
+    let home = encode_block(7, &sample()).expect("encodes");
+    let foreign = encode_block(8, &sample()).expect("encodes");
+    assert_ne!(home, foreign, "the partition is part of the value");
+    assert_eq!(
+        u64::from_be_bytes(home[6..14].try_into().expect("fixed header")),
+        7,
+        "partition_id sits after the format word, §6.2 field order"
+    );
+    // Same logical content: the digest field is IDENTICAL across partitions —
+    // the digest covers statements, not residence.
+    assert_eq!(home[49..81], foreign[49..81]);
+}
+
+/// **THE DIGEST LAW (ctj acceptance): mutating any entry breaks
+/// `canonical_logical_digest`.** The mutation here is STRUCTURALLY LAWFUL —
+/// a different `created_at` on a live single-entry block passes every frame
+/// and span check — so the digest is the only law that can catch it, which
+/// is exactly the property that makes the field worth 32 bytes.
+#[test]
+fn a_structurally_lawful_mutation_is_caught_by_the_digest_alone() {
+    let entries = vec![entry(1, 2, 5, None)];
+    let bytes = encode_block(0, &entries).expect("encodes");
+    assert_eq!(decode_block(&bytes).expect("decodes"), entries);
+
+    // The single span's created_at is the last 16..8 bytes of the frame.
+    let mut mutated = bytes.clone();
+    let at = mutated.len() - 16;
+    mutated[at..at + 8].copy_from_slice(&6u64.to_be_bytes());
+    assert!(
+        matches!(
+            decode_block(&mutated),
+            Err(BlockError::LogicalDigestMismatch { .. })
+        ),
+        "a retimed creation must be disowned by the digest"
+    );
+
+    // Decoder independence: a forged digest field — bytes the encoder cannot
+    // emit — is refused the same way.
+    let mut forged = bytes;
+    forged[49] ^= 0x01;
+    assert!(matches!(
+        decode_block(&forged),
+        Err(BlockError::LogicalDigestMismatch { .. })
+    ));
 }

@@ -263,7 +263,7 @@ fn locator_laws_hold_in_both_directions() {
     // More than one declared patch stays fail-closed (the 2t7q multi-patch
     // arm), proven by editing the count in place.
     let mut two = lawful;
-    two[39..41].copy_from_slice(&2u16.to_be_bytes());
+    two[47..49].copy_from_slice(&2u16.to_be_bytes());
     assert!(matches!(
         decode_block_with_properties(&two),
         Err(BlockError::PropertyPatchesNotYetImplemented { declared: 2 })
@@ -271,16 +271,18 @@ fn locator_laws_hold_in_both_directions() {
 }
 
 #[test]
-fn v3_blocks_are_refused_by_name() {
+fn retired_block_versions_are_refused_by_name() {
     let bytes = encode_block(0, &entries()).expect("encodes");
-    let mut old = bytes;
-    old[4..6].copy_from_slice(&3u16.to_be_bytes());
-    assert_eq!(
-        decode_block(&old),
-        Err(BlockError::UnsupportedFormat { format: 3 }),
-        "a retired version is 'not implemented', never 'not our file'"
-    );
-    let _ = BLOCK_FORMAT_V4; // the current version, named so the import is load-bearing
+    for retired in [3u16, 4] {
+        let mut old = bytes.clone();
+        old[4..6].copy_from_slice(&retired.to_be_bytes());
+        assert_eq!(
+            decode_block(&old),
+            Err(BlockError::UnsupportedFormat { format: retired }),
+            "a retired version is 'not implemented', never 'not our file'"
+        );
+    }
+    let _ = BLOCK_FORMAT_V4; // the newest RETIRED version, named so the import is load-bearing
 }
 
 #[test]
