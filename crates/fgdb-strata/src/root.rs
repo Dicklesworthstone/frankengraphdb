@@ -788,6 +788,21 @@ pub fn merge_neighbours(
     Ok(destinations.into_iter().collect())
 }
 
+/// Merge the blocks of a partition and answer one edge at one sequence — the
+/// point-lookup companion of [`merge_neighbours`], under the identical
+/// whole-history validation and tombstone-supersede model.
+pub fn merge_edge(
+    blocks: &[Vec<crate::AdjacencyEntry>],
+    eid: EId,
+    as_of: CommitSeq,
+) -> Result<Option<crate::AdjacencyEntry>, RootError> {
+    let (entries, _) = collapse_edge_history(blocks)?;
+    Ok(entries
+        .get(&eid)
+        .filter(|entry| entry.visible_at(as_of))
+        .copied())
+}
+
 /// Incremental proof that every block in one publication history agrees on EId
 /// identity and lifecycle.
 ///

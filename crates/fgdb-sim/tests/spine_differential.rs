@@ -191,6 +191,9 @@ fn the_spine_agrees_with_the_reference_oracle() {
             .collect();
         let engine_vertices: Vec<Option<fgdb::VertexRow>> =
             (1..=6u128).map(|vid| engine.vertex(VId(vid))).collect();
+        let engine_edges: Vec<Option<fgdb_strata::AdjacencyEntry>> = (10..=17u128)
+            .map(|eid| engine.edge(EId(eid)).expect("engine edge reads"))
+            .collect();
         drop(engine); // release the single-writer lease before the oracle opens
 
         // ORACLE SIDE. Its own coordinator over the same directory; nothing but
@@ -259,6 +262,35 @@ fn the_spine_agrees_with_the_reference_oracle() {
             "the fixture must exercise labels and properties or the vertex \
              differential is agreement about emptiness, got {labeled} labeled \
              and {propertied} propertied"
+        );
+
+        // THE EDGE-LOOKUP DIFFERENTIAL: existence, endpoints, and relation
+        // agree with the oracle per EId — including the deleted parallel
+        // edge, its surviving twin, and the cascade-retired edges.
+        let mut live_edges = 0usize;
+        let mut dead_edges = 0usize;
+        for (eid, engine_edge) in (10..=17u128).map(EId).zip(&engine_edges) {
+            let oracle_edge = graph.edge(eid);
+            assert_eq!(
+                engine_edge.is_some(),
+                oracle_edge.is_some(),
+                "engine and oracle disagree about whether {eid:?} exists"
+            );
+            let (Some(entry), Some(edge)) = (engine_edge, oracle_edge) else {
+                dead_edges += 1;
+                continue;
+            };
+            assert_eq!(
+                (entry.src, entry.relation, entry.dst),
+                (edge.src, edge.relation, edge.dst),
+                "engine and oracle disagree about {eid:?}'s topology"
+            );
+            live_edges += 1;
+        }
+        assert!(
+            live_edges >= 3 && dead_edges >= 3,
+            "the fixture must exercise both live and retired edges, got \
+             {live_edges} live and {dead_edges} dead"
         );
 
         // ANTI-VACUITY. Agreement over twelve empty answers is not agreement

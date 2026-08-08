@@ -156,7 +156,7 @@ use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, LabelId, LogicalDeltaTemplate,
     PropertyKeyId, RelationId, SchemaEpoch,
 };
-use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_neighbours};
+use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_edge, merge_neighbours};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::vertex::merge_vertex;
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
@@ -1158,6 +1158,23 @@ impl Database {
             &self.snapshot.blocks,
             src,
             relation,
+            self.snapshot.frontier,
+        )?)
+    }
+
+    /// The edge `eid` — its endpoints, relation, and lifetime — at the
+    /// published frontier, or `None` when no visible version exists.
+    ///
+    /// Served from the durable tier-D blocks exactly as
+    /// [`Database::neighbours`] is, under the same whole-history validation.
+    /// Properties are deliberately absent from the answer: edge property
+    /// STORAGE is `fgdb-w3-properties-gou`'s block-hosted patch shape
+    /// (ruling fgdb-2t7q 3B), and answering them from an in-memory fold here
+    /// would be the shortcut across the durable path this crate forbids.
+    pub fn edge(&self, eid: EId) -> Result<Option<AdjacencyEntry>, ReadError> {
+        Ok(merge_edge(
+            &self.snapshot.blocks,
+            eid,
             self.snapshot.frontier,
         )?)
     }
