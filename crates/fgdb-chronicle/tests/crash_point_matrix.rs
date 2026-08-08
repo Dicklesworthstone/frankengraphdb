@@ -1396,11 +1396,15 @@ impl fgdb_chronicle::validate::CommitValidator for RejectAll {
     }
 }
 
+/// One approved draft as the seam observed it:
+/// `(commit_seq, capsule_oid, capsule_plaintext, marker_commit_seq)`.
+type SeenDraft = (u64, ObjectId, Vec<u8>, u64);
+
 /// Records every draft it approves, so the test can compare what the seam saw
 /// against what the commit published.
 #[derive(Debug)]
 struct RecordEveryDraft {
-    seen: std::sync::Arc<std::sync::Mutex<Vec<(u64, ObjectId, Vec<u8>, u64)>>>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<SeenDraft>>>,
 }
 
 impl fgdb_chronicle::validate::CommitValidator for RecordEveryDraft {
@@ -1468,7 +1472,10 @@ fn a_rejected_draft_leaves_no_durable_trace_and_frees_its_sequence() {
             log_len_before,
             "no marker entry was appended"
         );
-        assert!(!coordinator.is_poisoned(), "a rejection is not an interrupted commit");
+        assert!(
+            !coordinator.is_poisoned(),
+            "a rejection is not an interrupted commit"
+        );
         assert_eq!(
             coordinator.next_commit_seq().expect("chain readable").0,
             2,
@@ -1502,9 +1509,16 @@ fn the_seam_judges_the_exact_draft_the_commit_publishes() {
         commit_ok(&mut coordinator, cx, 2).await;
 
         let seen = seen.lock().expect("recorder lock");
-        assert_eq!(seen.len(), 2, "one consultation per commit, no more, no fewer");
+        assert_eq!(
+            seen.len(),
+            2,
+            "one consultation per commit, no more, no fewer"
+        );
         for (expected_seq, (seq, oid, plaintext, marker_seq)) in (1u64..).zip(seen.iter()) {
-            assert_eq!(*seq, expected_seq, "the draft carries the allocated sequence");
+            assert_eq!(
+                *seq, expected_seq,
+                "the draft carries the allocated sequence"
+            );
             assert_eq!(
                 *oid,
                 capsule_oid(expected_seq),
