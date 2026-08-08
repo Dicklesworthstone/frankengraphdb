@@ -344,10 +344,11 @@ fn the_decoder_re_checks_the_range_laws() {
         vertex_patches: vec![],
     };
     let mut bytes = encode_root(&lawful).expect("encodes");
-    // header(58) + the id(32) + first_seq(8) inside the first ref. Verified before
+    // header(62) + the id(32) + first_seq(8) inside the first ref. Verified before
     // it is touched, because an offset slip here would silently patch a field this
-    // law says nothing about.
-    const HEADER: usize = 4 + 2 + 16 + 16 + 8 + 8 + 4;
+    // law says nothing about. The trailing `+ 4 + 4` is the V2 header's block
+    // count AND vertex-patch count (fgdb-3xoi).
+    const HEADER: usize = 4 + 2 + 16 + 16 + 8 + 8 + 4 + 4;
     let first_last_seq = HEADER + 32 + 8;
     assert_eq!(
         u64::from_be_bytes(

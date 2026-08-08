@@ -209,10 +209,15 @@ async fn build_and_persist(
         }
     }
 
-    let (root, blocks, _patches) = writer.publish(KEYS, frontier).expect("publishes");
+    let (root, blocks, patches) = writer.publish(KEYS, frontier).expect("publishes");
     let store = BlockStore::open(cx, dir, K_OID, NAMESPACE).expect("store opens");
     for block in &blocks {
         store.put(cx, &block.bytes).expect("stores a block");
+    }
+    for patch in &patches {
+        store
+            .put_patch(cx, &patch.bytes)
+            .expect("stores a vertex patch");
     }
     store.put_root(cx, &root).expect("stores the root")
 }
