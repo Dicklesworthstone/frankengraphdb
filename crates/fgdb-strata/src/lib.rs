@@ -72,12 +72,18 @@ pub const BLOCK_MAGIC: [u8; 4] = *b"FGSB";
 /// normative contract, and §6.2's unit is `DeltaBlockVersion {format,
 /// partition_id, descriptor_key, stripe_range, sorted_entries[],
 /// visibility_intervals[], property_patch_refs[], predecessor,
-/// canonical_logical_digest}`. Six of those nine fields are absent here, and the
-/// entry encoding is the one §6.2 names as wrong: raw 128-bit identities, where
-/// the registered identity-column codec (`w3-identity-encoding`, <=16 B/entry) is
-/// required. Freezing this shape would enshrine that density regression as the
-/// normative contract, and undoing it later costs a breaking-major format change
-/// plus a catalog re-pin cycle.
+/// canonical_logical_digest}`. V3 carries five of those nine — format, the
+/// descriptor key, identity-column-coded sorted entries (fgdb-by2l; the
+/// codec's joint-fit witness pins ~13 B/entry against the 16 B ceiling),
+/// visibility spans, and the property-patch-ref count as a fail-closed
+/// reservation (fgdb-2t7q 3B) — while FOUR remain absent: `partition_id`,
+/// `stripe_range`, `predecessor` (the per-block MVCC chain), and
+/// `canonical_logical_digest`. Freezing the incomplete shape would enshrine
+/// it as the normative contract, and undoing that later costs a
+/// breaking-major format change plus a catalog re-pin cycle.
+/// (An earlier revision of this comment claimed six absent fields and a raw
+/// 128-bit entry encoding; both went stale when V3 adopted the codec, which
+/// is its own lesson about prose beside moving formats.)
 ///
 /// The gap is MEASURED, not asserted — see the byte-economy witnesses in
 /// `tests/delta_block_format.rs`, which encode real blocks and publish the bad
