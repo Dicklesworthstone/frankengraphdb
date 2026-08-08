@@ -278,7 +278,7 @@ mod tests {
                 block.len(),
                 "one compacted block contains two versions of a key"
             );
-            crate::encode_block(block).expect("every compacted block remains encodable");
+            crate::encode_block(0, block).expect("every compacted block remains encodable");
             upper_frontiers.push(
                 crate::root::span_of(block)
                     .expect("the packer emits no empty blocks")

@@ -101,6 +101,35 @@ pub const BLOCK_FORMAT_V3: u16 = 3;
 /// byte-economy witnesses' arithmetic intact. V3 is refused by name; no
 /// production database predates V4.
 pub const BLOCK_FORMAT_V4: u16 = 4;
+/// Format version. V5 is a breaking bump (§16.6, fgdb-da6b): the header gains
+/// two of §6.2's normative `DeltaBlockVersion` fields —
+///
+/// - `partition_id` (u64): the owning partition, so a block cannot be
+///   transplanted into a foreign partition's root and still admit. The root
+///   already names its partition; V5 makes the block name it too, and
+///   admission refuses a disagreement.
+/// - `canonical_logical_digest` (32 B): an UNKEYED digest of the block's
+///   LOGICAL content under [`BLOCK_LOGICAL_DIGEST_DOMAIN`] — integrity, not
+///   authentication, exactly the `encoding_id` precedent. Mutating any
+///   entry or hosted property row breaks it. The decoder recomputes and
+///   refuses drift for propertyless blocks; a propertied block's rows live
+///   in its patch object, so ADMISSION verifies the joint digest with both
+///   objects in hand, beside the row-count bijection law.
+///
+/// Still absent, deliberately: `stripe_range` (deferred to the fgdb-n90t
+/// mini-sitting with the w4-ssi-witnesses consumer in the room) and
+/// `predecessor` (MVCC chain semantics change the root model — its own
+/// increment). V4 is refused by name; no production database predates V5.
+pub const BLOCK_FORMAT_V5: u16 = 5;
+
+/// Domain string for the block logical digest transcript, v1.
+///
+/// The transcript is ENCODING-INDEPENDENT — logical statements, not frame
+/// bytes: entry count, then per entry the six identity/lifetime fields LE
+/// plus its property row (key + canonical scalar encoding per property, in
+/// the row's canonical key order). Recompute-and-compare is the law; the
+/// digest is never an input to itself.
+pub const BLOCK_LOGICAL_DIGEST_DOMAIN: &[u8] = b"fgdb.strata.block-logical-digest.v1";
 
 /// Durable object kind for a Tier-D delta block.
 ///
@@ -169,7 +198,11 @@ pub struct PartitionRootVersion(pub ObjectId);
 /// identity columns cost 13 B/entry and visibility spans amortize under 2, so
 /// the locator has >=1 B of the 16 B ceiling left — the joint-fit witness
 /// pins that arithmetic.
-const HEADER_LEN: usize = 4 + 2 + 4 + 16 + 8 + 1 + 4 + 2;
+/// V5 widens the header by 40 bytes: `partition_id` (8 B, after the format
+/// word, mirroring §6.2's field order) and `canonical_logical_digest` (32 B,
+/// closing the header). Fixed offsets are named below in `read_header`; the
+/// arithmetic here stays a sum so the layout reads left to right.
+const HEADER_LEN: usize = 4 + 2 + 8 + 4 + 16 + 8 + 1 + 4 + 2 + 32;
 const COLUMN_FRAME_LEN: usize = 2 + 1 + 4 + 4;
 const VISIBILITY_SPAN_LEN: usize = 4 + 4 + 8 + 8;
 const MAX_IDENTITY_COLUMN_BYTES: usize = 4096;
@@ -313,6 +346,27 @@ pub enum BlockError {
         expected: ObjectId,
         actual: ObjectId,
     },
+    /// The declared `canonical_logical_digest` does not match a recomputation
+    /// over the block's logical statements (V5, fgdb-da6b). The bytes frame
+    /// correctly and describe content the digest disowns — either the frame
+    /// was mutated after sealing or the digest was forged; both are refusals.
+    LogicalDigestMismatch {
+        declared: [u8; 32],
+        recomputed: [u8; 32],
+    },
+    /// The hosted rows handed to the encoder disagree with its own locator
+    /// column's referenced count — the joint bijection law, at encode.
+    HostedRowCount {
+        referenced: usize,
+        declared: usize,
+    },
+    /// A property scalar failed to re-encode while building the logical digest
+    /// transcript. Impossible for rows that encoded into a patch once; refused
+    /// rather than skipped, because a digest over a skipped field is the exact
+    /// defect the digest exists to catch.
+    DigestScalarEncode {
+        at: usize,
+    },
 }
 
 impl core::fmt::Display for BlockError {
@@ -379,6 +433,21 @@ impl core::fmt::Display for BlockError {
                 f,
                 "visibility span {at} does not canonically cover the block rows"
             ),
+            Self::LogicalDigestMismatch { .. } => write!(
+                f,
+                "the declared canonical logical digest disowns the block's own statements"
+            ),
+            Self::HostedRowCount {
+                referenced,
+                declared,
+            } => write!(
+                f,
+                "the locator column references {referenced} rows but {declared} were supplied"
+            ),
+            Self::DigestScalarEncode { at } => write!(
+                f,
+                "entry {at}'s property row failed to re-encode for the digest transcript"
+            ),
         }
     }
 }
@@ -397,8 +466,82 @@ pub const MAX_BLOCK_ENTRIES: u32 = 256;
 /// REFUSES rather than sorts. A caller whose entries are out of order or repeated
 /// is describing something other than what a block means, and quietly repairing it
 /// would let two callers store different intents and both be told they succeeded.
-pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
-    encode_block_inner(entries, None)
+pub fn encode_block(partition_id: u64, entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
+    encode_block_inner(partition_id, entries, None)
+}
+
+/// The block's canonical logical digest (fgdb-da6b): UNKEYED, domain-separated,
+/// over the LOGICAL statements rather than the frame bytes, so a re-encoding
+/// under a different codec version digests identically. `rows` is per-entry —
+/// one (possibly empty) property row per entry, in entry order.
+///
+/// Deliberately infallible over admitted content: an entry or row that made it
+/// past canonical validation always digests. Scalar encoding failures are
+/// impossible for rows that encoded into a patch once already; the error is
+/// surfaced anyway rather than swallowed, because a digest computed over a
+/// SKIPPED field is the exact defect this field exists to catch.
+pub fn block_logical_digest(
+    entries: &[AdjacencyEntry],
+    rows: &[edge_props::EdgePropertyRow],
+) -> Result<[u8; 32], BlockError> {
+    debug_assert_eq!(entries.len(), rows.len(), "one row per entry, empty = none");
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(BLOCK_LOGICAL_DIGEST_DOMAIN);
+    hasher.update(&(entries.len() as u32).to_le_bytes());
+    for (at, (entry, row)) in entries.iter().zip(rows).enumerate() {
+        hasher.update(&entry.src.0.to_le_bytes());
+        hasher.update(&entry.relation.0.to_le_bytes());
+        hasher.update(&entry.dst.0.to_le_bytes());
+        hasher.update(&entry.eid.0.to_le_bytes());
+        hasher.update(&entry.created_at.0.to_le_bytes());
+        match entry.retired_at {
+            Some(retired) => {
+                hasher.update(&[1]);
+                hasher.update(&retired.0.to_le_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&(row.len() as u32).to_le_bytes());
+        for (key, value) in row {
+            let encoded = value
+                .encode()
+                .map_err(|_| BlockError::DigestScalarEncode { at })?;
+            hasher.update(&key.0.to_le_bytes());
+            hasher.update(&(encoded.len() as u32).to_le_bytes());
+            hasher.update(&encoded);
+        }
+    }
+    Ok(hasher.finalize().0)
+}
+
+/// The V5 header's partition and declared digest, for admission seams that
+/// already ran the full decode and need the two fields beside it.
+pub(crate) fn header_partition_and_digest(bytes: &[u8]) -> (u64, [u8; 32]) {
+    debug_assert!(bytes.len() >= HEADER_LEN, "caller decoded these bytes");
+    (
+        u64::from_be_bytes(bytes[6..14].try_into().expect("fixed header")),
+        bytes[49..81].try_into().expect("fixed header"),
+    )
+}
+
+/// Resolve each entry's row from the hosted patch shape — locator column plus
+/// patch rows — into the per-entry form [`block_logical_digest`] takes.
+pub(crate) fn rows_by_entry(
+    locators: &[u8],
+    rows: &[edge_props::EdgePropertyRow],
+) -> Vec<edge_props::EdgePropertyRow> {
+    locators
+        .iter()
+        .map(|&locator| {
+            if locator == 0 {
+                Vec::new()
+            } else {
+                rows.get(usize::from(locator) - 1).cloned().unwrap_or_default()
+            }
+        })
+        .collect()
 }
 
 /// Encode a block that hosts one edge property patch (fgdb-yqor): `patch_id`
@@ -408,9 +551,11 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
 /// is a separate content-addressed object; the joint law is proven at
 /// admission with both in hand.
 pub fn encode_block_with_properties(
+    partition_id: u64,
     entries: &[AdjacencyEntry],
     patch_id: ObjectId,
     locators: &[u8],
+    rows: &[edge_props::EdgePropertyRow],
 ) -> Result<Vec<u8>, BlockError> {
     if locators.len() != entries.len() {
         return Err(BlockError::NonCanonicalLocators {
@@ -430,12 +575,22 @@ pub fn encode_block_with_properties(
         // for that meaning (doctrine 4).
         return Err(BlockError::NonCanonicalLocators { at: 0 });
     }
-    encode_block_inner(entries, Some((patch_id, locators)))
+    // The joint row-count bijection, at ENCODE as well as admission (V5): an
+    // encoder holding rows that disagree with its own locator column is
+    // describing two different blocks at once.
+    if referenced != rows.len() {
+        return Err(BlockError::HostedRowCount {
+            referenced,
+            declared: rows.len(),
+        });
+    }
+    encode_block_inner(partition_id, entries, Some((patch_id, locators, rows)))
 }
 
 fn encode_block_inner(
+    partition_id: u64,
     entries: &[AdjacencyEntry],
-    patch: Option<(ObjectId, &[u8])>,
+    patch: Option<(ObjectId, &[u8], &[edge_props::EdgePropertyRow])>,
 ) -> Result<Vec<u8>, BlockError> {
     if entries.len() as u64 > u64::from(MAX_BLOCK_ENTRIES) {
         return Err(BlockError::ImplausibleEntryCount {
@@ -485,8 +640,19 @@ fn encode_block_inner(
             + edge_id_payload.len()
             + spans.len() * VISIBILITY_SPAN_LEN,
     );
+    // The logical digest covers each entry beside its resolved row (empty for
+    // a propertyless entry) — the statement, not the frame.
+    let digest = match patch {
+        Some((_, locators, rows)) => {
+            let per_entry = rows_by_entry(locators, rows);
+            block_logical_digest(entries, &per_entry)?
+        }
+        None => block_logical_digest(entries, &vec![Vec::new(); entries.len()])?,
+    };
+
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V4.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V5.to_be_bytes());
+    out.extend_from_slice(&partition_id.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     let descriptor = descriptor.unwrap_or(DescriptorKey {
         src: VId(0),
@@ -500,6 +666,7 @@ fn encode_block_inner(
     // property_patch_refs[] (fgdb-2t7q ruling 3B, live since V4/fgdb-yqor):
     // zero or one patch in this slice — see HEADER_LEN's doc.
     out.extend_from_slice(&u16::from(patch.is_some()).to_be_bytes());
+    out.extend_from_slice(&digest);
     append_identity_column(&mut out, destinations.descriptor(), &destination_payload);
     append_identity_column(&mut out, edge_ids.descriptor(), &edge_id_payload);
     for span in spans {
@@ -508,7 +675,7 @@ fn encode_block_inner(
         out.extend_from_slice(&span.created_at.0.to_be_bytes());
         out.extend_from_slice(&span.retired_at.map_or(0, |seq| seq.0).to_be_bytes());
     }
-    if let Some((patch_id, locators)) = patch {
+    if let Some((patch_id, locators, _)) = patch {
         out.extend_from_slice(&patch_id.0);
         out.extend_from_slice(locators);
     }
@@ -581,45 +748,52 @@ pub(crate) fn validate_entry(index: usize, entry: &AdjacencyEntry) -> Result<(),
     Ok(())
 }
 
-struct DecodedFrame {
-    descriptor: DescriptorKey,
-    destinations: IdentityColumn<VId>,
-    edge_ids: IdentityColumn<EId>,
-    spans: Vec<VisibilityInterval>,
+pub(crate) struct DecodedFrame {
+    pub(crate) descriptor: DescriptorKey,
+    pub(crate) destinations: IdentityColumn<VId>,
+    pub(crate) edge_ids: IdentityColumn<EId>,
+    pub(crate) spans: Vec<VisibilityInterval>,
     /// The hosted edge property patch, when the block declares one:
     /// its identity and the per-entry locator column (fgdb-yqor).
-    patch: Option<(ObjectId, Vec<u8>)>,
+    pub(crate) patch: Option<(ObjectId, Vec<u8>)>,
+    /// The declared canonical logical digest (V5, fgdb-da6b). Verified
+    /// against a recomputation by the decoder for propertyless blocks; a
+    /// propertied block's rows live in its patch, so admission verifies with
+    /// both objects in hand — via [`header_partition_and_digest`], which also
+    /// answers the partition the frame deliberately does not retain.
+    pub(crate) logical_digest: [u8; 32],
 }
 
-/// Read the V3 framing and reconstruct its two codec columns.  Counts live in
+/// Read the framing and reconstruct its two codec columns.  Counts live in
 /// the enclosing frame, never in the scalar payload, so truncation is checked
 /// before either codec sees a slice.
-fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
+pub(crate) fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
     if bytes.len() < HEADER_LEN || bytes[..4] != BLOCK_MAGIC {
         return Err(BlockError::NotABlock);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != BLOCK_FORMAT_V4 {
+    if format != BLOCK_FORMAT_V5 {
         return Err(BlockError::UnsupportedFormat { format });
     }
-    let count = u32::from_be_bytes(bytes[6..10].try_into().expect("fixed header"));
+    let count = u32::from_be_bytes(bytes[14..18].try_into().expect("fixed header"));
     if count > MAX_BLOCK_ENTRIES {
         return Err(BlockError::ImplausibleEntryCount { declared: count });
     }
     let descriptor = DescriptorKey {
         src: VId(u128::from_be_bytes(
-            bytes[10..26].try_into().expect("fixed header"),
+            bytes[18..34].try_into().expect("fixed header"),
         )),
         relation: RelationId(u64::from_be_bytes(
-            bytes[26..34].try_into().expect("fixed header"),
+            bytes[34..42].try_into().expect("fixed header"),
         )),
-        direction: match bytes[34] {
+        direction: match bytes[42] {
             0 => Direction::Outbound,
             direction => return Err(BlockError::UnsupportedDirection { direction }),
         },
     };
-    let span_count = u32::from_be_bytes(bytes[35..39].try_into().expect("fixed header")) as usize;
-    let patch_ref_count = u16::from_be_bytes(bytes[39..41].try_into().expect("fixed header"));
+    let span_count = u32::from_be_bytes(bytes[43..47].try_into().expect("fixed header")) as usize;
+    let patch_ref_count = u16::from_be_bytes(bytes[47..49].try_into().expect("fixed header"));
+    let logical_digest: [u8; 32] = bytes[49..81].try_into().expect("fixed header");
     if patch_ref_count > 1 {
         // The ruled shape is a SET; this slice implements at most one patch
         // per block, and the further arm stays fail-closed (2t7q 3B).
@@ -709,6 +883,7 @@ fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
         edge_ids,
         spans,
         patch,
+        logical_digest,
     })
 }
 
@@ -797,7 +972,7 @@ fn validate_spans(spans: &[VisibilityInterval], rows: usize) -> Result<(), Block
     Ok(())
 }
 
-fn read_entry(frame: &DecodedFrame, index: usize) -> AdjacencyEntry {
+pub(crate) fn read_entry(frame: &DecodedFrame, index: usize) -> AdjacencyEntry {
     let span = frame
         .spans
         .iter()
@@ -849,6 +1024,19 @@ pub fn decode_block_with_properties(
             return Err(BlockError::NonCanonicalOrder { at: index });
         }
         out.push(entry);
+    }
+    // The digest law, wherever the decoder can carry it alone: a propertyless
+    // block's transcript needs nothing but the entries. A propertied block's
+    // rows live in its patch object, so ADMISSION verifies the joint digest
+    // with both objects in hand — the same seam as the row-count bijection.
+    if frame.patch.is_none() {
+        let recomputed = block_logical_digest(&out, &vec![Vec::new(); out.len()])?;
+        if recomputed != frame.logical_digest {
+            return Err(BlockError::LogicalDigestMismatch {
+                declared: frame.logical_digest,
+                recomputed,
+            });
+        }
     }
     Ok((out, frame.patch))
 }

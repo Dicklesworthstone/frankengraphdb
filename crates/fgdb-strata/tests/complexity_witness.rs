@@ -250,7 +250,7 @@ fn the_probe_addresses_the_durable_layout() {
         created_at: CommitSeq(1),
         retired_at: None,
     }];
-    let bytes = encode_block(&entries).expect("V3 frame encodes");
+    let bytes = encode_block(0, &entries).expect("V3 frame encodes");
     assert_eq!(decode_block(&bytes).expect("V3 frame decodes"), entries);
     assert!(
         decode_block(&bytes[..bytes.len() - 1]).is_err(),
@@ -291,7 +291,7 @@ fn a_neighbour_scan_costs_the_whole_block_whatever_the_degree() {
             retired_at: None,
         })
         .collect();
-    let bytes = encode_block(&entries).expect("the skewed fixture is canonical");
+    let bytes = encode_block(0, &entries).expect("the skewed fixture is canonical");
     assert_eq!(
         scan_neighbours(&bytes, VId(1), RELATION, CommitSeq(1)).expect("scan"),
         (2..130).map(VId).collect::<Vec<_>>()
@@ -467,7 +467,7 @@ fn bytes_per_live_edge_amplify_with_version_history() {
         blocks
             .iter()
             .map(|block| {
-                encode_block(block)
+                encode_block(0, block)
                     .expect("every fixture block is canonical")
                     .len()
             })

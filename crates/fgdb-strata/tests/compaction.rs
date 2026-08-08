@@ -94,7 +94,7 @@ fn assert_blocks_are_lawful(blocks: &[Vec<AdjacencyEntry>]) {
     let mut published_at = CommitSeq(1);
     let mut references = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter().enumerate() {
-        let encoded = encode_block(block);
+        let encoded = encode_block(0, block);
         assert!(
             encoded.is_ok(),
             "compacted block {index} is not encodable: {encoded:?}"

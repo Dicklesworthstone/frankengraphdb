@@ -65,7 +65,7 @@ fn sample() -> Vec<AdjacencyEntry> {
 #[test]
 fn a_block_round_trips() {
     let entries = sample();
-    let bytes = encode_block(&entries).expect("encodes");
+    let bytes = encode_block(0, &entries).expect("encodes");
     assert_eq!(decode_block(&bytes).expect("decodes"), entries);
 }
 
@@ -73,14 +73,14 @@ fn a_block_round_trips() {
 /// identical bytes, and no other input produces those bytes.
 #[test]
 fn encoding_is_deterministic_and_injective() {
-    let a = encode_block(&sample()).expect("encodes");
-    let b = encode_block(&sample()).expect("encodes");
+    let a = encode_block(0, &sample()).expect("encodes");
+    let b = encode_block(0, &sample()).expect("encodes");
     assert_eq!(a, b, "the same entries must produce the same bytes");
 
     let mut different = sample();
     different[1].created_at = CommitSeq(4);
     assert_ne!(
-        encode_block(&different).expect("encodes"),
+        encode_block(0, &different).expect("encodes"),
         a,
         "a different value must produce different bytes"
     );
@@ -96,7 +96,7 @@ fn the_encoder_refuses_unsorted_entries() {
     let mut entries = sample();
     entries.swap(0, 1);
     assert_eq!(
-        encode_block(&entries),
+        encode_block(0, &entries),
         Err(BlockError::NonCanonicalOrder { at: 1 })
     );
 }
@@ -109,7 +109,7 @@ fn the_encoder_refuses_unsorted_entries() {
 fn the_encoder_refuses_duplicate_keys() {
     let entries = vec![entry(1, 2, 1, None), entry(1, 2, 3, None)];
     assert_eq!(
-        encode_block(&entries),
+        encode_block(0, &entries),
         Err(BlockError::NonCanonicalOrder { at: 1 })
     );
 }
@@ -119,7 +119,7 @@ fn the_encoder_refuses_duplicate_keys() {
 #[test]
 fn parallel_edge_identities_round_trip_without_repeating_the_destination() {
     let entries = vec![edge(10, 1, 2, 1, Some(4)), edge(20, 1, 2, 2, None)];
-    let bytes = encode_block(&entries).expect("parallel EIds are canonical keys");
+    let bytes = encode_block(0, &entries).expect("parallel EIds are canonical keys");
     assert_eq!(decode_block(&bytes).expect("decodes"), entries);
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(3)).expect("scans"),
@@ -142,7 +142,7 @@ fn parallel_edge_identities_round_trip_without_repeating_the_destination() {
 #[test]
 fn the_decoder_refuses_an_out_of_order_block() {
     let entries = sample();
-    let bytes = encode_block(&entries).expect("encodes");
+    let bytes = encode_block(0, &entries).expect("encodes");
     let swapped = encode_forged(&[entries[1], entries[0], entries[2]]);
     assert_ne!(swapped, bytes, "the forged bytes differ from a V3 frame");
     assert!(
@@ -187,7 +187,7 @@ fn foreign_bytes_and_future_versions_are_refused_distinctly() {
     );
     assert_eq!(decode_block(&[]), Err(BlockError::NotABlock));
 
-    let mut future = encode_block(&sample()).expect("encodes");
+    let mut future = encode_block(0, &sample()).expect("encodes");
     future[4] = 0x00;
     future[5] = 0x09;
     assert_eq!(
@@ -195,7 +195,7 @@ fn foreign_bytes_and_future_versions_are_refused_distinctly() {
         Err(BlockError::UnsupportedFormat { format: 9 })
     );
 
-    let mut legacy = encode_block(&sample()).expect("encodes");
+    let mut legacy = encode_block(0, &sample()).expect("encodes");
     legacy[4..6].copy_from_slice(&1u16.to_be_bytes());
     assert_eq!(
         decode_block(&legacy),
@@ -211,7 +211,7 @@ fn foreign_bytes_and_future_versions_are_refused_distinctly() {
 /// the count is read and validated rather than skipped.
 #[test]
 fn a_nonzero_property_patch_count_is_refused_until_the_machinery_lands() {
-    let mut declared = encode_block(&sample()).expect("encodes");
+    let mut declared = encode_block(0, &sample()).expect("encodes");
     // The count sits at bytes [39, 41) — after magic, format, rows,
     // (src, relation, direction), and span count.
     declared[39..41].copy_from_slice(&3u16.to_be_bytes());
@@ -242,7 +242,7 @@ fn a_nonzero_property_patch_count_is_refused_until_the_machinery_lands() {
 #[test]
 fn visibility_spans_and_the_patch_locator_jointly_fit_the_ceiling() {
     let rows = run_of(NORMATIVE_ENTRIES_PER_BLOCK);
-    let encoded = encode_block(&rows).expect("encodes the normative run");
+    let encoded = encode_block(0, &rows).expect("encodes the normative run");
 
     // Whole-frame amortized cost of everything that is NOT the two identity
     // columns, measured by differencing against the columns' own payload cost.
@@ -270,7 +270,7 @@ fn visibility_spans_and_the_patch_locator_jointly_fit_the_ceiling() {
 /// "it refuses any short read" are different claims and only the second is useful.
 #[test]
 fn every_truncation_is_refused() {
-    let bytes = encode_block(&sample()).expect("encodes");
+    let bytes = encode_block(0, &sample()).expect("encodes");
     for cut in 0..bytes.len() {
         let result = decode_block(&bytes[..cut]);
         assert!(
@@ -287,7 +287,7 @@ fn every_truncation_is_refused() {
 /// either way.
 #[test]
 fn trailing_bytes_are_refused() {
-    let mut bytes = encode_block(&sample()).expect("encodes");
+    let mut bytes = encode_block(0, &sample()).expect("encodes");
     bytes.push(0x00);
     assert_eq!(
         decode_block(&bytes),
@@ -300,7 +300,7 @@ fn trailing_bytes_are_refused() {
 /// request until it is bounded.
 #[test]
 fn an_implausible_entry_count_is_refused_before_allocating() {
-    let mut bytes = encode_block(&sample()).expect("encodes");
+    let mut bytes = encode_block(0, &sample()).expect("encodes");
     bytes[6..10].copy_from_slice(&u32::MAX.to_be_bytes());
     assert_eq!(
         decode_block(&bytes),
@@ -324,7 +324,7 @@ fn a_retirement_at_or_before_creation_is_refused() {
     for retired in [3u64, 2] {
         let entries = vec![entry(1, 2, 3, Some(retired))];
         assert_eq!(
-            encode_block(&entries),
+            encode_block(0, &entries),
             Err(BlockError::RetiredBeforeCreated {
                 at: 0,
                 created_at: CommitSeq(3),
@@ -332,7 +332,7 @@ fn a_retirement_at_or_before_creation_is_refused() {
             })
         );
     }
-    assert!(encode_block(&[entry(1, 2, 3, Some(4))]).is_ok());
+    assert!(encode_block(0, &[entry(1, 2, 3, Some(4))]).is_ok());
 }
 
 /// Creation at sequence zero is refused: zero names the empty stream and can
@@ -341,7 +341,7 @@ fn a_retirement_at_or_before_creation_is_refused() {
 #[test]
 fn creation_at_the_empty_stream_is_refused() {
     assert_eq!(
-        encode_block(&[entry(1, 2, 0, None)]),
+        encode_block(0, &[entry(1, 2, 0, None)]),
         Err(BlockError::CreatedAtZero { at: 0 })
     );
 }
@@ -350,7 +350,7 @@ fn creation_at_the_empty_stream_is_refused() {
 /// retirement at sequence zero.
 #[test]
 fn a_live_entry_round_trips_as_live() {
-    let bytes = encode_block(&[entry(1, 2, 1, None)]).expect("encodes");
+    let bytes = encode_block(0, &[entry(1, 2, 1, None)]).expect("encodes");
     assert_eq!(decode_block(&bytes).expect("decodes")[0].retired_at, None);
 }
 
@@ -361,7 +361,7 @@ fn a_live_entry_round_trips_as_live() {
 /// A scan sees an entry from its creation sequence onward, and not before.
 #[test]
 fn a_scan_sees_an_entry_from_its_creation_sequence() {
-    let bytes = encode_block(&sample()).expect("encodes");
+    let bytes = encode_block(0, &sample()).expect("encodes");
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(1)).expect("scans"),
         vec![VId(2)],
@@ -380,7 +380,7 @@ fn a_scan_sees_an_entry_from_its_creation_sequence() {
 /// same reason valid-time periods are half-open.
 #[test]
 fn retirement_is_half_open() {
-    let bytes = encode_block(&sample()).expect("encodes");
+    let bytes = encode_block(0, &sample()).expect("encodes");
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(4)).expect("scans"),
         vec![VId(2), VId(3), VId(4)],
@@ -398,7 +398,7 @@ fn retirement_is_half_open() {
 #[test]
 fn a_scan_is_scoped_to_its_source_and_relation() {
     let entries = vec![entry(1, 2, 1, None)];
-    let bytes = encode_block(&entries).expect("encodes");
+    let bytes = encode_block(0, &entries).expect("encodes");
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(9)).expect("scans"),
         vec![VId(2)]
@@ -427,7 +427,7 @@ fn a_scan_refuses_what_the_decoder_would_refuse() {
         "a forged block must not scan"
     );
 
-    let mut truncated = encode_block(&entries).expect("encodes");
+    let mut truncated = encode_block(0, &entries).expect("encodes");
     truncated.truncate(truncated.len() - 1);
     assert!(matches!(
         scan_neighbours(&truncated, VId(1), REL, CommitSeq(9)),
@@ -442,7 +442,7 @@ fn a_scan_refuses_what_the_decoder_would_refuse() {
 /// at one, since the middle of an interval is where every implementation agrees.
 #[test]
 fn a_scan_agrees_with_decode_and_filter() {
-    let bytes = encode_block(&sample()).expect("encodes");
+    let bytes = encode_block(0, &sample()).expect("encodes");
     let decoded = decode_block(&bytes).expect("decodes");
     for as_of in 1..=7u64 {
         let scanned = scan_neighbours(&bytes, VId(1), REL, CommitSeq(as_of)).expect("scans");
@@ -459,7 +459,7 @@ fn a_scan_agrees_with_decode_and_filter() {
 /// since a decoder that rejected it would be caught by nothing else here.
 #[test]
 fn an_empty_block_is_valid() {
-    let bytes = encode_block(&[]).expect("encodes");
+    let bytes = encode_block(0, &[]).expect("encodes");
     assert_eq!(decode_block(&bytes).expect("decodes"), Vec::new());
     assert_eq!(
         scan_neighbours(&bytes, VId(1), REL, CommitSeq(1)).expect("scans"),
@@ -481,7 +481,7 @@ fn namespace() -> DatabaseSecurityNamespaceId {
 /// and any different block has a different one.
 #[test]
 fn identity_is_derived_from_content() {
-    let a = encode_block(&sample()).expect("encodes");
+    let a = encode_block(0, &sample()).expect("encodes");
     assert_eq!(
         block_id(&K_OID, namespace(), &a),
         block_id(&K_OID, namespace(), &a),
@@ -490,7 +490,7 @@ fn identity_is_derived_from_content() {
 
     let mut other = sample();
     other[2].created_at = CommitSeq(4);
-    let b = encode_block(&other).expect("encodes");
+    let b = encode_block(0, &other).expect("encodes");
     assert_ne!(
         block_id(&K_OID, namespace(), &a),
         block_id(&K_OID, namespace(), &b),
@@ -506,7 +506,7 @@ fn identity_is_derived_from_content() {
 /// — and therefore fetched — by another's root.
 #[test]
 fn identity_is_scoped_to_the_database() {
-    let bytes = encode_block(&sample()).expect("encodes");
+    let bytes = encode_block(0, &sample()).expect("encodes");
     let mine = block_id(&K_OID, namespace(), &bytes);
 
     assert_ne!(
@@ -525,7 +525,7 @@ fn identity_is_scoped_to_the_database() {
 #[test]
 fn read_block_accepts_the_block_it_names() {
     let entries = sample();
-    let bytes = encode_block(&entries).expect("encodes");
+    let bytes = encode_block(0, &entries).expect("encodes");
     let id = block_id(&K_OID, namespace(), &bytes);
     assert_eq!(
         read_block(&K_OID, namespace(), &bytes, id).expect("reads"),
@@ -542,10 +542,10 @@ fn read_block_accepts_the_block_it_names() {
 /// bytes it found are that block rather than trusting the path they came from.
 #[test]
 fn read_block_refuses_a_different_block() {
-    let mine = encode_block(&sample()).expect("encodes");
+    let mine = encode_block(0, &sample()).expect("encodes");
     let mut other_entries = sample();
     other_entries[0].created_at = CommitSeq(9);
-    let other = encode_block(&other_entries).expect("encodes");
+    let other = encode_block(0, &other_entries).expect("encodes");
 
     let expected = block_id(&K_OID, namespace(), &mine);
     let actual = block_id(&K_OID, namespace(), &other);
@@ -565,7 +565,7 @@ fn read_block_refuses_a_different_block() {
 /// operator somewhere completely different from "this object is corrupt".
 #[test]
 fn identity_is_checked_before_the_contents() {
-    let bytes = encode_block(&sample()).expect("encodes");
+    let bytes = encode_block(0, &sample()).expect("encodes");
     let id = block_id(&K_OID, namespace(), &bytes);
 
     let mut damaged = bytes.clone();
@@ -661,7 +661,7 @@ fn the_v2_raw_entry_baseline_is_seventy_two_bytes() {
 fn four_kibibytes_hold_the_normative_two_hundred_fifty_six_entries() {
     let mut fits = 0usize;
     for count in 1..=NORMATIVE_ENTRIES_PER_BLOCK {
-        let encoded = encode_block(&run_of(count)).expect("encodes");
+        let encoded = encode_block(0, &run_of(count)).expect("encodes");
         if encoded.len() > NORMATIVE_BLOCK_BYTES {
             break;
         }
@@ -768,7 +768,7 @@ fn adopting_the_codec_alone_lands_near_forty_two_bytes_and_the_law_wants_sixteen
 #[test]
 fn the_v3_frame_is_thirteen_bytes_per_entry_and_visibility_amortizes_below_two() {
     let rows = run_of(NORMATIVE_ENTRIES_PER_BLOCK);
-    let encoded = encode_block(&rows).expect("V3 encodes the normative run");
+    let encoded = encode_block(0, &rows).expect("V3 encodes the normative run");
     assert_eq!(
         encoded.len().div_ceil(rows.len()),
         13,
@@ -842,8 +842,8 @@ fn the_fixture_builds_the_run_the_byte_economy_witnesses_assume() {
             "the run must be strictly ascending or the encoder would refuse it"
         );
     }
-    let eight = encode_block(&run).expect("the encoder must accept the fixture");
-    let nine = encode_block(&run_of(9)).expect("the encoder must accept the fixture");
+    let eight = encode_block(0, &run).expect("the encoder must accept the fixture");
+    let nine = encode_block(0, &run_of(9)).expect("the encoder must accept the fixture");
     assert!(
         nine.len() > eight.len(),
         "a longer run must encode to more bytes, or the measurement is vacuous"

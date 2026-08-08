@@ -296,6 +296,14 @@ pub enum RootError {
         blocks: usize,
         props: usize,
     },
+    /// A root names a block whose durable `partition_id` disagrees with the
+    /// root's own partition (V5, fgdb-da6b) — a transplanted block, refused
+    /// at admission rather than silently merged into a foreign partition.
+    BlockPartitionMismatch {
+        at: usize,
+        root_partition: u64,
+        block_partition: u64,
+    },
 }
 
 impl core::fmt::Display for RootError {
@@ -429,6 +437,15 @@ impl core::fmt::Display for RootError {
             Self::BlockPropsArity { blocks, props } => write!(
                 f,
                 "a property column for {props} blocks cannot align with {blocks} blocks"
+            ),
+            Self::BlockPartitionMismatch {
+                at,
+                root_partition,
+                block_partition,
+            } => write!(
+                f,
+                "block {at} durably names partition {block_partition}, but the root is \
+                 partition {root_partition}'s"
             ),
         }
     }

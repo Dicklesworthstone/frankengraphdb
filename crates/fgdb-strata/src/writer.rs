@@ -755,13 +755,22 @@ impl BlockWriter {
                     }
                 }
                 let (bytes, property_patch) = if rows.is_empty() {
-                    (encode_block(&entries).map_err(WriteError::Block)?, None)
+                    (
+                        encode_block(self.partition, &entries).map_err(WriteError::Block)?,
+                        None,
+                    )
                 } else {
                     let patch_bytes =
                         encode_property_patch(&rows).map_err(WriteError::EdgeProps)?;
                     let patch_id = property_patch_id(keys.0, keys.1, &patch_bytes);
-                    let bytes = encode_block_with_properties(&entries, patch_id, &locators)
-                        .map_err(WriteError::Block)?;
+                    let bytes = encode_block_with_properties(
+                        self.partition,
+                        &entries,
+                        patch_id,
+                        &locators,
+                        &rows,
+                    )
+                    .map_err(WriteError::Block)?;
                     (
                         bytes,
                         Some(SealedPropertyPatch {

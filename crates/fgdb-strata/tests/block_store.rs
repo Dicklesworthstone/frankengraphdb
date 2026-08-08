@@ -71,7 +71,7 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
 }
 
 fn sample() -> Vec<u8> {
-    encode_block(&[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes")
+    encode_block(0, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes")
 }
 
 /// A stored block reads back as the same entries, under the identity the store
@@ -274,7 +274,7 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
         let id = store.put(cx, &mine).expect("stores");
 
         // A different, perfectly lawful block written over the path.
-        let other = encode_block(&[entry(9, 9, 7)]).expect("encodes");
+        let other = encode_block(0, &[entry(9, 9, 7)]).expect("encodes");
         assert_ne!(other, mine);
         std::fs::write(store.path(id.0), &other).expect("overwrite");
 
@@ -365,7 +365,7 @@ fn a_damaged_existing_file_is_not_misreported_as_a_collision() {
         let id = store.put(cx, &bytes).expect("stores");
 
         // Something else has taken this identity's path with different bytes.
-        let other = encode_block(&[entry(4, 5, 6)]).expect("encodes");
+        let other = encode_block(0, &[entry(4, 5, 6)]).expect("encodes");
         std::fs::write(store.path(id.0), &other).expect("plant");
 
         let error = store.put(cx, &bytes).expect_err("damage must be refused");
@@ -565,8 +565,8 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let early = edge(10, 1, 2, 1, Some(3));
         let future = edge(10, 1, 2, 5, None);
-        let early_bytes = encode_block(&[early]).expect("early block encodes");
-        let future_bytes = encode_block(&[future]).expect("future block encodes");
+        let early_bytes = encode_block(0, &[early]).expect("early block encodes");
+        let future_bytes = encode_block(0, &[future]).expect("future block encodes");
         let early_id = store.put(cx, &early_bytes).expect("stores early block");
         let future_id = store.put(cx, &future_bytes).expect("stores future block");
         let root = PartitionRoot {
@@ -1005,7 +1005,7 @@ fn a_receipted_block_is_admitted_without_rereading_its_file() {
             .expect("earns the receipt");
         assert!(receipts.holds(id));
 
-        let other = encode_block(&[entry(9, 9, 7)]).expect("encodes");
+        let other = encode_block(0, &[entry(9, 9, 7)]).expect("encodes");
         std::fs::write(store.path(id.0), &other).expect("plants damage");
 
         assert!(
@@ -1130,8 +1130,8 @@ fn receipted_puts_refuse_eid_reuse_as_the_receipt_is_earned() {
         let mut receipts = PublishReceipts::new();
         let early = edge(10, 1, 2, 1, Some(3));
         let future = edge(10, 1, 2, 5, None);
-        let early_bytes = encode_block(&[early]).expect("encodes");
-        let future_bytes = encode_block(&[future]).expect("encodes");
+        let early_bytes = encode_block(0, &[early]).expect("encodes");
+        let future_bytes = encode_block(0, &[future]).expect("encodes");
 
         store
             .put_verified(cx, &early_bytes, None, &mut receipts)

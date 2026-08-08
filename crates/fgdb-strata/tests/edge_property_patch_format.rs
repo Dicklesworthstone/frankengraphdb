@@ -201,8 +201,9 @@ fn a_block_with_a_hosted_patch_round_trips_id_and_locators() {
     let entries = entries();
     let patch_id = ObjectId([0xab; 32]);
     let locators = [1u8, 0, 2];
-    let bytes =
-        encode_block_with_properties(&entries, patch_id, &locators).expect("lawful block encodes");
+    let rows = distinct_rows();
+    let bytes = encode_block_with_properties(0, &entries, patch_id, &locators, &rows)
+        .expect("lawful block encodes");
     let (decoded, patch) = decode_block_with_properties(&bytes).expect("decodes");
     assert_eq!(decoded, entries);
     let (found_id, found_locators) = patch.expect("the patch section survives");
@@ -213,7 +214,7 @@ fn a_block_with_a_hosted_patch_round_trips_id_and_locators() {
     assert_eq!(decode_block(&bytes).expect("plain decode"), entries);
 
     // A propertyless block carries NO section and decodes to None.
-    let plain = encode_block(&entries).expect("encodes");
+    let plain = encode_block(0, &entries).expect("encodes");
     let (_, none) = decode_block_with_properties(&plain).expect("decodes");
     assert!(none.is_none());
     assert!(plain.len() < bytes.len());
@@ -226,20 +227,20 @@ fn locator_laws_hold_in_both_directions() {
 
     // Length mismatch and scrambled sequences refuse at encode.
     assert!(matches!(
-        encode_block_with_properties(&entries, patch_id, &[1, 0]),
+        encode_block_with_properties(0, &entries, patch_id, &[1, 0], &distinct_rows()),
         Err(BlockError::NonCanonicalLocators { .. })
     ));
     assert!(matches!(
-        encode_block_with_properties(&entries, patch_id, &[2, 0, 1]),
+        encode_block_with_properties(0, &entries, patch_id, &[2, 0, 1], &distinct_rows()),
         Err(BlockError::NonCanonicalLocators { at: 0 })
     ));
     assert!(matches!(
-        encode_block_with_properties(&entries, patch_id, &[1, 0, 1]),
+        encode_block_with_properties(0, &entries, patch_id, &[1, 0, 1], &distinct_rows()),
         Err(BlockError::NonCanonicalLocators { at: 2 })
     ));
     assert!(
         matches!(
-            encode_block_with_properties(&entries, patch_id, &[0, 0, 0]),
+            encode_block_with_properties(0, &entries, patch_id, &[0, 0, 0], &distinct_rows()),
             Err(BlockError::NonCanonicalLocators { at: 0 })
         ),
         "a patch no entry references is dead weight, refused"
@@ -249,7 +250,8 @@ fn locator_laws_hold_in_both_directions() {
     // `entries.len()` bytes of the encoding — into a scramble the encoder
     // cannot emit.
     let lawful =
-        encode_block_with_properties(&entries, patch_id, &[1, 0, 2]).expect("lawful encodes");
+        encode_block_with_properties(0, &entries, patch_id, &[1, 0, 2], &distinct_rows())
+            .expect("lawful encodes");
     let mut scrambled = lawful.clone();
     let tail = scrambled.len() - 3;
     scrambled[tail..].copy_from_slice(&[2, 0, 1]);
@@ -270,7 +272,7 @@ fn locator_laws_hold_in_both_directions() {
 
 #[test]
 fn v3_blocks_are_refused_by_name() {
-    let bytes = encode_block(&entries()).expect("encodes");
+    let bytes = encode_block(0, &entries()).expect("encodes");
     let mut old = bytes;
     old[4..6].copy_from_slice(&3u16.to_be_bytes());
     assert_eq!(

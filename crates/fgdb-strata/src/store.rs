@@ -833,6 +833,7 @@ impl BlockStore {
         &self,
         cx: &impl StorageReadCx,
         at: usize,
+        partition: u64,
         reference: &crate::root::BlockRef,
     ) -> Result<(Vec<crate::AdjacencyEntry>, Option<BlockProps>), StoreError> {
         let bytes = self
@@ -851,6 +852,19 @@ impl BlockStore {
         // back with the entries rather than being re-read per answer.
         let (_, patch) =
             crate::decode_block_with_properties(&bytes).map_err(StoreError::Malformed)?;
+        // The block durably names its owning partition (V5, fgdb-da6b); a
+        // transplant into a foreign partition's root refuses here, at the
+        // seam where the root and the block's own bytes first meet.
+        let (block_partition, declared_digest) = crate::header_partition_and_digest(&bytes);
+        if block_partition != partition {
+            return Err(StoreError::MalformedRoot(
+                crate::root::RootError::BlockPartitionMismatch {
+                    at,
+                    root_partition: partition,
+                    block_partition,
+                },
+            ));
+        }
         let props = if let Some((patch_id, locators)) = patch {
             let patch_bytes = self
                 .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
@@ -867,6 +881,20 @@ impl BlockStore {
             .map_err(StoreError::MalformedEdgePropertyPatch)?;
             validate_block_patch_consistency(&locators, rows.len())
                 .map_err(StoreError::MalformedEdgePropertyPatch)?;
+            // The joint digest law (V5): a propertied block's transcript needs
+            // its rows, so this is the seam that owns it — decode proved the
+            // propertyless half already.
+            let per_entry = crate::rows_by_entry(&locators, &rows);
+            let recomputed = crate::block_logical_digest(&entries, &per_entry)
+                .map_err(StoreError::Malformed)?;
+            if recomputed != declared_digest {
+                return Err(StoreError::Malformed(
+                    crate::BlockError::LogicalDigestMismatch {
+                        declared: declared_digest,
+                        recomputed,
+                    },
+                ));
+            }
             Some(BlockProps { locators, rows })
         } else {
             None
@@ -895,7 +923,7 @@ impl BlockStore {
         let mut blocks = Vec::new();
         let mut history = crate::root::EdgeHistoryValidator::default();
         for (at, reference) in root.blocks.iter().enumerate() {
-            let (entries, props) = self.resolve_root_block(cx, at, reference)?;
+            let (entries, props) = self.resolve_root_block(cx, at, root.partition, reference)?;
             history
                 .observe_block(at, &entries)
                 .map_err(StoreError::MalformedRoot)?;
@@ -977,7 +1005,7 @@ impl BlockStore {
                 continue;
             }
             selected.next();
-            blocks.push(self.resolve_root_block(cx, at, reference)?.0);
+            blocks.push(self.resolve_root_block(cx, at, root.partition, reference)?.0);
         }
         debug_assert!(selected.next().is_none());
         Ok(blocks)
@@ -1121,6 +1149,22 @@ impl BlockStore {
             .map_err(StoreError::MalformedEdgePropertyPatch)?;
             validate_block_patch_consistency(&locators, rows.len())
                 .map_err(StoreError::MalformedEdgePropertyPatch)?;
+            // The joint digest law (V5) at the standalone-admission seam too:
+            // the receipt must not be earned by a block whose declared digest
+            // disowns the rows it hosts. Partition agreement is a root-side
+            // law — no root is in hand here.
+            let (_, declared_digest) = crate::header_partition_and_digest(bytes);
+            let per_entry = crate::rows_by_entry(&locators, &rows);
+            let recomputed = crate::block_logical_digest(&entries, &per_entry)
+                .map_err(StoreError::Malformed)?;
+            if recomputed != declared_digest {
+                return Err(StoreError::Malformed(
+                    crate::BlockError::LogicalDigestMismatch {
+                        declared: declared_digest,
+                        recomputed,
+                    },
+                ));
+            }
         }
         receipts
             .validator
@@ -1167,7 +1211,7 @@ impl BlockStore {
             {
                 continue;
             }
-            let (entries, _props) = self.resolve_root_block(cx, at, reference)?;
+            let (entries, _props) = self.resolve_root_block(cx, at, root.partition, reference)?;
             receipts
                 .validator
                 .observe_block(at, &entries)
