@@ -31,11 +31,11 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_sim::replay;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
 use std::path::{Path, PathBuf};
 
 const GRAPH: GraphId = GraphId(1);
@@ -99,7 +99,22 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
         .expect("creates");
 
     let mut first = WriteBatch::new(KNOWS);
-    for vid in 1..=5u128 {
+    // VId(1) carries labels AND properties, VId(2) a label alone, the rest
+    // nothing — so the vertex differential below compares three distinct
+    // shapes rather than six copies of the empty row (fgdb-3xoi).
+    first.create_vertex(
+        VId(1),
+        vec![LabelId(3), LabelId(5)],
+        vec![
+            (
+                PropertyKeyId(7),
+                CanonicalScalar::ucs_basic_text("ada").expect("admissible"),
+            ),
+            (PropertyKeyId(9), CanonicalScalar::Int(1815)),
+        ],
+    );
+    first.create_vertex(VId(2), vec![LabelId(3)], vec![]);
+    for vid in 3..=5u128 {
         first.create_vertex(VId(vid), vec![], vec![]);
     }
     first.add_edge(EId(10), VId(1), VId(2), vec![]);
@@ -142,6 +157,8 @@ fn the_spine_agrees_with_the_reference_oracle() {
             .iter()
             .map(|(vid, rel)| engine.neighbours(*vid, *rel).expect("engine reads"))
             .collect();
+        let engine_vertices: Vec<Option<fgdb::VertexRow>> =
+            (1..=6u128).map(|vid| engine.vertex(VId(vid))).collect();
         drop(engine); // release the single-writer lease before the oracle opens
 
         // ORACLE SIDE. Its own coordinator over the same directory; nothing but
@@ -168,6 +185,49 @@ fn the_spine_agrees_with_the_reference_oracle() {
                 nonempty += 1;
             }
         }
+
+        // THE VERTEX DIFFERENTIAL (fgdb-3xoi): the engine's durable vertex
+        // rows agree with the oracle's materialized vertices — existence,
+        // labels, and properties, per vid.
+        let mut labeled = 0usize;
+        let mut propertied = 0usize;
+        for (vid, engine_row) in (1..=6u128).map(VId).zip(&engine_vertices) {
+            let oracle_vertex = graph.vertex(vid);
+            assert_eq!(
+                engine_row.is_some(),
+                oracle_vertex.is_some(),
+                "engine and oracle disagree about whether {vid:?} exists"
+            );
+            let (Some(row), Some(vertex)) = (engine_row, oracle_vertex) else {
+                continue;
+            };
+            let oracle_labels: Vec<LabelId> = vertex.labels.iter().copied().collect();
+            let oracle_props: Vec<(PropertyKeyId, CanonicalScalar)> = vertex
+                .props
+                .iter()
+                .map(|(key, value)| (*key, value.clone()))
+                .collect();
+            assert_eq!(
+                row.labels, oracle_labels,
+                "engine and oracle disagree about {vid:?}'s labels"
+            );
+            assert_eq!(
+                row.props, oracle_props,
+                "engine and oracle disagree about {vid:?}'s properties"
+            );
+            assert_eq!(
+                row.birth_ordinal, vertex.birth_ordinal,
+                "engine and oracle disagree about {vid:?}'s birth ordinal"
+            );
+            labeled += usize::from(!row.labels.is_empty());
+            propertied += usize::from(!row.props.is_empty());
+        }
+        assert!(
+            labeled >= 2 && propertied >= 1,
+            "the fixture must exercise labels and properties or the vertex \
+             differential is agreement about emptiness, got {labeled} labeled \
+             and {propertied} propertied"
+        );
 
         // ANTI-VACUITY. Agreement over twelve empty answers is not agreement
         // about anything: two implementations that both return nothing agree
