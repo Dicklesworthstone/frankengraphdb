@@ -399,24 +399,40 @@ fn same_batch_create_and_update_shows_only_the_final_content() {
 }
 
 /// **THE EDGE-LOOKUP LAW: an edge answers by identity — endpoints, relation,
-/// lifetime — flips at its deletion, and survives a reopen.**
+/// lifetime, and properties — flips at its deletion, and survives a reopen.**
+///
+/// The parallel twin doubles as the properties control: it is propertyless, so
+/// a read that answered properties by position instead of by the locator
+/// column would hand the twin its sibling's row.
 #[test]
 fn edge_lookups_answer_by_identity_and_survive_a_reopen() {
     let dir = scratch("edge-lookup");
     under_lab(81, move |cx| async move {
         let cx = &cx;
+        let since = PropertyKeyId(7);
+        let props = vec![(since, CanonicalScalar::Int(2019))];
         {
             let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
             let mut batch = WriteBatch::new(KNOWS);
             batch.create_vertex(VId(1), vec![], vec![]);
             batch.create_vertex(VId(2), vec![], vec![]);
-            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+            batch.add_edge(EId(10), VId(1), VId(2), props.clone());
             batch.add_edge(EId(11), VId(1), VId(2), vec![]); // parallel twin
+            batch.add_edge(
+                EId(12),
+                VId(2),
+                VId(1),
+                vec![(since, CanonicalScalar::Int(2024))],
+            );
             db.write(cx, batch).await.expect("commits");
 
             let edge = db.edge(EId(10)).expect("reads").expect("exists");
-            assert_eq!((edge.src, edge.relation, edge.dst), (VId(1), KNOWS, VId(2)));
-            assert!(edge.retired_at.is_none());
+            assert_eq!(
+                (edge.entry.src, edge.entry.relation, edge.entry.dst),
+                (VId(1), KNOWS, VId(2))
+            );
+            assert!(edge.entry.retired_at.is_none());
+            assert_eq!(edge.props, props, "the durable patch answers the props");
             assert!(
                 db.edge(EId(99)).expect("reads").is_none(),
                 "an edge that was never created has no version"
@@ -435,11 +451,23 @@ fn edge_lookups_answer_by_identity_and_survive_a_reopen() {
             );
         }
 
-        // NOTHING crosses this line except `dir` and `keys()`.
+        // NOTHING crosses this line except `dir`, `keys()`, and the expected
+        // property row.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert!(db.edge(EId(10)).expect("reads").is_none());
         let twin = db.edge(EId(11)).expect("reads").expect("survives");
-        assert_eq!((twin.src, twin.dst), (VId(1), VId(2)));
+        assert_eq!((twin.entry.src, twin.entry.dst), (VId(1), VId(2)));
+        assert_eq!(
+            twin.props,
+            vec![],
+            "the propertyless twin owns no row, even beside a propertied sibling"
+        );
+        let survivor = db.edge(EId(12)).expect("reads").expect("survives");
+        assert_eq!(
+            survivor.props,
+            vec![(since, CanonicalScalar::Int(2024))],
+            "edge properties survive a from-scratch reopen"
+        );
     });
 }
 

@@ -117,22 +117,47 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
     for vid in 3..=5u128 {
         first.create_vertex(VId(vid), vec![], vec![]);
     }
-    first.add_edge(EId(10), VId(1), VId(2), vec![]);
+    // EDGE PROPERTIES (fgdb-yqor): EId(10) carries two, EId(11) none — the
+    // edge differential below compares distinct shapes, not copies of empty.
+    first.add_edge(
+        EId(10),
+        VId(1),
+        VId(2),
+        vec![
+            (PropertyKeyId(11), CanonicalScalar::Int(2019)),
+            (
+                PropertyKeyId(13),
+                CanonicalScalar::ucs_basic_text("close").expect("admissible"),
+            ),
+        ],
+    );
     first.add_edge(EId(11), VId(1), VId(3), vec![]);
     db.write(cx, first).await.expect("first batch commits");
 
     // PARALLEL EDGES: same (src, dst), different EId. EId is the unconditional
     // parallel-edge discriminator (§4.1), so a fold keyed on the pair alone
-    // collapses these and disagrees here.
+    // collapses these and disagrees here. EId(12) is propertied AND deleted
+    // below, so its retirement exercises the tombstone-restates-props path.
     let mut second = WriteBatch::new(KNOWS);
-    second.add_edge(EId(12), VId(1), VId(2), vec![]);
+    second.add_edge(
+        EId(12),
+        VId(1),
+        VId(2),
+        vec![(PropertyKeyId(11), CanonicalScalar::Int(2020))],
+    );
     second.add_edge(EId(13), VId(4), VId(4), vec![]); // self-loop
     db.write(cx, second).await.expect("second batch commits");
 
-    // A SECOND RELATION over an overlapping vertex set.
+    // A SECOND RELATION over an overlapping vertex set, propertied on the
+    // surviving edge so the cross-relation read is compared with content.
     let mut third = WriteBatch::new(WORKS_WITH);
     third.add_edge(EId(14), VId(1), VId(5), vec![]);
-    third.add_edge(EId(15), VId(2), VId(3), vec![]);
+    third.add_edge(
+        EId(15),
+        VId(2),
+        VId(3),
+        vec![(PropertyKeyId(11), CanonicalScalar::Bool(true))],
+    );
     db.write(cx, third).await.expect("third batch commits");
 
     // DELETES, with every before-image engine-derived (fgdb-p3ok). This is
@@ -191,7 +216,7 @@ fn the_spine_agrees_with_the_reference_oracle() {
             .collect();
         let engine_vertices: Vec<Option<fgdb::VertexRow>> =
             (1..=6u128).map(|vid| engine.vertex(VId(vid))).collect();
-        let engine_edges: Vec<Option<fgdb_strata::AdjacencyEntry>> = (10..=17u128)
+        let engine_edges: Vec<Option<fgdb::EdgeRecord>> = (10..=17u128)
             .map(|eid| engine.edge(EId(eid)).expect("engine edge reads"))
             .collect();
         drop(engine); // release the single-writer lease before the oracle opens
@@ -264,11 +289,12 @@ fn the_spine_agrees_with_the_reference_oracle() {
              and {propertied} propertied"
         );
 
-        // THE EDGE-LOOKUP DIFFERENTIAL: existence, endpoints, and relation
-        // agree with the oracle per EId — including the deleted parallel
-        // edge, its surviving twin, and the cascade-retired edges.
+        // THE EDGE-LOOKUP DIFFERENTIAL: existence, endpoints, relation, and
+        // properties agree with the oracle per EId — including the deleted
+        // parallel edge, its surviving twin, and the cascade-retired edges.
         let mut live_edges = 0usize;
         let mut dead_edges = 0usize;
+        let mut propertied_edges = 0usize;
         for (eid, engine_edge) in (10..=17u128).map(EId).zip(&engine_edges) {
             let oracle_edge = graph.edge(eid);
             assert_eq!(
@@ -276,21 +302,33 @@ fn the_spine_agrees_with_the_reference_oracle() {
                 oracle_edge.is_some(),
                 "engine and oracle disagree about whether {eid:?} exists"
             );
-            let (Some(entry), Some(edge)) = (engine_edge, oracle_edge) else {
+            let (Some(record), Some(edge)) = (engine_edge, oracle_edge) else {
                 dead_edges += 1;
                 continue;
             };
             assert_eq!(
-                (entry.src, entry.relation, entry.dst),
+                (record.entry.src, record.entry.relation, record.entry.dst),
                 (edge.src, edge.relation, edge.dst),
                 "engine and oracle disagree about {eid:?}'s topology"
             );
+            let oracle_props: Vec<_> = edge
+                .props
+                .iter()
+                .map(|(key, value)| (*key, value.clone()))
+                .collect();
+            assert_eq!(
+                record.props, oracle_props,
+                "engine and oracle disagree about {eid:?}'s properties"
+            );
             live_edges += 1;
+            if !record.props.is_empty() {
+                propertied_edges += 1;
+            }
         }
         assert!(
-            live_edges >= 3 && dead_edges >= 3,
-            "the fixture must exercise both live and retired edges, got \
-             {live_edges} live and {dead_edges} dead"
+            live_edges >= 3 && dead_edges >= 3 && propertied_edges >= 2,
+            "the fixture must exercise live, retired, and propertied edges, got \
+             {live_edges} live, {dead_edges} dead, {propertied_edges} propertied"
         );
 
         // ANTI-VACUITY. Agreement over twelve empty answers is not agreement

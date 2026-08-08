@@ -156,12 +156,14 @@ use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, LabelId, LogicalDeltaTemplate,
     PropertyKeyId, RelationId, SchemaEpoch,
 };
-use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_edge, merge_neighbours};
+use fgdb_strata::edge_props::BlockProps;
+use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_edge_with_props, merge_neighbours};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::vertex::merge_vertex;
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
 
+pub use fgdb_strata::edge_props::EdgePropertyRow;
 pub use fgdb_strata::vertex::VertexRow;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -568,6 +570,14 @@ impl WriteBatch {
     }
 }
 
+/// One edge's full answer: the winning adjacency statement and the
+/// properties its block's hosted patch carries (fgdb-yqor).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EdgeRecord {
+    pub entry: AdjacencyEntry,
+    pub props: EdgePropertyRow,
+}
+
 /// The published tier-D snapshot a reader is served from.
 #[derive(Debug)]
 struct Snapshot {
@@ -577,6 +587,10 @@ struct Snapshot {
     /// unchanged (fgdb-gieu) — content addressing makes the identity the
     /// proof, so an unchanged reference means an unchanged decoded block.
     refs: Vec<BlockRef>,
+    /// Each block's decoded property sidecar, aligned with `blocks`
+    /// (fgdb-yqor): the locator column plus the hosted patch's rows, or
+    /// `None` for a propertyless block.
+    block_props: Vec<Option<BlockProps>>,
     /// The decoded vertex row patches, aligned with `patch_refs` — the vertex
     /// half of the snapshot (fgdb-3xoi), under the same carry-forward rule.
     patches: Vec<Vec<VertexRow>>,
@@ -1060,8 +1074,10 @@ impl Database {
         // and `incremental_snapshot.rs` pins that a from-scratch reopen derives
         // this same root and adjacency. Decode failures refuse here, before the
         // old snapshot is disturbed (fold-then-swap, as above).
-        let mut fresh: std::collections::BTreeMap<ObjectId, Vec<AdjacencyEntry>> =
-            std::collections::BTreeMap::new();
+        let mut fresh: std::collections::BTreeMap<
+            ObjectId,
+            (Vec<AdjacencyEntry>, Option<BlockProps>),
+        > = std::collections::BTreeMap::new();
         let carried: std::collections::BTreeSet<ObjectId> =
             self.snapshot.refs.iter().map(|r| r.block_id).collect();
         for reference in &root.blocks {
@@ -1072,20 +1088,40 @@ impl Database {
                 .iter()
                 .find(|block| block.block_id == reference.block_id)
                 .expect("every reference in a publish's root names a block that publish returned");
-            fresh.insert(
-                reference.block_id,
-                fgdb_strata::decode_block(&sealed.bytes)
-                    .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?,
-            );
+            let (entries, hosted) = fgdb_strata::decode_block_with_properties(&sealed.bytes)
+                .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+            // A propertied block's rows decode from the exact patch bytes the
+            // same publish sealed — the durable path, not the writer's memory.
+            let props = match hosted {
+                Some((_, locators)) => {
+                    let patch = sealed.property_patch.as_ref().expect(
+                        "a sealed block declaring a hosted patch was sealed beside that patch",
+                    );
+                    let rows = fgdb_strata::edge_props::decode_property_patch(&patch.bytes)
+                        .map_err(|error| {
+                            RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
+                        })?;
+                    Some(BlockProps { locators, rows })
+                }
+                None => None,
+            };
+            fresh.insert(reference.block_id, (entries, props));
         }
-        let mut carried: std::collections::BTreeMap<ObjectId, Vec<AdjacencyEntry>> = self
+        let mut carried: std::collections::BTreeMap<
+            ObjectId,
+            (Vec<AdjacencyEntry>, Option<BlockProps>),
+        > = self
             .snapshot
             .refs
             .iter()
             .map(|r| r.block_id)
-            .zip(std::mem::take(&mut self.snapshot.blocks))
+            .zip(
+                std::mem::take(&mut self.snapshot.blocks)
+                    .into_iter()
+                    .zip(std::mem::take(&mut self.snapshot.block_props)),
+            )
             .collect();
-        let decoded = root
+        let (decoded, decoded_props): (Vec<Vec<AdjacencyEntry>>, Vec<Option<BlockProps>>) = root
             .blocks
             .iter()
             .map(|reference| {
@@ -1097,7 +1133,7 @@ impl Database {
                          publication cannot name the same block identity twice",
                     )
             })
-            .collect();
+            .unzip();
         // The identical carry-forward rule for the vertex half: an unchanged
         // patch reference means an unchanged decoded patch, and new patches
         // decode from the exact bytes `put_patch_verified` just fsynced.
@@ -1148,6 +1184,7 @@ impl Database {
         self.writer = folded;
         self.snapshot = Snapshot {
             blocks: decoded,
+            block_props: decoded_props,
             refs: root.blocks,
             patches: decoded_patches,
             patch_refs: root.vertex_patches,
@@ -1170,21 +1207,22 @@ impl Database {
         )?)
     }
 
-    /// The edge `eid` — its endpoints, relation, and lifetime — at the
-    /// published frontier, or `None` when no visible version exists.
+    /// The edge `eid` — its endpoints, relation, lifetime, AND properties —
+    /// at the published frontier, or `None` when no visible version exists.
     ///
-    /// Served from the durable tier-D blocks exactly as
-    /// [`Database::neighbours`] is, under the same whole-history validation.
-    /// Properties are deliberately absent from the answer: edge property
-    /// STORAGE is `fgdb-w3-properties-gou`'s block-hosted patch shape
-    /// (ruling fgdb-2t7q 3B), and answering them from an in-memory fold here
-    /// would be the shortcut across the durable path this crate forbids.
-    pub fn edge(&self, eid: EId) -> Result<Option<AdjacencyEntry>, ReadError> {
-        Ok(merge_edge(
+    /// Served from the durable tier-D blocks and their hosted property
+    /// patches (fgdb-yqor), under the same whole-history validation as
+    /// [`Database::neighbours`]: the properties made the full encode →
+    /// content-address → fsync → admit → decode round trip before a reader
+    /// can see them.
+    pub fn edge(&self, eid: EId) -> Result<Option<EdgeRecord>, ReadError> {
+        Ok(merge_edge_with_props(
             &self.snapshot.blocks,
+            &self.snapshot.block_props,
             eid,
             self.snapshot.frontier,
-        )?)
+        )?
+        .map(|(entry, props)| EdgeRecord { entry, props }))
     }
 
     /// The vertex `vid` — its labels and properties — at the published
@@ -1518,12 +1556,13 @@ async fn rebuild(
         store.put_patch(cx, &patch.bytes)?;
     }
     let root_id = store.put_root(cx, &root)?;
-    let (reopened_root, decoded, decoded_patches) = store.reopen(cx, root_id)?;
+    let (reopened_root, decoded, decoded_props, decoded_patches) = store.reopen(cx, root_id)?;
 
     Ok((
         Snapshot {
             blocks: decoded,
             refs: reopened_root.blocks,
+            block_props: decoded_props,
             patches: decoded_patches,
             patch_refs: reopened_root.vertex_patches,
             frontier,

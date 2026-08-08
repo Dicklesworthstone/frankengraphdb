@@ -50,7 +50,7 @@
 //! honest thing: bytes on disk, addressed by identity, verified on read.
 
 use crate::edge_props::{
-    EdgePropertyPatchVersion, read_property_patch, validate_block_patch_consistency,
+    BlockProps, EdgePropertyPatchVersion, read_property_patch, validate_block_patch_consistency,
 };
 use crate::vertex::{VertexPatchVersion, VertexRow, decode_patch, vertex_patch_id};
 use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
@@ -834,7 +834,7 @@ impl BlockStore {
         cx: &impl StorageReadCx,
         at: usize,
         reference: &crate::root::BlockRef,
-    ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
+    ) -> Result<(Vec<crate::AdjacencyEntry>, Option<BlockProps>), StoreError> {
         let bytes = self
             .get_bytes(cx, DeltaBlockVersion(reference.block_id))
             .map_err(|error| StoreError::RootBlockLoad {
@@ -847,10 +847,11 @@ impl BlockStore {
         // The block's hosted property patch is part of the block's truth
         // (fgdb-yqor): reachability is root -> block -> patch, so admitting
         // the block admits its patch — identity, format, and the joint
-        // locator bijection, with both objects in hand.
+        // locator bijection, with both objects in hand. The proven rows ride
+        // back with the entries rather than being re-read per answer.
         let (_, patch) =
             crate::decode_block_with_properties(&bytes).map_err(StoreError::Malformed)?;
-        if let Some((patch_id, locators)) = patch {
+        let props = if let Some((patch_id, locators)) = patch {
             let patch_bytes = self
                 .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
                 .map_err(|error| StoreError::BlockPatchLoad {
@@ -866,8 +867,11 @@ impl BlockStore {
             .map_err(StoreError::MalformedEdgePropertyPatch)?;
             validate_block_patch_consistency(&locators, rows.len())
                 .map_err(StoreError::MalformedEdgePropertyPatch)?;
-        }
-        Ok(entries)
+            Some(BlockProps { locators, rows })
+        } else {
+            None
+        };
+        Ok((entries, props))
     }
 
     /// Prove every block named by an already-structural root while retaining only
@@ -879,34 +883,36 @@ impl BlockStore {
     /// is the fresh admission path: even a block outside the requested snapshot is
     /// checked, because neither an unproved range nor an unproved identity is
     /// permission to skip that block.
+    #[allow(clippy::type_complexity)]
     fn inspect_root_blocks(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
         mut retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
-    ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
+    ) -> Result<Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>, StoreError> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
 
         let mut blocks = Vec::new();
         let mut history = crate::root::EdgeHistoryValidator::default();
         for (at, reference) in root.blocks.iter().enumerate() {
-            let entries = self.resolve_root_block(cx, at, reference)?;
+            let (entries, props) = self.resolve_root_block(cx, at, reference)?;
             history
                 .observe_block(at, &entries)
                 .map_err(StoreError::MalformedRoot)?;
             if retain(at, reference) {
-                blocks.push(entries);
+                blocks.push((entries, props));
             }
         }
         Ok(blocks)
     }
 
     /// Load and validate every block named by an already-structural root.
+    #[allow(clippy::type_complexity)]
     fn resolve_root_blocks(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
-    ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
+    ) -> Result<Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>, StoreError> {
         self.inspect_root_blocks(cx, root, |_, _| true)
     }
 
@@ -971,7 +977,7 @@ impl BlockStore {
                 continue;
             }
             selected.next();
-            blocks.push(self.resolve_root_block(cx, at, reference)?);
+            blocks.push(self.resolve_root_block(cx, at, reference)?.0);
         }
         debug_assert!(selected.next().is_none());
         Ok(blocks)
@@ -1161,7 +1167,7 @@ impl BlockStore {
             {
                 continue;
             }
-            let entries = self.resolve_root_block(cx, at, reference)?;
+            let (entries, _props) = self.resolve_root_block(cx, at, reference)?;
             receipts
                 .validator
                 .observe_block(at, &entries)
@@ -1221,14 +1227,21 @@ impl BlockStore {
         (
             crate::root::PartitionRoot,
             Vec<Vec<crate::AdjacencyEntry>>,
+            Vec<Option<BlockProps>>,
             Vec<Vec<VertexRow>>,
         ),
         StoreError,
     > {
         let root = self.get_root(cx, id)?;
-        let blocks = self.resolve_root_blocks(cx, &root)?;
+        let resolved = self.resolve_root_blocks(cx, &root)?;
+        let mut blocks = Vec::with_capacity(resolved.len());
+        let mut block_props = Vec::with_capacity(resolved.len());
+        for (entries, props) in resolved {
+            blocks.push(entries);
+            block_props.push(props);
+        }
         let patches = self.inspect_root_patches(cx, &root, |_, _| true)?;
-        Ok((root, blocks, patches))
+        Ok((root, blocks, block_props, patches))
     }
 
     /// Admit a stored root against every named block and patch without
@@ -1272,13 +1285,17 @@ impl BlockStore {
         let root = self.get_root(cx, id)?;
         let visible = crate::root::blocks_visible_at(&root, as_of);
         let mut visible = visible.into_iter().peekable();
-        let blocks = self.inspect_root_blocks(cx, &root, |at, _| {
-            if visible.peek() != Some(&at) {
-                return false;
-            }
-            visible.next();
-            true
-        })?;
+        let blocks: Vec<Vec<crate::AdjacencyEntry>> = self
+            .inspect_root_blocks(cx, &root, |at, _| {
+                if visible.peek() != Some(&at) {
+                    return false;
+                }
+                visible.next();
+                true
+            })?
+            .into_iter()
+            .map(|(entries, _)| entries)
+            .collect();
         debug_assert!(visible.next().is_none());
         let visible_patches = crate::root::patches_visible_at(&root, as_of);
         let mut visible_patches = visible_patches.into_iter().peekable();

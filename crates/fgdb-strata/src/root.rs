@@ -803,6 +803,37 @@ pub fn merge_edge(
         .copied())
 }
 
+/// [`merge_edge`], answering the winning statement's PROPERTIES beside it
+/// (fgdb-yqor). The properties ride the winning statement's own block — a
+/// tombstone restated them, so the supersede model needs no cross-block
+/// property lookup: find the LAST block carrying the winning statement and
+/// read its locator there.
+#[allow(clippy::type_complexity)]
+pub fn merge_edge_with_props(
+    blocks: &[Vec<crate::AdjacencyEntry>],
+    block_props: &[Option<crate::edge_props::BlockProps>],
+    eid: EId,
+    as_of: CommitSeq,
+) -> Result<Option<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
+    let (entries, _) = collapse_edge_history(blocks)?;
+    let Some(winner) = entries.get(&eid).filter(|entry| entry.visible_at(as_of)) else {
+        return Ok(None);
+    };
+    for (block_at, block) in blocks.iter().enumerate().rev() {
+        if let Some(index) = block.iter().position(|entry| entry == winner) {
+            let props = block_props
+                .get(block_at)
+                .and_then(Option::as_ref)
+                .map(|props| props.props_of(index))
+                .unwrap_or_default();
+            return Ok(Some((*winner, props)));
+        }
+    }
+    // Unreachable for a history the collapse admitted, but never a panic on
+    // a read path: answer the entry with no properties.
+    Ok(Some((*winner, Vec::new())))
+}
+
 /// Incremental proof that every block in one publication history agrees on EId
 /// identity and lifecycle.
 ///

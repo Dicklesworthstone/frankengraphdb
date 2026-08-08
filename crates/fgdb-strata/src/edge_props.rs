@@ -52,6 +52,29 @@ pub struct EdgePropertyPatchVersion(pub ObjectId);
 /// One entry's property list: strictly ascending by key, values canonical.
 pub type EdgePropertyRow = Vec<(PropertyKeyId, CanonicalScalar)>;
 
+/// A block's decoded property sidecar: the locator column and the hosted
+/// patch's rows, kept together because neither means anything alone.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct BlockProps {
+    pub locators: Vec<u8>,
+    pub rows: Vec<EdgePropertyRow>,
+}
+
+impl BlockProps {
+    /// The property list of the entry at `index`, empty when the entry's
+    /// locator is 0 or the block hosts no patch at all.
+    pub fn props_of(&self, index: usize) -> EdgePropertyRow {
+        match self.locators.get(index) {
+            Some(&locator) if locator != 0 => self
+                .rows
+                .get(usize::from(locator) - 1)
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// Why an edge property patch could not be encoded, decoded, or trusted —
 /// the same boundary set as the sibling formats.
 #[derive(Clone, Debug, PartialEq, Eq)]

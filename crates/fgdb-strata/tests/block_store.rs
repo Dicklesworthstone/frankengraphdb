@@ -726,7 +726,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
 
         // A FRESH handle, holding nothing but the root identity.
         let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens");
-        let (loaded_root, loaded_blocks, _patches) =
+        let (loaded_root, loaded_blocks, _block_props, _patches) =
             reopened.reopen(cx, root_id).expect("reopens the partition");
 
         assert_eq!(loaded_root, root, "the root came back exactly");
@@ -1289,7 +1289,7 @@ fn a_propertied_block_admits_only_with_its_patch_reachable() {
             .put_edge_property_patch(cx, &hosted.bytes)
             .expect("stores the hosted patch");
         let root_id = store.put_root(cx, &root).expect("root admits");
-        let (_, reopened_blocks, _) = store.reopen(cx, root_id).expect("reopens");
+        let (_, reopened_blocks, _block_props, _) = store.reopen(cx, root_id).expect("reopens");
         let total: usize = reopened_blocks.iter().map(Vec::len).sum();
         assert_eq!(total, 2, "both edges survive the round trip");
     });
