@@ -56,6 +56,7 @@ fn root_of(count: u64) -> PartitionRoot {
         partition: 0,
         published_at: CommitSeq(count + 1),
         blocks,
+        vertex_patches: vec![],
     }
 }
 

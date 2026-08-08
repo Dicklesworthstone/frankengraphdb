@@ -114,6 +114,7 @@ fn assert_blocks_are_lawful(blocks: &[Vec<AdjacencyEntry>]) {
         partition: 0,
         published_at,
         blocks: references,
+        vertex_patches: vec![],
     };
     encode_root(&root).expect("compacted blocks form a lawful ordered root");
 }

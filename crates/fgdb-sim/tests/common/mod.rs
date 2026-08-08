@@ -153,7 +153,7 @@ pub fn try_build(
         }
     }
 
-    let (_, sealed) = writer
+    let (_, sealed, _patches) = writer
         .publish(KEYS, CommitSeq(u64::MAX / 2))
         .map_err(|e| format!("publish failed: {e:?}"))?;
     // Decoded from the sealed BYTES, so the differential runs against what the

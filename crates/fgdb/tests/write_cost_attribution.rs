@@ -226,11 +226,16 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
     stages.row_fold = start.elapsed();
 
     let start = Instant::now();
-    let (root, blocks) = writer
+    let (root, blocks, patches) = writer
         .publish((&keys.k_oid, keys.namespace), frontier)
         .expect("replica publish");
     for block in &blocks {
         store.put(&commit, &block.bytes).expect("replica block put");
+    }
+    for patch in &patches {
+        store
+            .put_patch(&commit, &patch.bytes)
+            .expect("replica patch put");
     }
     let root_id = store.put_root(&commit, &root).expect("replica root put");
     store.reopen(&commit, root_id).expect("replica reopen");

@@ -123,7 +123,7 @@ fn incremental_clone_publish_equals_full_rebuild_at_every_commit_of_every_shape(
             let seq = index as u64 + 1;
             fold(&mut persistent, seq, rows);
 
-            let (incr_root, incr_blocks) = persistent
+            let (incr_root, incr_blocks, incr_patches) = persistent
                 .clone()
                 .publish(keys(), CommitSeq(seq))
                 .expect("incremental publish");
@@ -132,7 +132,7 @@ fn incremental_clone_publish_equals_full_rebuild_at_every_commit_of_every_shape(
             for (past_index, past_rows) in commits.iter().enumerate().take(index + 1) {
                 fold(&mut fresh, past_index as u64 + 1, past_rows);
             }
-            let (rebuild_root, rebuild_blocks) = fresh
+            let (rebuild_root, rebuild_blocks, rebuild_patches) = fresh
                 .publish(keys(), CommitSeq(seq))
                 .expect("rebuild publish");
 
@@ -146,6 +146,13 @@ fn incremental_clone_publish_equals_full_rebuild_at_every_commit_of_every_shape(
             assert_eq!(
                 incr_bytes, rebuild_bytes,
                 "shape {name:?}: sealed block bytes diverged at commit {seq}"
+            );
+            let incr_patch_bytes: Vec<_> = incr_patches.iter().map(|p| &p.bytes).collect();
+            let rebuild_patch_bytes: Vec<_> =
+                rebuild_patches.iter().map(|p| &p.bytes).collect();
+            assert_eq!(
+                incr_patch_bytes, rebuild_patch_bytes,
+                "shape {name:?}: sealed vertex patch bytes diverged at commit {seq}"
             );
         }
     }
@@ -163,7 +170,7 @@ fn the_equality_comparison_can_fail_a_rebuild_that_dropped_a_row() {
     for (index, rows) in commits.iter().enumerate() {
         fold(&mut complete, index as u64 + 1, rows);
     }
-    let (complete_root, complete_blocks) = complete
+    let (complete_root, complete_blocks, _complete_patches) = complete
         .publish(keys(), CommitSeq(last_seq))
         .expect("complete publish");
 
@@ -175,7 +182,7 @@ fn the_equality_comparison_can_fail_a_rebuild_that_dropped_a_row() {
         }
         fold(&mut truncated, seq, rows);
     }
-    let (truncated_root, truncated_blocks) = truncated
+    let (truncated_root, truncated_blocks, _truncated_patches) = truncated
         .publish(keys(), CommitSeq(last_seq))
         .expect("truncated publish");
 

@@ -27,7 +27,8 @@
 //! reusable here. Graph-wide allocator authority remains upstream of a
 //! partition-local writer.
 
-use crate::root::{BlockRef, PartitionRoot, RootError, span_of, validate_root};
+use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
+use crate::vertex::{VertexPatchError, VertexRow, encode_patch, span_of_rows, vertex_patch_id};
 use crate::{
     AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES, block_id, encode_block, validate_entry,
 };
@@ -50,6 +51,27 @@ impl SealedBlock {
     pub fn reference(&self) -> BlockRef {
         BlockRef {
             block_id: self.block_id,
+            first_seq: self.first_seq,
+            last_seq: self.last_seq,
+        }
+    }
+}
+
+/// A sealed vertex patch: its identity, its bytes, and the range it covers —
+/// the vertex counterpart of [`SealedBlock`] (fgdb-3xoi).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedPatch {
+    pub patch_id: ObjectId,
+    pub bytes: Vec<u8>,
+    pub first_seq: CommitSeq,
+    pub last_seq: CommitSeq,
+}
+
+impl SealedPatch {
+    /// The reference a root carries for this patch.
+    pub fn reference(&self) -> PatchRef {
+        PatchRef {
+            patch_id: self.patch_id,
             first_seq: self.first_seq,
             last_seq: self.last_seq,
         }
@@ -95,6 +117,17 @@ pub enum WriteError {
         previous: CommitSeq,
         offered: CommitSeq,
     },
+    /// A `CreateVertex` named a vertex this writer already holds live.
+    ///
+    /// Refused for the reason `EdgeAlreadyLive` is: a re-create of a live
+    /// identity is the stream failing to be a stream, and overwriting the
+    /// staged row would strand the first version.
+    VertexAlreadyLive { vid: VId },
+    /// A create tried to reuse a VId admitted earlier in this stream.
+    VertexIdentitySpent { vid: VId },
+    /// Sealing produced bytes the vertex patch encoder refused, or a row's
+    /// shape violated the patch format's canonical laws at fold time.
+    Patch(VertexPatchError),
     /// Sealing produced bytes the block encoder refused.
     Block(BlockError),
     /// The finished root violated a publication or structural law.
@@ -123,6 +156,13 @@ impl core::fmt::Display for WriteError {
                 f,
                 "rows must arrive in commit order; {offered:?} follows {previous:?}"
             ),
+            Self::VertexAlreadyLive { vid } => {
+                write!(f, "{vid:?} is already live; a re-create is not a version")
+            }
+            Self::VertexIdentitySpent { vid } => {
+                write!(f, "vertex identity {vid:?} is permanently spent")
+            }
+            Self::Patch(error) => write!(f, "vertex sealing: {error}"),
             Self::Block(error) => write!(f, "sealing: {error}"),
             Self::Root(error) => write!(f, "publishing: {error}"),
         }
@@ -156,6 +196,15 @@ pub struct BlockWriter {
     /// defense-in-depth check over the history visible to this fold.
     spent: BTreeSet<EId>,
     sealed: Vec<SealedBlock>,
+    /// Vertex rows not yet sealed into a patch, keyed by stable identity —
+    /// the vertex half of the fold (fgdb-3xoi). The same memtable argument as
+    /// `live`: bounded, rebuildable by replay, never authoritative.
+    pending_vertices: BTreeMap<VId, VertexRow>,
+    /// Every VId currently live in this fold.
+    live_vertices: BTreeSet<VId>,
+    /// Every VId admitted while replaying this partition-local writer.
+    spent_vertices: BTreeSet<VId>,
+    sealed_patches: Vec<SealedPatch>,
     last_seq: Option<CommitSeq>,
 }
 
@@ -169,6 +218,10 @@ impl BlockWriter {
             live: BTreeMap::new(),
             spent: BTreeSet::new(),
             sealed: Vec::new(),
+            pending_vertices: BTreeMap::new(),
+            live_vertices: BTreeSet::new(),
+            spent_vertices: BTreeSet::new(),
+            sealed_patches: Vec::new(),
             last_seq: None,
         }
     }
@@ -185,6 +238,15 @@ impl BlockWriter {
 
     pub fn sealed(&self) -> &[SealedBlock] {
         &self.sealed
+    }
+
+    pub fn sealed_patches(&self) -> &[SealedPatch] {
+        &self.sealed_patches
+    }
+
+    /// How many vertex rows are pending — the vertex half of the seal signal.
+    pub fn pending_vertex_len(&self) -> usize {
+        self.pending_vertices.len()
     }
 
     /// Fold one row at `seq`, sealing early if it would collide with a pending key.
@@ -249,11 +311,50 @@ impl BlockWriter {
                     self.retire(keys, *eid, seq)?;
                 }
             }
-            // Every other family is real and none of it is ADJACENCY. Vertex
-            // creation, labels, properties, valid time, counters, escrow, sketches,
-            // schema and constraints all belong to structures this tier does not
-            // hold, and silently folding them into an adjacency block would be
-            // worse than not storing them.
+            DeltaRow::CreateVertex {
+                vid,
+                birth_ordinal,
+                labels,
+                props,
+                ..
+            } => {
+                if self.live_vertices.contains(vid) {
+                    return Err(WriteError::VertexAlreadyLive { vid: *vid });
+                }
+                if self.spent_vertices.contains(vid) {
+                    return Err(WriteError::VertexIdentitySpent { vid: *vid });
+                }
+                let row = VertexRow {
+                    vid: *vid,
+                    birth_ordinal: *birth_ordinal,
+                    created_at: seq,
+                    retired_at: None,
+                    labels: labels.clone(),
+                    props: props.clone(),
+                };
+                // The capsule's canonical template encoding already refuses
+                // unsorted labels (NonCanonicalLabelOrder), so a violation here
+                // means the rows did not come from a canonical stream — a typed
+                // refusal, before any state changes.
+                crate::vertex::validate_patch_row(0, &row).map_err(WriteError::Patch)?;
+                if self.pending_vertices.len()
+                    >= usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX)
+                {
+                    // A format ceiling, exactly like the block path: one more
+                    // row would create a patch no conforming reader accepts.
+                    self.seal_vertices(keys)?;
+                }
+                self.pending_vertices.insert(*vid, row);
+                self.live_vertices.insert(*vid);
+                let was_fresh = self.spent_vertices.insert(*vid);
+                debug_assert!(was_fresh, "spent-set admission was checked above");
+            }
+            // Every other family is real and none of it belongs to the two
+            // structures this tier holds (adjacency blocks and vertex row
+            // patches). Label flips, property transitions, valid time,
+            // counters, escrow, sketches, schema and constraints belong to
+            // structures that do not exist yet, and silently folding them
+            // would be worse than not storing them.
             _ => {}
         }
         self.last_seq = Some(seq);
@@ -430,26 +531,58 @@ impl BlockWriter {
         Ok(first)
     }
 
-    /// Seal whatever remains and publish a root over every block.
+    /// Seal pending vertex rows into one canonical patch.
     ///
-    /// `published_at` must be at or above the last sequence any block reaches; the
-    /// root refuses otherwise, which is what stops a partition from claiming state
-    /// it has not caught up to.
+    /// The vertex counterpart of [`BlockWriter::seal`]: partition-local rows
+    /// leave the mutable staging map as one immutable, content-addressed
+    /// object. A failed seal leaves the staged rows exactly as they were.
+    pub fn seal_vertices(
+        &mut self,
+        keys: (&[u8; 32], DatabaseSecurityNamespaceId),
+    ) -> Result<Option<SealedPatch>, WriteError> {
+        if self.pending_vertices.is_empty() {
+            return Ok(None);
+        }
+        let rows: Vec<VertexRow> = self.pending_vertices.values().cloned().collect();
+        let bytes = encode_patch(&rows).map_err(WriteError::Patch)?;
+        let (first_seq, last_seq) = span_of_rows(&rows).expect("non-empty");
+        let sealed = SealedPatch {
+            patch_id: vertex_patch_id(keys.0, keys.1, &bytes),
+            bytes,
+            first_seq,
+            last_seq,
+        };
+        self.pending_vertices.clear();
+        self.sealed_patches.push(sealed.clone());
+        Ok(Some(sealed))
+    }
+
+    /// Seal whatever remains and publish a root over every block and patch.
+    ///
+    /// `published_at` must be at or above the last sequence any block or patch
+    /// reaches; the root refuses otherwise, which is what stops a partition
+    /// from claiming state it has not caught up to.
     pub fn publish(
         mut self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
         published_at: CommitSeq,
-    ) -> Result<(PartitionRoot, Vec<SealedBlock>), WriteError> {
+    ) -> Result<(PartitionRoot, Vec<SealedBlock>, Vec<SealedPatch>), WriteError> {
         self.seal(keys)?;
+        self.seal_vertices(keys)?;
         let root = PartitionRoot {
             graph: self.graph,
             branch: self.branch,
             partition: self.partition,
             published_at,
             blocks: self.sealed.iter().map(SealedBlock::reference).collect(),
+            vertex_patches: self
+                .sealed_patches
+                .iter()
+                .map(SealedPatch::reference)
+                .collect(),
         };
         validate_root(&root).map_err(WriteError::Root)?;
-        Ok((root, self.sealed))
+        Ok((root, self.sealed, self.sealed_patches))
     }
 }
 

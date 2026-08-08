@@ -534,6 +534,7 @@ fn putting_a_root_refuses_a_false_block_range_before_publication() {
                 first_seq: CommitSeq(2),
                 last_seq: CommitSeq(2),
             }],
+            vertex_patches: vec![],
         };
         let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
         let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
@@ -585,6 +586,7 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
                     last_seq: CommitSeq(5),
                 },
             ],
+            vertex_patches: vec![],
         };
         let expected = EdgeBirth {
             src: VId(1),
@@ -636,6 +638,7 @@ fn putting_a_root_requires_every_named_block_before_publication() {
                 first_seq: CommitSeq(1),
                 last_seq: CommitSeq(1),
             }],
+            vertex_patches: vec![],
         };
         let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
         let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
@@ -702,7 +705,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
         writer
             .apply(strata_keys, CommitSeq(4), &create(12, 2, 3))
             .expect("creates");
-        let (root, blocks) = writer
+        let (root, blocks, _patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
         assert!(blocks.len() >= 2, "the fixture spans more than one block");
@@ -723,7 +726,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
 
         // A FRESH handle, holding nothing but the root identity.
         let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens");
-        let (loaded_root, loaded_blocks) =
+        let (loaded_root, loaded_blocks, _patches) =
             reopened.reopen(cx, root_id).expect("reopens the partition");
 
         assert_eq!(loaded_root, root, "the root came back exactly");
@@ -756,7 +759,7 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
         writer
             .apply(strata_keys, CommitSeq(7), &create(11, 1, 3))
             .expect("creates the future block");
-        let (root, blocks) = writer
+        let (root, blocks, _patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs one skippable block");
@@ -767,7 +770,7 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
         }
         let root_id = store.put_root(cx, &root).expect("stores root");
 
-        let (admitted, visible) = store
+        let (admitted, visible, _patches) = store
             .reopen_at(cx, root_id, CommitSeq(3))
             .expect("selectively reopens");
         assert_eq!(admitted.root_id(), root_id);
@@ -800,6 +803,7 @@ fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
                 first_seq: CommitSeq(7),
                 last_seq: CommitSeq(7),
             }],
+            vertex_patches: vec![],
         };
         let root_bytes = fgdb_strata::root::encode_root(&lying).expect("encodes root");
         let root_id = plant_unadmitted_root(&store, &root_bytes);
@@ -831,7 +835,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
         writer
             .apply(strata_keys, CommitSeq(7), &create(11, 1, 3))
             .expect("creates the future block");
-        let (root, blocks) = writer
+        let (root, blocks, _patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs one future block");
@@ -882,7 +886,7 @@ fn reopening_with_a_missing_block_is_refused() {
         writer
             .apply(strata_keys, CommitSeq(4), &create(11, 1, 3))
             .expect("creates");
-        let (root, blocks) = writer
+        let (root, blocks, _patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 
@@ -954,7 +958,7 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
                 // ACROSS blocks, the case the cumulative validator must accept.
                 writer.seal(strata_keys).expect("seals");
             }
-            let (root, blocks) = writer.clone().publish(strata_keys, seq).expect("publishes");
+            let (root, blocks, _patches) = writer.clone().publish(strata_keys, seq).expect("publishes");
 
             for block in &blocks {
                 plain.put(cx, &block.bytes).expect("plain put");
@@ -1048,6 +1052,7 @@ fn a_root_lying_about_a_receipted_range_is_still_refused() {
                 first_seq: CommitSeq(2),
                 last_seq: CommitSeq(2),
             }],
+            vertex_patches: vec![],
         };
         let root_bytes = fgdb_strata::root::encode_root(&lying).expect("encodes root");
         let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
@@ -1084,7 +1089,7 @@ fn fresh_receipts_fall_back_to_full_disk_admission() {
         writer
             .apply(strata_keys, CommitSeq(4), &create(11, 1, 3))
             .expect("creates");
-        let (root, blocks) = writer
+        let (root, blocks, _patches) = writer
             .publish(strata_keys, CommitSeq(4))
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs a sealed prefix");
@@ -1151,7 +1156,7 @@ fn a_root_at_the_wrong_identity_is_refused() {
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates");
-        let (root, blocks) = writer
+        let (root, blocks, _patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 

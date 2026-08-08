@@ -188,8 +188,9 @@ impl core::fmt::Display for VertexPatchError {
 
 impl core::error::Error for VertexPatchError {}
 
-/// The full canonical-shape check for one row, shared by encode and decode.
-fn validate_row(at: usize, row: &VertexRow) -> Result<(), VertexPatchError> {
+/// The full canonical-shape check for one row, shared by encode, decode, and
+/// the writer's fold-time admission.
+pub(crate) fn validate_patch_row(at: usize, row: &VertexRow) -> Result<(), VertexPatchError> {
     if row.created_at.0 == 0 {
         return Err(VertexPatchError::CreatedAtZero { at });
     }
@@ -231,7 +232,7 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
         {
             return Err(VertexPatchError::NonCanonicalOrder { at });
         }
-        validate_row(at, row)?;
+        validate_patch_row(at, row)?;
         out.extend_from_slice(&row.vid.0.to_le_bytes());
         out.extend_from_slice(&row.birth_ordinal.to_le_bytes());
         out.extend_from_slice(&row.created_at.0.to_le_bytes());
@@ -360,7 +361,7 @@ pub fn decode_patch(bytes: &[u8]) -> Result<Vec<VertexRow>, VertexPatchError> {
             labels,
             props,
         };
-        validate_row(at, &row)?;
+        validate_patch_row(at, &row)?;
         rows.push(row);
         previous = Some(vid);
     }
@@ -389,6 +390,45 @@ pub fn vertex_patch_id(
         )
         .0,
     )
+}
+
+/// The sequence range a patch's rows mention — the vertex counterpart of
+/// [`crate::root::span_of`], with the identical low/high rule so a root's
+/// claimed range means the same thing for both object families.
+pub fn span_of_rows(rows: &[VertexRow]) -> Option<(CommitSeq, CommitSeq)> {
+    let mut low = u64::MAX;
+    let mut high = 0u64;
+    for row in rows {
+        low = low.min(row.created_at.0);
+        high = high.max(row.created_at.0);
+        if let Some(retired) = row.retired_at {
+            high = high.max(retired.0);
+        }
+    }
+    (!rows.is_empty()).then_some((CommitSeq(low), CommitSeq(high)))
+}
+
+/// Merge the vertex patches of a partition and answer one vertex at one
+/// sequence — the vertex counterpart of [`crate::root::merge_neighbours`].
+///
+/// The cross-patch model is the same last-statement-wins supersede as blocks:
+/// patches arrive in publication order, a later patch may restate a row to
+/// add its retirement, and the later statement is the truth. The winning row
+/// is then filtered by the tier's one visibility rule.
+pub fn merge_vertex(
+    patches: &[Vec<VertexRow>],
+    vid: VId,
+    as_of: CommitSeq,
+) -> Option<VertexRow> {
+    let mut winner: Option<&VertexRow> = None;
+    for rows in patches {
+        for row in rows {
+            if row.vid == vid {
+                winner = Some(row);
+            }
+        }
+    }
+    winner.filter(|row| row.visible_at(as_of)).cloned()
 }
 
 /// Decode a patch that must be the one named by `expected`.

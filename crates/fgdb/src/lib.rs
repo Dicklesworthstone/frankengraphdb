@@ -151,10 +151,13 @@ use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId,
     RelationId, SchemaEpoch,
 };
-use fgdb_strata::root::{BlockRef, RootError, merge_neighbours};
+use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_neighbours};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
+use fgdb_strata::vertex::merge_vertex;
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
+
+pub use fgdb_strata::vertex::VertexRow;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
@@ -496,6 +499,10 @@ struct Snapshot {
     /// unchanged (fgdb-gieu) — content addressing makes the identity the
     /// proof, so an unchanged reference means an unchanged decoded block.
     refs: Vec<BlockRef>,
+    /// The decoded vertex row patches, aligned with `patch_refs` — the vertex
+    /// half of the snapshot (fgdb-3xoi), under the same carry-forward rule.
+    patches: Vec<Vec<VertexRow>>,
+    patch_refs: Vec<PatchRef>,
     frontier: CommitSeq,
     root: PartitionRootVersion,
     /// The next unspent birth ordinal, derived by counting the creations the
@@ -751,7 +758,7 @@ impl Database {
                     })?;
             }
         }
-        let (root, blocks) = folded
+        let (root, blocks, patches) = folded
             .clone()
             .publish(self.keys.block_keys(), frontier)
             .map_err(|error| RebuildError::Fold {
@@ -770,6 +777,11 @@ impl Database {
         for block in &blocks {
             self.store
                 .put_verified(cx, &block.bytes, &mut self.receipts)
+                .map_err(RebuildError::from)?;
+        }
+        for patch in &patches {
+            self.store
+                .put_patch_verified(cx, &patch.bytes, &mut self.receipts)
                 .map_err(RebuildError::from)?;
         }
         let root_id = self
@@ -823,10 +835,55 @@ impl Database {
                     )
             })
             .collect();
+        // The identical carry-forward rule for the vertex half: an unchanged
+        // patch reference means an unchanged decoded patch, and new patches
+        // decode from the exact bytes `put_patch_verified` just fsynced.
+        let mut fresh_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> =
+            std::collections::BTreeMap::new();
+        let carried_patch_ids: std::collections::BTreeSet<ObjectId> =
+            self.snapshot.patch_refs.iter().map(|r| r.patch_id).collect();
+        for reference in &root.vertex_patches {
+            if carried_patch_ids.contains(&reference.patch_id)
+                || fresh_patches.contains_key(&reference.patch_id)
+            {
+                continue;
+            }
+            let sealed = patches
+                .iter()
+                .find(|patch| patch.patch_id == reference.patch_id)
+                .expect("every reference in a publish's root names a patch that publish returned");
+            fresh_patches.insert(
+                reference.patch_id,
+                fgdb_strata::vertex::decode_patch(&sealed.bytes)
+                    .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?,
+            );
+        }
+        let mut carried_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> = self
+            .snapshot
+            .patch_refs
+            .iter()
+            .map(|r| r.patch_id)
+            .zip(std::mem::take(&mut self.snapshot.patches))
+            .collect();
+        let decoded_patches = root
+            .vertex_patches
+            .iter()
+            .map(|reference| {
+                carried_patches
+                    .remove(&reference.patch_id)
+                    .or_else(|| fresh_patches.remove(&reference.patch_id))
+                    .expect(
+                        "every root patch reference resolves: VIds are spend-once, so one \
+                         publication cannot name the same patch identity twice",
+                    )
+            })
+            .collect();
         self.writer = folded;
         self.snapshot = Snapshot {
             blocks: decoded,
             refs: root.blocks,
+            patches: decoded_patches,
+            patch_refs: root.vertex_patches,
             frontier,
             root: root_id,
             next_birth_ordinal,
@@ -843,6 +900,17 @@ impl Database {
             relation,
             self.snapshot.frontier,
         )?)
+    }
+
+    /// The vertex `vid` — its labels and properties — at the published
+    /// frontier, or `None` when no visible row exists (fgdb-3xoi).
+    ///
+    /// Served from the durable tier-D vertex patches the snapshot decoded,
+    /// exactly as [`Database::neighbours`] is served from blocks: the row made
+    /// the full encode → content-address → fsync → decode round trip before a
+    /// reader can see it.
+    pub fn vertex(&self, vid: VId) -> Option<VertexRow> {
+        merge_vertex(&self.snapshot.patches, vid, self.snapshot.frontier)
     }
 
     /// The sequence the published partition has caught up to.
@@ -1042,7 +1110,7 @@ async fn rebuild(
     // Publish from a clone and hand the fold state back: the caller retains it
     // so later commits fold only their own template (fgdb-fujt). The strata
     // equality law pins clone-publish == this very rebuild, byte for byte.
-    let (root, blocks) = writer
+    let (root, blocks, patches) = writer
         .clone()
         .publish(keys.block_keys(), frontier)
         .map_err(|error| RebuildError::Fold {
@@ -1052,13 +1120,18 @@ async fn rebuild(
     for block in &blocks {
         store.put(cx, &block.bytes)?;
     }
+    for patch in &patches {
+        store.put_patch(cx, &patch.bytes)?;
+    }
     let root_id = store.put_root(cx, &root)?;
-    let (reopened_root, decoded) = store.reopen(cx, root_id)?;
+    let (reopened_root, decoded, decoded_patches) = store.reopen(cx, root_id)?;
 
     Ok((
         Snapshot {
             blocks: decoded,
             refs: reopened_root.blocks,
+            patches: decoded_patches,
+            patch_refs: reopened_root.vertex_patches,
             frontier,
             root: root_id,
             next_birth_ordinal,

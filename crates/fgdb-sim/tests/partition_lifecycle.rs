@@ -209,7 +209,7 @@ async fn build_and_persist(
         }
     }
 
-    let (root, blocks) = writer.publish(KEYS, frontier).expect("publishes");
+    let (root, blocks, _patches) = writer.publish(KEYS, frontier).expect("publishes");
     let store = BlockStore::open(cx, dir, K_OID, NAMESPACE).expect("store opens");
     for block in &blocks {
         store.put(cx, &block.bytes).expect("stores a block");
@@ -240,7 +240,7 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
         // NOTHING survives from the phases above except the path and this id —
         // exactly what a restarted process would hold.
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
-        let (root, blocks) = store.reopen(cx, root_id).expect("the partition reopens");
+        let (root, blocks, _patches) = store.reopen(cx, root_id).expect("the partition reopens");
 
         for source in [1u128, 2, 3] {
             let (expected, frontier) = oracle_answer(&dir, cx, source).await;
@@ -285,7 +285,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
 
         let compacted_root_id = {
             let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
-            let (root, blocks) = store.reopen(cx, root_id).expect("reopens");
+            let (root, blocks, _patches) = store.reopen(cx, root_id).expect("reopens");
             let result = compact(&blocks, frontier).expect("the persisted history compacts");
             assert!(
                 result.blocks.len() <= root.blocks.len(),
@@ -323,7 +323,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
 
         // A fresh handle, the compacted root identity, and nothing else.
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
-        let (_, blocks) = store.reopen(cx, compacted_root_id).expect("reopens");
+        let (_, blocks, _patches) = store.reopen(cx, compacted_root_id).expect("reopens");
         for source in [1u128, 2, 3] {
             let (expected, _) = oracle_answer(&dir, cx, source).await;
             assert_eq!(
@@ -338,7 +338,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
         // still correct — which is what makes republishing safe to do while readers
         // hold the previous identity.
         assert_ne!(compacted_root_id, root_id);
-        let (_, old_blocks) = store
+        let (_, old_blocks, _old_patches) = store
             .reopen(cx, root_id)
             .expect("the old root still reopens");
         assert_eq!(

@@ -89,7 +89,7 @@ fn a_retirement_after_a_seal_publishes_an_encodable_root() {
     w.seal(keys()).expect("seals the creation");
     w.apply(keys(), CommitSeq(6), &delete(10)).expect("retires");
 
-    let (root, blocks) = w.publish(keys(), CommitSeq(6)).expect("publishes");
+    let (root, blocks, _patches) = w.publish(keys(), CommitSeq(6)).expect("publishes");
     assert_eq!(
         root.blocks
             .iter()
@@ -138,7 +138,7 @@ fn retirement_and_a_fresh_identity_at_one_sequence_remain_rootable() {
     w.apply(keys(), CommitSeq(6), &create(11, 1, 2))
         .expect("creates a fresh identity at the same sequence");
 
-    let (root, blocks) = w.publish(keys(), CommitSeq(6)).expect("publishes");
+    let (root, blocks, _patches) = w.publish(keys(), CommitSeq(6)).expect("publishes");
     assert_eq!(
         root.blocks
             .iter()
@@ -188,7 +188,7 @@ fn fresh_parallel_identities_share_one_pending_block() {
         "both stable edge identities are pending"
     );
 
-    let (root, blocks) = w.publish(keys(), CommitSeq(9)).expect("publishes");
+    let (root, blocks, _patches) = w.publish(keys(), CommitSeq(9)).expect("publishes");
     assert_eq!(blocks.len(), 1);
     assert_eq!(root.blocks.len(), 1);
     let decoded = decode_block(&blocks[0].bytes).expect("decodes");
@@ -473,7 +473,7 @@ fn publication_before_the_last_block_is_refused_by_the_writer() {
 fn sealing_nothing_produces_no_block() {
     let mut w = writer();
     assert_eq!(w.seal(keys()).expect("seals"), None);
-    let (root, blocks) = w.publish(keys(), CommitSeq(1)).expect("publishes");
+    let (root, blocks, _patches) = w.publish(keys(), CommitSeq(1)).expect("publishes");
     assert!(blocks.is_empty() && root.blocks.is_empty());
 }
 
@@ -493,7 +493,7 @@ fn a_published_root_resolves_against_the_writers_own_blocks() {
     w.apply(keys(), CommitSeq(4), &create(12, 2, 3))
         .expect("creates");
 
-    let (root, blocks) = w.publish(keys(), CommitSeq(9)).expect("publishes");
+    let (root, blocks, _patches) = w.publish(keys(), CommitSeq(9)).expect("publishes");
     let encoded = fgdb_strata::root::encode_root(&root).expect("the root is lawful");
     assert_eq!(
         fgdb_strata::root::decode_root(&encoded).expect("decodes"),

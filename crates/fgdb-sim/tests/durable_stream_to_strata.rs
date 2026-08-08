@@ -172,7 +172,7 @@ async fn rebuild_from_stream(
             }
         }
     }
-    let (_, sealed) = writer
+    let (_, sealed, _patches) = writer
         .publish(KEYS, CommitSeq(u64::MAX / 2))
         .expect("publishes");
     sealed

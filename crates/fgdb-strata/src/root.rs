@@ -28,8 +28,17 @@ use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 
 /// `FGSR` — FrankenGraph Strata Root.
 pub const ROOT_MAGIC: [u8; 4] = *b"FGSR";
-/// Format version, versioned from day one (§16.6).
+/// The retired first cut of this format, refused by name so an old root reads
+/// as "a version this build does not implement" rather than "not our file".
+///
+/// V2 is a breaking bump (§16.6 breaking-major): the header gained the vertex
+/// patch count and the refs section behind it, and a V1 reader would parse a
+/// V2 root's patch section as trailing garbage. No production database
+/// predates V2 — the spine's databases live in per-run scratch directories —
+/// so there is deliberately no V1 decode path to maintain and drift.
 pub const ROOT_FORMAT_V1: u16 = 1;
+/// Format version, versioned from day one (§16.6).
+pub const ROOT_FORMAT_V2: u16 = 2;
 
 // Header field offsets, written out rather than computed at each use site. The
 // first draft of the decoder read `published_at` at 38 (the partition field) and
@@ -40,19 +49,25 @@ const OFF_BRANCH: usize = OFF_GRAPH + 16;
 const OFF_PARTITION: usize = OFF_BRANCH + 16;
 const OFF_PUBLISHED: usize = OFF_PARTITION + 8;
 const OFF_BLOCK_COUNT: usize = OFF_PUBLISHED + 8;
+const OFF_PATCH_COUNT: usize = OFF_BLOCK_COUNT + 4;
 /// magic + format + graph + branch + partition + published_at + block_count
-const HEADER_LEN: usize = OFF_BLOCK_COUNT + 4;
-/// block_id(32) + first_seq(8) + last_seq(8)
+/// + vertex_patch_count
+const HEADER_LEN: usize = OFF_PATCH_COUNT + 4;
+/// block_id(32) + first_seq(8) + last_seq(8) — and identically
+/// patch_id(32) + first_seq(8) + last_seq(8).
 const REF_LEN: usize = 32 + 8 + 8;
 
 /// The largest number of blocks this build will read from one root.
 pub const MAX_ROOT_BLOCKS: u32 = 1 << 20;
+/// The largest number of vertex patches this build will read from one root.
+pub const MAX_ROOT_PATCHES: u32 = 1 << 20;
 /// The largest canonical root byte string this format version can encode.
 ///
 /// Storage applies this before materializing a root. Keeping the byte ceiling
 /// derived beside the layout prevents the block store from drifting to a much
 /// larger, block-shaped allocation bound when the durable root format changes.
-pub const MAX_ENCODED_ROOT_BYTES: usize = HEADER_LEN + (MAX_ROOT_BLOCKS as usize) * REF_LEN;
+pub const MAX_ENCODED_ROOT_BYTES: usize =
+    HEADER_LEN + (MAX_ROOT_BLOCKS as usize + MAX_ROOT_PATCHES as usize) * REF_LEN;
 
 /// One block a root names, and the sequence range it covers.
 ///
@@ -75,6 +90,20 @@ pub struct BlockRef {
     pub last_seq: CommitSeq,
 }
 
+/// One vertex patch a root names, and the sequence range it covers.
+///
+/// Structurally a [`BlockRef`] over a different object family; kept a distinct
+/// type for the same reason [`crate::vertex::VertexPatchVersion`] is distinct
+/// from [`crate::DeltaBlockVersion`] — a patch reference handed to a block
+/// resolver would be answered with the wrong decoder's refusal, not a type
+/// error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PatchRef {
+    pub patch_id: ObjectId,
+    pub first_seq: CommitSeq,
+    pub last_seq: CommitSeq,
+}
+
 /// A partition's durable membership at one published sequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartitionRoot {
@@ -84,6 +113,9 @@ pub struct PartitionRoot {
     /// The commit sequence at which this root became the partition's state.
     pub published_at: CommitSeq,
     pub blocks: Vec<BlockRef>,
+    /// The vertex row patches this partition is made of, under the same
+    /// publication-order and frontier laws as `blocks` (fgdb-3xoi).
+    pub vertex_patches: Vec<PatchRef>,
 }
 
 /// The immutable birth bound to one permanently spent EId.
@@ -200,6 +232,63 @@ pub enum RootError {
         at: usize,
         error: BlockError,
     },
+    /// A vertex patch's own range is inverted.
+    PatchInvertedRange {
+        at: usize,
+        first_seq: CommitSeq,
+        last_seq: CommitSeq,
+    },
+    /// A later patch's upper sequence frontier is below its predecessor's —
+    /// the same publication-order witness as [`RootError::BlockOrderRegression`].
+    PatchOrderRegression {
+        earlier: usize,
+        later: usize,
+        earlier_last_seq: CommitSeq,
+        later_last_seq: CommitSeq,
+    },
+    /// A vertex patch claims a sequence at or after the root's own publication.
+    PatchAfterPublication {
+        at: usize,
+        last_seq: CommitSeq,
+        published_at: CommitSeq,
+    },
+    /// A vertex patch references sequence zero, which names the empty stream.
+    PatchSequenceZero {
+        at: usize,
+    },
+    ImplausiblePatchCount {
+        declared: u32,
+    },
+    /// The named vertex patch did not span what the root said about it —
+    /// the patch counterpart of [`RootError::BlockRangeMismatch`], and refused
+    /// for the same reason: an understated range makes a reader skip rows
+    /// that mattered, silently.
+    PatchRangeMismatch {
+        at: usize,
+        declared: (CommitSeq, CommitSeq),
+        actual: (CommitSeq, CommitSeq),
+    },
+    /// One permanently spent VId appeared with two incompatible rows.
+    ///
+    /// `VId` is the stable identity: its birth ordinal, creation sequence,
+    /// labels, and properties are immutable once published. A later patch may
+    /// only restate that exact row to add its retirement. Boxed for the same
+    /// reason as [`EdgeIdentityConflict`].
+    VertexIdentityMismatch {
+        vid: VId,
+        conflict: Box<(crate::vertex::VertexRow, crate::vertex::VertexRow)>,
+    },
+    /// A later statement tried to undo or retime a VId's retirement.
+    VertexRetirementMismatch {
+        vid: VId,
+        expected: Option<CommitSeq>,
+        found: Option<CommitSeq>,
+    },
+    /// Reading one of the named vertex patches failed.
+    Patch {
+        at: usize,
+        error: crate::vertex::VertexPatchError,
+    },
 }
 
 impl core::fmt::Display for RootError {
@@ -270,6 +359,63 @@ impl core::fmt::Display for RootError {
                  irreversible"
             ),
             Self::Block { at, error } => write!(f, "block {at}: {error}"),
+            Self::PatchInvertedRange {
+                at,
+                first_seq,
+                last_seq,
+            } => write!(
+                f,
+                "vertex patch {at} spans {first_seq:?}..{last_seq:?}, which is empty"
+            ),
+            Self::PatchOrderRegression {
+                earlier,
+                later,
+                earlier_last_seq,
+                later_last_seq,
+            } => write!(
+                f,
+                "vertex patch {later} ends at {later_last_seq:?}, before patch {earlier}'s \
+                 publication frontier {earlier_last_seq:?}"
+            ),
+            Self::PatchAfterPublication {
+                at,
+                last_seq,
+                published_at,
+            } => write!(
+                f,
+                "vertex patch {at} reaches {last_seq:?}, past this root's publication at \
+                 {published_at:?}"
+            ),
+            Self::PatchSequenceZero { at } => {
+                write!(f, "vertex patch {at} references the empty stream")
+            }
+            Self::ImplausiblePatchCount { declared } => {
+                write!(f, "a root naming {declared} vertex patches is not readable here")
+            }
+            Self::PatchRangeMismatch {
+                at,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "vertex patch {at} spans {actual:?} but the root declares {declared:?}"
+            ),
+            Self::VertexIdentityMismatch { vid, conflict } => write!(
+                f,
+                "{vid:?} was published as {:?}, then appeared as {:?}; vertex identities are \
+                 permanently spent",
+                conflict.0, conflict.1
+            ),
+            Self::VertexRetirementMismatch {
+                vid,
+                expected,
+                found,
+            } => write!(
+                f,
+                "{vid:?} retirement changed from {expected:?} to {found:?}; retirement is \
+                 irreversible"
+            ),
+            Self::Patch { at, error } => write!(f, "vertex patch {at}: {error}"),
         }
     }
 }
@@ -320,6 +466,45 @@ pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
             }
         }
     }
+    let declared_patches = u32::try_from(root.vertex_patches.len()).unwrap_or(u32::MAX);
+    if declared_patches > MAX_ROOT_PATCHES {
+        return Err(RootError::ImplausiblePatchCount {
+            declared: declared_patches,
+        });
+    }
+    for (index, patch) in root.vertex_patches.iter().enumerate() {
+        if patch.first_seq.0 == 0 || patch.last_seq.0 == 0 {
+            return Err(RootError::PatchSequenceZero { at: index });
+        }
+        if patch.last_seq.0 < patch.first_seq.0 {
+            return Err(RootError::PatchInvertedRange {
+                at: index,
+                first_seq: patch.first_seq,
+                last_seq: patch.last_seq,
+            });
+        }
+        if patch.last_seq.0 > root.published_at.0 {
+            return Err(RootError::PatchAfterPublication {
+                at: index,
+                last_seq: patch.last_seq,
+                published_at: root.published_at,
+            });
+        }
+        if index > 0 {
+            let previous = &root.vertex_patches[index - 1];
+            // The same frontier witness as blocks: a retirement restates the
+            // row's old creation sequence, so lower bounds may overlap while
+            // the upper frontier never regresses.
+            if patch.last_seq.0 < previous.last_seq.0 {
+                return Err(RootError::PatchOrderRegression {
+                    earlier: index - 1,
+                    later: index,
+                    earlier_last_seq: previous.last_seq,
+                    later_last_seq: patch.last_seq,
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -327,18 +512,26 @@ pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
 pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
     validate_root(root)?;
 
-    let mut out = Vec::with_capacity(HEADER_LEN + root.blocks.len() * REF_LEN);
+    let mut out = Vec::with_capacity(
+        HEADER_LEN + (root.blocks.len() + root.vertex_patches.len()) * REF_LEN,
+    );
     out.extend_from_slice(&ROOT_MAGIC);
-    out.extend_from_slice(&ROOT_FORMAT_V1.to_be_bytes());
+    out.extend_from_slice(&ROOT_FORMAT_V2.to_be_bytes());
     out.extend_from_slice(&root.graph.0.to_be_bytes());
     out.extend_from_slice(&root.branch.0.to_be_bytes());
     out.extend_from_slice(&root.partition.to_be_bytes());
     out.extend_from_slice(&root.published_at.0.to_be_bytes());
     out.extend_from_slice(&(root.blocks.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(root.vertex_patches.len() as u32).to_be_bytes());
     for block in &root.blocks {
         out.extend_from_slice(&block.block_id.0);
         out.extend_from_slice(&block.first_seq.0.to_be_bytes());
         out.extend_from_slice(&block.last_seq.0.to_be_bytes());
+    }
+    for patch in &root.vertex_patches {
+        out.extend_from_slice(&patch.patch_id.0);
+        out.extend_from_slice(&patch.first_seq.0.to_be_bytes());
+        out.extend_from_slice(&patch.last_seq.0.to_be_bytes());
     }
     Ok(out)
 }
@@ -349,7 +542,7 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
         return Err(RootError::NotARoot);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != ROOT_FORMAT_V1 {
+    if format != ROOT_FORMAT_V2 {
         return Err(RootError::UnsupportedFormat { format });
     }
     let u128_at = |at: usize| -> u128 {
@@ -362,16 +555,20 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
         buf.copy_from_slice(&bytes[at..at + 8]);
         u64::from_be_bytes(buf)
     };
-    let count = u32::from_be_bytes([
-        bytes[OFF_BLOCK_COUNT],
-        bytes[OFF_BLOCK_COUNT + 1],
-        bytes[OFF_BLOCK_COUNT + 2],
-        bytes[OFF_BLOCK_COUNT + 3],
-    ]);
+    let u32_at = |at: usize| -> u32 {
+        u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    };
+    let count = u32_at(OFF_BLOCK_COUNT);
     if count > MAX_ROOT_BLOCKS {
         return Err(RootError::ImplausibleBlockCount { declared: count });
     }
-    let expected = HEADER_LEN + count as usize * REF_LEN;
+    let patch_count = u32_at(OFF_PATCH_COUNT);
+    if patch_count > MAX_ROOT_PATCHES {
+        return Err(RootError::ImplausiblePatchCount {
+            declared: patch_count,
+        });
+    }
+    let expected = HEADER_LEN + (count as usize + patch_count as usize) * REF_LEN;
     if bytes.len() < expected {
         return Err(RootError::Truncated {
             expected,
@@ -395,12 +592,25 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
             last_seq: CommitSeq(u64_at(at + 40)),
         });
     }
+    let patches_base = HEADER_LEN + count as usize * REF_LEN;
+    let mut vertex_patches = Vec::with_capacity(patch_count as usize);
+    for index in 0..patch_count as usize {
+        let at = patches_base + index * REF_LEN;
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&bytes[at..at + 32]);
+        vertex_patches.push(PatchRef {
+            patch_id: ObjectId(id),
+            first_seq: CommitSeq(u64_at(at + 32)),
+            last_seq: CommitSeq(u64_at(at + 40)),
+        });
+    }
     let root = PartitionRoot {
         graph: GraphId(u128_at(OFF_GRAPH)),
         branch: BranchId(u128_at(OFF_BRANCH)),
         partition: u64_at(OFF_PARTITION),
         published_at: CommitSeq(u64_at(OFF_PUBLISHED)),
         blocks,
+        vertex_patches,
     };
     validate_root(&root)?;
     Ok(root)
@@ -691,6 +901,129 @@ pub fn blocks_visible_at(root: &PartitionRoot, as_of: CommitSeq) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, block)| block.first_seq.0 <= as_of.0)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Prove one loaded vertex patch against the identity and range a root named —
+/// the patch counterpart of [`resolve_block_ref`], catching the same two lies:
+/// wrong bytes, and a root that mis-stated the range of the right bytes.
+pub(crate) fn resolve_patch_ref(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    at: usize,
+    reference: &PatchRef,
+    bytes: &[u8],
+) -> Result<Vec<crate::vertex::VertexRow>, RootError> {
+    let rows = crate::vertex::read_patch(
+        k_oid,
+        namespace,
+        bytes,
+        crate::vertex::VertexPatchVersion(reference.patch_id),
+    )
+    .map_err(|error| RootError::Patch { at, error })?;
+
+    let Some(actual) = crate::vertex::span_of_rows(&rows) else {
+        return Err(RootError::PatchRangeMismatch {
+            at,
+            declared: (reference.first_seq, reference.last_seq),
+            actual: (CommitSeq(0), CommitSeq(0)),
+        });
+    };
+    if actual != (reference.first_seq, reference.last_seq) {
+        return Err(RootError::PatchRangeMismatch {
+            at,
+            declared: (reference.first_seq, reference.last_seq),
+            actual,
+        });
+    }
+    Ok(rows)
+}
+
+/// Cross-patch vertex history: one VId, one immutable birth, at most one
+/// retirement — the vertex counterpart of [`EdgeHistoryValidator`], enforcing
+/// FG-INV-03's finite/newer-first discipline at the identity level.
+#[derive(Debug, Default)]
+pub(crate) struct VertexHistoryValidator {
+    rows: std::collections::BTreeMap<VId, crate::vertex::VertexRow>,
+    seen: usize,
+}
+
+impl VertexHistoryValidator {
+    /// Admit one patch at its publication position.
+    pub(crate) fn observe_patch(
+        &mut self,
+        patch_at: usize,
+        rows: &[crate::vertex::VertexRow],
+    ) -> Result<(), RootError> {
+        for row in rows {
+            self.seen += 1;
+            if let Some(existing) = self.rows.get(&row.vid) {
+                let mut expected_birth = existing.clone();
+                let mut found_birth = row.clone();
+                expected_birth.retired_at = None;
+                found_birth.retired_at = None;
+                if found_birth != expected_birth {
+                    return Err(RootError::VertexIdentityMismatch {
+                        vid: row.vid,
+                        conflict: Box::new((existing.clone(), row.clone())),
+                    });
+                }
+                if existing.retired_at.is_some() && row.retired_at != existing.retired_at {
+                    return Err(RootError::VertexRetirementMismatch {
+                        vid: row.vid,
+                        expected: existing.retired_at,
+                        found: row.retired_at,
+                    });
+                }
+            }
+            self.rows.insert(row.vid, row.clone());
+        }
+        // `patch_at` names the publication position for future diagnostics;
+        // the per-patch structural laws were already proven by decode.
+        let _ = patch_at;
+        Ok(())
+    }
+
+    fn into_canonical(
+        self,
+    ) -> (
+        std::collections::BTreeMap<VId, crate::vertex::VertexRow>,
+        usize,
+    ) {
+        let superseded = self.seen - self.rows.len();
+        (self.rows, superseded)
+    }
+}
+
+/// Validate and collapse a patch publication history to one row per VId.
+///
+/// The mirror of [`collapse_edge_history`]: a later patch may restate one
+/// exact row to add its retirement and the later statement wins; nothing may
+/// change the birth itself.
+pub(crate) fn collapse_vertex_history(
+    patches: &[Vec<crate::vertex::VertexRow>],
+) -> Result<
+    (
+        std::collections::BTreeMap<VId, crate::vertex::VertexRow>,
+        usize,
+    ),
+    RootError,
+> {
+    let mut validator = VertexHistoryValidator::default();
+    for (patch_at, rows) in patches.iter().enumerate() {
+        validator.observe_patch(patch_at, rows)?;
+    }
+    Ok(validator.into_canonical())
+}
+
+/// Which of a root's vertex patches can contribute to a read at `as_of` —
+/// the patch counterpart of [`blocks_visible_at`].
+pub fn patches_visible_at(root: &PartitionRoot, as_of: CommitSeq) -> Vec<usize> {
+    root.vertex_patches
+        .iter()
+        .enumerate()
+        .filter(|(_, patch)| patch.first_seq.0 <= as_of.0)
         .map(|(index, _)| index)
         .collect()
 }

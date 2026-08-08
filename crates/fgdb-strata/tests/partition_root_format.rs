@@ -96,6 +96,7 @@ fn sample() -> (PartitionRoot, Vec<(ObjectId, Vec<u8>)>) {
         partition: 0,
         published_at: CommitSeq(9),
         blocks: vec![reference(id_a, span_a), reference(id_b, span_b)],
+        vertex_patches: vec![],
     };
     (root, vec![(id_a, bytes_a), (id_b, bytes_b)])
 }
@@ -138,6 +139,7 @@ fn every_header_field_round_trips_distinctly() {
         partition: 0x0102_0304_0506_0708,
         published_at: CommitSeq(0x1122_3344_5566_7788),
         blocks: vec![reference(id, span)],
+        vertex_patches: vec![],
     };
     let decoded = decode_root(&encode_root(&root).expect("encodes")).expect("decodes");
     assert_eq!(decoded.graph, root.graph);
@@ -196,6 +198,7 @@ fn overlapping_ranges_round_trip_in_publication_order() {
         partition: 0,
         published_at: CommitSeq(5),
         blocks: vec![reference(id_a, span_a), reference(id_b, span_b)],
+        vertex_patches: vec![],
     };
     let encoded = encode_root(&root).expect("truthful overlap is lawful");
     assert_eq!(decode_root(&encoded).expect("decodes"), root);
@@ -230,6 +233,7 @@ fn a_regressing_publication_frontier_is_refused() {
             reference(id_a, (CommitSeq(5), CommitSeq(5))),
             reference(id_b, (CommitSeq(1), CommitSeq(1))),
         ],
+        vertex_patches: vec![],
     };
     assert_eq!(
         encode_root(&root),
@@ -258,6 +262,7 @@ fn a_gap_between_blocks_is_allowed() {
             reference(id_a, (CommitSeq(1), CommitSeq(1))),
             reference(id_b, (CommitSeq(40), CommitSeq(40))),
         ],
+        vertex_patches: vec![],
     };
     assert!(encode_root(&root).is_ok(), "gaps are legal");
 }
@@ -274,6 +279,7 @@ fn a_block_after_publication_is_refused() {
         partition: 0,
         published_at: CommitSeq(3),
         blocks: vec![reference(id, (CommitSeq(1), CommitSeq(4)))],
+        vertex_patches: vec![],
     };
     assert_eq!(
         encode_root(&root),
@@ -302,6 +308,7 @@ fn inverted_and_zero_ranges_are_refused() {
         partition: 0,
         published_at: CommitSeq(9),
         blocks: vec![reference(id, (CommitSeq(5), CommitSeq(3)))],
+        vertex_patches: vec![],
     };
     assert_eq!(
         encode_root(&inverted),
@@ -313,6 +320,7 @@ fn inverted_and_zero_ranges_are_refused() {
     );
     let zero = PartitionRoot {
         blocks: vec![reference(id, (CommitSeq(0), CommitSeq(3)))],
+        vertex_patches: vec![],
         ..inverted
     };
     assert_eq!(encode_root(&zero), Err(RootError::SequenceZero { at: 0 }));
@@ -333,6 +341,7 @@ fn the_decoder_re_checks_the_range_laws() {
             reference(id_a, (CommitSeq(1), CommitSeq(1))),
             reference(id_b, (CommitSeq(2), CommitSeq(2))),
         ],
+        vertex_patches: vec![],
     };
     let mut bytes = encode_root(&lawful).expect("encodes");
     // header(58) + the id(32) + first_seq(8) inside the first ref. Verified before
@@ -417,6 +426,7 @@ fn resolution_refuses_an_unvalidated_publication_order_before_loading() {
             reference(newer_id, newer_span),
             reference(older_id, older_span),
         ],
+        vertex_patches: vec![],
     };
     let loads = Cell::new(0usize);
     let blocks = [(newer_id, newer_bytes), (older_id, older_bytes)];
@@ -473,6 +483,7 @@ fn a_root_that_understates_a_block_range_is_refused() {
         published_at: CommitSeq(9),
         // Claims the block stops at 2, though it reaches 8.
         blocks: vec![reference(id, (CommitSeq(1), CommitSeq(2)))],
+        vertex_patches: vec![],
     };
     assert_eq!(
         resolve_blocks(&K_OID, namespace(), &lying, loader(vec![(id, bytes)])),
@@ -509,6 +520,7 @@ fn resolution_enforces_block_identity_too() {
         partition: 0,
         published_at: CommitSeq(9),
         blocks: vec![reference(id_a, span_a)],
+        vertex_patches: vec![],
     };
     // The loader hands back a DIFFERENT block for the requested identity.
     let swapped = move |_wanted| Some(bytes_b.clone());
@@ -532,6 +544,7 @@ fn an_empty_root_is_valid() {
         partition: 0,
         published_at: CommitSeq(1),
         blocks: Vec::new(),
+        vertex_patches: vec![],
     };
     let bytes = encode_root(&root).expect("encodes");
     assert_eq!(decode_root(&bytes).expect("decodes"), root);
@@ -795,6 +808,7 @@ fn skipping_blocks_above_the_snapshot_gives_the_same_answer() {
         partition: 0,
         published_at: CommitSeq(9),
         blocks: vec![reference(id_a, span_a), reference(id_b, span_b)],
+        vertex_patches: vec![],
     };
     let all = vec![
         vec![entry(1, 2, 1, None), entry(1, 3, 2, None)],
@@ -829,6 +843,7 @@ fn the_skip_rule_is_not_vacuous() {
         partition: 0,
         published_at: CommitSeq(9),
         blocks: vec![reference(id_a, span_a), reference(id_b, span_b)],
+        vertex_patches: vec![],
     };
     assert_eq!(
         fgdb_strata::root::blocks_visible_at(&root, CommitSeq(3)),

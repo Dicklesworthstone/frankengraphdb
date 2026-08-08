@@ -49,6 +49,7 @@
 //! question this slice has no business answering. What is here is the smallest
 //! honest thing: bytes on disk, addressed by identity, verified on read.
 
+use crate::vertex::{VertexPatchVersion, VertexRow, decode_patch, vertex_patch_id};
 use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -169,6 +170,7 @@ struct ObjectPublicationPermit {
 enum StoredObjectKind {
     Block,
     Root,
+    VertexPatch,
 }
 
 impl StoredObjectKind {
@@ -181,6 +183,7 @@ impl StoredObjectKind {
         match self {
             Self::Block => block_id(k_oid, namespace, bytes),
             Self::Root => crate::root::root_id(k_oid, namespace, bytes),
+            Self::VertexPatch => crate::vertex::vertex_patch_id(k_oid, namespace, bytes),
         }
     }
 }
@@ -240,6 +243,15 @@ pub enum StoreError {
         at: usize,
         error: Box<StoreError>,
     },
+    /// The stored bytes are not a lawful vertex patch — the patch counterpart
+    /// of [`StoreError::Malformed`] (fgdb-3xoi).
+    MalformedPatch(crate::vertex::VertexPatchError),
+    /// Loading one of a root's named vertex patches failed at the storage
+    /// boundary — the patch counterpart of [`StoreError::RootBlockLoad`].
+    RootPatchLoad {
+        at: usize,
+        error: Box<StoreError>,
+    },
 }
 
 impl core::fmt::Display for StoreError {
@@ -266,6 +278,12 @@ impl core::fmt::Display for StoreError {
             Self::RootBlockLoad { at, error } => {
                 write!(f, "loading root block {at}: {error}")
             }
+            Self::MalformedPatch(error) => {
+                write!(f, "stored vertex patch is malformed: {error}")
+            }
+            Self::RootPatchLoad { at, error } => {
+                write!(f, "loading root vertex patch {at}: {error}")
+            }
         }
     }
 }
@@ -276,7 +294,10 @@ impl core::error::Error for StoreError {
             Self::Io(error) => Some(error),
             Self::Malformed(error) => Some(error),
             Self::MalformedRoot(error) => Some(error),
-            Self::RootBlockLoad { error, .. } => Some(error.as_ref()),
+            Self::MalformedPatch(error) => Some(error),
+            Self::RootBlockLoad { error, .. } | Self::RootPatchLoad { error, .. } => {
+                Some(error.as_ref())
+            }
             Self::ObjectTooLarge { .. }
             | Self::IdentityMismatch { .. }
             | Self::DamagedExisting { .. }
@@ -362,6 +383,16 @@ impl AdmittedPartitionRoot<'_> {
     ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
         self.store
             .resolve_admitted_root_blocks_at(cx, &self.root, as_of)
+    }
+
+    /// Load the vertex patches that can contribute to `as_of`.
+    pub fn resolve_patches_at(
+        &self,
+        cx: &impl StorageReadCx,
+        as_of: CommitSeq,
+    ) -> Result<Vec<Vec<VertexRow>>, StoreError> {
+        self.store
+            .resolve_admitted_root_patches_at(cx, &self.root, as_of)
     }
 }
 
@@ -717,6 +748,42 @@ impl BlockStore {
         Ok(bytes)
     }
 
+    /// Store a vertex patch's bytes — the same derived-identity discipline and
+    /// durable path as [`BlockStore::put`], under the patch object kind.
+    pub fn put_patch(&self, cx: &CommitCx, bytes: &[u8]) -> Result<VertexPatchVersion, StoreError> {
+        self.put_object_with_steps(StoredObjectKind::VertexPatch, cx, bytes, None, || {}, || {})
+            .map(VertexPatchVersion)
+    }
+
+    /// Load the raw bytes of a vertex patch, verifying identity but not
+    /// decoding — the patch counterpart of [`BlockStore::get_bytes`].
+    pub fn get_patch_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: VertexPatchVersion,
+    ) -> Result<Vec<u8>, StoreError> {
+        let bytes = self.read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)?;
+        let actual = vertex_patch_id(&self.k_oid, self.namespace, &bytes);
+        if actual != id.0 {
+            return Err(StoreError::IdentityMismatch {
+                expected: id.0,
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Load and decode the vertex patch named by `id`, re-deriving the
+    /// identity from the bytes exactly as [`BlockStore::get`] does for blocks.
+    pub fn get_patch(
+        &self,
+        cx: &impl StorageReadCx,
+        id: VertexPatchVersion,
+    ) -> Result<Vec<VertexRow>, StoreError> {
+        let bytes = self.get_patch_bytes(cx, id)?;
+        decode_patch(&bytes).map_err(StoreError::MalformedPatch)
+    }
+
     fn resolve_root_block(
         &self,
         cx: &impl StorageReadCx,
@@ -773,6 +840,47 @@ impl BlockStore {
         self.inspect_root_blocks(cx, root, |_, _| true)
     }
 
+    fn resolve_root_patch(
+        &self,
+        cx: &impl StorageReadCx,
+        at: usize,
+        reference: &crate::root::PatchRef,
+    ) -> Result<Vec<VertexRow>, StoreError> {
+        let bytes = self
+            .get_patch_bytes(cx, VertexPatchVersion(reference.patch_id))
+            .map_err(|error| StoreError::RootPatchLoad {
+                at,
+                error: Box::new(error),
+            })?;
+        crate::root::resolve_patch_ref(&self.k_oid, self.namespace, at, reference, &bytes)
+            .map_err(StoreError::MalformedRoot)
+    }
+
+    /// Prove every vertex patch named by an already-structural root while
+    /// retaining only the caller-selected decoded patches — the patch
+    /// counterpart of [`BlockStore::inspect_root_blocks`], including the
+    /// incremental vertex-history admission so a future patch cannot reuse a
+    /// VId and still mint a selective-read token.
+    fn inspect_root_patches(
+        &self,
+        cx: &impl StorageReadCx,
+        root: &crate::root::PartitionRoot,
+        mut retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
+    ) -> Result<Vec<Vec<VertexRow>>, StoreError> {
+        let mut patches = Vec::new();
+        let mut history = crate::root::VertexHistoryValidator::default();
+        for (at, reference) in root.vertex_patches.iter().enumerate() {
+            let rows = self.resolve_root_patch(cx, at, reference)?;
+            history
+                .observe_patch(at, &rows)
+                .map_err(StoreError::MalformedRoot)?;
+            if retain(at, reference) {
+                patches.push(rows);
+            }
+        }
+        Ok(patches)
+    }
+
     /// Resolve only blocks selected by an already-minted admission token.
     ///
     /// `selected` comes from the shared root skip rule and is walked in lockstep
@@ -799,6 +907,30 @@ impl BlockStore {
         Ok(blocks)
     }
 
+    /// Resolve only vertex patches selected by an already-minted admission
+    /// token — the patch counterpart of
+    /// [`BlockStore::resolve_admitted_root_blocks_at`].
+    fn resolve_admitted_root_patches_at(
+        &self,
+        cx: &impl StorageReadCx,
+        root: &crate::root::PartitionRoot,
+        as_of: CommitSeq,
+    ) -> Result<Vec<Vec<VertexRow>>, StoreError> {
+        crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
+        let selected = crate::root::patches_visible_at(root, as_of);
+        let mut selected = selected.into_iter().peekable();
+        let mut patches = Vec::with_capacity(selected.len());
+        for (at, reference) in root.vertex_patches.iter().enumerate() {
+            if selected.peek() != Some(&at) {
+                continue;
+            }
+            selected.next();
+            patches.push(self.resolve_root_patch(cx, at, reference)?);
+        }
+        debug_assert!(selected.next().is_none());
+        Ok(patches)
+    }
+
     /// Store a partition root, returning the identity it was stored under.
     ///
     /// **A ROOT IS AN OBJECT LIKE ANY OTHER**, which is what makes reopening a
@@ -820,8 +952,36 @@ impl BlockStore {
     ) -> Result<PartitionRootVersion, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
         self.inspect_root_blocks(cx, root, |_, _| false)?;
+        self.inspect_root_patches(cx, root, |_, _| false)?;
         self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
             .map(PartitionRootVersion)
+    }
+
+    /// [`BlockStore::put_patch`], memoised under `receipts` — the patch
+    /// counterpart of [`BlockStore::put_verified`], earning the same span and
+    /// vertex-history admission the root publication would otherwise re-derive
+    /// from disk.
+    pub fn put_patch_verified(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+        receipts: &mut PublishReceipts,
+    ) -> Result<VertexPatchVersion, StoreError> {
+        let id = vertex_patch_id(&self.k_oid, self.namespace, bytes);
+        if receipts.patch_spans.contains_key(&id) {
+            return Ok(VertexPatchVersion(id));
+        }
+        let stored = self.put_patch(cx, bytes)?;
+        debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
+        let rows = decode_patch(bytes).map_err(StoreError::MalformedPatch)?;
+        receipts
+            .vertex_validator
+            .observe_patch(receipts.patch_spans.len(), &rows)
+            .map_err(StoreError::MalformedRoot)?;
+        if let Some(span) = crate::vertex::span_of_rows(&rows) {
+            receipts.patch_spans.insert(id, span);
+        }
+        Ok(stored)
     }
 
     /// [`BlockStore::put`], memoised under `receipts` (fgdb-gieu).
@@ -908,6 +1068,23 @@ impl BlockStore {
                 (reference.first_seq, reference.last_seq),
             );
         }
+        for (at, reference) in root.vertex_patches.iter().enumerate() {
+            if receipts.patch_spans.get(&reference.patch_id)
+                == Some(&(reference.first_seq, reference.last_seq))
+            {
+                continue;
+            }
+            let rows = self.resolve_root_patch(cx, at, reference)?;
+            receipts
+                .vertex_validator
+                .observe_patch(at, &rows)
+                .map_err(StoreError::MalformedRoot)?;
+            // `resolve_root_patch` proved the actual span equals the claim.
+            receipts.patch_spans.insert(
+                reference.patch_id,
+                (reference.first_seq, reference.last_seq),
+            );
+        }
         self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
             .map(PartitionRootVersion)
     }
@@ -924,24 +1101,34 @@ impl BlockStore {
             .map_err(StoreError::MalformedRoot)
     }
 
-    /// Reopen a whole partition: the root, and every block it names.
+    /// Reopen a whole partition: the root, every block, and every vertex
+    /// patch it names.
     ///
     /// **THIS IS THE PAYOFF OF EVERYTHING ABOVE.** No commit stream is replayed and
     /// no writer runs: a root identity, a directory, and the two checks that make a
     /// content-addressed store trustworthy — the bytes are the object asked for, and
-    /// each block spans what the root claimed about it.
+    /// each block and patch spans what the root claimed about it.
+    #[allow(clippy::type_complexity)]
     pub fn reopen(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
-    ) -> Result<(crate::root::PartitionRoot, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
+    ) -> Result<
+        (
+            crate::root::PartitionRoot,
+            Vec<Vec<crate::AdjacencyEntry>>,
+            Vec<Vec<VertexRow>>,
+        ),
+        StoreError,
+    > {
         let root = self.get_root(cx, id)?;
         let blocks = self.resolve_root_blocks(cx, &root)?;
-        Ok((root, blocks))
+        let patches = self.inspect_root_patches(cx, &root, |_, _| true)?;
+        Ok((root, blocks, patches))
     }
 
-    /// Admit a stored root against every named block without retaining the
-    /// decoded partition.
+    /// Admit a stored root against every named block and patch without
+    /// retaining the decoded partition.
     pub fn admit_root(
         &self,
         cx: &impl StorageReadCx,
@@ -949,6 +1136,7 @@ impl BlockStore {
     ) -> Result<AdmittedPartitionRoot<'_>, StoreError> {
         let root = self.get_root(cx, id)?;
         self.inspect_root_blocks(cx, &root, |_, _| false)?;
+        self.inspect_root_patches(cx, &root, |_, _| false)?;
         Ok(AdmittedPartitionRoot {
             store: self,
             root_id: id,
@@ -963,12 +1151,20 @@ impl BlockStore {
     /// so this first call reads and verifies every named block. It retains only
     /// blocks that can affect `as_of`; the returned token makes later calls to
     /// [`AdmittedPartitionRoot::resolve_blocks_at`] genuinely selective.
+    #[allow(clippy::type_complexity)]
     pub fn reopen_at(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
         as_of: CommitSeq,
-    ) -> Result<(AdmittedPartitionRoot<'_>, Vec<Vec<crate::AdjacencyEntry>>), StoreError> {
+    ) -> Result<
+        (
+            AdmittedPartitionRoot<'_>,
+            Vec<Vec<crate::AdjacencyEntry>>,
+            Vec<Vec<VertexRow>>,
+        ),
+        StoreError,
+    > {
         let root = self.get_root(cx, id)?;
         let visible = crate::root::blocks_visible_at(&root, as_of);
         let mut visible = visible.into_iter().peekable();
@@ -980,12 +1176,22 @@ impl BlockStore {
             true
         })?;
         debug_assert!(visible.next().is_none());
+        let visible_patches = crate::root::patches_visible_at(&root, as_of);
+        let mut visible_patches = visible_patches.into_iter().peekable();
+        let patches = self.inspect_root_patches(cx, &root, |at, _| {
+            if visible_patches.peek() != Some(&at) {
+                return false;
+            }
+            visible_patches.next();
+            true
+        })?;
+        debug_assert!(visible_patches.next().is_none());
         let admitted = AdmittedPartitionRoot {
             store: self,
             root_id: id,
             root,
         };
-        Ok((admitted, blocks))
+        Ok((admitted, blocks, patches))
     }
 
     /// Does this store hold the block named by `id`?
@@ -1029,6 +1235,8 @@ impl BlockStore {
 pub struct PublishReceipts {
     validator: crate::root::EdgeHistoryValidator,
     spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
+    vertex_validator: crate::root::VertexHistoryValidator,
+    patch_spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
 }
 
 impl PublishReceipts {
