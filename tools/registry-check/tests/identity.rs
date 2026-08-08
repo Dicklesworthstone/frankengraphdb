@@ -11173,6 +11173,21 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "root_slot_durability_digest"
                 )
                 | ("RestoreShardOperationalAck", "canonical_signature_set")
+                // fgdb-a20-restore-promotion-ivsp: the local ready certificate's
+                // five precedent-shaped value fields (source order a20:2603),
+                // landed beside the pre-existing certificate reference rows and
+                // younger than the historical witness for the same reason.
+                | ("LocalRestoreReadyCertificate", "restore_id")
+                | ("LocalRestoreReadyCertificate", "restore_epoch")
+                | (
+                    "LocalRestoreReadyCertificate",
+                    "service_visibility_epoch"
+                )
+                | (
+                    "LocalRestoreReadyCertificate",
+                    "root_slot_durability_digest"
+                )
+                | ("LocalRestoreReadyCertificate", "quorum_signatures")
                 | ("RestoreServicePromotionManifest", "restore_id")
                 | ("RestoreServicePromotionManifest", "database_id")
                 | (
@@ -12081,7 +12096,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 824,
+        pre_erratum.fields.len() + 829,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

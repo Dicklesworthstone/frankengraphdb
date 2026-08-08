@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3756
+target_count = 3761
 projection_fallback_count = 141
-target_source_assignment_sha256 = "f84204d4e0f9b61a81fea22b7c0131115ac82b9976c677696c6134a420d84aee"
+target_source_assignment_sha256 = "88d55c9ce477da69b2a5bd169e8c0ede89a060e2c0480f5426b67f8d022b54f8"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -114666,5 +114666,126 @@ row_id = "a20:target:field-restore-shard-operational-ack-canonical-signature-set
 target_row_id = "a20:field:restore-shard-operational-ack-canonical-signature-set"
 slice_id = "a20"
 source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.canonical_signature_set|canonical_signature_set"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-ready-certificate-restore-id"
+containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x0001
+stable_name = "restore_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "portable restore operation identity binding this ready certificate to one restore; comparison input retained and cut with the certificate (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a20:target:field-local-restore-ready-certificate-restore-id"
+target_row_id = "a20:field:local-restore-ready-certificate-restore-id"
+slice_id = "a20"
+source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.restore_id|restore_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-ready-certificate-restore-epoch"
+containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x0002
+stable_name = "restore_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "restore attempt epoch paired with restore_id in every terminal restore artifact; comparison input retained and cut with the certificate (a20:2603); width follows the landed epoch precedent class (contestable, recorded on fgdb-a20-restore-promotion-ivsp)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-local-restore-ready-certificate-restore-epoch"
+target_row_id = "a20:field:local-restore-ready-certificate-restore-epoch"
+slice_id = "a20"
+source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.restore_epoch|restore_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-ready-certificate-service-visibility-epoch"
+containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x0003
+stable_name = "service_visibility_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "service visibility epoch this ready certificate is issued under; every later carrier must match it exactly, so the comparison input is retained and cut with the certificate (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-local-restore-ready-certificate-service-visibility-epoch"
+target_row_id = "a20:field:local-restore-ready-certificate-service-visibility-epoch"
+slice_id = "a20"
+source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-ready-certificate-root-slot-durability-digest"
+containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x000A
+stable_name = "root_slot_durability_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "durability digest of the winning root slot backing the certified-ready hidden root; comparison input retained and cut with the certificate (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[target]]
+row_id = "a20:target:field-local-restore-ready-certificate-root-slot-durability-digest"
+target_row_id = "a20:field:local-restore-ready-certificate-root-slot-durability-digest"
+slice_id = "a20"
+source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.root_slot_durability_digest|root_slot_durability_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-ready-certificate-quorum-signatures"
+containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x000C
+stable_name = "quorum_signatures"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "canonically sorted authority quorum signatures over the ready-certificate transcript; current-member signatures alone are never a trust root, so validation still resolves the pinned configuration evidence first (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[target]]
+row_id = "a20:target:field-local-restore-ready-certificate-quorum-signatures"
+target_row_id = "a20:field:local-restore-ready-certificate-quorum-signatures"
+slice_id = "a20"
+source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.quorum_signatures|quorum_signatures"
 target_kind = "field"
 definition_status = "declared"
