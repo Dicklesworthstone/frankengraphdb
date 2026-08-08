@@ -538,7 +538,9 @@ pub(crate) fn rows_by_entry(
             if locator == 0 {
                 Vec::new()
             } else {
-                rows.get(usize::from(locator) - 1).cloned().unwrap_or_default()
+                rows.get(usize::from(locator) - 1)
+                    .cloned()
+                    .unwrap_or_default()
             }
         })
         .collect()

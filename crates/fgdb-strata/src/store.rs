@@ -885,8 +885,8 @@ impl BlockStore {
             // its rows, so this is the seam that owns it — decode proved the
             // propertyless half already.
             let per_entry = crate::rows_by_entry(&locators, &rows);
-            let recomputed = crate::block_logical_digest(&entries, &per_entry)
-                .map_err(StoreError::Malformed)?;
+            let recomputed =
+                crate::block_logical_digest(&entries, &per_entry).map_err(StoreError::Malformed)?;
             if recomputed != declared_digest {
                 return Err(StoreError::Malformed(
                     crate::BlockError::LogicalDigestMismatch {
@@ -1005,7 +1005,10 @@ impl BlockStore {
                 continue;
             }
             selected.next();
-            blocks.push(self.resolve_root_block(cx, at, root.partition, reference)?.0);
+            blocks.push(
+                self.resolve_root_block(cx, at, root.partition, reference)?
+                    .0,
+            );
         }
         debug_assert!(selected.next().is_none());
         Ok(blocks)
@@ -1155,8 +1158,8 @@ impl BlockStore {
             // law — no root is in hand here.
             let (_, declared_digest) = crate::header_partition_and_digest(bytes);
             let per_entry = crate::rows_by_entry(&locators, &rows);
-            let recomputed = crate::block_logical_digest(&entries, &per_entry)
-                .map_err(StoreError::Malformed)?;
+            let recomputed =
+                crate::block_logical_digest(&entries, &per_entry).map_err(StoreError::Malformed)?;
             if recomputed != declared_digest {
                 return Err(StoreError::Malformed(
                     crate::BlockError::LogicalDigestMismatch {
