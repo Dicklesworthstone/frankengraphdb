@@ -315,6 +315,10 @@ fn a_compacted_partition_still_agrees_after_reopening() {
                 partition: 0,
                 published_at: frontier,
                 blocks: references,
+                // Compaction here rewrites BLOCKS only; the vertex patches are
+                // untouched state and the compacted root must keep naming
+                // them, or republishing would silently lose every vertex row.
+                vertex_patches: root.vertex_patches.clone(),
             };
             store
                 .put_root(cx, &compacted)
