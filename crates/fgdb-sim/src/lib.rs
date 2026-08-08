@@ -221,10 +221,25 @@ pub async fn replay<V: asupersync::fs::Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
 ) -> Result<Replayed, ReplayError> {
+    replay_through(cx, coordinator, fgdb_types::CommitSeq(u64::MAX)).await
+}
+
+/// [`replay`], stopping after the last marker at or below `through` — the
+/// oracle-at-an-epoch a system-time differential compares against
+/// (fgdb-90jx). The chain is walked in commit order, so everything applied
+/// is exactly the stream's prefix through that sequence.
+pub async fn replay_through<V: asupersync::fs::Vfs>(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator<V>,
+    through: fgdb_types::CommitSeq,
+) -> Result<Replayed, ReplayError> {
     let mut database = ReferenceDatabase::with_database_id(reference_database_id(cx, coordinator)?);
     let mut index = LocalDeltaBatchIndex::new();
     for entry in coordinator.chain().entries() {
         let commit_seq = entry.marker.commit_seq;
+        if commit_seq > through.0 {
+            break;
+        }
         let EffectSource::Local {
             capsule_ref,
             logical_delta_template_digest,

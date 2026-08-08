@@ -27,7 +27,7 @@ use fgdb::{CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::path::{Path, PathBuf};
 
 const KNOWS: RelationId = RelationId(1);
@@ -811,5 +811,87 @@ fn a_created_but_unwritten_database_reopens_empty() {
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert!(db.neighbours(VId(1), KNOWS).expect("reads").is_empty());
         assert_eq!(db.frontier(), fgdb_types::CommitSeq(0));
+    });
+}
+
+/// **THE TIME-TRAVEL LAW (fgdb-90jx): every read family answers AS OF any
+/// committed sequence, each answer flips at exactly its boundary commit, the
+/// future is a typed refusal, and history survives a reopen.**
+#[test]
+fn reads_answer_as_of_any_committed_sequence() {
+    let dir = scratch("time-travel");
+    under_lab(93, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let props = vec![(key, CanonicalScalar::Int(1815))];
+
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(EId(10), VId(1), VId(2), props.clone());
+        let s1 = db.write(cx, first).await.expect("commits");
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(3), vec![], vec![]);
+        second.add_edge(EId(11), VId(1), VId(3), vec![]);
+        let s2 = db.write(cx, second).await.expect("commits");
+        let mut third = WriteBatch::new(KNOWS);
+        third.delete_edge(EId(10));
+        let s3 = db.write(cx, third).await.expect("commits");
+        let mut fourth = WriteBatch::new(KNOWS);
+        fourth.set_vertex_label(VId(3), LabelId(9), true);
+        let s4 = db.write(cx, fourth).await.expect("commits");
+        let mut fifth = WriteBatch::new(KNOWS);
+        fifth.delete_vertex(VId(3)); // cascades EId(11)
+        let s5 = db.write(cx, fifth).await.expect("commits");
+        drop(db);
+
+        // NOTHING crosses this line except `dir`, `keys()`, the recorded
+        // sequences, and the expected values — history is read back durable.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(db.frontier(), s5);
+
+        // Neighbours flip at every boundary.
+        let hood = |as_of| db.neighbours_at(VId(1), KNOWS, as_of).expect("reads");
+        assert_eq!(hood(s1), vec![VId(2)]);
+        assert_eq!(hood(s2), vec![VId(2), VId(3)]);
+        assert_eq!(hood(s3), vec![VId(3)], "e10's deletion is visible at s3");
+        assert_eq!(hood(s4), vec![VId(3)]);
+        assert_eq!(hood(s5), vec![], "the cascade retired e11 at s5");
+
+        // The deleted edge answers its whole life — props included — and
+        // nothing after.
+        for alive in [s1, s2] {
+            let record = db.edge_at(EId(10), alive).expect("reads").expect("alive");
+            assert_eq!(record.props, props, "history answers the durable row");
+        }
+        for dead in [s3, s4, s5] {
+            assert!(db.edge_at(EId(10), dead).expect("reads").is_none());
+        }
+
+        // The vertex chain: absent, bare, labeled, gone.
+        assert!(db.vertex_at(VId(3), s1).expect("reads").is_none());
+        for bare in [s2, s3] {
+            let row = db.vertex_at(VId(3), bare).expect("reads").expect("exists");
+            assert_eq!(row.labels, vec![], "the label lands at s4, not before");
+        }
+        let labeled = db.vertex_at(VId(3), s4).expect("reads").expect("exists");
+        assert_eq!(labeled.labels, vec![LabelId(9)]);
+        assert!(db.vertex_at(VId(3), s5).expect("reads").is_none());
+
+        // The future is a refusal, not a clamp — for every family.
+        let future = CommitSeq(s5.0 + 1);
+        assert!(matches!(
+            db.neighbours_at(VId(1), KNOWS, future),
+            Err(fgdb::ReadError::BeyondFrontier { asked, frontier }) if asked == future && frontier == s5
+        ));
+        assert!(matches!(
+            db.edge_at(EId(10), future),
+            Err(fgdb::ReadError::BeyondFrontier { .. })
+        ));
+        assert!(matches!(
+            db.vertex_at(VId(3), future),
+            Err(fgdb::ReadError::BeyondFrontier { .. })
+        ));
     });
 }

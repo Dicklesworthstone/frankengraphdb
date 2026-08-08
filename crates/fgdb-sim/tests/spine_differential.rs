@@ -93,7 +93,7 @@ where
 /// self-loop, a second relation, and a hub with several destinations. A fixture
 /// where every vertex has one neighbour would agree under almost any folding
 /// mistake.
-async fn write_history(cx: &CommitCx, dir: &Path) {
+async fn write_history(cx: &CommitCx, dir: &Path) -> Vec<fgdb_types::CommitSeq> {
     let mut db = Database::create(cx, dir, engine_keys())
         .await
         .expect("creates");
@@ -132,7 +132,8 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
         ],
     );
     first.add_edge(EId(11), VId(1), VId(3), vec![]);
-    db.write(cx, first).await.expect("first batch commits");
+    let mut epochs = Vec::new();
+    epochs.push(db.write(cx, first).await.expect("first batch commits"));
 
     // PARALLEL EDGES: same (src, dst), different EId. EId is the unconditional
     // parallel-edge discriminator (§4.1), so a fold keyed on the pair alone
@@ -146,7 +147,7 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
         vec![(PropertyKeyId(11), CanonicalScalar::Int(2020))],
     );
     second.add_edge(EId(13), VId(4), VId(4), vec![]); // self-loop
-    db.write(cx, second).await.expect("second batch commits");
+    epochs.push(db.write(cx, second).await.expect("second batch commits"));
 
     // A SECOND RELATION over an overlapping vertex set, propertied on the
     // surviving edge so the cross-relation read is compared with content.
@@ -158,7 +159,7 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
         VId(3),
         vec![(PropertyKeyId(11), CanonicalScalar::Bool(true))],
     );
-    db.write(cx, third).await.expect("third batch commits");
+    epochs.push(db.write(cx, third).await.expect("third batch commits"));
 
     // DELETES, with every before-image engine-derived (fgdb-p3ok). This is
     // the differential's sharpest teeth: the oracle's replay REFUSES a wrong
@@ -169,12 +170,12 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
     fourth.create_vertex(VId(6), vec![], vec![]);
     fourth.add_edge(EId(16), VId(6), VId(1), vec![]);
     fourth.add_edge(EId(17), VId(2), VId(4), vec![]);
-    db.write(cx, fourth).await.expect("fourth batch commits");
+    epochs.push(db.write(cx, fourth).await.expect("fourth batch commits"));
     let mut fifth = WriteBatch::new(KNOWS);
     fifth.delete_edge(EId(12)); // ONE of the two parallel edges — its twin survives
     fifth.delete_vertex(VId(6)); // cascades EId(16)
     fifth.delete_vertex(VId(5)); // cascades EId(14), a cross-relation edge
-    db.write(cx, fifth).await.expect("fifth batch commits");
+    epochs.push(db.write(cx, fifth).await.expect("fifth batch commits"));
 
     // UPDATES (fgdb-stb6), every before-image engine-derived and validated by
     // the oracle at replay (LabelBeforeMismatch / PropertyBeforeMismatch):
@@ -190,7 +191,8 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
     sixth.set_vertex_label(VId(1), LabelId(9), true);
     sixth.set_vertex_label(VId(1), LabelId(3), false);
     sixth.set_vertex_label(VId(3), LabelId(7), true);
-    db.write(cx, sixth).await.expect("sixth batch commits");
+    epochs.push(db.write(cx, sixth).await.expect("sixth batch commits"));
+    epochs
 }
 
 /// **THE DIFFERENTIAL: the engine's answer equals the oracle's, for every vertex
@@ -200,7 +202,7 @@ fn the_spine_agrees_with_the_reference_oracle() {
     let dir = scratch("agreement");
     under_lab(101, move |cx| async move {
         let cx = &cx;
-        write_history(cx, &dir).await;
+        let _ = write_history(cx, &dir).await;
 
         // ENGINE SIDE. A fresh open, so the answers come from the durable path
         // rather than from the writer that produced them.
@@ -349,7 +351,7 @@ fn agreement_survives_a_reopen() {
     let dir = scratch("reopen-agreement");
     under_lab(102, move |cx| async move {
         let cx = &cx;
-        write_history(cx, &dir).await;
+        let _ = write_history(cx, &dir).await;
 
         let first = {
             let engine = Database::open(cx, &dir, engine_keys())
@@ -379,6 +381,139 @@ fn agreement_survives_a_reopen() {
             !oracle.is_empty(),
             "vertex 1 has parallel KNOWS edges in the fixture; an empty answer here \
              means the fixture stopped exercising the fold"
+        );
+    });
+}
+
+/// **THE TIME-TRAVEL DIFFERENTIAL (fgdb-90jx): at EVERY epoch frontier, the
+/// engine's as-of answers equal the oracle replayed through that prefix.**
+///
+/// The frontier differential above cannot see a fold that reaches the right
+/// final state through wrong intermediate ones — a delete applied one commit
+/// early, an update folded into its predecessor's span. Here the oracle is
+/// rebuilt six times, once per prefix, so every intermediate graph the stream
+/// ever meant is compared, not just the last.
+#[test]
+fn the_spine_agrees_with_the_oracle_at_every_epoch() {
+    let dir = scratch("epoch-agreement");
+    under_lab(107, move |cx| async move {
+        let cx = &cx;
+        let epochs = write_history(cx, &dir).await;
+        assert_eq!(epochs.len(), 6, "the fixture is six epochs");
+
+        // ENGINE SIDE: every epoch's answers gathered from one fresh open,
+        // before the single-writer lease drops.
+        let engine = Database::open(cx, &dir, engine_keys())
+            .await
+            .expect("reopens");
+        let probes: Vec<(VId, RelationId)> = (1..=6u128)
+            .flat_map(|vid| [(VId(vid), KNOWS), (VId(vid), WORKS_WITH)])
+            .collect();
+        type EpochAnswers = (
+            Vec<Vec<VId>>,
+            Vec<Option<fgdb::VertexRow>>,
+            Vec<Option<fgdb::EdgeRecord>>,
+        );
+        let engine_epochs: Vec<EpochAnswers> = epochs
+            .iter()
+            .map(|as_of| {
+                (
+                    probes
+                        .iter()
+                        .map(|(vid, rel)| {
+                            engine
+                                .neighbours_at(*vid, *rel, *as_of)
+                                .expect("engine reads")
+                        })
+                        .collect(),
+                    (1..=6u128)
+                        .map(|vid| engine.vertex_at(VId(vid), *as_of).expect("engine reads"))
+                        .collect(),
+                    (10..=17u128)
+                        .map(|eid| engine.edge_at(EId(eid), *as_of).expect("engine reads"))
+                        .collect(),
+                )
+            })
+            .collect();
+        drop(engine);
+
+        // ORACLE SIDE: one prefix replay per epoch, over nothing but the bytes.
+        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("oracle opens");
+        for (as_of, (hoods, vertices, edges)) in epochs.iter().zip(&engine_epochs) {
+            let replayed = fgdb_sim::replay_through(cx, &coordinator, *as_of)
+                .await
+                .expect("the prefix replays");
+            let graph = replayed
+                .database
+                .graph(GRAPH, BRANCH)
+                .expect("the oracle materialized the coordinate");
+
+            for ((vid, rel), engine_answer) in probes.iter().zip(hoods) {
+                assert_eq!(
+                    engine_answer,
+                    &graph.neighbours(*vid, *rel),
+                    "epoch {as_of:?}: {vid:?} over {rel:?}"
+                );
+            }
+            for (vid, engine_row) in (1..=6u128).map(VId).zip(vertices) {
+                let oracle_vertex = graph.vertex(vid);
+                assert_eq!(
+                    engine_row.is_some(),
+                    oracle_vertex.is_some(),
+                    "epoch {as_of:?}: {vid:?} existence"
+                );
+                let (Some(row), Some(vertex)) = (engine_row, oracle_vertex) else {
+                    continue;
+                };
+                assert_eq!(
+                    row.labels,
+                    vertex.labels.iter().copied().collect::<Vec<_>>(),
+                    "epoch {as_of:?}: {vid:?} labels"
+                );
+                assert_eq!(
+                    row.props,
+                    vertex
+                        .props
+                        .iter()
+                        .map(|(key, value)| (*key, value.clone()))
+                        .collect::<Vec<_>>(),
+                    "epoch {as_of:?}: {vid:?} properties"
+                );
+            }
+            for (eid, engine_edge) in (10..=17u128).map(EId).zip(edges) {
+                let oracle_edge = graph.edge(eid);
+                assert_eq!(
+                    engine_edge.is_some(),
+                    oracle_edge.is_some(),
+                    "epoch {as_of:?}: {eid:?} existence"
+                );
+                let (Some(record), Some(edge)) = (engine_edge, oracle_edge) else {
+                    continue;
+                };
+                assert_eq!(
+                    (record.entry.src, record.entry.relation, record.entry.dst),
+                    (edge.src, edge.relation, edge.dst),
+                    "epoch {as_of:?}: {eid:?} topology"
+                );
+                assert_eq!(
+                    record.props,
+                    edge.props
+                        .iter()
+                        .map(|(key, value)| (*key, value.clone()))
+                        .collect::<Vec<_>>(),
+                    "epoch {as_of:?}: {eid:?} properties"
+                );
+            }
+        }
+
+        // ANTI-VACUITY: six agreements about one unchanging graph would prove
+        // nothing about time. Every consecutive epoch pair must differ in at
+        // least one gathered answer — each commit changed the observable graph.
+        assert!(
+            engine_epochs.windows(2).all(|pair| pair[0] != pair[1]),
+            "every epoch must observe a different graph from its predecessor"
         );
     });
 }

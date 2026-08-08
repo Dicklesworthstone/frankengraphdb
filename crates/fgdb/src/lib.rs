@@ -322,6 +322,14 @@ pub enum WriteError {
 #[derive(Debug)]
 pub enum ReadError {
     Root(RootError),
+    /// A time-travel read asked about a sequence the published partition has
+    /// not reached. Refused rather than clamped: an answer AT the frontier
+    /// for a question ABOUT the future would silently change meaning the
+    /// moment the next commit lands (fgdb-90jx).
+    BeyondFrontier {
+        asked: CommitSeq,
+        frontier: CommitSeq,
+    },
 }
 
 macro_rules! from_error {
@@ -423,6 +431,10 @@ impl core::fmt::Display for ReadError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Root(error) => write!(f, "partition: {error}"),
+            Self::BeyondFrontier { asked, frontier } => write!(
+                f,
+                "asked about {asked:?}, beyond the published frontier {frontier:?}"
+            ),
         }
     }
 }
@@ -1199,11 +1211,25 @@ impl Database {
     /// The live destinations of `src` over `relation`, at the published
     /// frontier.
     pub fn neighbours(&self, src: VId, relation: RelationId) -> Result<Vec<VId>, ReadError> {
+        self.neighbours_at(src, relation, self.snapshot.frontier)
+    }
+
+    /// [`Database::neighbours`] as of `as_of` — the system-time read B1 makes
+    /// core (fgdb-90jx). History in the spine is whole, so every historical
+    /// answer is served from the same durable blocks the frontier answer is;
+    /// a sequence beyond the published frontier is refused, never clamped.
+    pub fn neighbours_at(
+        &self,
+        src: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, ReadError> {
+        self.check_frontier(as_of)?;
         Ok(merge_neighbours(
             &self.snapshot.blocks,
             src,
             relation,
-            self.snapshot.frontier,
+            as_of,
         )?)
     }
 
@@ -1216,11 +1242,20 @@ impl Database {
     /// content-address → fsync → admit → decode round trip before a reader
     /// can see them.
     pub fn edge(&self, eid: EId) -> Result<Option<EdgeRecord>, ReadError> {
+        self.edge_at(eid, self.snapshot.frontier)
+    }
+
+    /// [`Database::edge`] as of `as_of` (fgdb-90jx). A version retired at
+    /// `r` answers for every `as_of` in `[created_at, r)` and never after —
+    /// the same visibility rule the frontier read applies, at an older
+    /// sequence.
+    pub fn edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+        self.check_frontier(as_of)?;
         Ok(merge_edge_with_props(
             &self.snapshot.blocks,
             &self.snapshot.block_props,
             eid,
-            self.snapshot.frontier,
+            as_of,
         )?
         .map(|(entry, props)| EdgeRecord { entry, props }))
     }
@@ -1234,6 +1269,26 @@ impl Database {
     /// reader can see it.
     pub fn vertex(&self, vid: VId) -> Option<VertexRow> {
         merge_vertex(&self.snapshot.patches, vid, self.snapshot.frontier)
+    }
+
+    /// [`Database::vertex`] as of `as_of` (fgdb-90jx): the version chain's
+    /// statement visible at that sequence, or `None` when the vertex did not
+    /// exist yet — or no longer did.
+    pub fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(merge_vertex(&self.snapshot.patches, vid, as_of))
+    }
+
+    /// The shared refusal every `*_at` read applies before answering: the
+    /// published frontier bounds what this snapshot can truthfully say.
+    fn check_frontier(&self, as_of: CommitSeq) -> Result<(), ReadError> {
+        if as_of.0 > self.snapshot.frontier.0 {
+            return Err(ReadError::BeyondFrontier {
+                asked: as_of,
+                frontier: self.snapshot.frontier,
+            });
+        }
+        Ok(())
     }
 
     /// The sequence the published partition has caught up to.
