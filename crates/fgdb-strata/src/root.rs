@@ -845,6 +845,52 @@ pub fn merge_edge_with_props(
     Ok(Some((*winner, Vec::new())))
 }
 
+/// The row each EId's LAST statement carries, by one forward pass in
+/// publication order — the same last-block-wins rule the entry collapse
+/// applies, over the hosted columns instead. Shared by the whole-graph scan
+/// and compaction so neither can drift to a second precedence rule.
+pub(crate) fn winning_edge_rows(
+    blocks: &[Vec<crate::AdjacencyEntry>],
+    block_props: &[Option<crate::edge_props::BlockProps>],
+) -> std::collections::BTreeMap<EId, crate::edge_props::EdgePropertyRow> {
+    let mut rows = std::collections::BTreeMap::new();
+    for (block, props) in blocks.iter().zip(block_props) {
+        for (index, entry) in block.iter().enumerate() {
+            let row = props
+                .as_ref()
+                .map(|props| props.props_of(index))
+                .unwrap_or_default();
+            rows.insert(entry.eid, row);
+        }
+    }
+    rows
+}
+
+/// Every edge with a visible version at `as_of`, each beside the row its
+/// winning statement carries, in ascending EId order (fgdb-9k5w) — the
+/// whole-graph scan a query layer starts from, under the identical
+/// whole-history validation and precedence rules as every point lookup.
+#[allow(clippy::type_complexity)]
+pub fn merge_all_edges_with_props(
+    blocks: &[Vec<crate::AdjacencyEntry>],
+    block_props: &[Option<crate::edge_props::BlockProps>],
+    as_of: CommitSeq,
+) -> Result<Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
+    if blocks.len() != block_props.len() {
+        return Err(RootError::BlockPropsArity {
+            blocks: blocks.len(),
+            props: block_props.len(),
+        });
+    }
+    let (entries, _) = collapse_edge_history(blocks)?;
+    let mut rows = winning_edge_rows(blocks, block_props);
+    Ok(entries
+        .into_iter()
+        .filter(|(_, entry)| entry.visible_at(as_of))
+        .map(|(eid, entry)| (entry, rows.remove(&eid).unwrap_or_default()))
+        .collect())
+}
+
 /// Incremental proof that every block in one publication history agrees on EId
 /// identity and lifecycle.
 ///

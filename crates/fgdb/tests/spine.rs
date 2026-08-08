@@ -895,3 +895,105 @@ fn reads_answer_as_of_any_committed_sequence() {
         ));
     });
 }
+
+/// **THE ENUMERATION LAW (fgdb-9k5w): the whole graph scans at any committed
+/// sequence, in canonical ascending-identity order, agreeing element-for-
+/// element with the point lookups — and the future is the same refusal.**
+///
+/// Enumeration is what a query layer starts from, so the sharp edge is
+/// TOTALITY: nothing visible may be missing, nothing retired may appear, and
+/// nothing may disagree with the point lookup that serves the same identity.
+#[test]
+fn the_graph_enumerates_at_every_committed_sequence() {
+    let dir = scratch("enumeration");
+    under_lab(97, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let props = vec![(key, CanonicalScalar::Int(1815))];
+
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![LabelId(3)], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(EId(10), VId(1), VId(2), props.clone());
+        let s1 = db.write(cx, first).await.expect("commits");
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(3), vec![], vec![]);
+        second.add_edge(EId(11), VId(3), VId(1), vec![]);
+        let s2 = db.write(cx, second).await.expect("commits");
+        let mut third = WriteBatch::new(KNOWS);
+        third.delete_edge(EId(10));
+        third.delete_vertex(VId(3)); // cascades EId(11)
+        let s3 = db.write(cx, third).await.expect("commits");
+        drop(db);
+
+        // NOTHING crosses this line except `dir`, `keys()`, the recorded
+        // sequences, and the expected values.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+
+        // Totality and order at each epoch.
+        let vids = |as_of| -> Vec<VId> {
+            db.vertices_at(as_of)
+                .expect("reads")
+                .iter()
+                .map(|row| row.vid)
+                .collect()
+        };
+        let eids = |as_of| -> Vec<EId> {
+            db.edges_at(as_of)
+                .expect("reads")
+                .iter()
+                .map(|record| record.entry.eid)
+                .collect()
+        };
+        assert_eq!(vids(s1), vec![VId(1), VId(2)]);
+        assert_eq!(eids(s1), vec![EId(10)]);
+        assert_eq!(vids(s2), vec![VId(1), VId(2), VId(3)]);
+        assert_eq!(eids(s2), vec![EId(10), EId(11)]);
+        assert_eq!(vids(s3), vec![VId(1), VId(2)], "the delete drops out");
+        assert_eq!(
+            eids(s3),
+            vec![],
+            "both the deletion and its cascade drop out"
+        );
+
+        // The frontier faces answer the last epoch.
+        assert_eq!(
+            db.vertices().iter().map(|row| row.vid).collect::<Vec<_>>(),
+            vids(s3)
+        );
+        assert_eq!(db.edges().expect("reads").len(), 0);
+
+        // Element-for-element agreement with the point lookups, every epoch.
+        for as_of in [s1, s2, s3] {
+            for row in db.vertices_at(as_of).expect("reads") {
+                assert_eq!(
+                    db.vertex_at(row.vid, as_of).expect("reads"),
+                    Some(row),
+                    "enumeration and point lookup disagree at {as_of:?}"
+                );
+            }
+            for record in db.edges_at(as_of).expect("reads") {
+                assert_eq!(
+                    db.edge_at(record.entry.eid, as_of).expect("reads"),
+                    Some(record),
+                    "enumeration and point lookup disagree at {as_of:?}"
+                );
+            }
+        }
+        // The scanned property row is the durable one.
+        let scanned = db.edges_at(s2).expect("reads");
+        assert_eq!(scanned[0].props, props);
+
+        // The future refuses for both scan families.
+        let future = CommitSeq(s3.0 + 1);
+        assert!(matches!(
+            db.vertices_at(future),
+            Err(fgdb::ReadError::BeyondFrontier { .. })
+        ));
+        assert!(matches!(
+            db.edges_at(future),
+            Err(fgdb::ReadError::BeyondFrontier { .. })
+        ));
+    });
+}

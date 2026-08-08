@@ -413,6 +413,8 @@ fn the_spine_agrees_with_the_oracle_at_every_epoch() {
             Vec<Vec<VId>>,
             Vec<Option<fgdb::VertexRow>>,
             Vec<Option<fgdb::EdgeRecord>>,
+            Vec<fgdb::VertexRow>,
+            Vec<fgdb::EdgeRecord>,
         );
         let engine_epochs: Vec<EpochAnswers> = epochs
             .iter()
@@ -432,6 +434,8 @@ fn the_spine_agrees_with_the_oracle_at_every_epoch() {
                     (10..=17u128)
                         .map(|eid| engine.edge_at(EId(eid), *as_of).expect("engine reads"))
                         .collect(),
+                    engine.vertices_at(*as_of).expect("engine scans"),
+                    engine.edges_at(*as_of).expect("engine scans"),
                 )
             })
             .collect();
@@ -441,7 +445,9 @@ fn the_spine_agrees_with_the_oracle_at_every_epoch() {
         let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
             .await
             .expect("oracle opens");
-        for (as_of, (hoods, vertices, edges)) in epochs.iter().zip(&engine_epochs) {
+        for (as_of, (hoods, vertices, edges, vertex_scan, edge_scan)) in
+            epochs.iter().zip(&engine_epochs)
+        {
             let replayed = fgdb_sim::replay_through(cx, &coordinator, *as_of)
                 .await
                 .expect("the prefix replays");
@@ -504,6 +510,62 @@ fn the_spine_agrees_with_the_oracle_at_every_epoch() {
                         .map(|(key, value)| (*key, value.clone()))
                         .collect::<Vec<_>>(),
                     "epoch {as_of:?}: {eid:?} properties"
+                );
+            }
+
+            // THE ENUMERATION DIFFERENTIAL (fgdb-9k5w): the scan agrees with
+            // the oracle element-for-element, and the COUNTS close the
+            // universe — the engine cannot answer a vertex the oracle lacks,
+            // and equal cardinality forbids missing one the oracle has.
+            assert_eq!(
+                vertex_scan.len(),
+                graph.vertex_count(),
+                "epoch {as_of:?}: vertex scan cardinality"
+            );
+            for row in vertex_scan {
+                let vertex = graph.vertex(row.vid);
+                assert!(
+                    vertex.is_some(),
+                    "epoch {as_of:?}: scanned {:?} unknown to the oracle",
+                    row.vid
+                );
+                let vertex = vertex.expect("existence just asserted");
+                assert_eq!(
+                    row.labels,
+                    vertex.labels.iter().copied().collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    row.props,
+                    vertex
+                        .props
+                        .iter()
+                        .map(|(key, value)| (*key, value.clone()))
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(
+                edge_scan.len(),
+                graph.edge_count(),
+                "epoch {as_of:?}: edge scan cardinality"
+            );
+            for record in edge_scan {
+                let edge = graph.edge(record.entry.eid);
+                assert!(
+                    edge.is_some(),
+                    "epoch {as_of:?}: scanned {:?} unknown to the oracle",
+                    record.entry.eid
+                );
+                let edge = edge.expect("existence just asserted");
+                assert_eq!(
+                    (record.entry.src, record.entry.relation, record.entry.dst),
+                    (edge.src, edge.relation, edge.dst)
+                );
+                assert_eq!(
+                    record.props,
+                    edge.props
+                        .iter()
+                        .map(|(key, value)| (*key, value.clone()))
+                        .collect::<Vec<_>>()
                 );
             }
         }

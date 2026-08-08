@@ -157,9 +157,12 @@ use fgdb_delta_types::{
     PropertyKeyId, RelationId, SchemaEpoch,
 };
 use fgdb_strata::edge_props::BlockProps;
-use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_edge_with_props, merge_neighbours};
+use fgdb_strata::root::{
+    BlockRef, PatchRef, RootError, merge_all_edges_with_props, merge_edge_with_props,
+    merge_neighbours,
+};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
-use fgdb_strata::vertex::merge_vertex;
+use fgdb_strata::vertex::{merge_all_vertices, merge_vertex};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
 
@@ -1277,6 +1280,38 @@ impl Database {
     pub fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
         self.check_frontier(as_of)?;
         Ok(merge_vertex(&self.snapshot.patches, vid, as_of))
+    }
+
+    /// Every vertex visible at the published frontier, in ascending VId
+    /// order — the whole-graph scan a query layer starts from (fgdb-9k5w).
+    pub fn vertices(&self) -> Vec<VertexRow> {
+        merge_all_vertices(&self.snapshot.patches, self.snapshot.frontier)
+    }
+
+    /// [`Database::vertices`] as of `as_of`, under the same frontier refusal
+    /// as every `*_at` read.
+    pub fn vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(merge_all_vertices(&self.snapshot.patches, as_of))
+    }
+
+    /// Every edge visible at the published frontier — endpoints, relation,
+    /// lifetime, and properties — in ascending EId order (fgdb-9k5w).
+    pub fn edges(&self) -> Result<Vec<EdgeRecord>, ReadError> {
+        self.edges_at(self.snapshot.frontier)
+    }
+
+    /// [`Database::edges`] as of `as_of`, under the same frontier refusal as
+    /// every `*_at` read and the identical whole-history validation and
+    /// last-statement-wins precedence as the point lookups.
+    pub fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(
+            merge_all_edges_with_props(&self.snapshot.blocks, &self.snapshot.block_props, as_of)?
+                .into_iter()
+                .map(|(entry, props)| EdgeRecord { entry, props })
+                .collect(),
+        )
     }
 
     /// The shared refusal every `*_at` read applies before answering: the

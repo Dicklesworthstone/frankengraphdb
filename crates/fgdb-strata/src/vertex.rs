@@ -484,6 +484,25 @@ pub fn merge_vertex(patches: &[Vec<VertexRow>], vid: VId, as_of: CommitSeq) -> O
         .cloned()
 }
 
+/// Every vertex with a visible statement at `as_of`, in ascending VId order —
+/// [`merge_vertex`] over the whole patch family in one pass (fgdb-9k5w). The
+/// chain-contiguity law makes the winning statements per VId non-overlapping,
+/// so the visibility filter selects at most one row per vertex.
+pub fn merge_all_vertices(patches: &[Vec<VertexRow>], as_of: CommitSeq) -> Vec<VertexRow> {
+    let mut statements: std::collections::BTreeMap<(VId, u64), &VertexRow> =
+        std::collections::BTreeMap::new();
+    for rows in patches {
+        for row in rows {
+            statements.insert((row.vid, row.created_at.0), row);
+        }
+    }
+    statements
+        .into_values()
+        .filter(|row| row.visible_at(as_of))
+        .cloned()
+        .collect()
+}
+
 /// Decode a patch that must be the one named by `expected`.
 pub fn read_patch(
     k_oid: &[u8; 32],

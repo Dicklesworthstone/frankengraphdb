@@ -26,7 +26,7 @@
 use crate::AdjacencyEntry;
 use crate::edge_props::{BlockProps, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS};
 use crate::root::{RootError, collapse_edge_history};
-use fgdb_types::{CommitSeq, EId};
+use fgdb_types::CommitSeq;
 use std::collections::BTreeMap;
 
 /// The result of compacting a partition's blocks.
@@ -123,17 +123,9 @@ fn compact_with_limit(
     let (entries, superseded) = collapse_edge_history(blocks)?;
 
     // The winning statement's row, by the same forward last-block-wins pass
-    // the collapse applied to the entries themselves.
-    let mut winning_props: BTreeMap<EId, EdgePropertyRow> = BTreeMap::new();
-    for (block, props) in blocks.iter().zip(block_props) {
-        for (index, entry) in block.iter().enumerate() {
-            let row = props
-                .as_ref()
-                .map(|props| props.props_of(index))
-                .unwrap_or_default();
-            winning_props.insert(entry.eid, row);
-        }
-    }
+    // the collapse applied to the entries themselves — shared with the
+    // whole-graph scan so the two cannot drift apart.
+    let mut winning_props = crate::root::winning_edge_rows(blocks, block_props);
 
     // DROP BY OBSERVABILITY, NOT BY AGE. A version whose life ended at or before
     // the floor can never be seen again; one still live at the floor must stay
