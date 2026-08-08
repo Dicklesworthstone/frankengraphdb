@@ -147,10 +147,17 @@ fn bytes_per_live_edge_under_power_law_skew() {
 
             let mut batch = WriteBatch::new(KNOWS);
             let mut eid = 1u128;
+            // Destination vids are SHARED across hubs, and vertex identities
+            // are create-once (the oracle refuses a duplicate CreateVertex, and
+            // since fgdb-3xoi the tier-D fold refuses it identically) — so the
+            // fixture creates each destination exactly once.
+            let mut created = std::collections::BTreeSet::new();
             for (src, degree) in SKEW {
                 batch.create_vertex(VId(src), vec![], vec![]);
                 for k in 0..degree {
-                    batch.create_vertex(VId(1000 + k), vec![], vec![]);
+                    if created.insert(1000 + k) {
+                        batch.create_vertex(VId(1000 + k), vec![], vec![]);
+                    }
                     batch.add_edge(EId(eid), VId(src), VId(1000 + k), vec![]);
                     eid += 1;
                 }
@@ -378,10 +385,15 @@ fn a_cold_reopen_answers_identically_across_the_whole_skew() {
             let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
             let mut batch = WriteBatch::new(KNOWS);
             let mut eid = 1u128;
+            // Same create-once discipline as the byte-measurement fixture
+            // above: shared destinations are created exactly once.
+            let mut created = std::collections::BTreeSet::new();
             for (src, degree) in SKEW {
                 batch.create_vertex(VId(src), vec![], vec![]);
                 for k in 0..degree {
-                    batch.create_vertex(VId(1000 + k), vec![], vec![]);
+                    if created.insert(1000 + k) {
+                        batch.create_vertex(VId(1000 + k), vec![], vec![]);
+                    }
                     batch.add_edge(EId(eid), VId(src), VId(1000 + k), vec![]);
                     eid += 1;
                 }
