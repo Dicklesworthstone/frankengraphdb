@@ -6646,6 +6646,21 @@ digest_class = "target"
 
 [[field]]
 containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x000b
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact CertificateSignerLock named by this field; retained while the ready certificate is retained, and order 12 <= 40 keeps the edge backward-only (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreReadyCertificate"
 field_tag = 0x000c
 stable_name = "quorum_signatures"
 exact_wire_type = "bytes"

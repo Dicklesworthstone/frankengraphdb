@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3782;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3783;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "781c1fc87a9473b80109f0a8428207486eefb1b8937cb6b7dbdea5ca4b20e24d";
+    "c43666d69b788cf86e3c9f1ab089ad647695dd65d4b55dcfa66a341bc35df501";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 141;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "3cf6fb3e6128fd5fcb7f61f3a4c4c1c7b791c3680126db26ae8d3997ae121926";
+    "518c566aba8aa436574de845e27ee0242a5b09a9e22eca4263d7ec727bd79521";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15876,10 +15876,10 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            19,
-            "the coverage law must still evaluate a20's 19 uncovered keys after \
-             fgdb-a20-restore-promotion-ivsp registers the two completion \
-             specs' expected_source_lease_generation members"
+            18,
+            "the coverage law must still evaluate a20's 18 uncovered keys after \
+             fgdb-a20-restore-promotion-ivsp registers the ready certificate's \
+             one_digest_signer_lock_ref against the minted CertificateSignerLock"
         );
 
         // CONFORMANT CONTROL: certify the universe and only the universe code
@@ -15893,7 +15893,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            19,
+            18,
             "certification must not change what the coverage law finds"
         );
     }

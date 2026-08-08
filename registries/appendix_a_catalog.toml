@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3782
+target_count = 3783
 projection_fallback_count = 141
-target_source_assignment_sha256 = "3cf6fb3e6128fd5fcb7f61f3a4c4c1c7b791c3680126db26ae8d3997ae121926"
+target_source_assignment_sha256 = "518c566aba8aa436574de845e27ee0242a5b09a9e22eca4263d7ec727bd79521"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -115291,5 +115291,30 @@ row_id = "a20:target:field-local-restore-service-completion-spec-expected-source
 target_row_id = "a20:field:local-restore-service-completion-spec-expected-source-lease-generation"
 slice_id = "a20"
 source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.expected_source_lease_generation|expected_source_lease_generation"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-ready-certificate-one-digest-signer-lock-ref"
+containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x000B
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact CertificateSignerLock named by this field; retained while the ready certificate is retained, and order 12 <= 40 keeps the edge backward-only (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a20:target:field-local-restore-ready-certificate-one-digest-signer-lock-ref"
+target_row_id = "a20:field:local-restore-ready-certificate-one-digest-signer-lock-ref"
+slice_id = "a20"
+source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
 target_kind = "field"
 definition_status = "declared"

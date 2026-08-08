@@ -11197,6 +11197,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "root_slot_durability_digest"
                 )
                 | ("LocalRestoreReadyCertificate", "quorum_signatures")
+                // fgdb-a20-restore-promotion-ivsp: the ready certificate's
+                // signer-lock reference, landable once a04 minted
+                // CertificateSignerLock (0x0269) and the a05/a07/a08 rows
+                // fixed the bare shorthand's shape; younger than the
+                // historical witness for the same reason.
+                | (
+                    "LocalRestoreReadyCertificate",
+                    "one_digest_signer_lock_ref"
+                )
                 // fgdb-a20-restore-promotion-ivsp: the six Spec-family
                 // terminal_audit_gate members (source order a20:2597-2605),
                 // landed with the TerminalAuditGate closure extension naming
@@ -12164,7 +12173,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 850,
+        pre_erratum.fields.len() + 851,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
