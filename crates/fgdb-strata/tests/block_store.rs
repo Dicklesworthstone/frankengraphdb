@@ -968,7 +968,7 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
 
             for block in &blocks {
                 receipted
-                    .put_verified(cx, &block.bytes, &mut receipts)
+                    .put_verified(cx, &block.bytes, None, &mut receipts)
                     .expect("put_verified");
             }
             let receipted_root = receipted
@@ -1001,7 +1001,7 @@ fn a_receipted_block_is_admitted_without_rereading_its_file() {
         let mut receipts = PublishReceipts::new();
         let bytes = sample();
         let id = store
-            .put_verified(cx, &bytes, &mut receipts)
+            .put_verified(cx, &bytes, None, &mut receipts)
             .expect("earns the receipt");
         assert!(receipts.holds(id));
 
@@ -1017,7 +1017,7 @@ fn a_receipted_block_is_admitted_without_rereading_its_file() {
         );
         assert_eq!(
             store
-                .put_verified(cx, &bytes, &mut receipts)
+                .put_verified(cx, &bytes, None, &mut receipts)
                 .expect("the receipt answers without the file"),
             id,
             "a receipted identity resolves from the session's own proof"
@@ -1041,7 +1041,7 @@ fn a_root_lying_about_a_receipted_range_is_still_refused() {
         let mut receipts = PublishReceipts::new();
         let bytes = sample();
         let block_id = store
-            .put_verified(cx, &bytes, &mut receipts)
+            .put_verified(cx, &bytes, None, &mut receipts)
             .expect("stores block");
         let lying = PartitionRoot {
             graph: GraphId(1),
@@ -1134,10 +1134,10 @@ fn receipted_puts_refuse_eid_reuse_as_the_receipt_is_earned() {
         let future_bytes = encode_block(&[future]).expect("encodes");
 
         store
-            .put_verified(cx, &early_bytes, &mut receipts)
+            .put_verified(cx, &early_bytes, None, &mut receipts)
             .expect("the first birth is lawful");
         assert!(matches!(
-            store.put_verified(cx, &future_bytes, &mut receipts),
+            store.put_verified(cx, &future_bytes, None, &mut receipts),
             Err(StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
                 eid: EId(10),
                 ..
@@ -1181,5 +1181,214 @@ fn a_root_at_the_wrong_identity_is_refused() {
                 RootError::IdentityMismatch { .. }
             ))
         ));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Block-hosted edge property patches (fgdb-yqor increment 2)
+// ---------------------------------------------------------------------------
+
+/// The writer seals an FGSP patch beside any block whose entries carry
+/// properties, the store admits the pair through the root, and a reopen
+/// re-proves the joint bijection — while a root over a propertied block whose
+/// patch was never stored FAILS CLOSED at the unreachable patch.
+#[test]
+fn a_propertied_block_admits_only_with_its_patch_reachable() {
+    let dir = scratch_dir("propertied-admission");
+    under_lab(0x9a_01, move |cx| {
+        use fgdb_delta_types::{DeltaRow, PropertyKeyId};
+        use fgdb_strata::writer::BlockWriter;
+        use fgdb_types::CanonicalScalar;
+        use fgdb_types::ids::{BranchId, GraphId};
+
+        let keys = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        for vid in [1u128, 2, 3] {
+            writer
+                .apply(
+                    keys,
+                    CommitSeq(1),
+                    &DeltaRow::CreateVertex {
+                        vid: VId(vid),
+                        birth_ordinal: vid as u64,
+                        labels: vec![],
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("vertex folds");
+        }
+        writer
+            .apply(
+                keys,
+                CommitSeq(2),
+                &DeltaRow::CreateEdge {
+                    eid: EId(10),
+                    birth_ordinal: 10,
+                    src: VId(1),
+                    relation: REL,
+                    dst: VId(2),
+                    canonical_key: None,
+                    props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))],
+                    valid_time: None,
+                },
+            )
+            .expect("propertied edge folds");
+        writer
+            .apply(
+                keys,
+                CommitSeq(2),
+                &DeltaRow::CreateEdge {
+                    eid: EId(11),
+                    birth_ordinal: 11,
+                    src: VId(1),
+                    relation: REL,
+                    dst: VId(3),
+                    canonical_key: None,
+                    props: vec![],
+                    valid_time: None,
+                },
+            )
+            .expect("bare edge folds");
+        let (root, blocks, patches) = writer.publish(keys, CommitSeq(2)).expect("publishes");
+
+        let propertied = blocks
+            .iter()
+            .find(|block| block.property_patch.is_some())
+            .expect("the propertied entry forced a hosted patch");
+        let hosted = propertied.property_patch.as_ref().expect("present");
+        let rows = fgdb_strata::edge_props::decode_property_patch(&hosted.bytes)
+            .expect("the sealed patch decodes");
+        assert_eq!(
+            rows,
+            vec![vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))]],
+            "the patch carries exactly the propertied entry's list"
+        );
+
+        // WITHOUT the patch stored, the root is refused at the unreachable
+        // patch — reachability is root -> block -> patch.
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+        for block in &blocks {
+            store.put(cx, &block.bytes).expect("stores the block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(cx, &patch.bytes)
+                .expect("stores vertex patch");
+        }
+        assert!(
+            matches!(
+                store.put_root(cx, &root),
+                Err(StoreError::BlockPatchLoad { .. })
+            ),
+            "an unreachable hosted patch must refuse the root"
+        );
+
+        // With the patch durable, admission and a fresh reopen both hold.
+        store
+            .put_edge_property_patch(cx, &hosted.bytes)
+            .expect("stores the hosted patch");
+        let root_id = store.put_root(cx, &root).expect("root admits");
+        let (_, reopened_blocks, _) = store.reopen(cx, root_id).expect("reopens");
+        let total: usize = reopened_blocks.iter().map(Vec::len).sum();
+        assert_eq!(total, 2, "both edges survive the round trip");
+    });
+}
+
+/// A tombstone RESTATES the properties: after a delete, the superseding
+/// statement's block hosts a patch carrying the same list, so pre-retirement
+/// snapshots keep answering them.
+#[test]
+fn a_tombstone_restates_the_properties_in_its_own_patch() {
+    let dir = scratch_dir("tombstone-props");
+    under_lab(0x9a_02, move |cx| {
+        use fgdb_delta_types::{DeltaRow, PropertyKeyId};
+        use fgdb_strata::writer::BlockWriter;
+        use fgdb_types::CanonicalScalar;
+        use fgdb_types::ids::{BranchId, GraphId};
+
+        let keys = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        for vid in [1u128, 2] {
+            writer
+                .apply(
+                    keys,
+                    CommitSeq(1),
+                    &DeltaRow::CreateVertex {
+                        vid: VId(vid),
+                        birth_ordinal: vid as u64,
+                        labels: vec![],
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("vertex folds");
+        }
+        writer
+            .apply(
+                keys,
+                CommitSeq(2),
+                &DeltaRow::CreateEdge {
+                    eid: EId(10),
+                    birth_ordinal: 10,
+                    src: VId(1),
+                    relation: REL,
+                    dst: VId(2),
+                    canonical_key: None,
+                    props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1))],
+                    valid_time: None,
+                },
+            )
+            .expect("creates");
+        writer.seal(keys).expect("seals the creation");
+        writer
+            .apply(
+                keys,
+                CommitSeq(5),
+                &DeltaRow::DeleteEdge {
+                    eid: EId(10),
+                    before_version: ObjectId([0u8; 32]),
+                },
+            )
+            .expect("retires");
+        let (root, blocks, patches) = writer.publish(keys, CommitSeq(5)).expect("publishes");
+
+        let tombstone_block = blocks
+            .iter()
+            .find(|block| {
+                fgdb_strata::decode_block(&block.bytes)
+                    .expect("decodes")
+                    .iter()
+                    .any(|entry| entry.retired_at == Some(CommitSeq(5)))
+            })
+            .expect("the tombstone sealed into its own block");
+        let hosted = tombstone_block
+            .property_patch
+            .as_ref()
+            .expect("the tombstone RESTATES the properties");
+        assert_eq!(
+            fgdb_strata::edge_props::decode_property_patch(&hosted.bytes).expect("decodes"),
+            vec![vec![(PropertyKeyId(7), CanonicalScalar::Int(1))]],
+        );
+
+        // Full round trip: store everything, admit, reopen.
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+        for block in &blocks {
+            if let Some(patch) = &block.property_patch {
+                store
+                    .put_edge_property_patch(cx, &patch.bytes)
+                    .expect("stores hosted patch");
+            }
+            store.put(cx, &block.bytes).expect("stores block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(cx, &patch.bytes)
+                .expect("stores vertex patch");
+        }
+        let root_id = store.put_root(cx, &root).expect("root admits");
+        store
+            .reopen(cx, root_id)
+            .expect("the history reopens whole");
     });
 }

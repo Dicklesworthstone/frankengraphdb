@@ -49,6 +49,9 @@
 //! question this slice has no business answering. What is here is the smallest
 //! honest thing: bytes on disk, addressed by identity, verified on read.
 
+use crate::edge_props::{
+    EdgePropertyPatchVersion, read_property_patch, validate_block_patch_consistency,
+};
 use crate::vertex::{VertexPatchVersion, VertexRow, decode_patch, vertex_patch_id};
 use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
 use fgdb_types::context::CommitCx;
@@ -171,6 +174,7 @@ enum StoredObjectKind {
     Block,
     Root,
     VertexPatch,
+    EdgePropertyPatch,
 }
 
 impl StoredObjectKind {
@@ -184,6 +188,9 @@ impl StoredObjectKind {
             Self::Block => block_id(k_oid, namespace, bytes),
             Self::Root => crate::root::root_id(k_oid, namespace, bytes),
             Self::VertexPatch => crate::vertex::vertex_patch_id(k_oid, namespace, bytes),
+            Self::EdgePropertyPatch => {
+                crate::edge_props::property_patch_id(k_oid, namespace, bytes)
+            }
         }
     }
 }
@@ -252,6 +259,17 @@ pub enum StoreError {
         at: usize,
         error: Box<StoreError>,
     },
+    /// The stored bytes are not a lawful edge property patch, or a block and
+    /// its hosted patch violated the locator bijection (fgdb-yqor).
+    MalformedEdgePropertyPatch(crate::edge_props::EdgePropertyPatchError),
+    /// Loading a block's hosted edge property patch failed at the storage
+    /// boundary — the block-hosted counterpart of
+    /// [`StoreError::RootBlockLoad`], reached through the block rather than
+    /// the root.
+    BlockPatchLoad {
+        at: usize,
+        error: Box<StoreError>,
+    },
 }
 
 impl core::fmt::Display for StoreError {
@@ -284,6 +302,12 @@ impl core::fmt::Display for StoreError {
             Self::RootPatchLoad { at, error } => {
                 write!(f, "loading root vertex patch {at}: {error}")
             }
+            Self::MalformedEdgePropertyPatch(error) => {
+                write!(f, "stored edge property patch is malformed: {error}")
+            }
+            Self::BlockPatchLoad { at, error } => {
+                write!(f, "loading block {at}'s hosted property patch: {error}")
+            }
         }
     }
 }
@@ -295,9 +319,10 @@ impl core::error::Error for StoreError {
             Self::Malformed(error) => Some(error),
             Self::MalformedRoot(error) => Some(error),
             Self::MalformedPatch(error) => Some(error),
-            Self::RootBlockLoad { error, .. } | Self::RootPatchLoad { error, .. } => {
-                Some(error.as_ref())
-            }
+            Self::MalformedEdgePropertyPatch(error) => Some(error),
+            Self::RootBlockLoad { error, .. }
+            | Self::RootPatchLoad { error, .. }
+            | Self::BlockPatchLoad { error, .. } => Some(error.as_ref()),
             Self::ObjectTooLarge { .. }
             | Self::IdentityMismatch { .. }
             | Self::DamagedExisting { .. }
@@ -755,6 +780,26 @@ impl BlockStore {
             .map(VertexPatchVersion)
     }
 
+    /// Store a block-hosted edge property patch's bytes (fgdb-yqor) — the
+    /// same derived-identity discipline, under the FGSP object kind. The
+    /// caller stores the patch BEFORE the block's root is published, or
+    /// admission fails closed on the unreachable patch.
+    pub fn put_edge_property_patch(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+    ) -> Result<EdgePropertyPatchVersion, StoreError> {
+        self.put_object_with_steps(
+            StoredObjectKind::EdgePropertyPatch,
+            cx,
+            bytes,
+            None,
+            || {},
+            || {},
+        )
+        .map(EdgePropertyPatchVersion)
+    }
+
     /// Load the raw bytes of a vertex patch, verifying identity but not
     /// decoding — the patch counterpart of [`BlockStore::get_bytes`].
     pub fn get_patch_bytes(
@@ -796,8 +841,33 @@ impl BlockStore {
                 at,
                 error: Box::new(error),
             })?;
-        crate::root::resolve_block_ref(&self.k_oid, self.namespace, at, reference, &bytes)
-            .map_err(StoreError::MalformedRoot)
+        let entries =
+            crate::root::resolve_block_ref(&self.k_oid, self.namespace, at, reference, &bytes)
+                .map_err(StoreError::MalformedRoot)?;
+        // The block's hosted property patch is part of the block's truth
+        // (fgdb-yqor): reachability is root -> block -> patch, so admitting
+        // the block admits its patch — identity, format, and the joint
+        // locator bijection, with both objects in hand.
+        let (_, patch) =
+            crate::decode_block_with_properties(&bytes).map_err(StoreError::Malformed)?;
+        if let Some((patch_id, locators)) = patch {
+            let patch_bytes = self
+                .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                .map_err(|error| StoreError::BlockPatchLoad {
+                    at,
+                    error: Box::new(error),
+                })?;
+            let rows = read_property_patch(
+                &self.k_oid,
+                self.namespace,
+                &patch_bytes,
+                EdgePropertyPatchVersion(patch_id),
+            )
+            .map_err(StoreError::MalformedEdgePropertyPatch)?;
+            validate_block_patch_consistency(&locators, rows.len())
+                .map_err(StoreError::MalformedEdgePropertyPatch)?;
+        }
+        Ok(entries)
     }
 
     /// Prove every block named by an already-structural root while retaining only
@@ -1003,15 +1073,49 @@ impl BlockStore {
         &self,
         cx: &CommitCx,
         bytes: &[u8],
+        patch_bytes: Option<&[u8]>,
         receipts: &mut PublishReceipts,
     ) -> Result<DeltaBlockVersion, StoreError> {
         let id = block_id(&self.k_oid, self.namespace, bytes);
         if receipts.spans.contains_key(&id) {
             return Ok(DeltaBlockVersion(id));
         }
+        // The hosted patch becomes durable BEFORE the block earns a receipt,
+        // so a receipted block's patch is never unreachable (fgdb-yqor).
+        if let Some(patch_bytes) = patch_bytes {
+            self.put_edge_property_patch(cx, patch_bytes)?;
+        }
         let stored = self.put(cx, bytes)?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
-        let entries = decode_block(bytes).map_err(StoreError::Malformed)?;
+        let (entries, declared_patch) =
+            crate::decode_block_with_properties(bytes).map_err(StoreError::Malformed)?;
+        if let Some((patch_id, locators)) = declared_patch {
+            // Prove the declared patch from the bytes in hand, or from disk
+            // when the caller supplied none — either way the receipt is
+            // earned only after the joint bijection law holds.
+            let owned;
+            let proof_bytes: &[u8] = match patch_bytes {
+                Some(bytes) => bytes,
+                None => {
+                    owned = self
+                        .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                        .map_err(|error| StoreError::BlockPatchLoad {
+                            at: receipts.spans.len(),
+                            error: Box::new(error),
+                        })?;
+                    &owned
+                }
+            };
+            let rows = read_property_patch(
+                &self.k_oid,
+                self.namespace,
+                proof_bytes,
+                EdgePropertyPatchVersion(patch_id),
+            )
+            .map_err(StoreError::MalformedEdgePropertyPatch)?;
+            validate_block_patch_consistency(&locators, rows.len())
+                .map_err(StoreError::MalformedEdgePropertyPatch)?;
+        }
         receipts
             .validator
             .observe_block(receipts.spans.len(), &entries)

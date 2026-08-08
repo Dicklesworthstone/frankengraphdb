@@ -1031,7 +1031,15 @@ impl Database {
         // per commit with no new information in it.
         for block in &blocks {
             self.store
-                .put_verified(cx, &block.bytes, &mut self.receipts)
+                .put_verified(
+                    cx,
+                    &block.bytes,
+                    block
+                        .property_patch
+                        .as_ref()
+                        .map(|patch| patch.bytes.as_slice()),
+                    &mut self.receipts,
+                )
                 .map_err(RebuildError::from)?;
         }
         for patch in &patches {
@@ -1501,6 +1509,9 @@ async fn rebuild(
             error,
         })?;
     for block in &blocks {
+        if let Some(patch) = &block.property_patch {
+            store.put_edge_property_patch(cx, &patch.bytes)?;
+        }
         store.put(cx, &block.bytes)?;
     }
     for patch in &patches {

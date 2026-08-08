@@ -27,10 +27,15 @@
 //! reusable here. Graph-wide allocator authority remains upstream of a
 //! partition-local writer.
 
+use crate::edge_props::{
+    EdgePropertyPatchError, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, encode_property_patch,
+    property_patch_id,
+};
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
 use crate::vertex::{VertexPatchError, VertexRow, encode_patch, span_of_rows, vertex_patch_id};
 use crate::{
-    AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES, block_id, encode_block, validate_entry,
+    AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES, block_id, encode_block,
+    encode_block_with_properties, validate_entry,
 };
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::CanonicalScalar;
@@ -38,13 +43,26 @@ use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A sealed block: its identity, its bytes, and the range it covers.
+/// A sealed block: its identity, its bytes, the range it covers, and — when
+/// any of its entries carry properties — the hosted edge property patch the
+/// block's locator column references (fgdb-yqor).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedBlock {
     pub block_id: ObjectId,
     pub bytes: Vec<u8>,
     pub first_seq: CommitSeq,
     pub last_seq: CommitSeq,
+    /// The FGSP object this block's locators reference, if any. The caller
+    /// must make it durable BEFORE the root that names the block, or root
+    /// admission fails closed on the unreachable patch.
+    pub property_patch: Option<SealedPropertyPatch>,
+}
+
+/// A sealed edge property patch riding beside its hosting block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedPropertyPatch {
+    pub patch_id: ObjectId,
+    pub bytes: Vec<u8>,
 }
 
 impl SealedBlock {
@@ -56,6 +74,23 @@ impl SealedBlock {
             last_seq: self.last_seq,
         }
     }
+}
+
+/// One staged adjacency statement: the entry and its properties.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingStatement {
+    entry: AdjacencyEntry,
+    props: EdgePropertyRow,
+}
+
+/// The live-map record of one edge (see the `live` field's doc).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiveEdge {
+    src: VId,
+    relation: RelationId,
+    dst: VId,
+    created_at: CommitSeq,
+    props: EdgePropertyRow,
 }
 
 /// One vertex content transition the fold applies (fgdb-stb6).
@@ -145,6 +180,8 @@ pub enum WriteError {
     /// Sealing produced bytes the vertex patch encoder refused, or a row's
     /// shape violated the patch format's canonical laws at fold time.
     Patch(VertexPatchError),
+    /// Sealing produced bytes the edge property patch encoder refused.
+    EdgeProps(EdgePropertyPatchError),
     /// Sealing produced bytes the block encoder refused.
     Block(BlockError),
     /// The finished root violated a publication or structural law.
@@ -183,6 +220,7 @@ impl core::fmt::Display for WriteError {
                 write!(f, "vertex identity {vid:?} is permanently spent")
             }
             Self::Patch(error) => write!(f, "vertex sealing: {error}"),
+            Self::EdgeProps(error) => write!(f, "edge property sealing: {error}"),
             Self::Block(error) => write!(f, "sealing: {error}"),
             Self::Root(error) => write!(f, "publishing: {error}"),
         }
@@ -206,10 +244,14 @@ pub struct BlockWriter {
     graph: GraphId,
     branch: BranchId,
     partition: u64,
-    /// Entries not yet sealed, keyed by the complete stable adjacency identity.
-    pending: BTreeMap<(VId, RelationId, VId, EId), AdjacencyEntry>,
-    /// `(src, relation, dst, created_at)` for every edge currently live.
-    live: BTreeMap<EId, (VId, RelationId, VId, CommitSeq)>,
+    /// Entries not yet sealed, keyed by the complete stable adjacency
+    /// identity, each with the properties its statement carries.
+    pending: BTreeMap<(VId, RelationId, VId, EId), PendingStatement>,
+    /// The full statement of every edge currently live — endpoints, creation,
+    /// AND properties, because a tombstone must RESTATE the properties so a
+    /// pre-retirement snapshot keeps answering them (fgdb-yqor), exactly as
+    /// the vertex live map remembers rows for the same reason.
+    live: BTreeMap<EId, LiveEdge>,
     /// Every EId admitted while replaying this partition-local writer.
     ///
     /// The graph-wide allocator is enforced before partition routing; this is a
@@ -280,7 +322,9 @@ impl BlockWriter {
     /// maintained for retirement. A second fold of the same stream beside
     /// this one would be two opinions about one fact.
     pub fn live_edge(&self, eid: EId) -> Option<(VId, RelationId, VId, CommitSeq)> {
-        self.live.get(&eid).copied()
+        self.live
+            .get(&eid)
+            .map(|edge| (edge.src, edge.relation, edge.dst, edge.created_at))
     }
 
     /// Is `vid` live in this fold?
@@ -294,7 +338,7 @@ impl BlockWriter {
     pub fn live_incident_edges(&self, vid: VId) -> Vec<EId> {
         self.live
             .iter()
-            .filter(|(_, (src, _, dst, _))| *src == vid || *dst == vid)
+            .filter(|(_, edge)| edge.src == vid || edge.dst == vid)
             .map(|(eid, _)| *eid)
             .collect()
     }
@@ -326,6 +370,7 @@ impl BlockWriter {
                 src,
                 relation,
                 dst,
+                props,
                 ..
             } => {
                 if self.live.contains_key(eid) {
@@ -344,8 +389,18 @@ impl BlockWriter {
                         created_at: seq,
                         retired_at: None,
                     },
+                    props.clone(),
                 )?;
-                self.live.insert(*eid, (*src, *relation, *dst, seq));
+                self.live.insert(
+                    *eid,
+                    LiveEdge {
+                        src: *src,
+                        relation: *relation,
+                        dst: *dst,
+                        created_at: seq,
+                        props: props.clone(),
+                    },
+                );
                 let was_fresh = self.spent.insert(*eid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
@@ -554,28 +609,32 @@ impl BlockWriter {
         &self,
         eid: EId,
         seq: CommitSeq,
-    ) -> Result<Option<AdjacencyEntry>, WriteError> {
-        let &(src, relation, dst, created_at) =
-            self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
-        if created_at == seq {
+    ) -> Result<Option<(AdjacencyEntry, EdgePropertyRow)>, WriteError> {
+        let edge = self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
+        if edge.created_at == seq {
             let is_same_run = self
                 .pending
-                .get(&(src, relation, dst, eid))
-                .is_some_and(|pending| pending.created_at == seq && pending.retired_at.is_none());
+                .get(&(edge.src, edge.relation, edge.dst, eid))
+                .is_some_and(|pending| {
+                    pending.entry.created_at == seq && pending.entry.retired_at.is_none()
+                });
             if is_same_run {
                 return Ok(None);
             }
         }
         let entry = AdjacencyEntry {
-            src,
-            relation,
-            dst,
+            src: edge.src,
+            relation: edge.relation,
+            dst: edge.dst,
             eid,
-            created_at,
+            created_at: edge.created_at,
             retired_at: Some(seq),
         };
         validate_entry(0, &entry).map_err(WriteError::Block)?;
-        Ok(Some(entry))
+        // THE TOMBSTONE RESTATES THE PROPERTIES: supersede replaces the whole
+        // statement, so a tombstone without them would erase the edge's
+        // properties from every pre-retirement snapshot (fgdb-yqor).
+        Ok(Some((entry, edge.props.clone())))
     }
 
     fn retire(
@@ -584,12 +643,12 @@ impl BlockWriter {
         eid: EId,
         seq: CommitSeq,
     ) -> Result<(), WriteError> {
-        let Some(entry) = self.retirement_entry(eid, seq)? else {
+        let Some((entry, props)) = self.retirement_entry(eid, seq)? else {
             // The same-commit fold: created and deleted in one commit, so the
             // exact durable image is no entry at all.
-            let &(src, relation, dst, _) =
-                self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
-            let removed_pending = self.pending.remove(&(src, relation, dst, eid));
+            let edge = self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
+            let key = (edge.src, edge.relation, edge.dst, eid);
+            let removed_pending = self.pending.remove(&key);
             debug_assert!(
                 removed_pending.is_some(),
                 "the fold requires the pending creation it was proven on"
@@ -598,7 +657,7 @@ impl BlockWriter {
             debug_assert!(removed_live.is_some(), "preflighted live edge disappeared");
             return Ok(());
         };
-        self.push(keys, entry)?;
+        self.push(keys, entry, props)?;
         let removed = self.live.remove(&eid);
         debug_assert!(removed.is_some(), "preflighted live edge disappeared");
         Ok(())
@@ -614,16 +673,18 @@ impl BlockWriter {
         &mut self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
         entry: AdjacencyEntry,
+        props: EdgePropertyRow,
     ) -> Result<(), WriteError> {
         validate_entry(0, &entry).map_err(WriteError::Block)?;
         let key = (entry.src, entry.relation, entry.dst, entry.eid);
+        let statement = PendingStatement { entry, props };
         match self.pending.get(&key) {
-            Some(existing) if existing.created_at == entry.created_at => {
-                self.pending.insert(key, entry);
+            Some(existing) if existing.entry.created_at == entry.created_at => {
+                self.pending.insert(key, statement);
             }
             Some(_) => {
                 self.seal(keys)?;
-                self.pending.insert(key, entry);
+                self.pending.insert(key, statement);
             }
             None if self.pending.len()
                 >= usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX) =>
@@ -631,10 +692,10 @@ impl BlockWriter {
                 // This is a format ceiling, not an adaptive seal policy: allowing
                 // one more row would create a block no conforming reader accepts.
                 self.seal(keys)?;
-                self.pending.insert(key, entry);
+                self.pending.insert(key, statement);
             }
             None => {
-                self.pending.insert(key, entry);
+                self.pending.insert(key, statement);
             }
         }
         Ok(())
@@ -651,23 +712,73 @@ impl BlockWriter {
         if self.pending.is_empty() {
             return Ok(None);
         }
-        let mut by_descriptor: BTreeMap<(VId, RelationId), Vec<AdjacencyEntry>> = BTreeMap::new();
-        for entry in self.pending.values().copied() {
+        let mut by_descriptor: BTreeMap<(VId, RelationId), Vec<PendingStatement>> = BTreeMap::new();
+        for statement in self.pending.values().cloned() {
             by_descriptor
-                .entry((entry.src, entry.relation))
+                .entry((statement.entry.src, statement.entry.relation))
                 .or_default()
-                .push(entry);
+                .push(statement);
         }
         let mut sealed = Vec::with_capacity(by_descriptor.len());
-        for entries in by_descriptor.into_values() {
-            let bytes = encode_block(&entries).map_err(WriteError::Block)?;
-            let (first_seq, last_seq) = span_of(&entries).expect("non-empty");
-            sealed.push(SealedBlock {
-                block_id: block_id(keys.0, keys.1, &bytes),
-                bytes,
-                first_seq,
-                last_seq,
-            });
+        for statements in by_descriptor.into_values() {
+            // The locator addresses at most MAX_PROPERTY_PATCH_ROWS propertied
+            // entries per block — a FORMAT ceiling, so a descriptor run whose
+            // propertied count exceeds it splits into consecutive blocks,
+            // exactly as the entry-count ceiling splits a pending run.
+            let ceiling = usize::try_from(MAX_PROPERTY_PATCH_ROWS).unwrap_or(usize::MAX);
+            let mut chunk: Vec<PendingStatement> = Vec::new();
+            let mut chunk_propertied = 0usize;
+            let mut chunks: Vec<Vec<PendingStatement>> = Vec::new();
+            for statement in statements {
+                let propertied = usize::from(!statement.props.is_empty());
+                if chunk_propertied + propertied > ceiling {
+                    chunks.push(std::mem::take(&mut chunk));
+                    chunk_propertied = 0;
+                }
+                chunk_propertied += propertied;
+                chunk.push(statement);
+            }
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+            for statements in chunks {
+                let entries: Vec<AdjacencyEntry> =
+                    statements.iter().map(|statement| statement.entry).collect();
+                let mut locators = Vec::with_capacity(statements.len());
+                let mut rows: Vec<EdgePropertyRow> = Vec::new();
+                for statement in &statements {
+                    if statement.props.is_empty() {
+                        locators.push(0u8);
+                    } else {
+                        rows.push(statement.props.clone());
+                        locators.push(u8::try_from(rows.len()).expect("chunked to the ceiling"));
+                    }
+                }
+                let (bytes, property_patch) = if rows.is_empty() {
+                    (encode_block(&entries).map_err(WriteError::Block)?, None)
+                } else {
+                    let patch_bytes =
+                        encode_property_patch(&rows).map_err(WriteError::EdgeProps)?;
+                    let patch_id = property_patch_id(keys.0, keys.1, &patch_bytes);
+                    let bytes = encode_block_with_properties(&entries, patch_id, &locators)
+                        .map_err(WriteError::Block)?;
+                    (
+                        bytes,
+                        Some(SealedPropertyPatch {
+                            patch_id,
+                            bytes: patch_bytes,
+                        }),
+                    )
+                };
+                let (first_seq, last_seq) = span_of(&entries).expect("non-empty");
+                sealed.push(SealedBlock {
+                    block_id: block_id(keys.0, keys.1, &bytes),
+                    bytes,
+                    first_seq,
+                    last_seq,
+                    property_patch,
+                });
+            }
         }
         // Roots publish in nondecreasing frontier order even when descriptor
         // keys sort differently from the commit stream that populated them.
@@ -822,7 +933,7 @@ impl BlockWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockWriter, WriteError};
+    use super::{BlockWriter, PendingStatement, WriteError};
     use crate::{AdjacencyEntry, BlockError};
     use fgdb_delta_types::RelationId;
     use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -839,13 +950,16 @@ mod tests {
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         writer.pending.insert(
             (VId(1), RelationId(1), VId(2), EId(10)),
-            AdjacencyEntry {
-                src: VId(1),
-                relation: RelationId(1),
-                dst: VId(2),
-                eid: EId(10),
-                created_at: CommitSeq(0),
-                retired_at: None,
+            PendingStatement {
+                entry: AdjacencyEntry {
+                    src: VId(1),
+                    relation: RelationId(1),
+                    dst: VId(2),
+                    eid: EId(10),
+                    created_at: CommitSeq(0),
+                    retired_at: None,
+                },
+                props: vec![],
             },
         );
 
