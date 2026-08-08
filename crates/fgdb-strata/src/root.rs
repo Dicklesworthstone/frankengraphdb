@@ -390,7 +390,10 @@ impl core::fmt::Display for RootError {
                 write!(f, "vertex patch {at} references the empty stream")
             }
             Self::ImplausiblePatchCount { declared } => {
-                write!(f, "a root naming {declared} vertex patches is not readable here")
+                write!(
+                    f,
+                    "a root naming {declared} vertex patches is not readable here"
+                )
             }
             Self::PatchRangeMismatch {
                 at,
@@ -512,9 +515,8 @@ pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
 pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
     validate_root(root)?;
 
-    let mut out = Vec::with_capacity(
-        HEADER_LEN + (root.blocks.len() + root.vertex_patches.len()) * REF_LEN,
-    );
+    let mut out =
+        Vec::with_capacity(HEADER_LEN + (root.blocks.len() + root.vertex_patches.len()) * REF_LEN);
     out.extend_from_slice(&ROOT_MAGIC);
     out.extend_from_slice(&ROOT_FORMAT_V2.to_be_bytes());
     out.extend_from_slice(&root.graph.0.to_be_bytes());
@@ -946,7 +948,6 @@ pub(crate) fn resolve_patch_ref(
 #[derive(Debug, Default)]
 pub(crate) struct VertexHistoryValidator {
     rows: std::collections::BTreeMap<VId, crate::vertex::VertexRow>,
-    seen: usize,
 }
 
 impl VertexHistoryValidator {
@@ -957,7 +958,6 @@ impl VertexHistoryValidator {
         rows: &[crate::vertex::VertexRow],
     ) -> Result<(), RootError> {
         for row in rows {
-            self.seen += 1;
             if let Some(existing) = self.rows.get(&row.vid) {
                 let mut expected_birth = existing.clone();
                 let mut found_birth = row.clone();
@@ -984,37 +984,6 @@ impl VertexHistoryValidator {
         let _ = patch_at;
         Ok(())
     }
-
-    fn into_canonical(
-        self,
-    ) -> (
-        std::collections::BTreeMap<VId, crate::vertex::VertexRow>,
-        usize,
-    ) {
-        let superseded = self.seen - self.rows.len();
-        (self.rows, superseded)
-    }
-}
-
-/// Validate and collapse a patch publication history to one row per VId.
-///
-/// The mirror of [`collapse_edge_history`]: a later patch may restate one
-/// exact row to add its retirement and the later statement wins; nothing may
-/// change the birth itself.
-pub(crate) fn collapse_vertex_history(
-    patches: &[Vec<crate::vertex::VertexRow>],
-) -> Result<
-    (
-        std::collections::BTreeMap<VId, crate::vertex::VertexRow>,
-        usize,
-    ),
-    RootError,
-> {
-    let mut validator = VertexHistoryValidator::default();
-    for (patch_at, rows) in patches.iter().enumerate() {
-        validator.observe_patch(patch_at, rows)?;
-    }
-    Ok(validator.into_canonical())
 }
 
 /// Which of a root's vertex patches can contribute to a read at `as_of` —

@@ -958,7 +958,8 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
                 // ACROSS blocks, the case the cumulative validator must accept.
                 writer.seal(strata_keys).expect("seals");
             }
-            let (root, blocks, _patches) = writer.clone().publish(strata_keys, seq).expect("publishes");
+            let (root, blocks, _patches) =
+                writer.clone().publish(strata_keys, seq).expect("publishes");
 
             for block in &blocks {
                 plain.put(cx, &block.bytes).expect("plain put");

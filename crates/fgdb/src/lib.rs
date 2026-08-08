@@ -840,8 +840,12 @@ impl Database {
         // decode from the exact bytes `put_patch_verified` just fsynced.
         let mut fresh_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> =
             std::collections::BTreeMap::new();
-        let carried_patch_ids: std::collections::BTreeSet<ObjectId> =
-            self.snapshot.patch_refs.iter().map(|r| r.patch_id).collect();
+        let carried_patch_ids: std::collections::BTreeSet<ObjectId> = self
+            .snapshot
+            .patch_refs
+            .iter()
+            .map(|r| r.patch_id)
+            .collect();
         for reference in &root.vertex_patches {
             if carried_patch_ids.contains(&reference.patch_id)
                 || fresh_patches.contains_key(&reference.patch_id)

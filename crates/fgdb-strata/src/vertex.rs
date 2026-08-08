@@ -415,11 +415,7 @@ pub fn span_of_rows(rows: &[VertexRow]) -> Option<(CommitSeq, CommitSeq)> {
 /// patches arrive in publication order, a later patch may restate a row to
 /// add its retirement, and the later statement is the truth. The winning row
 /// is then filtered by the tier's one visibility rule.
-pub fn merge_vertex(
-    patches: &[Vec<VertexRow>],
-    vid: VId,
-    as_of: CommitSeq,
-) -> Option<VertexRow> {
+pub fn merge_vertex(patches: &[Vec<VertexRow>], vid: VId, as_of: CommitSeq) -> Option<VertexRow> {
     let mut winner: Option<&VertexRow> = None;
     for rows in patches {
         for row in rows {

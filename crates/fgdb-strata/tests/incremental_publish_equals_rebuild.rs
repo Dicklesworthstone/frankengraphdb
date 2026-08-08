@@ -148,8 +148,7 @@ fn incremental_clone_publish_equals_full_rebuild_at_every_commit_of_every_shape(
                 "shape {name:?}: sealed block bytes diverged at commit {seq}"
             );
             let incr_patch_bytes: Vec<_> = incr_patches.iter().map(|p| &p.bytes).collect();
-            let rebuild_patch_bytes: Vec<_> =
-                rebuild_patches.iter().map(|p| &p.bytes).collect();
+            let rebuild_patch_bytes: Vec<_> = rebuild_patches.iter().map(|p| &p.bytes).collect();
             assert_eq!(
                 incr_patch_bytes, rebuild_patch_bytes,
                 "shape {name:?}: sealed vertex patch bytes diverged at commit {seq}"

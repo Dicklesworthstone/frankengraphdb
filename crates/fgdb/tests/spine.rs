@@ -24,10 +24,10 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError};
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{EId, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::path::{Path, PathBuf};
 
 const KNOWS: RelationId = RelationId(1);
@@ -143,6 +143,68 @@ fn open_write_read_drop_reopen_returns_the_same_graph() {
             root,
             "and the rebuild is deterministic, so it republishes the same root"
         );
+    });
+}
+
+/// **THE VERTEX LAW (fgdb-3xoi): written labels and properties are readable,
+/// and a reopen answers the same.** Until this landed, tier D was adjacency
+/// only and a committed vertex's labels/properties were durable, oracle-
+/// materialized, and unreadable — so this is the law that makes
+/// [`Database::vertex`] real rather than decorative.
+#[test]
+fn written_labels_and_properties_are_readable_and_survive_a_reopen() {
+    let dir = scratch("vertex-props");
+    under_lab(76, move |cx| async move {
+        let cx = &cx;
+        let name_key = PropertyKeyId(7);
+        let born_key = PropertyKeyId(9);
+        let before = {
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(
+                VId(1),
+                vec![LabelId(3), LabelId(5)],
+                vec![
+                    (
+                        name_key,
+                        CanonicalScalar::ucs_basic_text("ada").expect("admissible"),
+                    ),
+                    (born_key, CanonicalScalar::Int(1815)),
+                ],
+            );
+            batch.create_vertex(VId(2), vec![], vec![]);
+            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+            db.write(cx, batch).await.expect("commits");
+
+            let row = db.vertex(VId(1)).expect("the written vertex is readable");
+            assert_eq!(row.labels, vec![LabelId(3), LabelId(5)]);
+            assert_eq!(
+                row.props,
+                vec![
+                    (
+                        name_key,
+                        CanonicalScalar::ucs_basic_text("ada").expect("admissible")
+                    ),
+                    (born_key, CanonicalScalar::Int(1815)),
+                ]
+            );
+            let bare = db.vertex(VId(2)).expect("the bare vertex is readable too");
+            assert!(bare.labels.is_empty() && bare.props.is_empty());
+            assert!(
+                db.vertex(VId(99)).is_none(),
+                "a vertex that was never created has no row"
+            );
+            row
+        };
+
+        // NOTHING crosses this line except `dir` and `keys()`.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(
+            db.vertex(VId(1)).expect("still readable"),
+            before,
+            "the reopened database must answer the same labels and properties"
+        );
+        assert!(db.vertex(VId(99)).is_none());
     });
 }
 
