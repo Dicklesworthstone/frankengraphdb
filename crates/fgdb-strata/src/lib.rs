@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 
 pub mod compact;
+pub mod edge_props;
 pub mod root;
 pub mod store;
 pub mod vertex;
@@ -92,6 +93,14 @@ pub const BLOCK_MAGIC: [u8; 4] = *b"FGSB";
 /// `fgdb-ge6a` (register both formats, and root the partition binding that makes
 /// a database reopenable from its `manifest.root` alone).
 pub const BLOCK_FORMAT_V3: u16 = 3;
+/// Format version. V4 is a breaking bump (§16.6): the reserved property-patch
+/// count becomes meaningful (fgdb-yqor, ruling 2t7q 3B) — when non-zero, the
+/// spans are followed by the patch identities (32 B each) and a one-byte
+/// per-entry `prop_row_ref` locator column. A zero-patch V4 block is
+/// byte-identical to V3 except this version field, which keeps the
+/// byte-economy witnesses' arithmetic intact. V3 is refused by name; no
+/// production database predates V4.
+pub const BLOCK_FORMAT_V4: u16 = 4;
 
 /// Durable object kind for a Tier-D delta block.
 ///
@@ -269,13 +278,19 @@ pub enum BlockError {
     UnsupportedDirection {
         direction: u8,
     },
-    /// The reserved `property_patch_refs[]` count is nonzero, and the patch
-    /// machinery that would make it lawful has not landed
-    /// (fgdb-w3-properties-gou). Fail-closed like an unknown direction: bytes
-    /// claiming a capability this decoder does not have are refused, never
-    /// skipped.
+    /// The property-patch count exceeds what this slice implements: V4 makes
+    /// the reserved count meaningful for AT MOST ONE patch per block
+    /// (fgdb-yqor); the multi-patch arm of ruling 2t7q 3B remains fail-closed
+    /// until a block that needs it exists. Bytes claiming a capability this
+    /// decoder does not have are refused, never skipped.
     PropertyPatchesNotYetImplemented {
         declared: u16,
+    },
+    /// The locator column violates its own canonical law: non-zero locators
+    /// must be exactly `1..=n` in entry order (fgdb-yqor). Carries the entry
+    /// position so the diagnostic names the pair.
+    NonCanonicalLocators {
+        at: usize,
     },
     UnsupportedIdentityCodec {
         column: u8,
@@ -346,8 +361,12 @@ impl core::fmt::Display for BlockError {
             }
             Self::PropertyPatchesNotYetImplemented { declared } => write!(
                 f,
-                "block declares {declared} property patch ref(s); the reserved \
-                 slot is zero until the patch machinery lands"
+                "block declares {declared} property patch refs; this slice \
+                 implements at most one per block"
+            ),
+            Self::NonCanonicalLocators { at } => write!(
+                f,
+                "the locator column violates its 1..=n entry-order law at entry {at}"
             ),
             Self::UnsupportedIdentityCodec { column, codec_id } => write!(
                 f,
@@ -379,6 +398,45 @@ pub const MAX_BLOCK_ENTRIES: u32 = 256;
 /// is describing something other than what a block means, and quietly repairing it
 /// would let two callers store different intents and both be told they succeeded.
 pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
+    encode_block_inner(entries, None)
+}
+
+/// Encode a block that hosts one edge property patch (fgdb-yqor): `patch_id`
+/// names the FGSP object and `locators` carries one byte per entry — 0 for
+/// "no properties", otherwise the 1-based row in the patch, in the bijection
+/// order [`edge_props::validate_locator_sequence`] enforces. The patch itself
+/// is a separate content-addressed object; the joint law is proven at
+/// admission with both in hand.
+pub fn encode_block_with_properties(
+    entries: &[AdjacencyEntry],
+    patch_id: ObjectId,
+    locators: &[u8],
+) -> Result<Vec<u8>, BlockError> {
+    if locators.len() != entries.len() {
+        return Err(BlockError::NonCanonicalLocators {
+            at: locators.len().min(entries.len()),
+        });
+    }
+    let referenced =
+        edge_props::validate_locator_sequence(locators).map_err(|error| match error {
+            edge_props::EdgePropertyPatchError::LocatorBijectionViolation { entry_at, .. } => {
+                BlockError::NonCanonicalLocators { at: entry_at }
+            }
+            _ => BlockError::NonCanonicalLocators { at: 0 },
+        })?;
+    if referenced == 0 {
+        // A patch no entry references is dead weight; a propertyless block is
+        // encoded WITHOUT the section, so there is exactly one byte string
+        // for that meaning (doctrine 4).
+        return Err(BlockError::NonCanonicalLocators { at: 0 });
+    }
+    encode_block_inner(entries, Some((patch_id, locators)))
+}
+
+fn encode_block_inner(
+    entries: &[AdjacencyEntry],
+    patch: Option<(ObjectId, &[u8])>,
+) -> Result<Vec<u8>, BlockError> {
     if entries.len() as u64 > u64::from(MAX_BLOCK_ENTRIES) {
         return Err(BlockError::ImplausibleEntryCount {
             declared: MAX_BLOCK_ENTRIES,
@@ -428,7 +486,7 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
             + spans.len() * VISIBILITY_SPAN_LEN,
     );
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V3.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V4.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     let descriptor = descriptor.unwrap_or(DescriptorKey {
         src: VId(0),
@@ -439,9 +497,9 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
     out.extend_from_slice(&descriptor.relation.0.to_be_bytes());
     out.push(descriptor.direction as u8);
     out.extend_from_slice(&(spans.len() as u32).to_be_bytes());
-    // property_patch_refs[] (fgdb-2t7q ruling 3B): reserved, always zero until
-    // fgdb-w3-properties-gou supplies patch objects — see HEADER_LEN's doc.
-    out.extend_from_slice(&0u16.to_be_bytes());
+    // property_patch_refs[] (fgdb-2t7q ruling 3B, live since V4/fgdb-yqor):
+    // zero or one patch in this slice — see HEADER_LEN's doc.
+    out.extend_from_slice(&u16::from(patch.is_some()).to_be_bytes());
     append_identity_column(&mut out, destinations.descriptor(), &destination_payload);
     append_identity_column(&mut out, edge_ids.descriptor(), &edge_id_payload);
     for span in spans {
@@ -449,6 +507,10 @@ pub fn encode_block(entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
         out.extend_from_slice(&span.end_row.to_be_bytes());
         out.extend_from_slice(&span.created_at.0.to_be_bytes());
         out.extend_from_slice(&span.retired_at.map_or(0, |seq| seq.0).to_be_bytes());
+    }
+    if let Some((patch_id, locators)) = patch {
+        out.extend_from_slice(&patch_id.0);
+        out.extend_from_slice(locators);
     }
     Ok(out)
 }
@@ -524,6 +586,9 @@ struct DecodedFrame {
     destinations: IdentityColumn<VId>,
     edge_ids: IdentityColumn<EId>,
     spans: Vec<VisibilityInterval>,
+    /// The hosted edge property patch, when the block declares one:
+    /// its identity and the per-entry locator column (fgdb-yqor).
+    patch: Option<(ObjectId, Vec<u8>)>,
 }
 
 /// Read the V3 framing and reconstruct its two codec columns.  Counts live in
@@ -534,7 +599,7 @@ fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
         return Err(BlockError::NotABlock);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != BLOCK_FORMAT_V3 {
+    if format != BLOCK_FORMAT_V4 {
         return Err(BlockError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes(bytes[6..10].try_into().expect("fixed header"));
@@ -555,10 +620,9 @@ fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
     };
     let span_count = u32::from_be_bytes(bytes[35..39].try_into().expect("fixed header")) as usize;
     let patch_ref_count = u16::from_be_bytes(bytes[39..41].try_into().expect("fixed header"));
-    if patch_ref_count != 0 {
-        // The slot is real and validated; its nonzero arm is not yet lawful.
-        // Refusing here rather than skipping is what makes the reservation a
-        // contract instead of dead bytes (fgdb-2t7q ruling 3B).
+    if patch_ref_count > 1 {
+        // The ruled shape is a SET; this slice implements at most one patch
+        // per block, and the further arm stays fail-closed (2t7q 3B).
         return Err(BlockError::PropertyPatchesNotYetImplemented {
             declared: patch_ref_count,
         });
@@ -566,6 +630,11 @@ fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
     let mut offset = HEADER_LEN;
     let destinations = read_identity_column::<VId>(bytes, &mut offset, count as usize, 0)?;
     let edge_ids = read_identity_column::<EId>(bytes, &mut offset, count as usize, 1)?;
+    let patch_section = if patch_ref_count == 1 {
+        32usize + count as usize
+    } else {
+        0
+    };
     let expected =
         offset
             .checked_add(span_count.checked_mul(VISIBILITY_SPAN_LEN).ok_or(
@@ -574,6 +643,7 @@ fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
                     found: bytes.len(),
                 },
             )?)
+            .and_then(|sum| sum.checked_add(patch_section))
             .ok_or(BlockError::Truncated {
                 expected: usize::MAX,
                 found: bytes.len(),
@@ -617,11 +687,28 @@ fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
         offset += VISIBILITY_SPAN_LEN;
     }
     validate_spans(&spans, count as usize)?;
+    let patch = if patch_ref_count == 1 {
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&bytes[offset..offset + 32]);
+        let locators = bytes[offset + 32..offset + 32 + count as usize].to_vec();
+        // The locator column's own law holds without the patch in hand; the
+        // joint row-count half is admission's, with both objects resolved.
+        edge_props::validate_locator_sequence(&locators).map_err(|error| match error {
+            edge_props::EdgePropertyPatchError::LocatorBijectionViolation { entry_at, .. } => {
+                BlockError::NonCanonicalLocators { at: entry_at }
+            }
+            _ => BlockError::NonCanonicalLocators { at: 0 },
+        })?;
+        Some((ObjectId(id), locators))
+    } else {
+        None
+    };
     Ok(DecodedFrame {
         descriptor,
         destinations,
         edge_ids,
         spans,
+        patch,
     })
 }
 
@@ -740,6 +827,16 @@ fn read_entry(frame: &DecodedFrame, index: usize) -> AdjacencyEntry {
 /// same reason the chain's `verify` replays through `validate`: one law, checked
 /// wherever a value can enter.
 pub fn decode_block(bytes: &[u8]) -> Result<Vec<AdjacencyEntry>, BlockError> {
+    decode_block_with_properties(bytes).map(|(entries, _)| entries)
+}
+
+/// [`decode_block`], keeping the hosted property-patch reference and locator
+/// column beside the entries (fgdb-yqor). The full format validation runs on
+/// both faces — this one merely does not discard what the block declared.
+#[allow(clippy::type_complexity)]
+pub fn decode_block_with_properties(
+    bytes: &[u8],
+) -> Result<(Vec<AdjacencyEntry>, Option<(ObjectId, Vec<u8>)>), BlockError> {
     let frame = read_header(bytes)?;
     let count = frame.destinations.len();
     let mut out: Vec<AdjacencyEntry> = Vec::with_capacity(count);
@@ -753,7 +850,7 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<AdjacencyEntry>, BlockError> {
         }
         out.push(entry);
     }
-    Ok(out)
+    Ok((out, frame.patch))
 }
 
 /// The neighbours of `src` over `relation` visible at `as_of`, ascending.
