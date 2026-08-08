@@ -249,9 +249,8 @@ fn locator_laws_hold_in_both_directions() {
     // Decoder independence: corrupt the locator bytes in place — the last
     // `entries.len()` bytes of the encoding — into a scramble the encoder
     // cannot emit.
-    let lawful =
-        encode_block_with_properties(0, &entries, patch_id, &[1, 0, 2], &distinct_rows())
-            .expect("lawful encodes");
+    let lawful = encode_block_with_properties(0, &entries, patch_id, &[1, 0, 2], &distinct_rows())
+        .expect("lawful encodes");
     let mut scrambled = lawful.clone();
     let tail = scrambled.len() - 3;
     scrambled[tail..].copy_from_slice(&[2, 0, 1]);
@@ -304,4 +303,21 @@ fn the_joint_bijection_law_needs_both_objects() {
             declared: 2
         })
     );
+}
+
+/// The joint row-count bijection holds at ENCODE too (V5): an encoder whose
+/// locator column references a different number of rows than it was handed is
+/// describing two blocks at once, and is refused before bytes exist.
+#[test]
+fn the_encoder_refuses_rows_that_disagree_with_its_own_locators() {
+    let entries = entries();
+    let patch_id = ObjectId([0xab; 32]);
+    let one_row = &distinct_rows()[..1];
+    assert!(matches!(
+        encode_block_with_properties(0, &entries, patch_id, &[1, 0, 2], one_row),
+        Err(BlockError::HostedRowCount {
+            referenced: 2,
+            declared: 1
+        })
+    ));
 }
