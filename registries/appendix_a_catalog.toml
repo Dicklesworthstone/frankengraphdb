@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3783
+target_count = 3786
 projection_fallback_count = 141
-target_source_assignment_sha256 = "518c566aba8aa436574de845e27ee0242a5b09a9e22eca4263d7ec727bd79521"
+target_source_assignment_sha256 = "918dbfd2e6ef90703567d4983a50d408a7807c476ebcb21541b5963931f2c64e"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -115316,5 +115316,79 @@ row_id = "a20:target:field-local-restore-ready-certificate-one-digest-signer-loc
 target_row_id = "a20:field:local-restore-ready-certificate-one-digest-signer-lock-ref"
 slice_id = "a20"
 source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-domain"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0001
+stable_name = "domain"
+exact_wire_type = "ImportedCertificateDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "canonical imported certificate authority-domain header naming the source authority group this leaf was exported from (a01:1400); comparison-only wire record carried by value, never a local reachability edge (a01:1396)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-domain"
+target_row_id = "a01:field:export-leaf-t-domain"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.domain|domain"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:remote-retention-release-request-certificate-one-digest-signer-lock-ref"
+containing_schema = "RemoteRetentionReleaseRequestCertificate"
+field_tag = 0x0007
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateSignerLock named by this field; retained while the request certificate is retained, and order 12 <= 30 keeps the edge backward-only (a01:1404); tag follows the landed dense sequence rather than the source ordinal, whose slot 0x0006 was released to quorum_signatures before this member was landable (contestable, recorded on fgdb-eik0)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a01:target:field-remote-retention-release-request-certificate-one-digest-signer-lock-ref"
+target_row_id = "a01:field:remote-retention-release-request-certificate-one-digest-signer-lock-ref"
+slice_id = "a01"
+source_key = "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
+containing_schema = "RemoteRetentionReleaseAckCertificate"
+field_tag = 0x0009
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 36
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateSignerLock named by this field; retained while the ack certificate is retained, and order 12 <= 36 keeps the edge backward-only (a01:1404); tag follows the landed dense sequence rather than the source ordinal, whose slot 0x0008 was released to quorum_signatures before this member was landable (contestable, recorded on fgdb-eik0)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a01:target:field-remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
+target_row_id = "a01:field:remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
+slice_id = "a01"
+source_key = "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
 target_kind = "field"
 definition_status = "declared"

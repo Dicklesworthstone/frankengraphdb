@@ -10075,6 +10075,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "consumer_applied_ref"
                 )
                 | ("RemoteRetentionGrantSpec", "authority_configuration_ref")
+                // fgdb-eik0: the three shorthand members landable once a04
+                // minted CertificateSignerLock and ImportedCertificateDomain;
+                // younger than the historical witness for the same reason.
+                | ("ExportLeaf<T>", "domain")
+                | (
+                    "RemoteRetentionReleaseRequestCertificate",
+                    "one_digest_signer_lock_ref"
+                )
+                | (
+                    "RemoteRetentionReleaseAckCertificate",
+                    "one_digest_signer_lock_ref"
+                )
                 | ("ExportLeaf<T>", "target_identity")
                 | ("ExportLeaf<T>", "local_strong_ref_projection")
                 | ("ExportLeaf<T>", "export_projection_version")
@@ -12173,7 +12185,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 851,
+        pre_erratum.fields.len() + 854,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
@@ -13574,7 +13586,9 @@ fn idr_a01_incomplete_activation_cohort_is_reserved() {
         .iter()
         .filter(|row| incomplete_schemas.contains(row.containing_schema.as_str()))
         .collect();
-    assert_eq!(fields.len(), 114);
+    // 114 -> 116 (fgdb-eik0): the two release certificates' landed
+    // one_digest_signer_lock_ref rows, reserved like the rest of the cohort.
+    assert_eq!(fields.len(), 116);
     assert!(
         fields.iter().all(|row| row.version_status == "reserved"),
         "incomplete A01 durable fields must not be consumable"
