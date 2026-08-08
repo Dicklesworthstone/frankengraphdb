@@ -8,7 +8,7 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_strata::vertex::{
-    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V1, VERTEX_PATCH_MAGIC, VertexPatchError,
+    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V2, VERTEX_PATCH_MAGIC, VertexPatchError,
     VertexPatchVersion, VertexRow, decode_patch, encode_patch, read_patch, vertex_patch_id,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -116,11 +116,11 @@ fn wrong_magic_and_future_format_are_distinct_refusals() {
     );
 
     let mut future = bytes;
-    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V1 + 1).to_le_bytes());
+    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V2 + 1).to_le_bytes());
     assert_eq!(
         decode_patch(&future),
         Err(VertexPatchError::UnsupportedFormat {
-            format: VERTEX_PATCH_FORMAT_V1 + 1
+            format: VERTEX_PATCH_FORMAT_V2 + 1
         }),
         "a newer version of our file is not \"not our file\""
     );
@@ -143,7 +143,7 @@ fn encoder_and_decoder_both_refuse_unsorted_rows() {
     let descending_second = encode_patch(&rows[1..2]).expect("row alone encodes"); // VId(101)
     let mut spliced = Vec::new();
     spliced.extend_from_slice(&VERTEX_PATCH_MAGIC);
-    spliced.extend_from_slice(&VERTEX_PATCH_FORMAT_V1.to_le_bytes());
+    spliced.extend_from_slice(&VERTEX_PATCH_FORMAT_V2.to_le_bytes());
     spliced.extend_from_slice(&2u32.to_le_bytes());
     spliced.extend_from_slice(&descending_first[10..]); // strip 4+2+4 header
     spliced.extend_from_slice(&descending_second[10..]);
@@ -279,4 +279,123 @@ fn visibility_is_the_shared_half_open_interval_rule() {
     assert!(!retired.visible_at(CommitSeq(9)), "half-open upper bound");
     let live = &rows[0]; // created 3, live
     assert!(live.visible_at(CommitSeq(u64::MAX)));
+}
+
+// ---------------------------------------------------------------------------
+// Version chains (fgdb-stb6, FGSV V2)
+// ---------------------------------------------------------------------------
+
+/// Two statements of one vid forming a lawful chain: the successor begins
+/// exactly where the predecessor retired, under the same birth ordinal.
+fn chained_rows() -> Vec<VertexRow> {
+    vec![
+        VertexRow {
+            vid: VId(101),
+            birth_ordinal: 7,
+            created_at: CommitSeq(3),
+            retired_at: Some(CommitSeq(5)),
+            labels: vec![LabelId(11)],
+            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(1))],
+        },
+        VertexRow {
+            vid: VId(101),
+            birth_ordinal: 7,
+            created_at: CommitSeq(5),
+            retired_at: None,
+            labels: vec![LabelId(11), LabelId(23)],
+            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(2))],
+        },
+    ]
+}
+
+#[test]
+fn a_version_chain_round_trips_and_merges_by_visibility() {
+    let rows = chained_rows();
+    let bytes = encode_patch(&rows).expect("a lawful chain encodes");
+    let decoded = decode_patch(&bytes).expect("and decodes");
+    assert_eq!(decoded, rows);
+
+    let patches = vec![decoded];
+    use fgdb_strata::vertex::merge_vertex;
+    assert!(
+        merge_vertex(&patches, VId(101), CommitSeq(2)).is_none(),
+        "nothing is visible before the birth"
+    );
+    assert_eq!(
+        merge_vertex(&patches, VId(101), CommitSeq(4))
+            .expect("the first version answers inside its interval")
+            .props,
+        vec![(PropertyKeyId(41), CanonicalScalar::Int(1))]
+    );
+    assert_eq!(
+        merge_vertex(&patches, VId(101), CommitSeq(5))
+            .expect("the successor answers AT the update sequence — half-open")
+            .props,
+        vec![(PropertyKeyId(41), CanonicalScalar::Int(2))]
+    );
+}
+
+#[test]
+fn a_chain_gap_an_overlap_and_a_live_predecessor_are_refused() {
+    // Gap: predecessor retired at 5, successor begins at 6.
+    let mut gap = chained_rows();
+    gap[1].created_at = CommitSeq(6);
+    assert_eq!(
+        encode_patch(&gap),
+        Err(VertexPatchError::ChainDiscontinuity {
+            at: 1,
+            expected: Some(CommitSeq(5)),
+            found: CommitSeq(6),
+        })
+    );
+
+    // Overlap: successor begins at 4, inside the predecessor's interval.
+    let mut overlap = chained_rows();
+    overlap[1].created_at = CommitSeq(4);
+    assert_eq!(
+        encode_patch(&overlap),
+        Err(VertexPatchError::ChainDiscontinuity {
+            at: 1,
+            expected: Some(CommitSeq(5)),
+            found: CommitSeq(4),
+        })
+    );
+
+    // A live predecessor cannot have a successor at all: that is two
+    // simultaneous versions of one identity.
+    let mut live = chained_rows();
+    live[0].retired_at = None;
+    assert_eq!(
+        encode_patch(&live),
+        Err(VertexPatchError::ChainDiscontinuity {
+            at: 1,
+            expected: None,
+            found: CommitSeq(5),
+        })
+    );
+}
+
+#[test]
+fn chain_birth_drift_is_refused_in_both_directions() {
+    let mut drift = chained_rows();
+    drift[1].birth_ordinal = 8;
+    assert_eq!(
+        encode_patch(&drift),
+        Err(VertexPatchError::ChainBirthDrift { at: 1 })
+    );
+
+    // Decoder independence: each row alone is lawful, so the encoder cannot
+    // emit the drifted pair — splice the two single-row payloads by hand.
+    let lone_first = encode_patch(&drift[0..1]).expect("row alone encodes");
+    let lone_second = encode_patch(&drift[1..2]).expect("row alone encodes");
+    let mut spliced = Vec::new();
+    spliced.extend_from_slice(&VERTEX_PATCH_MAGIC);
+    spliced.extend_from_slice(&VERTEX_PATCH_FORMAT_V2.to_le_bytes());
+    spliced.extend_from_slice(&2u32.to_le_bytes());
+    spliced.extend_from_slice(&lone_first[10..]);
+    spliced.extend_from_slice(&lone_second[10..]);
+    assert_eq!(
+        decode_patch(&spliced),
+        Err(VertexPatchError::ChainBirthDrift { at: 1 })
+    );
 }

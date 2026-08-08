@@ -942,12 +942,14 @@ pub(crate) fn resolve_patch_ref(
     Ok(rows)
 }
 
-/// Cross-patch vertex history: one VId, one immutable birth, at most one
-/// retirement — the vertex counterpart of [`EdgeHistoryValidator`], enforcing
-/// FG-INV-03's finite/newer-first discipline at the identity level.
+/// Cross-patch vertex history: statements keyed by `(vid, created_at)` form
+/// per-vid version CHAINS — contiguous, birth-immutable, with at most one
+/// retirement change per statement (fgdb-stb6). The vertex counterpart of
+/// [`EdgeHistoryValidator`], enforcing FG-INV-03's finite/newer-first
+/// discipline at the identity level.
 #[derive(Debug, Default)]
 pub(crate) struct VertexHistoryValidator {
-    rows: std::collections::BTreeMap<VId, crate::vertex::VertexRow>,
+    rows: std::collections::BTreeMap<(VId, CommitSeq), crate::vertex::VertexRow>,
 }
 
 impl VertexHistoryValidator {
@@ -958,7 +960,10 @@ impl VertexHistoryValidator {
         rows: &[crate::vertex::VertexRow],
     ) -> Result<(), RootError> {
         for row in rows {
-            if let Some(existing) = self.rows.get(&row.vid) {
+            let key = (row.vid, row.created_at);
+            if let Some(existing) = self.rows.get(&key) {
+                // A restatement of one exact version: birth must byte-match,
+                // and the only lawful change is live-to-retired.
                 let mut expected_birth = existing.clone();
                 let mut found_birth = row.clone();
                 expected_birth.retired_at = None;
@@ -976,8 +981,44 @@ impl VertexHistoryValidator {
                         found: row.retired_at,
                     });
                 }
+            } else {
+                // A NEW statement must extend its vid's chain contiguously:
+                // begin exactly where the predecessor retired (a gap is a
+                // resurrection, an overlap is aliasing), keep the birth
+                // ordinal, and — if a later statement already exists — retire
+                // exactly where that successor begins.
+                let predecessor = self
+                    .rows
+                    .range(..key)
+                    .next_back()
+                    .filter(|((vid, _), _)| *vid == row.vid)
+                    .map(|(_, existing)| existing);
+                if let Some(predecessor) = predecessor
+                    && (predecessor.retired_at != Some(row.created_at)
+                        || predecessor.birth_ordinal != row.birth_ordinal)
+                {
+                    return Err(RootError::VertexIdentityMismatch {
+                        vid: row.vid,
+                        conflict: Box::new((predecessor.clone(), row.clone())),
+                    });
+                }
+                let successor = self
+                    .rows
+                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                    .next()
+                    .filter(|((vid, _), _)| *vid == row.vid)
+                    .map(|(_, existing)| existing);
+                if let Some(successor) = successor
+                    && (row.retired_at != Some(successor.created_at)
+                        || successor.birth_ordinal != row.birth_ordinal)
+                {
+                    return Err(RootError::VertexIdentityMismatch {
+                        vid: row.vid,
+                        conflict: Box::new((row.clone(), successor.clone())),
+                    });
+                }
             }
-            self.rows.insert(row.vid, row.clone());
+            self.rows.insert(key, row.clone());
         }
         // `patch_at` names the publication position for future diagnostics;
         // the per-patch structural laws were already proven by decode.

@@ -35,9 +35,18 @@ use fgdb_types::{CanonicalScalar, CommitSeq, ScalarDecodeError, ScalarEncodeErro
 /// `FGSV` — FrankenGraph Strata Vertex patch.
 pub const VERTEX_PATCH_MAGIC: [u8; 4] = *b"FGSV";
 
+/// The retired first cut, refused by name so an old patch reads as "a version
+/// this build does not implement" rather than "not our file".
+///
+/// V2 is a breaking bump (§16.6): V1 admitted exactly one statement per
+/// `VId`, while V2 orders rows by `(vid, created_at)` and admits a version
+/// CHAIN per vid (fgdb-stb6) — bytes a V1 reader would refuse as unsorted.
+/// No production database predates V2; the spine's databases live in per-run
+/// scratch directories.
+pub const VERTEX_PATCH_FORMAT_V1: u16 = 1;
 /// Format version. Durable formats are versioned from day one (§16.6):
 /// additive-minor, breaking-major.
-pub const VERTEX_PATCH_FORMAT_V1: u16 = 1;
+pub const VERTEX_PATCH_FORMAT_V2: u16 = 2;
 
 /// Durable object kind for a Tier-D vertex row patch — part of the §5.1
 /// logical-identity header, separate from the payload framing for the same
@@ -102,8 +111,21 @@ pub enum VertexPatchError {
     /// Bytes remain after the declared rows — a concatenation or damage,
     /// both wrong to read past.
     TrailingBytes { extra: usize },
-    /// Rows are not strictly ascending by `VId`.
+    /// Rows are not strictly ascending by `(vid, created_at)`.
     NonCanonicalOrder { at: usize },
+    /// A same-vid successor does not begin exactly where its predecessor
+    /// retired. Updates are atomic at one sequence, so `created_at` must
+    /// EQUAL the predecessor's `retired_at`: a gap is a resurrection and an
+    /// overlap is two simultaneous versions of one identity — both refused
+    /// (fgdb-stb6).
+    ChainDiscontinuity {
+        at: usize,
+        expected: Option<CommitSeq>,
+        found: CommitSeq,
+    },
+    /// A same-vid successor changed the birth ordinal, which is immutable
+    /// along a version chain.
+    ChainBirthDrift { at: usize },
     /// A row was created at sequence zero, which names the empty stream.
     CreatedAtZero { at: usize },
     /// A row claims to have been retired at or before it was created.
@@ -147,8 +169,20 @@ impl core::fmt::Display for VertexPatchError {
             Self::NonCanonicalOrder { at } => {
                 write!(
                     f,
-                    "rows must be strictly ascending by vid; violated at row {at}"
+                    "rows must be strictly ascending by (vid, created_at); violated at row {at}"
                 )
+            }
+            Self::ChainDiscontinuity {
+                at,
+                expected,
+                found,
+            } => write!(
+                f,
+                "row {at} begins a same-vid version at {found:?}, but the predecessor \
+                 retired at {expected:?}; a chain has no gaps and no overlaps"
+            ),
+            Self::ChainBirthDrift { at } => {
+                write!(f, "row {at} changed its vid's birth ordinal mid-chain")
             }
             Self::CreatedAtZero { at } => {
                 write!(f, "row {at} was created at sequence zero")
@@ -212,6 +246,35 @@ pub(crate) fn validate_patch_row(at: usize, row: &VertexRow) -> Result<(), Verte
     Ok(())
 }
 
+/// The cross-row canonical law, shared by encode and decode: strict
+/// `(vid, created_at)` ascent, and same-vid CONTIGUITY — a successor begins
+/// exactly where its predecessor retired, under an immutable birth ordinal.
+fn validate_succession(
+    at: usize,
+    previous: Option<&VertexRow>,
+    row: &VertexRow,
+) -> Result<(), VertexPatchError> {
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    if (previous.vid, previous.created_at.0) >= (row.vid, row.created_at.0) {
+        return Err(VertexPatchError::NonCanonicalOrder { at });
+    }
+    if previous.vid == row.vid {
+        if previous.retired_at != Some(row.created_at) {
+            return Err(VertexPatchError::ChainDiscontinuity {
+                at,
+                expected: previous.retired_at,
+                found: row.created_at,
+            });
+        }
+        if previous.birth_ordinal != row.birth_ordinal {
+            return Err(VertexPatchError::ChainBirthDrift { at });
+        }
+    }
+    Ok(())
+}
+
 /// Encode rows into one canonical patch. Refuses non-canonical input rather
 /// than sorting it, for the reason the block encoder gives: a caller handing
 /// over a different order is describing a different intent.
@@ -223,15 +286,10 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
     }
     let mut out = Vec::new();
     out.extend_from_slice(&VERTEX_PATCH_MAGIC);
-    out.extend_from_slice(&VERTEX_PATCH_FORMAT_V1.to_le_bytes());
+    out.extend_from_slice(&VERTEX_PATCH_FORMAT_V2.to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
-    let mut previous: Option<VId> = None;
     for (at, row) in rows.iter().enumerate() {
-        if let Some(previous) = previous
-            && previous >= row.vid
-        {
-            return Err(VertexPatchError::NonCanonicalOrder { at });
-        }
+        validate_succession(at, rows[..at].last(), row)?;
         validate_patch_row(at, row)?;
         out.extend_from_slice(&row.vid.0.to_le_bytes());
         out.extend_from_slice(&row.birth_ordinal.to_le_bytes());
@@ -255,7 +313,6 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(&encoded);
         }
-        previous = Some(row.vid);
     }
     Ok(out)
 }
@@ -316,7 +373,7 @@ pub fn decode_patch(bytes: &[u8]) -> Result<Vec<VertexRow>, VertexPatchError> {
         return Err(VertexPatchError::NotAVertexPatch);
     }
     let format = cursor.u16()?;
-    if format != VERTEX_PATCH_FORMAT_V1 {
+    if format != VERTEX_PATCH_FORMAT_V2 {
         return Err(VertexPatchError::UnsupportedFormat { format });
     }
     let declared = cursor.u32()?;
@@ -324,14 +381,8 @@ pub fn decode_patch(bytes: &[u8]) -> Result<Vec<VertexRow>, VertexPatchError> {
         return Err(VertexPatchError::ImplausibleRowCount { declared });
     }
     let mut rows = Vec::with_capacity(declared as usize);
-    let mut previous: Option<VId> = None;
     for at in 0..declared as usize {
         let vid = VId(cursor.u128()?);
-        if let Some(previous) = previous
-            && previous >= vid
-        {
-            return Err(VertexPatchError::NonCanonicalOrder { at });
-        }
         let birth_ordinal = cursor.u64()?;
         let created_at = CommitSeq(cursor.u64()?);
         let retired_raw = cursor.u64()?;
@@ -361,9 +412,9 @@ pub fn decode_patch(bytes: &[u8]) -> Result<Vec<VertexRow>, VertexPatchError> {
             labels,
             props,
         };
+        validate_succession(at, rows.last(), &row)?;
         validate_patch_row(at, &row)?;
         rows.push(row);
-        previous = Some(vid);
     }
     if cursor.at != bytes.len() {
         return Err(VertexPatchError::TrailingBytes {
@@ -411,20 +462,26 @@ pub fn span_of_rows(rows: &[VertexRow]) -> Option<(CommitSeq, CommitSeq)> {
 /// Merge the vertex patches of a partition and answer one vertex at one
 /// sequence — the vertex counterpart of [`crate::root::merge_neighbours`].
 ///
-/// The cross-patch model is the same last-statement-wins supersede as blocks:
-/// patches arrive in publication order, a later patch may restate a row to
-/// add its retirement, and the later statement is the truth. The winning row
-/// is then filtered by the tier's one visibility rule.
+/// The cross-patch model is the same tombstone supersede as blocks, PER
+/// VERSION STATEMENT (fgdb-stb6): a statement is keyed by
+/// `(vid, created_at)`, patches arrive in publication order, and a later
+/// patch may restate one exact statement to add its retirement — the later
+/// statement of that key is the truth. The chain-contiguity law makes the
+/// winning statements non-overlapping, so at most one is visible at `as_of`.
 pub fn merge_vertex(patches: &[Vec<VertexRow>], vid: VId, as_of: CommitSeq) -> Option<VertexRow> {
-    let mut winner: Option<&VertexRow> = None;
+    let mut statements: std::collections::BTreeMap<u64, &VertexRow> =
+        std::collections::BTreeMap::new();
     for rows in patches {
         for row in rows {
             if row.vid == vid {
-                winner = Some(row);
+                statements.insert(row.created_at.0, row);
             }
         }
     }
-    winner.filter(|row| row.visible_at(as_of)).cloned()
+    statements
+        .into_values()
+        .find(|row| row.visible_at(as_of))
+        .cloned()
 }
 
 /// Decode a patch that must be the one named by `expected`.
