@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3780
+target_count = 3782
 projection_fallback_count = 141
-target_source_assignment_sha256 = "727c65141f415bb8d4dc764d4e3e89e9bf73e70ccbfcc2c61fdf6bafaed9c0f0"
+target_source_assignment_sha256 = "3cf6fb3e6128fd5fcb7f61f3a4c4c1c7b791c3680126db26ae8d3997ae121926"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -115243,5 +115243,53 @@ row_id = "a20:target:field-shard-restore-service-open-spec-service-visibility-ep
 target_row_id = "a20:field:shard-restore-service-open-spec-service-visibility-epoch"
 slice_id = "a20"
 source_key = "field|ShardRestoreServiceOpenSpec|ShardRestoreServiceOpenSpec.service_visibility_epoch|service_visibility_epoch"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-completion-spec-expected-source-lease-generation"
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0009
+stable_name = "expected_source_lease_generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "expected source-lease generation this completion verifies before selecting Operational, so a lease renewal cannot slip between proof and completion; comparison input retained and cut with the spec (a20:2601); width follows the landed generation-counter precedent class (contestable, recorded on fgdb-a20-restore-promotion-ivsp)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-completion-spec-expected-source-lease-generation"
+target_row_id = "a20:field:global-restore-service-completion-spec-expected-source-lease-generation"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceCompletionSpec|GlobalRestoreServiceCompletionSpec.expected_source_lease_generation|expected_source_lease_generation"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-completion-spec-expected-source-lease-generation"
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0008
+stable_name = "expected_source_lease_generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "expected source-lease generation this completion verifies before selecting Operational, so a lease renewal cannot slip between proof and completion; comparison input retained and cut with the spec (a20:2605); width follows the landed generation-counter precedent class (contestable, recorded on fgdb-a20-restore-promotion-ivsp)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-completion-spec-expected-source-lease-generation"
+target_row_id = "a20:field:local-restore-service-completion-spec-expected-source-lease-generation"
+slice_id = "a20"
+source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.expected_source_lease_generation|expected_source_lease_generation"
 target_kind = "field"
 definition_status = "declared"

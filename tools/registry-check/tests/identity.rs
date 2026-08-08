@@ -11243,6 +11243,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "service_visibility_epoch"
                 )
                 | ("ShardRestoreServiceOpenSpec", "service_visibility_epoch")
+                // fgdb-a20-restore-promotion-ivsp: the two completion specs'
+                // expected_source_lease_generation members (source order
+                // a20:2601/2605), u64 per the landed generation-counter
+                // precedent class and younger than the historical witness for
+                // the same reason.
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
+                    "expected_source_lease_generation"
+                )
+                | (
+                    "LocalRestoreServiceCompletionSpec",
+                    "expected_source_lease_generation"
+                )
                 | ("RestoreServicePromotionManifest", "restore_id")
                 | ("RestoreServicePromotionManifest", "database_id")
                 | (
@@ -12151,7 +12164,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 848,
+        pre_erratum.fields.len() + 850,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
