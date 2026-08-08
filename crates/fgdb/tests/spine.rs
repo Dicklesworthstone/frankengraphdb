@@ -208,6 +208,108 @@ fn written_labels_and_properties_are_readable_and_survive_a_reopen() {
     });
 }
 
+/// **THE DELETE LAW (fgdb-p3ok): deletes take effect, cascade, and survive a
+/// reopen — with every before-image derived by the engine.**
+///
+/// The image derivation itself is proven against the oracle by the
+/// differential (`fgdb-sim/tests/spine_differential.rs`), whose replay path
+/// REFUSES a wrong `before_version` or cascade; this law pins the engine-side
+/// lifecycle: reads flip at the delete, nothing resurrects across a reopen,
+/// and deleting the absent is a typed refusal with no durable trace.
+#[test]
+fn deletes_take_effect_cascade_and_survive_a_reopen() {
+    let dir = scratch("deletes");
+    under_lab(77, move |cx| async move {
+        let cx = &cx;
+        {
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(1), vec![LabelId(3)], vec![]);
+            batch.create_vertex(VId(2), vec![], vec![]);
+            batch.create_vertex(VId(3), vec![], vec![]);
+            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+            batch.add_edge(EId(11), VId(1), VId(3), vec![]);
+            batch.add_edge(EId(12), VId(3), VId(1), vec![]);
+            db.write(cx, batch).await.expect("commits");
+
+            // Delete one edge: only that edge goes.
+            let mut drop_edge = WriteBatch::new(KNOWS);
+            drop_edge.delete_edge(EId(10));
+            db.write(cx, drop_edge).await.expect("edge delete commits");
+            assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(3)]);
+
+            // Delete a vertex: the engine derives the cascade — BOTH
+            // directions — and the vertex row goes with its edges.
+            let mut drop_vertex = WriteBatch::new(KNOWS);
+            drop_vertex.delete_vertex(VId(1));
+            db.write(cx, drop_vertex)
+                .await
+                .expect("vertex delete commits");
+            assert!(db.vertex(VId(1)).is_none(), "the vertex row is retired");
+            assert!(db.neighbours(VId(1), KNOWS).expect("reads").is_empty());
+            assert!(
+                db.neighbours(VId(3), KNOWS).expect("reads").is_empty(),
+                "the inbound edge 12 was cascade-retired too"
+            );
+
+            // Deleting the absent is a typed refusal, before anything durable.
+            let frontier = db.frontier();
+            let mut again = WriteBatch::new(KNOWS);
+            again.delete_vertex(VId(1));
+            assert!(matches!(
+                db.write(cx, again).await,
+                Err(WriteError::UnknownVertex { vid: VId(1) })
+            ));
+            let mut ghost = WriteBatch::new(KNOWS);
+            ghost.delete_edge(EId(10));
+            assert!(matches!(
+                db.write(cx, ghost).await,
+                Err(WriteError::UnknownEdge { eid: EId(10) })
+            ));
+            assert_eq!(db.frontier(), frontier, "refusals consumed no sequence");
+        }
+
+        // NOTHING crosses this line except `dir` and `keys()`.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert!(db.vertex(VId(1)).is_none(), "no resurrection across reopen");
+        assert!(db.neighbours(VId(3), KNOWS).expect("reads").is_empty());
+        assert_eq!(
+            db.vertex(VId(2)).expect("undeleted vertex survives").labels,
+            vec![]
+        );
+    });
+}
+
+/// A create and its delete in ONE batch: the engine images the version the
+/// batch prefix just minted, and the durable fold leaves no trace of the
+/// element — the same-commit fold, end to end through the public surface.
+#[test]
+fn a_same_batch_create_and_delete_leaves_no_element() {
+    let dir = scratch("same-batch-delete");
+    under_lab(78, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(1), vec![], vec![]);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        batch.delete_edge(EId(10));
+        batch.create_vertex(VId(3), vec![], vec![]);
+        batch.delete_vertex(VId(3));
+        db.write(cx, batch).await.expect("commits");
+
+        assert!(db.neighbours(VId(1), KNOWS).expect("reads").is_empty());
+        assert!(db.vertex(VId(3)).is_none());
+        assert!(
+            db.vertex(VId(1)).is_some() && db.vertex(VId(2)).is_some(),
+            "the surviving vertices are untouched"
+        );
+        drop(db);
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert!(db.vertex(VId(3)).is_none(), "and the fold is stable");
+    });
+}
+
 /// The read is keyed on BOTH source and relation. Without these controls a read
 /// that ignored either would still pass the law above.
 #[test]

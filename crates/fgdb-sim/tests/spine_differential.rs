@@ -134,6 +134,22 @@ async fn write_history(cx: &CommitCx, dir: &Path) {
     third.add_edge(EId(14), VId(1), VId(5), vec![]);
     third.add_edge(EId(15), VId(2), VId(3), vec![]);
     db.write(cx, third).await.expect("third batch commits");
+
+    // DELETES, with every before-image engine-derived (fgdb-p3ok). This is
+    // the differential's sharpest teeth: the oracle's replay REFUSES a wrong
+    // `before_version` or an inexact cascade, so these rows are validated at
+    // apply time, not merely compared afterwards. VId(6) exists-then-goes in
+    // one batch; VId(5) goes with its inbound WORKS_WITH edge cascaded.
+    let mut fourth = WriteBatch::new(KNOWS);
+    fourth.create_vertex(VId(6), vec![], vec![]);
+    fourth.add_edge(EId(16), VId(6), VId(1), vec![]);
+    fourth.add_edge(EId(17), VId(2), VId(4), vec![]);
+    db.write(cx, fourth).await.expect("fourth batch commits");
+    let mut fifth = WriteBatch::new(KNOWS);
+    fifth.delete_edge(EId(12)); // ONE of the two parallel edges — its twin survives
+    fifth.delete_vertex(VId(6)); // cascades EId(16)
+    fifth.delete_vertex(VId(5)); // cascades EId(14), a cross-relation edge
+    db.write(cx, fifth).await.expect("fifth batch commits");
 }
 
 /// **THE DIFFERENTIAL: the engine's answer equals the oracle's, for every vertex

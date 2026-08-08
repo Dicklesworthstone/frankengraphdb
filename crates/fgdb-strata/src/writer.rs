@@ -256,6 +256,34 @@ impl BlockWriter {
         &self.sealed_patches
     }
 
+    /// The endpoints and creation of one live edge, or `None` when the fold
+    /// holds no live version of it.
+    ///
+    /// The read face of the writer's live map (fgdb-p3ok): the spine derives
+    /// delete before-images from CURRENT state, and the fold's live map IS
+    /// that state — rebuilt by replay, never authoritative, and already
+    /// maintained for retirement. A second fold of the same stream beside
+    /// this one would be two opinions about one fact.
+    pub fn live_edge(&self, eid: EId) -> Option<(VId, RelationId, VId, CommitSeq)> {
+        self.live.get(&eid).copied()
+    }
+
+    /// Is `vid` live in this fold?
+    pub fn is_vertex_live(&self, vid: VId) -> bool {
+        self.live_vertices.contains_key(&vid)
+    }
+
+    /// Every live edge touching `vid`, in canonical ascending-EId order —
+    /// the exact set a vertex deletion's cascade before-image must equal
+    /// (both directions, the reference semantics).
+    pub fn live_incident_edges(&self, vid: VId) -> Vec<EId> {
+        self.live
+            .iter()
+            .filter(|(_, (src, _, dst, _))| *src == vid || *dst == vid)
+            .map(|(eid, _)| *eid)
+            .collect()
+    }
+
     /// How many vertex rows are pending — the vertex half of the seal signal.
     pub fn pending_vertex_len(&self) -> usize {
         self.pending_vertices.len()

@@ -97,11 +97,14 @@
 //!
 //! # What tier D indexes
 //!
-//! Tier D is ADJACENCY. `CreateVertex` rows are committed and durable — the
-//! oracle materializes them, and they are in the stream a future tier reads —
-//! but the block fold ignores them, so [`Database::neighbours`] is the whole read
-//! surface. Properties, labels, and vertex-level reads arrive with
-//! `fgdb-w3-properties-gou`.
+//! Tier D holds ADJACENCY BLOCKS and VERTEX ROW PATCHES. Edges answer through
+//! [`Database::neighbours`]; a vertex's labels and properties answer through
+//! [`Database::vertex`] (fgdb-3xoi). Deletes go through
+//! [`WriteBatch::delete_edge`] and [`WriteBatch::delete_vertex`] with
+//! engine-derived before-images (fgdb-p3ok). Edge properties, label-membership
+//! flips, and the columnar sealed forms arrive with `fgdb-w3-properties-gou`;
+//! the provenance envelopes and `NetEffectNormalForm` canonicalization with
+//! `fgdb-w5-effects-normal-form-819`.
 
 #![forbid(unsafe_code)]
 
@@ -148,8 +151,8 @@ use fgdb_chronicle::identity::IdentifiedObject;
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate};
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
-    CanonicalError, CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId,
-    RelationId, SchemaEpoch,
+    CanonicalError, CoordinateEntry, DeltaRow, ElementId, LabelId, LogicalDeltaTemplate,
+    PropertyKeyId, RelationId, SchemaEpoch,
 };
 use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_neighbours};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
@@ -293,6 +296,17 @@ pub enum WriteError {
     /// commit consumes a sequence and publishes a marker, and a caller that did
     /// that by accident should be told.
     EmptyBatch,
+    /// A delete named an edge this database holds no live version of, at the
+    /// point in the batch where the delete sits. Refused before anything
+    /// durable happens (fgdb-p3ok).
+    UnknownEdge {
+        eid: EId,
+    },
+    /// A delete named a vertex this database holds no live version of, at
+    /// the point in the batch where the delete sits.
+    UnknownVertex {
+        vid: VId,
+    },
     Canonical(CanonicalError),
     Commit(CommitError),
     /// The write was durable, and republishing the derived partition failed.
@@ -385,6 +399,12 @@ impl core::fmt::Display for WriteError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
+            Self::UnknownEdge { eid } => {
+                write!(f, "no live version of {eid:?} to delete")
+            }
+            Self::UnknownVertex { vid } => {
+                write!(f, "no live version of {vid:?} to delete")
+            }
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
             Self::Rebuild(error) => write!(
@@ -421,11 +441,16 @@ impl core::error::Error for ReadError {}
 ///
 /// One batch carries one relation, because a `CoordinateEntry` names one.
 ///
-/// Deletions are absent on purpose. `DeltaRow::DeleteEdge` carries a
-/// `before_version` and `DeleteVertex` a complete cascade before-image, and
-/// computing those is FINALIZATION's job (§9.1, `fgdb-w5-effects-normal-form-819`).
-/// A caller-supplied cascade would be an assertion the caller could get wrong,
-/// so this slice commits creates only and says why.
+/// **Deletes name the identity and nothing else** (fgdb-p3ok). A durable
+/// `DeltaRow::DeleteEdge` carries a `before_version` and `DeleteVertex` a
+/// complete cascade before-image, and a caller-supplied image would be an
+/// assertion the caller could get wrong — so the ENGINE derives both at
+/// commit time, from the fold's live state plus the batch prefix, and the
+/// reference oracle re-validates every derived image at replay
+/// (`ElementVersionMismatch` / `CascadeImageMismatch` are refusals, which is
+/// what keeps the two derivations honest without sharing code). The
+/// provenance envelopes and `NetEffectNormalForm` canonicalization stay with
+/// `fgdb-w5-effects-normal-form-819`, which absorbs this surface.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
     relation: RelationId,
@@ -444,6 +469,12 @@ enum PendingRow {
         src: VId,
         dst: VId,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    },
+    DeleteEdge {
+        eid: EId,
+    },
+    DeleteVertex {
+        vid: VId,
     },
 }
 
@@ -481,6 +512,22 @@ impl WriteBatch {
         self
     }
 
+    /// Delete the edge `eid`. The durable row's `before_version` is derived
+    /// by the engine at commit time; deleting an edge this database does not
+    /// hold refuses before anything durable happens.
+    pub fn delete_edge(&mut self, eid: EId) -> &mut Self {
+        self.rows.push(PendingRow::DeleteEdge { eid });
+        self
+    }
+
+    /// Delete the vertex `vid` and every edge touching it. The cascade
+    /// before-image — the exact incident set, both directions, ascending —
+    /// and the `before_version` are derived by the engine at commit time.
+    pub fn delete_vertex(&mut self, vid: VId) -> &mut Self {
+        self.rows.push(PendingRow::DeleteVertex { vid });
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
@@ -510,6 +557,14 @@ struct Snapshot {
     /// allocation is `fgdb-w2`'s, and a counter persisted here would be a second
     /// authority beside the stream.
     next_birth_ordinal: u64,
+    /// The current element-version chain head of every LIVE element,
+    /// derived by folding the stream (fgdb-p3ok). This is the state a
+    /// delete's `before_version` names, so it is engine state — but the
+    /// DERIVATION is deliberately an independent spelling of the reference
+    /// oracle's, never shared code: the differential's replay path validates
+    /// every emitted image against the oracle's own chains, so a drift in
+    /// either implementation is a refusal, not a silent agreement.
+    versions: std::collections::BTreeMap<ElementId, ObjectId>,
 }
 
 /// An open database.
@@ -667,32 +722,113 @@ impl Database {
             return Err(WriteError::EmptyBatch);
         }
 
+        // Build durable rows SEQUENTIALLY, deriving every delete's
+        // before-image from the fold's live state PLUS the batch prefix: a
+        // create-then-delete in one batch must image the version the create
+        // just minted, exactly as the oracle will re-derive it at replay.
+        // Deletes take no birth ordinal — only creations spend one.
         let mut rows = Vec::with_capacity(batch.rows.len());
-        for (birth_ordinal, row) in (self.snapshot.next_birth_ordinal..).zip(batch.rows) {
-            rows.push(match row {
-                PendingRow::Vertex { vid, labels, props } => DeltaRow::CreateVertex {
-                    vid,
-                    birth_ordinal,
-                    labels,
-                    props,
-                    valid_time: None,
-                },
+        let mut birth_ordinal = self.snapshot.next_birth_ordinal;
+        // The batch-prefix overlay: identities this batch created or deleted
+        // ahead of the row being built, with the versions the prefix minted.
+        let mut prefix_versions: std::collections::BTreeMap<ElementId, ObjectId> =
+            std::collections::BTreeMap::new();
+        let mut prefix_edges: std::collections::BTreeMap<EId, (VId, VId)> =
+            std::collections::BTreeMap::new();
+        let mut prefix_deleted_edges: std::collections::BTreeSet<EId> =
+            std::collections::BTreeSet::new();
+        let mut prefix_deleted_vertices: std::collections::BTreeSet<VId> =
+            std::collections::BTreeSet::new();
+        for pending in batch.rows {
+            let row = match pending {
+                PendingRow::Vertex { vid, labels, props } => {
+                    let row = DeltaRow::CreateVertex {
+                        vid,
+                        birth_ordinal,
+                        labels,
+                        props,
+                        valid_time: None,
+                    };
+                    birth_ordinal += 1;
+                    prefix_versions.insert(ElementId::Vertex(vid), successor_version(None, &row)?);
+                    row
+                }
                 PendingRow::Edge {
                     eid,
                     src,
                     dst,
                     props,
-                } => DeltaRow::CreateEdge {
-                    eid,
-                    birth_ordinal,
-                    src,
-                    relation: batch.relation,
-                    dst,
-                    canonical_key: None,
-                    props,
-                    valid_time: None,
-                },
-            });
+                } => {
+                    let row = DeltaRow::CreateEdge {
+                        eid,
+                        birth_ordinal,
+                        src,
+                        relation: batch.relation,
+                        dst,
+                        canonical_key: None,
+                        props,
+                        valid_time: None,
+                    };
+                    birth_ordinal += 1;
+                    prefix_versions.insert(ElementId::Edge(eid), successor_version(None, &row)?);
+                    prefix_edges.insert(eid, (src, dst));
+                    row
+                }
+                PendingRow::DeleteEdge { eid } => {
+                    let live_now = !prefix_deleted_edges.contains(&eid)
+                        && (prefix_edges.contains_key(&eid)
+                            || self.writer.live_edge(eid).is_some());
+                    if !live_now {
+                        return Err(WriteError::UnknownEdge { eid });
+                    }
+                    let before_version = prefix_versions
+                        .get(&ElementId::Edge(eid))
+                        .or_else(|| self.snapshot.versions.get(&ElementId::Edge(eid)))
+                        .copied()
+                        .expect("a live edge always has a version chain head");
+                    prefix_deleted_edges.insert(eid);
+                    DeltaRow::DeleteEdge {
+                        eid,
+                        before_version,
+                    }
+                }
+                PendingRow::DeleteVertex { vid } => {
+                    let live_now = !prefix_deleted_vertices.contains(&vid)
+                        && (prefix_versions.contains_key(&ElementId::Vertex(vid))
+                            || self.writer.is_vertex_live(vid));
+                    if !live_now {
+                        return Err(WriteError::UnknownVertex { vid });
+                    }
+                    let before_version = prefix_versions
+                        .get(&ElementId::Vertex(vid))
+                        .or_else(|| self.snapshot.versions.get(&ElementId::Vertex(vid)))
+                        .copied()
+                        .expect("a live vertex always has a version chain head");
+                    // The cascade image: every live incident edge at THIS
+                    // point in the batch — the fold's live set, minus the
+                    // prefix's deletions, plus the prefix's incident
+                    // creations, in ascending-EId order (the reference
+                    // semantics, both directions).
+                    let mut cascade: std::collections::BTreeSet<EId> =
+                        self.writer.live_incident_edges(vid).into_iter().collect();
+                    cascade.retain(|eid| !prefix_deleted_edges.contains(eid));
+                    for (eid, (src, dst)) in &prefix_edges {
+                        if !prefix_deleted_edges.contains(eid) && (*src == vid || *dst == vid) {
+                            cascade.insert(*eid);
+                        }
+                    }
+                    for eid in &cascade {
+                        prefix_deleted_edges.insert(*eid);
+                    }
+                    prefix_deleted_vertices.insert(vid);
+                    DeltaRow::DeleteVertex {
+                        vid,
+                        before_version,
+                        sorted_retired_incident_edges: cascade.into_iter().collect(),
+                    }
+                }
+            };
+            rows.push(row);
         }
 
         let template = LogicalDeltaTemplate::build(
@@ -739,6 +875,7 @@ impl Database {
         );
         let mut folded = self.writer.clone();
         let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
+        let mut new_versions = self.snapshot.versions.clone();
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
                 continue;
@@ -750,6 +887,7 @@ impl Database {
                 ) {
                     next_birth_ordinal += 1;
                 }
+                fold_version(&mut new_versions, row)?;
                 folded
                     .apply(self.keys.block_keys(), frontier, row)
                     .map_err(|error| RebuildError::Fold {
@@ -891,6 +1029,7 @@ impl Database {
             frontier,
             root: root_id,
             next_birth_ordinal,
+            versions: new_versions,
         };
         Ok(self.snapshot.frontier)
     }
@@ -934,6 +1073,75 @@ impl Database {
     pub fn path(&self) -> &Path {
         self.coordinator.database_dir()
     }
+}
+
+/// The element-version chain domain.
+///
+/// Deliberately the same BYTES as the reference oracle's
+/// `ELEMENT_VERSION_DOMAIN`, and deliberately not the same CONSTANT: the
+/// engine and the oracle each derive versions from their own spelling of the
+/// law, and the differential's replay validates every engine-emitted
+/// `before_version` against the oracle's chains — shared code here would gut
+/// that check (§15.2).
+const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v1";
+
+/// Extend one element's version chain with one canonical effect — the
+/// engine's independent spelling of the reference derivation: a domain, a
+/// predecessor tag distinguishing creation from an all-zero prior digest, a
+/// self-delimiting row length, and the row's canonical bytes. No branch
+/// population, wall clock, or commit sequence enters it.
+fn successor_version(
+    previous: Option<ObjectId>,
+    row: &DeltaRow,
+) -> Result<ObjectId, CanonicalError> {
+    let canonical = row.canonical_bytes()?;
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(ELEMENT_VERSION_DOMAIN);
+    match previous {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(version) => {
+            hasher.update(&[1]);
+            hasher.update(&version.0);
+        }
+    }
+    hasher.update(&(canonical.len() as u64).to_le_bytes());
+    hasher.update(&canonical);
+    Ok(ObjectId(hasher.finalize().0))
+}
+
+/// Advance the version map by one row — creation opens a chain, deletion
+/// removes the element. A closed chain's head is never consulted again
+/// because identities never recycle (§6.2), which is also why the map holds
+/// LIVE elements only.
+fn fold_version(
+    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
+    row: &DeltaRow,
+) -> Result<(), CanonicalError> {
+    match row {
+        DeltaRow::CreateVertex { vid, .. } => {
+            versions.insert(ElementId::Vertex(*vid), successor_version(None, row)?);
+        }
+        DeltaRow::CreateEdge { eid, .. } => {
+            versions.insert(ElementId::Edge(*eid), successor_version(None, row)?);
+        }
+        DeltaRow::DeleteVertex {
+            vid,
+            sorted_retired_incident_edges,
+            ..
+        } => {
+            versions.remove(&ElementId::Vertex(*vid));
+            for eid in sorted_retired_incident_edges {
+                versions.remove(&ElementId::Edge(*eid));
+            }
+        }
+        DeltaRow::DeleteEdge { eid, .. } => {
+            versions.remove(&ElementId::Edge(*eid));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// The pinned intent semantics this slice commits under.
@@ -1050,6 +1258,7 @@ async fn rebuild(
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut frontier = CommitSeq(0);
     let mut next_birth_ordinal = 0u64;
+    let mut versions = std::collections::BTreeMap::new();
 
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
@@ -1101,6 +1310,10 @@ async fn rebuild(
                 ) {
                     next_birth_ordinal += 1;
                 }
+                fold_version(&mut versions, row).map_err(|error| RebuildError::Decode {
+                    commit_seq: commit_seq.0,
+                    error,
+                })?;
                 writer
                     .apply(keys.block_keys(), commit_seq, row)
                     .map_err(|error| RebuildError::Fold {
@@ -1139,6 +1352,7 @@ async fn rebuild(
             frontier,
             root: root_id,
             next_birth_ordinal,
+            versions,
         },
         writer,
     ))
