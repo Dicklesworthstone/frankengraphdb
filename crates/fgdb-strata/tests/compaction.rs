@@ -451,3 +451,91 @@ fn compacted_entries_have_a_rootable_publication_order() {
     );
     assert_answers_preserved(&before, &result.blocks, CommitSeq(1), 1_002, &[1, 2]);
 }
+
+/// **PROPERTIES SURVIVE COMPACTION** (fgdb-yqor): every retained edge answers
+/// the same row through `merge_edge_with_props` before and after, the
+/// tombstone-restated row wins across blocks, a floor-dropped edge's row is
+/// gone from the replacement column, and a misaligned column is refused.
+#[test]
+fn compaction_carries_each_retained_entrys_property_row() {
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_strata::compact::compact_with_props;
+    use fgdb_strata::edge_props::{BlockProps, validate_block_patch_consistency};
+    use fgdb_strata::root::merge_edge_with_props;
+    use fgdb_types::CanonicalScalar;
+
+    let row = |seed: u64| vec![(PropertyKeyId(seed), CanonicalScalar::Int(seed as i64))];
+    // e10 propertied then retired by a tombstone RESTATING a changed row —
+    // last-block-wins over props; e20 propertied and live; e30 propertyless
+    // beside them; e40 propertied but retired BELOW the floor, so its row must
+    // not survive into any replacement patch.
+    let before = vec![
+        vec![
+            edge(10, 1, 2, 1, None),
+            edge(20, 1, 3, 1, None),
+            edge(40, 1, 5, 1, Some(2)),
+        ],
+        vec![edge(30, 1, 4, 3, None)],
+        vec![edge(10, 1, 2, 1, Some(9))],
+    ];
+    let before_props = vec![
+        Some(BlockProps {
+            locators: vec![1, 2, 3],
+            rows: vec![row(7), row(11), row(13)],
+        }),
+        None,
+        Some(BlockProps {
+            locators: vec![1],
+            rows: vec![row(99)],
+        }),
+    ];
+
+    let floor = CommitSeq(3);
+    let result = compact_with_props(&before, &before_props, floor).expect("valid history compacts");
+    assert_eq!(result.dropped, 1, "only e40 fell below the floor");
+
+    // Answer-preservation swept per EId and sequence, props included.
+    for eid in [10u128, 20, 30] {
+        for as_of in floor.0..=10 {
+            let original =
+                merge_edge_with_props(&before, &before_props, EId(eid), CommitSeq(as_of))
+                    .expect("the original merges");
+            let compacted = merge_edge_with_props(
+                &result.blocks,
+                &result.block_props,
+                EId(eid),
+                CommitSeq(as_of),
+            )
+            .expect("the compaction merges");
+            assert_eq!(original, compacted, "EId({eid}) disagrees at {as_of}");
+        }
+    }
+    // The tombstone's restated row is the one that survived.
+    let (_, tombstoned) =
+        merge_edge_with_props(&result.blocks, &result.block_props, EId(10), CommitSeq(5))
+            .expect("merges")
+            .expect("e10 is visible below its retirement");
+    assert_eq!(tombstoned, row(99), "last-block-wins governs props too");
+
+    // No replacement patch smuggles e40's row back in, and every emitted
+    // column satisfies the joint bijection law.
+    for (block, props) in result.blocks.iter().zip(&result.block_props) {
+        let Some(props) = props else { continue };
+        assert_eq!(props.locators.len(), block.len());
+        validate_block_patch_consistency(&props.locators, props.rows.len())
+            .expect("compacted columns satisfy the joint bijection law");
+        assert!(
+            !props.rows.contains(&row(13)),
+            "a floor-dropped edge's row survived compaction"
+        );
+    }
+
+    // A column for the wrong number of blocks is refused, not realigned.
+    assert_eq!(
+        compact_with_props(&before, &before_props[..2], floor),
+        Err(RootError::BlockPropsArity {
+            blocks: 3,
+            props: 2
+        })
+    );
+}

@@ -289,6 +289,13 @@ pub enum RootError {
         at: usize,
         error: crate::vertex::VertexPatchError,
     },
+    /// [`crate::compact::compact_with_props`] was handed a property column for
+    /// a different number of blocks than it was asked to compact. Guessing an
+    /// alignment would silently attach rows to the wrong entries.
+    BlockPropsArity {
+        blocks: usize,
+        props: usize,
+    },
 }
 
 impl core::fmt::Display for RootError {
@@ -419,6 +426,10 @@ impl core::fmt::Display for RootError {
                  irreversible"
             ),
             Self::Patch { at, error } => write!(f, "vertex patch {at}: {error}"),
+            Self::BlockPropsArity { blocks, props } => write!(
+                f,
+                "a property column for {props} blocks cannot align with {blocks} blocks"
+            ),
         }
     }
 }
