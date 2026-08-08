@@ -3444,7 +3444,10 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         (concrete_wire_citations, ordinary_union_citations),
         // 603 -> 604 (fgdb-a20-restore-promotion-ivsp): the Meta completion
         // precondition constrains its generated discriminant to the one exact host.
-        (604, 430),
+        // 604 -> 610 / 430 -> 436 (fgdb-a20-restore-promotion-ivsp): the
+        // TerminalAuditGate closure names its six Spec-family consumers in
+        // both generated artifacts.
+        (610, 436),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -7576,9 +7579,15 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         "TerminalAuditGate",
         &[
             "ConfigurationTransitionSpec",
+            "GlobalRestoreServiceCompletionSpec",
+            "GlobalRestoreServiceFinalizeSpec",
             "HistoryCutActivationSpec",
             "InitialConfigFloorInstallSpec",
             "KeyDestroyProposal",
+            "LocalRestoreActivationSpec",
+            "LocalRestoreServiceCompletionSpec",
+            "LocalRestoreServicePrepareSpec",
+            "LocalRestoreServicePromotionSpec",
             "ResourceLedgerTransitionSpec",
             "SequenceNeutralSpec<Tag>",
         ],
@@ -11188,6 +11197,23 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "root_slot_durability_digest"
                 )
                 | ("LocalRestoreReadyCertificate", "quorum_signatures")
+                // fgdb-a20-restore-promotion-ivsp: the six Spec-family
+                // terminal_audit_gate members (source order a20:2597-2605),
+                // landed with the TerminalAuditGate closure extension naming
+                // each consumer and younger than the historical witness for
+                // the same reason.
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
+                    "terminal_audit_gate"
+                )
+                | ("GlobalRestoreServiceFinalizeSpec", "terminal_audit_gate")
+                | ("LocalRestoreActivationSpec", "terminal_audit_gate")
+                | (
+                    "LocalRestoreServiceCompletionSpec",
+                    "terminal_audit_gate"
+                )
+                | ("LocalRestoreServicePrepareSpec", "terminal_audit_gate")
+                | ("LocalRestoreServicePromotionSpec", "terminal_audit_gate")
                 | ("RestoreServicePromotionManifest", "restore_id")
                 | ("RestoreServicePromotionManifest", "database_id")
                 | (
@@ -12096,7 +12122,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 829,
+        pre_erratum.fields.len() + 835,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

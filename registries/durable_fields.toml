@@ -4122,6 +4122,20 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[field]]
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x000a
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the completion spec; embedded by value and retained/cut with GlobalRestoreServiceCompletionSpec, with no independent reachability edge (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "GlobalRestoreServiceFinalCertificate"
 field_tag = 0x0001
 stable_name = "restore_id"
@@ -4324,6 +4338,20 @@ reference_semantics = "none"
 construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "comparison-only Meta WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the finalize spec (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0009
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the finalize spec; embedded by value and retained/cut with GlobalRestoreServiceFinalizeSpec, with no independent reachability edge (a20:2597)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -6357,6 +6385,20 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "LocalRestoreActivationSpec"
+field_tag = 0x0007
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the activation spec; embedded by value and retained/cut with LocalRestoreActivationSpec, with no independent reachability edge (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "LocalRestoreCompletionEvidence"
 field_tag = 0x0001
 stable_name = "cleanup_authority_ref"
@@ -6607,6 +6649,20 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[field]]
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0009
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the completion spec; embedded by value and retained/cut with LocalRestoreServiceCompletionSpec, with no independent reachability edge (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "LocalRestoreServicePrepareSpec"
 field_tag = 0x0002
 stable_name = "activation_certificate_ref"
@@ -6646,6 +6702,20 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "role-local"
 retention_and_cut_rule = "closed source-ordered promotion-authority recipe embedded by value; no arm creates reachability and the union is retained and cut with the prepare spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0007
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the prepare spec; embedded by value and retained/cut with LocalRestoreServicePrepareSpec, with no independent reachability edge (a20:2603)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -6705,6 +6775,20 @@ reference_semantics = "none"
 construction_order = 35
 role_predicate = "role-local"
 retention_and_cut_rule = "comparison-only Local WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the promotion spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalRestoreServicePromotionSpec"
+field_tag = 0x000a
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the promotion spec; embedded by value and retained/cut with LocalRestoreServicePromotionSpec, with no independent reachability edge (a20:2605)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -19471,7 +19555,7 @@ containing_schema = "TerminalAuditGate"
 union_path = "TerminalAuditGate"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ConfigurationTransitionSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
