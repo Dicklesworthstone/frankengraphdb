@@ -40,6 +40,7 @@
 pub mod compact;
 pub mod root;
 pub mod store;
+pub mod vertex;
 pub mod writer;
 
 use fgdb_codec::identity::{
