@@ -141,6 +141,15 @@ pub const BLOCK_FORMAT_V5: u16 = 5;
 /// plan L536's no-stamping law). V5 is refused by name; no production
 /// database predates V6.
 pub const BLOCK_FORMAT_V6: u16 = 6;
+/// Format version. V7 is a breaking bump (§16.6, fgdb-ls5b): the canonical
+/// entry order and uniqueness law extends from `(dst, eid)` to
+/// `(dst, eid, created_at)`, so one block can carry an EId's retire +
+/// content-version successor pair — the FGSV V2 chain model applied to
+/// edges. The byte layout is V6's exactly; only the law over the sorted
+/// entries widens, and the chain-contiguity admission law is what keeps a
+/// second `created_at` from being identity reuse. V6 is refused by name; no
+/// production database predates V7.
+pub const BLOCK_FORMAT_V7: u16 = 7;
 
 /// Domain string for the block logical digest transcript, v1.
 ///
@@ -660,7 +669,13 @@ fn encode_block_inner(
         {
             return Err(BlockError::MixedDescriptor { at: index });
         }
-        if index > 0 && (entries[index - 1].dst, entries[index - 1].eid) >= (entry.dst, entry.eid) {
+        if index > 0
+            && (
+                entries[index - 1].dst,
+                entries[index - 1].eid,
+                entries[index - 1].created_at,
+            ) >= (entry.dst, entry.eid, entry.created_at)
+        {
             return Err(BlockError::NonCanonicalOrder { at: index });
         }
     }
@@ -702,7 +717,7 @@ fn encode_block_inner(
     };
 
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V6.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V7.to_be_bytes());
     out.extend_from_slice(&partition_id.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     let descriptor = descriptor.unwrap_or(DescriptorKey {
@@ -833,7 +848,7 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
         return Err(BlockError::NotABlock);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != BLOCK_FORMAT_V6 {
+    if format != BLOCK_FORMAT_V7 {
         return Err(BlockError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes(bytes[14..18].try_into().expect("fixed header"));
@@ -1099,7 +1114,8 @@ pub fn decode_block_with_properties(
         let entry = read_entry(&frame, index);
         validate_entry(index, &entry)?;
         if let Some(previous) = out.last()
-            && (previous.dst, previous.eid) >= (entry.dst, entry.eid)
+            && (previous.dst, previous.eid, previous.created_at)
+                >= (entry.dst, entry.eid, entry.created_at)
         {
             return Err(BlockError::NonCanonicalOrder { at: index });
         }
@@ -1144,16 +1160,16 @@ pub fn scan_neighbours(
     }
     let count = frame.destinations.len();
     let mut out = Vec::new();
-    let mut previous: Option<(VId, EId)> = None;
+    let mut previous: Option<(VId, EId, CommitSeq)> = None;
     for index in 0..count {
         let entry = read_entry(&frame, index);
         validate_entry(index, &entry)?;
         if let Some(prev) = previous
-            && prev >= (entry.dst, entry.eid)
+            && prev >= (entry.dst, entry.eid, entry.created_at)
         {
             return Err(BlockError::NonCanonicalOrder { at: index });
         }
-        previous = Some((entry.dst, entry.eid));
+        previous = Some((entry.dst, entry.eid, entry.created_at));
 
         if entry.visible_at(as_of) {
             // Neighbour semantics are set-valued: parallel EIds prove distinct

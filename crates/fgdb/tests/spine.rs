@@ -1052,3 +1052,111 @@ fn every_publish_leaves_a_resolvable_manifest() {
         );
     });
 }
+
+/// **THE EDGE UPDATE LAW (fgdb-ls5b): a live edge's properties change without
+/// its identity or lifetime changing — durably as a retire + content
+/// successor — so the frontier answers the new row while every pre-update
+/// sequence keeps answering the row it always had.**
+///
+/// The as-of assertions are the law's teeth: a naive restatement model
+/// (rewrite the row in place, last block wins) passes every frontier check
+/// and silently leaks the new row into history.
+#[test]
+fn edge_property_updates_version_the_row_without_respending_the_identity() {
+    let dir = scratch("edge-update");
+    under_lab(83, move |cx| async move {
+        let cx = &cx;
+        let weight = PropertyKeyId(7);
+        let label = PropertyKeyId(9);
+        let text = CanonicalScalar::ucs_basic_text("close").expect("admissible");
+
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(
+            EId(10),
+            VId(1),
+            VId(2),
+            vec![(weight, CanonicalScalar::Int(1))],
+        );
+        let s1 = db.write(cx, first).await.expect("commits");
+
+        let mut second = WriteBatch::new(KNOWS);
+        second.set_edge_property(EId(10), weight, Some(CanonicalScalar::Int(2)));
+        second.set_edge_property(EId(10), label, Some(text.clone()));
+        let s2 = db.write(cx, second).await.expect("commits");
+
+        let mut third = WriteBatch::new(KNOWS);
+        third.set_edge_property(EId(10), weight, None);
+        let s3 = db.write(cx, third).await.expect("commits");
+
+        // SAME-BATCH create + update folds to one durable statement carrying
+        // the final row — the intermediate never existed on any snapshot.
+        let mut fourth = WriteBatch::new(KNOWS);
+        fourth.add_edge(
+            EId(11),
+            VId(2),
+            VId(1),
+            vec![(weight, CanonicalScalar::Int(7))],
+        );
+        fourth.set_edge_property(EId(11), weight, Some(CanonicalScalar::Int(8)));
+        let s4 = db.write(cx, fourth).await.expect("commits");
+
+        // Refusals: an unknown edge and a deleted edge both refuse.
+        let mut ghost = WriteBatch::new(KNOWS);
+        ghost.set_edge_property(EId(99), weight, Some(CanonicalScalar::Int(0)));
+        assert!(matches!(
+            db.write(cx, ghost).await,
+            Err(fgdb::WriteError::UnknownEdge { .. })
+        ));
+        let mut gone = WriteBatch::new(KNOWS);
+        gone.delete_edge(EId(11));
+        db.write(cx, gone).await.expect("commits");
+        let mut late = WriteBatch::new(KNOWS);
+        late.set_edge_property(EId(11), weight, Some(CanonicalScalar::Int(9)));
+        assert!(matches!(
+            db.write(cx, late).await,
+            Err(fgdb::WriteError::UnknownEdge { .. })
+        ));
+        drop(db);
+
+        // NOTHING crosses this line except `dir`, `keys()`, the recorded
+        // sequences, and the expected rows.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let props_at = |as_of| {
+            db.edge_at(EId(10), as_of)
+                .expect("reads")
+                .expect("alive at every probed sequence")
+                .props
+        };
+        assert_eq!(props_at(s1), vec![(weight, CanonicalScalar::Int(1))]);
+        assert_eq!(
+            props_at(s2),
+            vec![(weight, CanonicalScalar::Int(2)), (label, text.clone())],
+            "the frontier of s2 answers the updated row"
+        );
+        assert_eq!(props_at(s3), vec![(label, text)], "the unset key is gone");
+        let record = db.edge(EId(10)).expect("reads").expect("alive");
+        assert_eq!(
+            record.entry.retired_at, None,
+            "updates never touch the lifetime the reader sees"
+        );
+        // Identity is not respent: topology and the neighbour answer are
+        // stable across every content version.
+        assert_eq!(
+            db.neighbours_at(VId(1), KNOWS, s1).expect("reads"),
+            db.neighbours_at(VId(1), KNOWS, s3).expect("reads"),
+        );
+        // The same-batch fold left exactly one durable statement.
+        let folded = db
+            .edge_at(EId(11), s4)
+            .expect("reads")
+            .expect("alive at s4");
+        assert_eq!(folded.props, vec![(weight, CanonicalScalar::Int(8))]);
+        assert_eq!(
+            folded.entry.created_at, s4,
+            "one statement, born at its commit"
+        );
+    });
+}

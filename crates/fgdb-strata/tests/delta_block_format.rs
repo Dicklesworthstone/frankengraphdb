@@ -107,11 +107,18 @@ fn the_encoder_refuses_unsorted_entries() {
 /// stable edge slot, and a block cannot say which supersedes the other.
 #[test]
 fn the_encoder_refuses_duplicate_keys() {
-    let entries = vec![entry(1, 2, 1, None), entry(1, 2, 3, None)];
+    // Same (dst, eid, created_at) — an exact duplicate statement.
+    let entries = vec![entry(1, 2, 1, None), entry(1, 2, 1, None)];
     assert_eq!(
         encode_block(0, None, &entries),
         Err(BlockError::NonCanonicalOrder { at: 1 })
     );
+    // Two statements of one EId with DIFFERENT created_at are lawful at
+    // encode since V7 (fgdb-ls5b) — an edge's retire + content successor
+    // share a block. Whether they form a lawful CHAIN is admission's law,
+    // not the frame's.
+    let chain = vec![entry(1, 2, 1, Some(3)), entry(1, 2, 3, None)];
+    assert!(encode_block(0, None, &chain).is_ok());
 }
 
 /// EId is the unconditional discriminator: parallel edges with equal topology

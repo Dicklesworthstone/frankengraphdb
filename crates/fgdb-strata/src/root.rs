@@ -843,11 +843,22 @@ pub fn merge_edge(
     eid: EId,
     as_of: CommitSeq,
 ) -> Result<Option<crate::AdjacencyEntry>, RootError> {
-    let (entries, _) = collapse_edge_history(blocks)?;
-    Ok(entries
-        .get(&eid)
+    let (statements, _) = collapse_edge_history(blocks)?;
+    Ok(visible_statement(&statements, eid, as_of).copied())
+}
+
+/// The at-most-one statement of `eid` visible at `as_of` — chain contiguity
+/// (fgdb-ls5b) is what makes "at most one" a law rather than a hope.
+fn visible_statement(
+    statements: &std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    eid: EId,
+    as_of: CommitSeq,
+) -> Option<&crate::AdjacencyEntry> {
+    statements
+        .range((eid, CommitSeq(0))..=(eid, as_of))
+        .next_back()
+        .map(|(_, entry)| entry)
         .filter(|entry| entry.visible_at(as_of))
-        .copied())
 }
 
 /// [`merge_edge`], answering the winning statement's PROPERTIES beside it
@@ -862,10 +873,12 @@ pub fn merge_edge_with_props(
     eid: EId,
     as_of: CommitSeq,
 ) -> Result<Option<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
-    let (entries, _) = collapse_edge_history(blocks)?;
-    let Some(winner) = entries.get(&eid).filter(|entry| entry.visible_at(as_of)) else {
+    let (statements, _) = collapse_edge_history(blocks)?;
+    let Some(winner) = visible_statement(&statements, eid, as_of) else {
         return Ok(None);
     };
+    let winner = *winner;
+    let winner = &winner;
     for (block_at, block) in blocks.iter().enumerate().rev() {
         if let Some(index) = block.iter().position(|entry| entry == winner) {
             let props = block_props
@@ -888,7 +901,7 @@ pub fn merge_edge_with_props(
 pub(crate) fn winning_edge_rows(
     blocks: &[Vec<crate::AdjacencyEntry>],
     block_props: &[Option<crate::edge_props::BlockProps>],
-) -> std::collections::BTreeMap<EId, crate::edge_props::EdgePropertyRow> {
+) -> std::collections::BTreeMap<(EId, CommitSeq), crate::edge_props::EdgePropertyRow> {
     let mut rows = std::collections::BTreeMap::new();
     for (block, props) in blocks.iter().zip(block_props) {
         for (index, entry) in block.iter().enumerate() {
@@ -896,7 +909,7 @@ pub(crate) fn winning_edge_rows(
                 .as_ref()
                 .map(|props| props.props_of(index))
                 .unwrap_or_default();
-            rows.insert(entry.eid, row);
+            rows.insert((entry.eid, entry.created_at), row);
         }
     }
     rows
@@ -918,12 +931,12 @@ pub fn merge_all_edges_with_props(
             props: block_props.len(),
         });
     }
-    let (entries, _) = collapse_edge_history(blocks)?;
+    let (statements, _) = collapse_edge_history(blocks)?;
     let mut rows = winning_edge_rows(blocks, block_props);
-    Ok(entries
+    Ok(statements
         .into_iter()
         .filter(|(_, entry)| entry.visible_at(as_of))
-        .map(|(eid, entry)| (entry, rows.remove(&eid).unwrap_or_default()))
+        .map(|(key, entry)| (entry, rows.remove(&key).unwrap_or_default()))
         .collect())
 }
 
@@ -932,9 +945,19 @@ pub fn merge_all_edges_with_props(
 ///
 /// Root admission uses this without retaining decoded future blocks; merge and
 /// compaction consume the same state into their canonical one-entry-per-EId map.
+/// The canonical collapsed history: one row per content statement, keyed
+/// `(eid, created_at)`, beside the superseded-statement count.
+pub(crate) type CollapsedEdgeHistory = (
+    std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    usize,
+);
+
 #[derive(Debug, Default)]
 pub(crate) struct EdgeHistoryValidator {
-    entries: std::collections::BTreeMap<EId, crate::AdjacencyEntry>,
+    /// One row per content STATEMENT, keyed `(eid, created_at)` — the FGSV V2
+    /// chain model applied to edges (fgdb-ls5b). Birth fields are immutable
+    /// across an EId's whole chain; `created_at` advances only at contiguity.
+    statements: std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
     seen: usize,
 }
 
@@ -958,7 +981,13 @@ impl EdgeHistoryValidator {
                 at: block_at,
                 error,
             })?;
-            let found_key = (entry.src, entry.relation, entry.dst, entry.eid);
+            let found_key = (
+                entry.src,
+                entry.relation,
+                entry.dst,
+                entry.eid,
+                entry.created_at,
+            );
             if previous_key.is_some_and(|previous| previous >= found_key) {
                 return Err(RootError::Block {
                     at: block_at,
@@ -967,23 +996,23 @@ impl EdgeHistoryValidator {
             }
             previous_key = Some(found_key);
             self.seen += 1;
-            if let Some(existing) = self.entries.get(&entry.eid) {
-                let expected = EdgeBirth {
-                    src: existing.src,
-                    relation: existing.relation,
-                    dst: existing.dst,
-                    created_at: existing.created_at,
-                };
-                let found = EdgeBirth {
-                    src: entry.src,
-                    relation: entry.relation,
-                    dst: entry.dst,
-                    created_at: entry.created_at,
-                };
-                if found != expected {
+            let birth = |entry: &crate::AdjacencyEntry| EdgeBirth {
+                src: entry.src,
+                relation: entry.relation,
+                dst: entry.dst,
+                created_at: entry.created_at,
+            };
+            let key = (entry.eid, entry.created_at);
+            if let Some(existing) = self.statements.get(&key) {
+                // A restatement of one exact statement: birth fields must
+                // byte-match, and the only lawful change is live-to-retired.
+                if birth(existing) != birth(entry) {
                     return Err(RootError::EdgeIdentityMismatch {
                         eid: entry.eid,
-                        conflict: Box::new(EdgeIdentityConflict { expected, found }),
+                        conflict: Box::new(EdgeIdentityConflict {
+                            expected: birth(existing),
+                            found: birth(entry),
+                        }),
                     });
                 }
                 if existing.retired_at.is_some() && entry.retired_at != existing.retired_at {
@@ -993,38 +1022,76 @@ impl EdgeHistoryValidator {
                         found: entry.retired_at,
                     });
                 }
+            } else {
+                // A NEW statement must extend its EId's chain contiguously —
+                // begin exactly where the predecessor retired (a gap is a
+                // resurrection, an overlap is aliasing) and carry the SAME
+                // topology, since (src, relation, dst) is immutable for the
+                // chain's whole life; only content versions advance
+                // (fgdb-ls5b, the FGSV V2 law on edges).
+                let predecessor = self
+                    .statements
+                    .range(..key)
+                    .next_back()
+                    .filter(|((eid, _), _)| *eid == entry.eid)
+                    .map(|(_, existing)| existing);
+                if let Some(predecessor) = predecessor
+                    && (predecessor.retired_at != Some(entry.created_at)
+                        || (predecessor.src, predecessor.relation, predecessor.dst)
+                            != (entry.src, entry.relation, entry.dst))
+                {
+                    return Err(RootError::EdgeIdentityMismatch {
+                        eid: entry.eid,
+                        conflict: Box::new(EdgeIdentityConflict {
+                            expected: birth(predecessor),
+                            found: birth(entry),
+                        }),
+                    });
+                }
+                let successor = self
+                    .statements
+                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                    .next()
+                    .filter(|((eid, _), _)| *eid == entry.eid)
+                    .map(|(_, existing)| existing);
+                if let Some(successor) = successor
+                    && (entry.retired_at != Some(successor.created_at)
+                        || (successor.src, successor.relation, successor.dst)
+                            != (entry.src, entry.relation, entry.dst))
+                {
+                    return Err(RootError::EdgeIdentityMismatch {
+                        eid: entry.eid,
+                        conflict: Box::new(EdgeIdentityConflict {
+                            expected: birth(entry),
+                            found: birth(successor),
+                        }),
+                    });
+                }
             }
-            self.entries.insert(entry.eid, *entry);
+            self.statements.insert(key, *entry);
         }
         Ok(())
     }
 
-    fn into_canonical(
-        self,
-    ) -> (
-        std::collections::BTreeMap<EId, crate::AdjacencyEntry>,
-        usize,
-    ) {
-        let superseded = self.seen - self.entries.len();
-        (self.entries, superseded)
+    fn into_canonical(self) -> CollapsedEdgeHistory {
+        let superseded = self.seen - self.statements.len();
+        (self.statements, superseded)
     }
 }
 
-/// Validate and collapse a block publication history to one statement per EId.
+/// Validate and collapse a block publication history to one row per content
+/// STATEMENT `(eid, created_at)` — the FGSV V2 chain model (fgdb-ls5b).
 ///
-/// Later blocks may restate one exact birth to add its retirement, and the later
-/// statement wins. Nothing may change the birth itself: EIds are permanently
-/// spent, so treating `created_at` as a version discriminator would silently make
-/// reuse legal in the durable read and compaction paths.
+/// Later blocks may restate one exact statement to add its retirement, and the
+/// later statement wins. A NEW `created_at` for a spent EId is lawful ONLY as
+/// a contiguous content-version successor (same topology, beginning exactly
+/// where the predecessor retired); anything else — a gap, an overlap, or a
+/// topology change — is refused, which is what keeps EId reuse illegal now
+/// that `created_at` is a version discriminator. Contiguity also guarantees
+/// at most one statement per EId is visible at any sequence.
 pub(crate) fn collapse_edge_history(
     blocks: &[Vec<crate::AdjacencyEntry>],
-) -> Result<
-    (
-        std::collections::BTreeMap<EId, crate::AdjacencyEntry>,
-        usize,
-    ),
-    RootError,
-> {
+) -> Result<CollapsedEdgeHistory, RootError> {
     let mut validator = EdgeHistoryValidator::default();
     for (block_at, block) in blocks.iter().enumerate() {
         validator.observe_block(block_at, block)?;

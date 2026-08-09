@@ -501,6 +501,11 @@ enum PendingRow {
         label: LabelId,
         member: bool,
     },
+    SetEdgeProperty {
+        eid: EId,
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    },
     SetProperty {
         vid: VId,
         key: PropertyKeyId,
@@ -574,6 +579,21 @@ impl WriteBatch {
         value: Option<CanonicalScalar>,
     ) -> &mut Self {
         self.rows.push(PendingRow::SetProperty { vid, key, value });
+        self
+    }
+
+    /// Set (`Some`) or unset (`None`) one property of the edge `eid`
+    /// (fgdb-ls5b). The durable row's before-image is derived by the engine
+    /// at commit time; durably, the live statement retires and a content
+    /// successor begins — so pre-update snapshots keep answering the old row.
+    pub fn set_edge_property(
+        &mut self,
+        eid: EId,
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    ) -> &mut Self {
+        self.rows
+            .push(PendingRow::SetEdgeProperty { eid, key, value });
         self
     }
 
@@ -799,6 +819,11 @@ impl Database {
             std::collections::BTreeMap::new();
         let mut prefix_edges: std::collections::BTreeMap<EId, (VId, VId)> =
             std::collections::BTreeMap::new();
+        // Edge CONTENT for update targets, seeded lazily from the live
+        // statement's row so an update's before-image reflects the batch
+        // prefix — the edge half of `prefix_content`.
+        let mut prefix_edge_rows: std::collections::BTreeMap<EId, EdgePropertyRow> =
+            std::collections::BTreeMap::new();
         let mut prefix_deleted_edges: std::collections::BTreeSet<EId> =
             std::collections::BTreeSet::new();
         let mut prefix_deleted_vertices: std::collections::BTreeSet<VId> =
@@ -844,6 +869,9 @@ impl Database {
                     birth_ordinal += 1;
                     prefix_versions.insert(ElementId::Edge(eid), successor_version(None, &row)?);
                     prefix_edges.insert(eid, (src, dst));
+                    if let DeltaRow::CreateEdge { props, .. } = &row {
+                        prefix_edge_rows.insert(eid, props.clone());
+                    }
                     row
                 }
                 PendingRow::DeleteEdge { eid } => {
@@ -935,6 +963,46 @@ impl Database {
                         .or_else(|| self.snapshot.versions.get(&elem))
                         .copied()
                         .expect("a live vertex always has a version chain head");
+                    prefix_versions.insert(elem, successor_version(Some(previous), &row)?);
+                    row
+                }
+                PendingRow::SetEdgeProperty { eid, key, value } => {
+                    let live_now = !prefix_deleted_edges.contains(&eid)
+                        && (prefix_edges.contains_key(&eid)
+                            || self.writer.live_edge(eid).is_some());
+                    if !live_now {
+                        return Err(WriteError::UnknownEdge { eid });
+                    }
+                    let props = prefix_edge_rows
+                        .entry(eid)
+                        .or_insert_with(|| self.writer.live_edge_row(eid).unwrap_or_default());
+                    let position = props.binary_search_by_key(&key, |(k, _)| *k);
+                    let before = position.ok().map(|at| props[at].1.clone());
+                    let row = DeltaRow::Property {
+                        elem: ElementId::Edge(eid),
+                        property: key,
+                        before,
+                        after: value.clone(),
+                    };
+                    match position {
+                        Ok(at) => match value {
+                            Some(value) => props[at].1 = value,
+                            None => {
+                                props.remove(at);
+                            }
+                        },
+                        Err(at) => {
+                            if let Some(value) = value {
+                                props.insert(at, (key, value));
+                            }
+                        }
+                    }
+                    let elem = ElementId::Edge(eid);
+                    let previous = prefix_versions
+                        .get(&elem)
+                        .or_else(|| self.snapshot.versions.get(&elem))
+                        .copied()
+                        .expect("a live edge always has a version chain head");
                     prefix_versions.insert(elem, successor_version(Some(previous), &row)?);
                     row
                 }

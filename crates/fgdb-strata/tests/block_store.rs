@@ -1588,3 +1588,93 @@ fn a_root_refuses_a_broken_or_forged_family_chain() {
             .expect("an interleaved foreign family leaves the chain lawful");
     });
 }
+
+/// **THE EDGE CHAIN LAWS AT ADMISSION (fgdb-ls5b): a content-version
+/// successor must begin exactly where its predecessor retired and carry the
+/// same topology.** An overlap is aliasing, a topology change is a different
+/// edge wearing a spent EId — both refuse; the lawful chain is the control,
+/// and history answers each version in its own interval.
+#[test]
+fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
+    let dir = scratch_dir("edge-chains");
+    under_lab(57, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let reference = |id: fgdb_strata::DeltaBlockVersion, first: u64, last: u64| BlockRef {
+            block_id: id.0,
+            first_seq: CommitSeq(first),
+            last_seq: CommitSeq(last),
+        };
+        let root_of = |blocks: Vec<BlockRef>| PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(9),
+            blocks,
+            vertex_patches: vec![],
+        };
+
+        // The predecessor statement: eid 10, alive [1, 5).
+        let first_bytes = encode_block(0, None, &[edge(10, 1, 2, 1, Some(5))]).expect("encodes");
+        let first_id = store.put(cx, &first_bytes).expect("stores");
+
+        // ALIASING: a successor that begins inside the predecessor's life.
+        // Its span reaches PAST the predecessor's frontier so the root-order
+        // law stays satisfied and the refusal under test is the chain law.
+        let overlap =
+            encode_block(0, Some(first_id), &[edge(10, 1, 2, 3, Some(9))]).expect("frame-lawful");
+        let overlap_id = store.put(cx, &overlap).expect("stores");
+        assert!(matches!(
+            store.put_root(
+                cx,
+                &root_of(vec![reference(first_id, 1, 5), reference(overlap_id, 3, 9),])
+            ),
+            Err(StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
+                eid: EId(10),
+                ..
+            })),
+        ));
+
+        // TOPOLOGY DRIFT: contiguous, but the successor moved the edge.
+        let drift =
+            encode_block(0, Some(first_id), &[edge(10, 1, 3, 5, None)]).expect("frame-lawful");
+        let drift_id = store.put(cx, &drift).expect("stores");
+        assert!(matches!(
+            store.put_root(
+                cx,
+                &root_of(vec![reference(first_id, 1, 5), reference(drift_id, 5, 5),])
+            ),
+            Err(StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
+                eid: EId(10),
+                ..
+            })),
+        ));
+
+        // CONTROL: the contiguous same-topology successor admits, and each
+        // version answers in its own interval.
+        let lawful = encode_block(0, Some(first_id), &[edge(10, 1, 2, 5, None)]).expect("encodes");
+        let lawful_id = store.put(cx, &lawful).expect("stores");
+        store
+            .put_root(
+                cx,
+                &root_of(vec![reference(first_id, 1, 5), reference(lawful_id, 5, 5)]),
+            )
+            .expect("the lawful chain admits");
+        let history = vec![
+            vec![edge(10, 1, 2, 1, Some(5))],
+            vec![edge(10, 1, 2, 5, None)],
+        ];
+        for (as_of, expect_created) in [(1u64, 1u64), (4, 1), (5, 5), (9, 5)] {
+            let answered =
+                merge_neighbours(&history, VId(1), REL, CommitSeq(as_of)).expect("merges");
+            assert_eq!(answered, vec![VId(2)], "one edge, every content version");
+            let statement = fgdb_strata::root::merge_edge(&history, EId(10), CommitSeq(as_of))
+                .expect("merges")
+                .expect("visible at every probed sequence");
+            assert_eq!(
+                statement.created_at,
+                CommitSeq(expect_created),
+                "as_of {as_of} answers its own content version"
+            );
+        }
+    });
+}

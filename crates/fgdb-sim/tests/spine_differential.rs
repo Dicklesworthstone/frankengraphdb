@@ -192,6 +192,26 @@ async fn write_history(cx: &CommitCx, dir: &Path) -> Vec<fgdb_types::CommitSeq> 
     sixth.set_vertex_label(VId(1), LabelId(3), false);
     sixth.set_vertex_label(VId(3), LabelId(7), true);
     epochs.push(db.write(cx, sixth).await.expect("sixth batch commits"));
+
+    // EDGE PROPERTY UPDATES (fgdb-ls5b), every before-image engine-derived
+    // and oracle-validated at replay: change a value, unset one, add one to a
+    // previously propertyless edge — including a same-batch chain on one
+    // edge so the derivation walks the prefix. The per-epoch differential's
+    // earlier epochs then also prove the OLD rows survive in history.
+    let mut seventh = WriteBatch::new(KNOWS);
+    seventh.set_edge_property(EId(10), PropertyKeyId(11), Some(CanonicalScalar::Int(2021)));
+    seventh.set_edge_property(EId(10), PropertyKeyId(13), None);
+    seventh.set_edge_property(
+        EId(13),
+        PropertyKeyId(17),
+        Some(CanonicalScalar::Bool(false)),
+    );
+    seventh.set_edge_property(
+        EId(13),
+        PropertyKeyId(17),
+        Some(CanonicalScalar::Bool(true)),
+    );
+    epochs.push(db.write(cx, seventh).await.expect("seventh batch commits"));
     epochs
 }
 
@@ -399,7 +419,7 @@ fn the_spine_agrees_with_the_oracle_at_every_epoch() {
     under_lab(107, move |cx| async move {
         let cx = &cx;
         let epochs = write_history(cx, &dir).await;
-        assert_eq!(epochs.len(), 6, "the fixture is six epochs");
+        assert_eq!(epochs.len(), 7, "the fixture is seven epochs");
 
         // ENGINE SIDE: every epoch's answers gathered from one fresh open,
         // before the single-writer lease drops.

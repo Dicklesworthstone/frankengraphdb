@@ -137,10 +137,10 @@ fn compact_with_limit(
     // however old its creation is.
     let before_floor = entries.len();
     let retained: Vec<(AdjacencyEntry, EdgePropertyRow)> = entries
-        .into_values()
-        .filter(|entry| entry.retired_at.is_none_or(|r| r.0 > floor.0))
-        .map(|entry| {
-            let row = winning_props.remove(&entry.eid).unwrap_or_default();
+        .into_iter()
+        .filter(|(_, entry)| entry.retired_at.is_none_or(|r| r.0 > floor.0))
+        .map(|(key, entry)| {
+            let row = winning_props.remove(&key).unwrap_or_default();
             (entry, row)
         })
         .collect();
@@ -180,7 +180,7 @@ fn pack_retained(
     }
     let mut packed: Vec<(Vec<AdjacencyEntry>, Option<BlockProps>)> = Vec::new();
     for pairs in by_descriptor.values_mut() {
-        pairs.sort_by_key(|(entry, _)| (entry.dst, entry.eid));
+        pairs.sort_by_key(|(entry, _)| (entry.dst, entry.eid, entry.created_at));
         // Cut a block at entry capacity OR at the hosted patch's row ceiling,
         // whichever binds first — a block hosts at most one patch, so packing
         // past the row ceiling would emit an unencodable block.

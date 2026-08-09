@@ -246,7 +246,7 @@ pub struct BlockWriter {
     partition: u64,
     /// Entries not yet sealed, keyed by the complete stable adjacency
     /// identity, each with the properties its statement carries.
-    pending: BTreeMap<(VId, RelationId, VId, EId), PendingStatement>,
+    pending: BTreeMap<(VId, RelationId, VId, EId, CommitSeq), PendingStatement>,
     /// The full statement of every edge currently live — endpoints, creation,
     /// AND properties, because a tombstone must RESTATE the properties so a
     /// pre-retirement snapshot keeps answering them (fgdb-yqor), exactly as
@@ -331,6 +331,12 @@ impl BlockWriter {
         self.live
             .get(&eid)
             .map(|edge| (edge.src, edge.relation, edge.dst, edge.created_at))
+    }
+
+    /// The property row of the LIVE statement of `eid`, when one exists —
+    /// the before-image source for an update's derivation (fgdb-ls5b).
+    pub fn live_edge_row(&self, eid: EId) -> Option<EdgePropertyRow> {
+        self.live.get(&eid).map(|edge| edge.props.clone())
     }
 
     /// Is `vid` live in this fold?
@@ -548,14 +554,7 @@ impl BlockWriter {
                     )?;
                 }
                 ElementId::Edge(eid) => {
-                    // Edge properties have no tier-D storage yet — the
-                    // block-hosted patch refs are `fgdb-w3-properties-gou`'s.
-                    // The row stays durable in the stream, and LIVENESS is
-                    // still enforced here so an unlawful stream refuses
-                    // instead of silently versioning a ghost.
-                    if !self.live.contains_key(eid) {
-                        return Err(WriteError::UnknownEdge { eid: *eid });
-                    }
+                    self.fold_edge_update(keys, *eid, seq, *property, after.clone())?;
                 }
             },
             // Every other family is real and none of it belongs to the two
@@ -620,10 +619,8 @@ impl BlockWriter {
         if edge.created_at == seq {
             let is_same_run = self
                 .pending
-                .get(&(edge.src, edge.relation, edge.dst, eid))
-                .is_some_and(|pending| {
-                    pending.entry.created_at == seq && pending.entry.retired_at.is_none()
-                });
+                .get(&(edge.src, edge.relation, edge.dst, eid, seq))
+                .is_some_and(|pending| pending.entry.retired_at.is_none());
             if is_same_run {
                 return Ok(None);
             }
@@ -653,7 +650,7 @@ impl BlockWriter {
             // The same-commit fold: created and deleted in one commit, so the
             // exact durable image is no entry at all.
             let edge = self.live.get(&eid).ok_or(WriteError::UnknownEdge { eid })?;
-            let key = (edge.src, edge.relation, edge.dst, eid);
+            let key = (edge.src, edge.relation, edge.dst, eid, edge.created_at);
             let removed_pending = self.pending.remove(&key);
             debug_assert!(
                 removed_pending.is_some(),
@@ -682,28 +679,26 @@ impl BlockWriter {
         props: EdgePropertyRow,
     ) -> Result<(), WriteError> {
         validate_entry(0, &entry).map_err(WriteError::Block)?;
-        let key = (entry.src, entry.relation, entry.dst, entry.eid);
-        let statement = PendingStatement { entry, props };
-        match self.pending.get(&key) {
-            Some(existing) if existing.entry.created_at == entry.created_at => {
-                self.pending.insert(key, statement);
-            }
-            Some(_) => {
-                self.seal(keys)?;
-                self.pending.insert(key, statement);
-            }
-            None if self.pending.len()
-                >= usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX) =>
-            {
-                // This is a format ceiling, not an adaptive seal policy: allowing
-                // one more row would create a block no conforming reader accepts.
-                self.seal(keys)?;
-                self.pending.insert(key, statement);
-            }
-            None => {
-                self.pending.insert(key, statement);
-            }
+        // Statement-keyed since V7 (fgdb-ls5b): a retire and its content
+        // successor are DISTINCT keys that lawfully share one block under the
+        // widened (dst, eid, created_at) canonical order. A same-key insert
+        // remains the same-version restatement (a retirement of something
+        // created in this very run) and replaces in place.
+        let key = (
+            entry.src,
+            entry.relation,
+            entry.dst,
+            entry.eid,
+            entry.created_at,
+        );
+        if !self.pending.contains_key(&key)
+            && self.pending.len() >= usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX)
+        {
+            // This is a format ceiling, not an adaptive seal policy: allowing
+            // one more row would create a block no conforming reader accepts.
+            self.seal(keys)?;
         }
+        self.pending.insert(key, PendingStatement { entry, props });
         Ok(())
     }
 
@@ -860,6 +855,99 @@ impl BlockWriter {
     /// delete fold. The writer APPLIES the after-image and does not verify
     /// the before-image, for the cascade's reason: the row's image is checked
     /// against materialized state by the materializer that produced it.
+    /// Fold one edge property transition (fgdb-ls5b): the live statement
+    /// retires at `seq` and its successor — identical topology, updated row —
+    /// begins there, the FGSV V2 chain shape applied to edges. A transition
+    /// inside the statement's own creation commit folds IN PLACE: the
+    /// intermediate row never existed on any snapshot, exactly like the
+    /// same-commit vertex fold. The writer APPLIES the after-image and does
+    /// not verify the before-image, for the cascade's reason: images are
+    /// checked against materialized state by the materializer that produced
+    /// them.
+    fn fold_edge_update(
+        &mut self,
+        keys: (&[u8; 32], DatabaseSecurityNamespaceId),
+        eid: EId,
+        seq: CommitSeq,
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    ) -> Result<(), WriteError> {
+        let current = self
+            .live
+            .get(&eid)
+            .cloned()
+            .ok_or(WriteError::UnknownEdge { eid })?;
+        let mut successor_row = current.props.clone();
+        match successor_row.binary_search_by_key(&key, |(k, _)| *k) {
+            Ok(at) => match value {
+                Some(value) => successor_row[at].1 = value,
+                None => {
+                    successor_row.remove(at);
+                }
+            },
+            Err(at) => {
+                if let Some(value) = value {
+                    successor_row.insert(at, (key, value));
+                }
+            }
+        }
+        let statement_key = (current.src, current.relation, current.dst, eid, seq);
+        if current.created_at == seq
+            && self
+                .pending
+                .get(&statement_key)
+                .is_some_and(|pending| pending.entry.retired_at.is_none())
+        {
+            let entry = self
+                .pending
+                .get(&statement_key)
+                .expect("checked above")
+                .entry;
+            self.pending.insert(
+                statement_key,
+                PendingStatement {
+                    entry,
+                    props: successor_row.clone(),
+                },
+            );
+            self.live
+                .entry(eid)
+                .and_modify(|live| live.props = successor_row);
+            return Ok(());
+        }
+        // The retiring statement keeps ITS OWN row — that row is the content
+        // of `[created_at, seq)` and pre-update snapshots keep answering it.
+        let tombstone = AdjacencyEntry {
+            src: current.src,
+            relation: current.relation,
+            dst: current.dst,
+            eid,
+            created_at: current.created_at,
+            retired_at: Some(seq),
+        };
+        let successor = AdjacencyEntry {
+            src: current.src,
+            relation: current.relation,
+            dst: current.dst,
+            eid,
+            created_at: seq,
+            retired_at: None,
+        };
+        self.push(keys, tombstone, current.props.clone())?;
+        self.push(keys, successor, successor_row.clone())?;
+        self.live.insert(
+            eid,
+            LiveEdge {
+                src: current.src,
+                relation: current.relation,
+                dst: current.dst,
+                created_at: seq,
+                props: successor_row,
+            },
+        );
+        Ok(())
+    }
+
     fn fold_vertex_update(
         &mut self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
@@ -1012,7 +1100,7 @@ mod tests {
     fn a_failed_seal_preserves_its_pending_entries() {
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         writer.pending.insert(
-            (VId(1), RelationId(1), VId(2), EId(10)),
+            (VId(1), RelationId(1), VId(2), EId(10), CommitSeq(0)),
             PendingStatement {
                 entry: AdjacencyEntry {
                     src: VId(1),
