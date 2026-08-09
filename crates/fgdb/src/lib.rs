@@ -315,6 +315,29 @@ pub enum WriteError {
     UnknownVertex {
         vid: VId,
     },
+    /// A create named an identity that is already live. Identities are
+    /// permanently spent, and this refusal fires BEFORE the two-fsync commit
+    /// (fgdb-kokz): the fold would refuse the same row after it, and a
+    /// durable commit its own replay refuses poisons the database.
+    AlreadyLive {
+        elem: ElementId,
+    },
+    /// A create named an identity that was spent by earlier history —
+    /// including earlier in this very batch. Same pre-commit discipline as
+    /// [`WriteError::AlreadyLive`].
+    IdentitySpent {
+        elem: ElementId,
+    },
+    /// The batch composed operations on one element whose meaning depends on
+    /// submission order (fgdb-kokz): an update and a delete of one element,
+    /// or two touches of one exact field. The durable template's row order is
+    /// CANONICAL BYTE ORDER, not submission order, so committing this batch
+    /// would produce bytes that replay in a different order than the caller
+    /// meant — and the fold/replay refusal would then arrive AFTER the
+    /// irreversible commit. Split the batch.
+    OrderSensitiveBatch {
+        elem: ElementId,
+    },
     Canonical(CanonicalError),
     Commit(CommitError),
     /// The write was durable, and republishing the derived partition failed.
@@ -420,6 +443,25 @@ impl core::fmt::Display for WriteError {
             }
             Self::UnknownVertex { vid } => {
                 write!(f, "no live version of {vid:?} to delete")
+            }
+            Self::AlreadyLive { elem } => {
+                write!(
+                    f,
+                    "{elem:?} is already live; identities are permanently spent"
+                )
+            }
+            Self::IdentitySpent { elem } => {
+                write!(
+                    f,
+                    "{elem:?} was spent by earlier history and can never be re-created"
+                )
+            }
+            Self::OrderSensitiveBatch { elem } => {
+                write!(
+                    f,
+                    "{elem:?} is composed order-sensitively in one batch; durable row order \
+                     is canonical, not submission order — split the batch"
+                )
             }
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
@@ -833,9 +875,35 @@ impl Database {
         // prefix: (labels, props), both kept in canonical order.
         let mut prefix_content: std::collections::BTreeMap<VId, VertexContent> =
             std::collections::BTreeMap::new();
+        // ORDER-SENSITIVITY tracking (fgdb-kokz): the durable template's row
+        // order is canonical byte order, not submission order, so any
+        // composition whose meaning depends on submission order must refuse
+        // HERE — before a byte is durable — or the committed stream refuses
+        // its own replay. `updated` records every exact field this batch has
+        // touched per element; deletes consult it, and a second touch of one
+        // exact field refuses.
+        let mut updated: std::collections::BTreeMap<
+            ElementId,
+            std::collections::BTreeSet<(u8, u64)>,
+        > = std::collections::BTreeMap::new();
         for pending in batch.rows {
             let row = match pending {
                 PendingRow::Vertex { vid, labels, props } => {
+                    // The fold's refusals, preflighted (fgdb-kokz): a create
+                    // that the writer would refuse AFTER the two-fsync commit
+                    // must refuse before it.
+                    if prefix_versions.contains_key(&ElementId::Vertex(vid))
+                        || self.writer.is_vertex_live(vid)
+                    {
+                        return Err(WriteError::AlreadyLive {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
+                    if prefix_deleted_vertices.contains(&vid) || self.writer.is_vertex_spent(vid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
                     let row = DeltaRow::CreateVertex {
                         vid,
                         birth_ordinal,
@@ -856,6 +924,16 @@ impl Database {
                     dst,
                     props,
                 } => {
+                    if prefix_edges.contains_key(&eid) || self.writer.live_edge(eid).is_some() {
+                        return Err(WriteError::AlreadyLive {
+                            elem: ElementId::Edge(eid),
+                        });
+                    }
+                    if prefix_deleted_edges.contains(&eid) || self.writer.is_edge_spent(eid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Edge(eid),
+                        });
+                    }
                     let row = DeltaRow::CreateEdge {
                         eid,
                         birth_ordinal,
@@ -880,6 +958,11 @@ impl Database {
                             || self.writer.live_edge(eid).is_some());
                     if !live_now {
                         return Err(WriteError::UnknownEdge { eid });
+                    }
+                    if updated.contains_key(&ElementId::Edge(eid)) {
+                        return Err(WriteError::OrderSensitiveBatch {
+                            elem: ElementId::Edge(eid),
+                        });
                     }
                     let before_version = prefix_versions
                         .get(&ElementId::Edge(eid))
@@ -917,6 +1000,22 @@ impl Database {
                             cascade.insert(*eid);
                         }
                     }
+                    if updated.contains_key(&ElementId::Vertex(vid)) {
+                        return Err(WriteError::OrderSensitiveBatch {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
+                    if let Some(eid) = cascade
+                        .iter()
+                        .find(|eid| updated.contains_key(&ElementId::Edge(**eid)))
+                    {
+                        // The cascade retires this edge, and this batch also
+                        // updated it — the same order sensitivity, reached
+                        // through the vertex.
+                        return Err(WriteError::OrderSensitiveBatch {
+                            elem: ElementId::Edge(*eid),
+                        });
+                    }
                     for eid in &cascade {
                         prefix_deleted_edges.insert(*eid);
                     }
@@ -935,6 +1034,15 @@ impl Database {
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
                         return Err(WriteError::UnknownVertex { vid });
+                    }
+                    if !updated
+                        .entry(ElementId::Vertex(vid))
+                        .or_default()
+                        .insert((0, label.0))
+                    {
+                        return Err(WriteError::OrderSensitiveBatch {
+                            elem: ElementId::Vertex(vid),
+                        });
                     }
                     let (labels, _) =
                         vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
@@ -972,6 +1080,15 @@ impl Database {
                             || self.writer.live_edge(eid).is_some());
                     if !live_now {
                         return Err(WriteError::UnknownEdge { eid });
+                    }
+                    if !updated
+                        .entry(ElementId::Edge(eid))
+                        .or_default()
+                        .insert((1, key.0))
+                    {
+                        return Err(WriteError::OrderSensitiveBatch {
+                            elem: ElementId::Edge(eid),
+                        });
                     }
                     let props = prefix_edge_rows
                         .entry(eid)
@@ -1013,6 +1130,15 @@ impl Database {
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
                         return Err(WriteError::UnknownVertex { vid });
+                    }
+                    if !updated
+                        .entry(ElementId::Vertex(vid))
+                        .or_default()
+                        .insert((1, key.0))
+                    {
+                        return Err(WriteError::OrderSensitiveBatch {
+                            elem: ElementId::Vertex(vid),
+                        });
                     }
                     let (_, props) = vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
                     let position = props.binary_search_by_key(&key, |(k, _)| *k);

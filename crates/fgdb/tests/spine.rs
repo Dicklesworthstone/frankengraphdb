@@ -1182,3 +1182,82 @@ fn edge_property_updates_version_the_row_without_respending_the_identity() {
         );
     });
 }
+
+/// **THE ORDER-SENSITIVITY REFUSAL (fgdb-kokz, found by the generated
+/// differential, seed 11): a batch whose meaning depends on submission order
+/// refuses BEFORE any byte is durable.** The durable template's row order is
+/// canonical byte order, so update-then-delete of one element — directly or
+/// through a cascade — and a double touch of one exact field would commit
+/// bytes that replay in a different order than the caller meant, and the
+/// refusal would otherwise arrive AFTER the irreversible commit, poisoning
+/// the database against its own reopen.
+#[test]
+fn order_sensitive_batches_refuse_before_anything_is_durable() {
+    let dir = scratch("order-sensitive");
+    under_lab(91, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(EId(10), VId(1), VId(2), vec![]);
+        let s1 = db.write(cx, first).await.expect("commits");
+
+        // Update-then-delete, both element kinds — including the cascade
+        // route, where the delete reaches the updated edge through a vertex.
+        let mut vertex_case = WriteBatch::new(KNOWS);
+        vertex_case.set_vertex_property(VId(1), key, None);
+        vertex_case.delete_vertex(VId(1));
+        assert!(matches!(
+            db.write(cx, vertex_case).await,
+            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
+        ));
+        let mut edge_case = WriteBatch::new(KNOWS);
+        edge_case.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(1)));
+        edge_case.delete_edge(EId(10));
+        assert!(matches!(
+            db.write(cx, edge_case).await,
+            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
+        ));
+        let mut cascade_case = WriteBatch::new(KNOWS);
+        cascade_case.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(1)));
+        cascade_case.delete_vertex(VId(2));
+        assert!(matches!(
+            db.write(cx, cascade_case).await,
+            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
+        ));
+        // A double touch of one exact field; a DIFFERENT field commutes and
+        // stays lawful — the control that keeps this a refusal about order,
+        // not about updates.
+        let mut double = WriteBatch::new(KNOWS);
+        double.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(1)));
+        double.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(2)));
+        assert!(matches!(
+            db.write(cx, double).await,
+            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
+        ));
+        let mut commuting = WriteBatch::new(KNOWS);
+        commuting.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(1)));
+        commuting.set_vertex_property(VId(1), PropertyKeyId(9), Some(CanonicalScalar::Int(2)));
+        let s2 = db
+            .write(cx, commuting)
+            .await
+            .expect("distinct fields commute");
+
+        // Identity reuse refusals, also pre-commit (the fold's spent law).
+        let mut recreate = WriteBatch::new(KNOWS);
+        recreate.create_vertex(VId(1), vec![], vec![]);
+        assert!(matches!(
+            db.write(cx, recreate).await,
+            Err(fgdb::WriteError::AlreadyLive { .. })
+        ));
+        drop(db);
+
+        // NOTHING refused above became durable: the reopened database sits at
+        // exactly the two acknowledged commits.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(db.frontier(), s2);
+        assert!(db.vertex_at(VId(1), s1).expect("reads").is_some());
+    });
+}

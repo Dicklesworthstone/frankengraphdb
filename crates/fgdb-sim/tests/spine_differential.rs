@@ -195,22 +195,19 @@ async fn write_history(cx: &CommitCx, dir: &Path) -> Vec<fgdb_types::CommitSeq> 
 
     // EDGE PROPERTY UPDATES (fgdb-ls5b), every before-image engine-derived
     // and oracle-validated at replay: change a value, unset one, add one to a
-    // previously propertyless edge — including a same-batch chain on one
-    // edge so the derivation walks the prefix. The per-epoch differential's
-    // earlier epochs then also prove the OLD rows survive in history.
+    // previously propertyless edge — two COMMUTING fields, since a same-batch
+    // touch of one exact field is an order-sensitivity refusal (fgdb-kokz).
+    // The per-epoch differential's earlier epochs then also prove the OLD
+    // rows survive in history.
     let mut seventh = WriteBatch::new(KNOWS);
     seventh.set_edge_property(EId(10), PropertyKeyId(11), Some(CanonicalScalar::Int(2021)));
     seventh.set_edge_property(EId(10), PropertyKeyId(13), None);
     seventh.set_edge_property(
         EId(13),
         PropertyKeyId(17),
-        Some(CanonicalScalar::Bool(false)),
-    );
-    seventh.set_edge_property(
-        EId(13),
-        PropertyKeyId(17),
         Some(CanonicalScalar::Bool(true)),
     );
+    seventh.set_edge_property(EId(13), PropertyKeyId(19), Some(CanonicalScalar::Int(3)));
     epochs.push(db.write(cx, seventh).await.expect("seventh batch commits"));
     epochs
 }
@@ -598,4 +595,250 @@ fn the_spine_agrees_with_the_oracle_at_every_epoch() {
             "every epoch must observe a different graph from its predecessor"
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// Model-based generated histories over the ENGINE (§15 storage oracle)
+// ---------------------------------------------------------------------------
+
+/// Deterministic generator state — SplitMix64, so a seed IS the history and a
+/// failure report is a repro command, never a coincidence.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+}
+
+/// The generator's model: enough state to propose ONLY lawful operations.
+/// Validity is maintained, not filtered — a refused batch is a generator
+/// defect, and the driver treats it as one.
+#[derive(Default)]
+struct GenModel {
+    next_vid: u128,
+    next_eid: u128,
+    live_vertices: Vec<u128>,
+    /// eid -> (src, dst); endpoints so a vertex delete cascades in the model
+    /// exactly as the engine's writer cascades it.
+    live_edges: Vec<(u128, u128, u128)>,
+}
+
+/// **THE GENERATED DIFFERENTIAL: N seeded random histories of creates,
+/// deletes, cascades, label flips, and BOTH property-update families, each
+/// compared against the oracle at EVERY epoch with counts closing the
+/// universe.** The hand-built seven-epoch fixture above proves the shapes it
+/// thought of; this proves the interactions nobody thought of, and a seed
+/// reproduces any disagreement exactly.
+#[test]
+fn generated_histories_agree_with_the_oracle_at_every_epoch() {
+    for seed in [11u64, 47, 203] {
+        let dir = scratch(&format!("generated-{seed}"));
+        under_lab(300 + seed, move |cx| async move {
+            let cx = &cx;
+            let mut rng = SplitMix64(seed);
+            let mut model = GenModel {
+                next_vid: 1,
+                next_eid: 1000,
+                ..GenModel::default()
+            };
+
+            // ENGINE SIDE: generate and commit 8 batches of 1..=5 lawful ops.
+            let mut db = Database::create(cx, &dir, engine_keys())
+                .await
+                .expect("creates");
+            let mut epochs = Vec::new();
+            for _ in 0..8 {
+                let mut batch = WriteBatch::new(KNOWS);
+                let ops = 1 + rng.below(5);
+                // Per-batch order-sensitivity bookkeeping (fgdb-kokz): the
+                // model refuses to PROPOSE what the engine refuses to commit,
+                // so a refusal stays a generator defect rather than noise.
+                let mut touched: std::collections::BTreeSet<(u8, u128)> =
+                    std::collections::BTreeSet::new();
+                for _ in 0..ops {
+                    match rng.below(7) {
+                        0 | 1 => {
+                            let vid = model.next_vid;
+                            model.next_vid += 1;
+                            let labels = if rng.below(2) == 0 {
+                                vec![LabelId(3)]
+                            } else {
+                                vec![]
+                            };
+                            let props = if rng.below(2) == 0 {
+                                vec![(PropertyKeyId(7), CanonicalScalar::Int(vid as i64))]
+                            } else {
+                                vec![]
+                            };
+                            batch.create_vertex(VId(vid), labels, props);
+                            model.live_vertices.push(vid);
+                        }
+                        2 if model.live_vertices.len() >= 2 => {
+                            let eid = model.next_eid;
+                            model.next_eid += 1;
+                            let src = model.live_vertices[rng.below(model.live_vertices.len())];
+                            let dst = model.live_vertices[rng.below(model.live_vertices.len())];
+                            let props = if rng.below(2) == 0 {
+                                vec![(PropertyKeyId(11), CanonicalScalar::Int(eid as i64))]
+                            } else {
+                                vec![]
+                            };
+                            batch.add_edge(EId(eid), VId(src), VId(dst), props);
+                            model.live_edges.push((eid, src, dst));
+                        }
+                        3 if !model.live_edges.is_empty() => {
+                            let at = rng.below(model.live_edges.len());
+                            if touched.contains(&(1, model.live_edges[at].0)) {
+                                continue; // updated this batch — deletion is order-sensitive
+                            }
+                            let (eid, _, _) = model.live_edges.remove(at);
+                            batch.delete_edge(EId(eid));
+                        }
+                        4 if !model.live_vertices.is_empty() => {
+                            let at = rng.below(model.live_vertices.len());
+                            let vid = model.live_vertices[at];
+                            let cascade_touched = touched.contains(&(0, vid))
+                                || model.live_edges.iter().any(|(eid, s, d)| {
+                                    (*s == vid || *d == vid) && touched.contains(&(1, *eid))
+                                });
+                            if cascade_touched {
+                                continue; // this batch updated it or a cascade member
+                            }
+                            model.live_vertices.remove(at);
+                            batch.delete_vertex(VId(vid));
+                            model.live_edges.retain(|(_, s, d)| *s != vid && *d != vid);
+                        }
+                        5 if !model.live_vertices.is_empty() => {
+                            let vid = model.live_vertices[rng.below(model.live_vertices.len())];
+                            if !touched.insert((0, vid)) {
+                                continue; // one exact field per element per batch
+                            }
+                            let value = (rng.below(2) == 0)
+                                .then(|| CanonicalScalar::Int(rng.next() as i64 % 1000));
+                            batch.set_vertex_property(VId(vid), PropertyKeyId(7), value);
+                        }
+                        6 if !model.live_edges.is_empty() => {
+                            let (eid, _, _) = model.live_edges[rng.below(model.live_edges.len())];
+                            if !touched.insert((1, eid)) {
+                                continue; // one exact field per element per batch
+                            }
+                            let value = (rng.below(2) == 0)
+                                .then(|| CanonicalScalar::Int(rng.next() as i64 % 1000));
+                            batch.set_edge_property(EId(eid), PropertyKeyId(11), value);
+                        }
+                        _ => {
+                            // The preferred family had no lawful target yet;
+                            // create a vertex instead so the batch stays
+                            // non-empty and the mix self-heals from empty
+                            // models.
+                            let vid = model.next_vid;
+                            model.next_vid += 1;
+                            batch.create_vertex(VId(vid), vec![], vec![]);
+                            model.live_vertices.push(vid);
+                        }
+                    }
+                }
+                let frontier = db
+                    .write(cx, batch)
+                    .await
+                    .expect("every generated batch is lawful — a refusal is a generator defect");
+                epochs.push(frontier);
+            }
+
+            // Gather every epoch's engine scans before the lease drops.
+            let engine_epochs: Vec<(Vec<fgdb::VertexRow>, Vec<fgdb::EdgeRecord>)> = epochs
+                .iter()
+                .map(|as_of| {
+                    (
+                        db.vertices_at(*as_of).expect("engine scans"),
+                        db.edges_at(*as_of).expect("engine scans"),
+                    )
+                })
+                .collect();
+            drop(db);
+
+            // ORACLE SIDE: one prefix replay per epoch, over nothing but the
+            // bytes; counts close the universe in both directions.
+            let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+                .await
+                .expect("oracle opens");
+            for (as_of, (vertex_scan, edge_scan)) in epochs.iter().zip(&engine_epochs) {
+                let replayed = fgdb_sim::replay_through(cx, &coordinator, *as_of)
+                    .await
+                    .expect("the prefix replays");
+                let graph = replayed
+                    .database
+                    .graph(GRAPH, BRANCH)
+                    .expect("the oracle materialized the coordinate");
+                assert_eq!(
+                    vertex_scan.len(),
+                    graph.vertex_count(),
+                    "seed {seed} epoch {as_of:?}: vertex cardinality"
+                );
+                for row in vertex_scan {
+                    let vertex = graph.vertex(row.vid);
+                    assert!(
+                        vertex.is_some(),
+                        "seed {seed} epoch {as_of:?}: scanned {:?} unknown to the oracle",
+                        row.vid
+                    );
+                    let vertex = vertex.expect("existence just asserted");
+                    assert_eq!(
+                        row.labels,
+                        vertex.labels.iter().copied().collect::<Vec<_>>(),
+                        "seed {seed} epoch {as_of:?}: {:?} labels",
+                        row.vid
+                    );
+                    assert_eq!(
+                        row.props,
+                        vertex
+                            .props
+                            .iter()
+                            .map(|(key, value)| (*key, value.clone()))
+                            .collect::<Vec<_>>(),
+                        "seed {seed} epoch {as_of:?}: {:?} properties",
+                        row.vid
+                    );
+                }
+                assert_eq!(
+                    edge_scan.len(),
+                    graph.edge_count(),
+                    "seed {seed} epoch {as_of:?}: edge cardinality"
+                );
+                for record in edge_scan {
+                    let edge = graph.edge(record.entry.eid);
+                    assert!(
+                        edge.is_some(),
+                        "seed {seed} epoch {as_of:?}: scanned {:?} unknown to the oracle",
+                        record.entry.eid
+                    );
+                    let edge = edge.expect("existence just asserted");
+                    assert_eq!(
+                        (record.entry.src, record.entry.dst),
+                        (edge.src, edge.dst),
+                        "seed {seed} epoch {as_of:?}: {:?} topology",
+                        record.entry.eid
+                    );
+                    assert_eq!(
+                        record.props,
+                        edge.props
+                            .iter()
+                            .map(|(key, value)| (*key, value.clone()))
+                            .collect::<Vec<_>>(),
+                        "seed {seed} epoch {as_of:?}: {:?} properties",
+                        record.entry.eid
+                    );
+                }
+            }
+        });
+    }
 }

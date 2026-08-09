@@ -175,6 +175,7 @@ pub enum WriteError {
     /// identity is the stream failing to be a stream, and overwriting the
     /// staged row would strand the first version.
     VertexAlreadyLive { vid: VId },
+
     /// A create tried to reuse a VId admitted earlier in this stream.
     VertexIdentitySpent { vid: VId },
     /// Sealing produced bytes the vertex patch encoder refused, or a row's
@@ -337,6 +338,18 @@ impl BlockWriter {
     /// the before-image source for an update's derivation (fgdb-ls5b).
     pub fn live_edge_row(&self, eid: EId) -> Option<EdgePropertyRow> {
         self.live.get(&eid).map(|edge| edge.props.clone())
+    }
+
+    /// Was `eid` ever admitted in this fold's history? Identities are
+    /// permanently spent, and a caller composing a batch must be able to ask
+    /// BEFORE committing bytes whose fold would refuse (fgdb-kokz).
+    pub fn is_edge_spent(&self, eid: EId) -> bool {
+        self.spent.contains(&eid)
+    }
+
+    /// The vertex counterpart of [`BlockWriter::is_edge_spent`].
+    pub fn is_vertex_spent(&self, vid: VId) -> bool {
+        self.spent_vertices.contains(&vid)
     }
 
     /// Is `vid` live in this fold?
