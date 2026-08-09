@@ -14,38 +14,20 @@
 //! same root. If it did, root equality could not distinguish anything and the
 //! law above would be vacuous.
 
-use asupersync::cx::Cx;
+use asupersync::{Budget, cx::Cx, runtime::Runtime, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::RelationId;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
 
 const KNOWS: RelationId = RelationId(1);
 
-/// Minimal single-future executor for the non-lab lane — same shape and
-/// rationale as `cx_probe.rs`.
-fn drive<F: Future>(future: F) -> F::Output {
-    struct ThreadWaker(std::thread::Thread);
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-    let mut future = pin!(future);
-    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-    let mut task_cx = Context::from_waker(&waker);
-    loop {
-        match future.as_mut().poll(&mut task_cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::park(),
-        }
-    }
+fn production_runtime() -> (Runtime, Cx) {
+    let runtime = RuntimeBuilder::new().build().expect("production runtime");
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    (runtime, cx)
 }
 
 fn keys() -> DatabaseKeys {
@@ -62,33 +44,42 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-fn commit_one(commit: &fgdb_types::context::CommitCx, db: &mut Database, b: usize) {
+fn commit_one(
+    runtime: &Runtime,
+    commit: &fgdb_types::context::CommitCx,
+    db: &mut Database,
+    b: usize,
+) {
     let mut batch = WriteBatch::new(KNOWS);
     if b == 0 {
         batch.create_vertex(VId(1), vec![], vec![]);
     }
     batch.create_vertex(VId(2000 + b as u128), vec![], vec![]);
     batch.add_edge(EId(b as u128 + 1), VId(1), VId(2000 + b as u128), vec![]);
-    drive(db.write(commit, batch)).expect("commit");
+    runtime.block_on(db.write(commit, batch)).expect("commit");
 }
 
 #[test]
 fn the_incremental_snapshot_reopens_to_the_same_root() {
     const COMMITS: usize = 24;
-    let cx = Cx::for_testing();
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     let dir = scratch("same-root");
-    let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
+    let mut db = runtime
+        .block_on(Database::create(&commit, &dir, keys()))
+        .expect("creates");
     for b in 0..COMMITS {
-        commit_one(&commit, &mut db, b);
+        commit_one(&runtime, &commit, &mut db, b);
     }
     let incremental_root = db.partition_root();
     let incremental_frontier = db.frontier();
     let incremental_neighbours = db.neighbours(VId(1), KNOWS).expect("reads");
     drop(db);
 
-    let reopened = drive(Database::open(&commit, &dir, keys())).expect("reopens");
+    let reopened = runtime
+        .block_on(Database::open(&commit, &dir, keys()))
+        .expect("reopens");
     assert_eq!(
         reopened.partition_root(),
         incremental_root,
@@ -109,21 +100,25 @@ fn the_incremental_snapshot_reopens_to_the_same_root() {
 #[test]
 fn a_database_missing_the_last_commit_reopens_to_a_different_root() {
     const COMMITS: usize = 24;
-    let cx = Cx::for_testing();
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     let full_dir = scratch("control-full");
-    let mut full = drive(Database::create(&commit, &full_dir, keys())).expect("creates");
+    let mut full = runtime
+        .block_on(Database::create(&commit, &full_dir, keys()))
+        .expect("creates");
     for b in 0..COMMITS {
-        commit_one(&commit, &mut full, b);
+        commit_one(&runtime, &commit, &mut full, b);
     }
     let full_root = full.partition_root();
     drop(full);
 
     let short_dir = scratch("control-short");
-    let mut short = drive(Database::create(&commit, &short_dir, keys())).expect("creates");
+    let mut short = runtime
+        .block_on(Database::create(&commit, &short_dir, keys()))
+        .expect("creates");
     for b in 0..COMMITS - 1 {
-        commit_one(&commit, &mut short, b);
+        commit_one(&runtime, &commit, &mut short, b);
     }
     let short_root = short.partition_root();
     drop(short);

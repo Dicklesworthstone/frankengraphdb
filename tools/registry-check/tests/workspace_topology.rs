@@ -39,7 +39,7 @@ const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
 // message, never hand-computed. The semantic contract covers activation_status
 // AND posture status, so activating a crate MUST move this — a pin that
 // survived the change would be pinning nothing.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:1b7bb6b5baacc93b";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:510d1b3de5d772f7";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -531,7 +531,7 @@ fn topology_neg_live_crate_declared_planned() {
 #[test]
 fn topology_neg_foundation_revision_drift() {
     let codes = codes_after(
-        "pinned_rev = \"3e8d08efe6617e08635fa8705c62a2a531373f43\"",
+        "pinned_rev = \"24eb7ec6c62e9ba037d70fed4a69c4e733785926\"",
         "pinned_rev = \"0000000000000000000000000000000000000000\"",
     );
     assert_reports(&codes, "foundation_rev_drift");

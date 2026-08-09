@@ -285,15 +285,16 @@ fn continuity_refusals_precede_the_irreversible_write() {
             let outcome = store
                 .publish_with_continuity(&cx, &slot(2), authority)
                 .await;
-            let refused = match outcome {
+            let refused = match &outcome {
                 Err(StoreError::ContinuityVersionSkew { .. }) => want_skew,
                 Err(StoreError::ContinuityForked { .. }) => want_fork,
                 Err(StoreError::ContinuityUnavailable(_)) => want_outage,
-                ref other => {
-                    panic!("{name}: expected a continuity refusal, got {other:?}")
-                }
+                _ => false,
             };
-            assert!(refused, "{name}: refused with the wrong continuity error");
+            assert!(
+                refused,
+                "{name}: expected its continuity refusal, got {outcome:?}"
+            );
             assert_eq!(
                 std::fs::read(store.path()).expect("bytes after refusal"),
                 pristine,

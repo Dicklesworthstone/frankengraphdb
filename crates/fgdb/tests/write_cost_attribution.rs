@@ -55,7 +55,7 @@
 //! measurement interval start, never key material; `keys()` is the same fixed
 //! test fixture every spine test uses.
 
-use asupersync::cx::Cx;
+use asupersync::{Budget, cx::Cx, runtime::Runtime, runtime::RuntimeBuilder};
 use fgdb::marker_for_capsule;
 use fgdb::{Database, DatabaseKeys, WriteBatch, prepare_capsule, template_digest};
 use fgdb_chronicle::commit::CommitCoordinator;
@@ -65,35 +65,13 @@ use fgdb_strata::writer::BlockWriter;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::{BranchId, DatabaseSecurityNamespaceId, GraphId, ObjectId};
 use fgdb_types::{EId, VId};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
-/// Minimal single-future executor for the non-lab lane — same shape and
-/// rationale as `cx_probe.rs`: this file measures OFF the lab runtime, and
-/// asupersync's `spawn_blocking` falls back to dedicated threads without a
-/// runtime, so the durable-path futures complete and wake this parked thread.
-/// The parked-thread round trip is microseconds against the millisecond-scale
-/// operations measured here.
-fn drive<F: Future>(future: F) -> F::Output {
-    struct ThreadWaker(std::thread::Thread);
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-    let mut future = pin!(future);
-    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-    let mut task_cx = Context::from_waker(&waker);
-    loop {
-        match future.as_mut().poll(&mut task_cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::park(),
-        }
-    }
+fn production_runtime() -> (Runtime, Cx) {
+    let runtime = RuntimeBuilder::new().build().expect("production runtime");
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    (runtime, cx)
 }
 
 const KNOWS: RelationId = RelationId(1);
@@ -118,7 +96,12 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// One edge per commit, the sweep's history-building shape.
-fn build_history(commit: &fgdb_types::context::CommitCx, db: &mut Database, commits: usize) {
+fn build_history(
+    runtime: &Runtime,
+    commit: &fgdb_types::context::CommitCx,
+    db: &mut Database,
+    commits: usize,
+) {
     for b in 0..commits {
         let mut batch = WriteBatch::new(KNOWS);
         if b == 0 {
@@ -126,7 +109,9 @@ fn build_history(commit: &fgdb_types::context::CommitCx, db: &mut Database, comm
         }
         batch.create_vertex(VId(2000 + b as u128), vec![], vec![]);
         batch.add_edge(EId(b as u128 + 1), VId(1), VId(2000 + b as u128), vec![]);
-        drive(db.write(commit, batch)).expect("history commit");
+        runtime
+            .block_on(db.write(commit, batch))
+            .expect("history commit");
     }
 }
 
@@ -157,13 +142,14 @@ impl ReplicaStages {
 /// no live writer (drop the `Database` first — the coordinator lease is the
 /// sole-writer authority and `open` would otherwise refuse).
 fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
-    let cx = Cx::for_testing();
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
     let keys = keys();
     let mut stages = ReplicaStages::default();
 
     let start = Instant::now();
-    let coordinator = drive(CommitCoordinator::open(&commit, dir, capsule_keys(&keys)))
+    let coordinator = runtime
+        .block_on(CommitCoordinator::open(&commit, dir, capsule_keys(&keys)))
         .expect("replica coordinator opens");
     stages.open_recover_chain = start.elapsed();
 
@@ -179,7 +165,9 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
             &entry.marker.effect_source;
         plaintexts.push((
             entry.marker.commit_seq,
-            drive(coordinator.read_capsule(&commit, *capsule_ref)).expect("replica capsule read"),
+            runtime
+                .block_on(coordinator.read_capsule(&commit, *capsule_ref))
+                .expect("replica capsule read"),
         ));
     }
     stages.capsule_read_recover = start.elapsed();
@@ -276,7 +264,7 @@ fn control_capsule_bytes(round: u64) -> (Vec<u8>, fgdb::PreparedCapsule) {
 fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     const HISTORY_POINTS: [usize; 3] = [8, 32, 96];
 
-    let cx = Cx::for_testing();
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     // ---- Instrument 1 + 2: marginal write and rebuild replica per history size.
@@ -284,14 +272,18 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     let mut replicas: Vec<(usize, ReplicaStages)> = Vec::new();
     for &n in &HISTORY_POINTS {
         let dir = scratch(&format!("hist-{n}"));
-        let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
-        build_history(&commit, &mut db, n);
+        let mut db = runtime
+            .block_on(Database::create(&commit, &dir, keys()))
+            .expect("creates");
+        build_history(&runtime, &commit, &mut db, n);
 
         let start = Instant::now();
         let mut batch = WriteBatch::new(KNOWS);
         batch.create_vertex(VId(900_000), vec![], vec![]);
         batch.add_edge(EId(900_000), VId(1), VId(900_000), vec![]);
-        drive(db.write(&commit, batch)).expect("marginal commit");
+        runtime
+            .block_on(db.write(&commit, batch))
+            .expect("marginal commit");
         let t_marginal = start.elapsed();
         marginal.push((n, t_marginal));
 
@@ -302,12 +294,13 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     // ---- Instrument 3: chronicle-only control — raw commits, no rebuild.
     let control_dir = scratch("chronicle-only");
     let control_keys = keys();
-    let mut coordinator = drive(CommitCoordinator::open(
-        &commit,
-        &control_dir,
-        capsule_keys(&control_keys),
-    ))
-    .expect("control coordinator");
+    let mut coordinator = runtime
+        .block_on(CommitCoordinator::open(
+            &commit,
+            &control_dir,
+            capsule_keys(&control_keys),
+        ))
+        .expect("control coordinator");
     // Each commit is timed against an ADJACENT constant-work sentinel — a
     // 4 KiB write + fsync in the same directory — and the verdict is over
     // the RATIO. Machine load (this box runs many panes, fgdb-j57r measured
@@ -336,10 +329,11 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
         // cannot manufacture a huge ratio.
         let sentinel = sentinel_start.elapsed().max(Duration::from_micros(50));
         let start = Instant::now();
-        drive(coordinator.commit(&commit, &bytes, |seq, oid| {
-            marker_for_capsule(seq, oid, &capsule, Vec::new())
-        }))
-        .expect("control commit");
+        runtime
+            .block_on(coordinator.commit(&commit, &bytes, |seq, oid| {
+                marker_for_capsule(seq, oid, &capsule, Vec::new())
+            }))
+            .expect("control commit");
         let elapsed = start.elapsed();
         control.push((elapsed, elapsed.as_secs_f64() / sentinel.as_secs_f64()));
     }

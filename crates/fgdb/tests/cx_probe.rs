@@ -1,38 +1,14 @@
-//! **Which `Cx` an external crate can actually obtain, and what that permits us
-//! to measure.**
+//! **The production-runtime `Cx` an external crate obtains, and what that
+//! permits us to measure.**
 //!
-//! Bead fgdb-uz0o / fgdb-p95p. This file exists because a load-bearing claim in
-//! this workspace was wrong, and the error had already propagated into two
-//! commits before anyone checked it against `Cargo.toml`.
+//! Beads fgdb-r8fa / fgdb-uz0o / fgdb-p95p. Pinned asupersync revision
+//! `24eb7ec6` makes `Runtime::request_cx_with_budget` public. Every test here now
+//! obtains its root context from that runtime boundary with default features
+//! disabled; `Cx::for_testing` and `test-internals` are absent from this package.
 //!
-//! **THE CORRECTION.** `crates/fgdb/examples/open_a_database.rs` (77e512d)
-//! states that `Cx::for_testing()` is `#[cfg(any(test, feature =
-//! "test-internals"))]` "and asupersync's `[features]` table **does not define**
-//! `test-internals`". The second half is false at the pinned revision
-//! `3e8d08e`: `test-internals` is defined at asupersync's `Cargo.toml:109`,
-//! commented "Enable internal test helpers for integration tests. This exposes
-//! private APIs like `Cx::new()`". `a_non_lab_cx_is_constructible` below is the
-//! witness — it compiles and passes only because that feature exists and the
-//! constructor is reachable. I repeated the same wrong claim in `d104645`'s
-//! commit message before checking it, so this corrects my own work as much as
-//! anyone else's.
-//!
-//! **WHAT THAT DOES AND DOES NOT UNLOCK.** Three things get called "the
-//! production path" and only the first is now available:
-//!
-//! 1. A **non-lab** `Cx` — AVAILABLE, via this dev-dependency feature. The lab
-//!    scheduler is deterministic and serialized, so nothing measured under it
-//!    can speak to wall-clock behaviour. A non-lab `Cx` removes exactly that
-//!    obstacle, which is what makes the timing below meaningful at all.
-//! 2. The **production** `Cx` — STILL UNAVAILABLE.
-//!    `Runtime::request_cx_with_budget`, which asupersync's own doc calls "the
-//!    only ambient-free way to mint a `Cx` in production", remains `pub(crate)`,
-//!    and no public `Runtime` method returns a `Cx`. `for_testing()` is gated
-//!    precisely so "production consumers cannot construct a `Cx<cap::All>` out
-//!    of band, bypassing runtime cap-mask enforcement" — so using it opts out of
-//!    enforcement a production number would have to include.
-//! 3. A **§17-conformant benchmark manifest** — STILL UNAVAILABLE, and not an
-//!    asupersync problem. §17 activates a gate only once its manifest pins
+//! This closes the production-authority blocker, not the benchmark program. A
+//! **§17-conformant benchmark manifest remains unavailable**: §17 activates a
+//! gate only once its manifest pins
 //!    CPU/microcode, kernel and mount options, NVMe model and measured fsync
 //!    distribution, toolchain, and configuration. None of that is pinned here,
 //!    and this box runs a dozen panes compiling at once.
@@ -61,47 +37,21 @@
 //! a reader who runs `ubs` and sees two CRITICALs should find this paragraph
 //! rather than wonder whether anyone looked.
 
-use asupersync::cx::Cx;
+use asupersync::{Budget, cx::Cx, runtime::Runtime, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::RelationId;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 const KNOWS: RelationId = RelationId(1);
 
-/// Minimal single-future executor for the non-lab lane: poll, park until woken.
-///
-/// The database's durable path is async (chronicle's Vfs migration), but this
-/// file's whole point is running OFF the lab runtime — and the production
-/// runtime path is still unavailable (module doc, item 2). asupersync's
-/// `spawn_blocking` documents a dedicated-thread fallback when no runtime
-/// blocking pool exists, so the I/O futures complete and wake this parked
-/// thread without any runtime. Timing note: the parked-thread round trip is
-/// microseconds against the millisecond-scale operations measured here, and
-/// the sync read path (`neighbours`) is measured without this wrapper.
-fn drive<F: Future>(future: F) -> F::Output {
-    struct ThreadWaker(std::thread::Thread);
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-    let mut future = pin!(future);
-    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-    let mut task_cx = Context::from_waker(&waker);
-    loop {
-        match future.as_mut().poll(&mut task_cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::park(),
-        }
-    }
+fn production_runtime() -> (Runtime, Cx) {
+    let runtime = RuntimeBuilder::new().build().expect("production runtime");
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    (runtime, cx)
 }
 
 fn keys() -> DatabaseKeys {
@@ -116,31 +66,29 @@ fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("fgdb-cx-{}-{name}", std::process::id()))
 }
 
-/// THE WITNESS FOR THE CORRECTION: a non-lab `Cx` is constructible from an
-/// external crate, and can actually drive the database.
-///
-/// If `test-internals` were undefined — the claim this file corrects — this
-/// would not compile. Constructing the `Cx` is only half of it; a `Cx` that
-/// exists but cannot drive `Database` would unlock nothing, so the write and
-/// read are part of the assertion.
+/// The positive capability witness: an external package obtains a runtime-bound
+/// production `Cx`, narrows it, and drives the real durable database path.
 #[test]
-fn a_non_lab_cx_is_constructible() {
-    let cx = Cx::for_testing();
+fn a_production_runtime_cx_drives_the_database() {
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     let dir = scratch("constructible");
-    let mut db =
-        drive(Database::create(&commit, &dir, keys())).expect("creates off the lab runtime");
+    let mut db = runtime
+        .block_on(Database::create(&commit, &dir, keys()))
+        .expect("creates under the production runtime");
     let mut batch = WriteBatch::new(KNOWS);
     batch.create_vertex(VId(1), vec![], vec![]);
     batch.create_vertex(VId(2), vec![], vec![]);
     batch.add_edge(EId(1), VId(1), VId(2), vec![]);
-    drive(db.write(&commit, batch)).expect("commits off the lab runtime");
+    runtime
+        .block_on(db.write(&commit, batch))
+        .expect("commits under the production runtime");
 
     assert_eq!(
         db.neighbours(VId(1), KNOWS).expect("reads"),
         vec![VId(2)],
-        "a database driven by a non-lab Cx must answer like any other"
+        "a database driven by a production-runtime Cx must answer like any other"
     );
 }
 
@@ -159,8 +107,8 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 /// §17's point-read gate is "≥ 8M lookups/s across cores; p99 < 15 µs warm".
 /// This measures the p99 half, on one core, off the lab scheduler, on an
 /// unpinned shared box — a *reported observation*, not that gate. The
-/// across-cores half is not attempted: it needs the production runtime and a
-/// pinned manifest, neither of which exists (module doc).
+/// across-cores half is not attempted: it needs a pinned benchmark manifest,
+/// which does not exist (module doc).
 ///
 /// **THE DISTRIBUTION IS THE POINT, NOT THE MEAN.** §17 law 2 asks for
 /// p50/p95/p99 and worst hot-key behaviour, never an average. Supernode and leaf
@@ -193,10 +141,12 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 #[test]
 fn warm_point_read_latency_distribution() {
     let dir = scratch("latency");
-    let cx = Cx::for_testing();
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
-    let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
+    let mut db = runtime
+        .block_on(Database::create(&commit, &dir, keys()))
+        .expect("creates");
     let mut batch = WriteBatch::new(KNOWS);
     batch.create_vertex(VId(1), vec![], vec![]);
     batch.create_vertex(VId(2), vec![], vec![]);
@@ -207,7 +157,7 @@ fn warm_point_read_latency_distribution() {
         eid += 1;
     }
     batch.add_edge(EId(eid), VId(2), VId(1000), vec![]);
-    drive(db.write(&commit, batch)).expect("commits");
+    runtime.block_on(db.write(&commit, batch)).expect("commits");
 
     const WARMUP: usize = 200;
     const SAMPLES: usize = 2_000;
@@ -322,19 +272,23 @@ fn warm_point_read_latency_distribution() {
 fn recovery_cost_versus_capsule_tail_length() {
     const BATCHES: [usize; 4] = [1, 4, 16, 64];
 
-    let cx = Cx::for_testing();
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     let mut report = Vec::new();
     for batches in BATCHES {
         let dir = scratch(&format!("recovery-{batches}"));
-        let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
-        batch_writes(&commit, &mut db, batches);
+        let mut db = runtime
+            .block_on(Database::create(&commit, &dir, keys()))
+            .expect("creates");
+        batch_writes(&runtime, &commit, &mut db, batches);
         drop(db);
 
         // RECOVERY: the reopen itself.
         let start = Instant::now();
-        let db = drive(Database::open(&commit, &dir, keys())).expect("reopens");
+        let db = runtime
+            .block_on(Database::open(&commit, &dir, keys()))
+            .expect("reopens");
         let reopen = start.elapsed();
 
         // TIME TO FIRST QUERY, which is what §17 actually gates — an open that
@@ -396,7 +350,12 @@ fn recovery_cost_versus_capsule_tail_length() {
 ///
 /// Separate batches on purpose: recovery replays a capsule tail, so the tail is
 /// lengthened by commits, not by edges inside one commit.
-fn batch_writes(commit: &fgdb_types::context::CommitCx, db: &mut Database, batches: usize) {
+fn batch_writes(
+    runtime: &Runtime,
+    commit: &fgdb_types::context::CommitCx,
+    db: &mut Database,
+    batches: usize,
+) {
     for b in 0..batches {
         let mut batch = WriteBatch::new(KNOWS);
         if b == 0 {
@@ -404,7 +363,7 @@ fn batch_writes(commit: &fgdb_types::context::CommitCx, db: &mut Database, batch
         }
         batch.create_vertex(VId(2000 + b as u128), vec![], vec![]);
         batch.add_edge(EId(b as u128 + 1), VId(1), VId(2000 + b as u128), vec![]);
-        drive(db.write(commit, batch)).expect("commits");
+        runtime.block_on(db.write(commit, batch)).expect("commits");
     }
 }
 
@@ -474,7 +433,7 @@ fn per_commit_versus_per_edge_write_cost() {
     // recorded in the doc above; the effect is fully visible without it.
     const SPLITS: [(usize, usize); 4] = [(64, 4), (16, 16), (4, 64), (1, 256)];
 
-    let cx = Cx::for_testing();
+    let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     let mut report = Vec::new();
@@ -486,7 +445,9 @@ fn per_commit_versus_per_edge_write_cost() {
         );
 
         let dir = scratch(&format!("writesplit-{batches}x{per_batch}"));
-        let mut db = drive(Database::create(&commit, &dir, keys())).expect("creates");
+        let mut db = runtime
+            .block_on(Database::create(&commit, &dir, keys()))
+            .expect("creates");
 
         let start = Instant::now();
         let mut eid = 1u128;
@@ -500,7 +461,7 @@ fn per_commit_versus_per_edge_write_cost() {
                 batch.add_edge(EId(eid), VId(1), VId(3000 + eid), vec![]);
                 eid += 1;
             }
-            drive(db.write(&commit, batch)).expect("commits");
+            runtime.block_on(db.write(&commit, batch)).expect("commits");
         }
         let elapsed = start.elapsed();
 

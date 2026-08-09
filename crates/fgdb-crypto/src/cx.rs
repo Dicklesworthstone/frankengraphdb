@@ -7,7 +7,7 @@
 //! hazard that is easy to walk into and invisible once you have.
 //!
 //! **THE HAZARD, MEASURED 2026-08-04 against the pinned asupersync
-//! (3e8d08e).** `Cx` exposes an entropy capability — `Cx::random_bytes`,
+//! (24eb7ec6).** `Cx` exposes an entropy capability — `Cx::random_bytes`,
 //! `Cx::random_u64` — over a `dyn EntropySource`. There are two production-
 //! relevant implementations in `src/util/entropy.rs`: `OsEntropy` (getrandom,
 //! `source_id` "os") and `DetEntropy`, the deterministic source the lab runtime

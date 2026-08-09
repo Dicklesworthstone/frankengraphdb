@@ -21,40 +21,19 @@
 //! elsewhere. An example is a real binary with a real `main` and costs the
 //! registry nothing.
 //!
-//! # THE RUNTIME CAVEAT, WHICH IS THE WHOLE POINT OF `fgdb-0b8r`
+//! # Production runtime authority
 //!
-//! This runs under **asupersync's LAB runtime**, and that is not a stylistic
-//! choice — it is the only option that exists. Measured at pinned revision
-//! `3e8d08e`:
+//! Pinned asupersync revision `24eb7ec6` exposes
+//! `Runtime::request_cx_with_budget` as its ambient-free production boundary.
+//! This example uses that path with default features disabled: the `Cx` inherits
+//! the runtime's drivers and capability mask, then `PurposeContexts` narrows it
+//! to `CommitCx`. No `test-internals` constructor or LAB scheduler participates.
 //!
-//! - `fgdb::Database` needs a `&CommitCx`, which comes only from
-//!   `PurposeContexts::narrow_runtime_root(&Cx<cap::All>)`.
-//! - `Cx::for_testing()` and `Cx::for_request()` are
-//!   `#[cfg(any(test, feature = "test-internals"))]`. That feature is real and
-//!   this crate enables it under `[dev-dependencies]`, so an example *can* call
-//!   `for_testing()`. **It deliberately does not.** That constructor mints
-//!   `Budget::INFINITE` with full capabilities and inherits no runtime cap-mask —
-//!   the "external-crate capability injection" escape asupersync's own doc warns
-//!   about. It would compile and it would break doctrine 6.
-//! - `Runtime::request_cx_with_budget` — which asupersync's own doc names as the
-//!   sanctioned production path, *"the only ambient-free way to mint a Cx in
-//!   production"* — is declared **`pub(crate)`**. Every call site is inside
-//!   `#[cfg(test)] mod tests`.
-//! - No public method on `Runtime` returns a `Cx` at all.
-//!
-//! So the gap is not "no path exists" — it is that **the only reachable path is
-//! an escalating one**, and the non-escalating path the documentation points at
-//! is `pub(crate)`. The lab runtime is therefore the honest choice here: it
-//! yields a `Cx` through a public, sanctioned entry without minting ambient
-//! authority. This binary proves the spine is **consumable from a program**,
-//! which was in doubt; it does **not** prove the database runs on a production
-//! runtime, which is still blocked upstream (`fgdb-r8fa`).
-//!
-//! Nothing here is labelled as a performance result, and it must not be used as
-//! one: the lab scheduler is deterministic and serialized, so timings taken
-//! under it cannot speak to §17's across-cores throughput or p99 gates.
+//! This proves the embedded durable slice runs under the production runtime. It
+//! is not a §17 performance result: the host, filesystem, and workload manifest
+//! are not pinned here.
 
-use asupersync::lab::run_async_under_lab;
+use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::RelationId;
 use fgdb_types::context::PurposeContexts;
@@ -64,6 +43,13 @@ use fgdb_types::{EId, VId};
 const KNOWS: RelationId = RelationId(1);
 
 fn main() {
+    if let Err(error) = run() {
+        eprintln!("FAILED: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     // A per-pid directory: concurrent panes run this against one /tmp, and
     // nothing is ever removed — rule 1 has no carve-out for example code.
     let path = std::env::temp_dir().join(format!("fgdb-example-{}", std::process::id()));
@@ -76,9 +62,11 @@ fn main() {
     println!("fgdb spine witness");
     println!("  database directory: {}", path.display());
 
-    let (outcome, report) = run_async_under_lab(1, move |root| async move {
-        let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
+    let runtime = RuntimeBuilder::new().build()?;
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
 
+    runtime.block_on(async move {
         // ---- create, write, read -------------------------------------------
         let mut db = Database::create(cx, &path, keys).await?;
         let mut batch = WriteBatch::new(KNOWS);
@@ -115,16 +103,7 @@ fn main() {
             "the fixture must be non-trivial, or agreement is cheap"
         );
 
-        Ok::<(), Box<dyn core::error::Error + Send + Sync>>(())
-    });
-
-    if let Err(error) = outcome {
-        eprintln!("FAILED: {error}");
-        std::process::exit(1);
-    }
-    if !report.lab_test_passed() {
-        eprintln!("FAILED: lab run did not pass: {report:?}");
-        std::process::exit(1);
-    }
-    println!("OK: opened, wrote, dropped, reopened, agreed.");
+        println!("OK: opened, wrote, dropped, reopened, agreed.");
+        Ok(())
+    })
 }

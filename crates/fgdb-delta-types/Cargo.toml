@@ -22,7 +22,7 @@ path = "../fgdb-resource"
 
 [dev-dependencies.asupersync]
 git = "https://github.com/Dicklesworthstone/asupersync"
-rev = "3e8d08efe6617e08635fa8705c62a2a531373f43"
+rev = "24eb7ec6c62e9ba037d70fed4a69c4e733785926"
 default-features = false
 
 [lints]
