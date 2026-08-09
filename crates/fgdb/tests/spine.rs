@@ -176,7 +176,10 @@ fn written_labels_and_properties_are_readable_and_survive_a_reopen() {
             batch.add_edge(EId(10), VId(1), VId(2), vec![]);
             db.write(cx, batch).await.expect("commits");
 
-            let row = db.vertex(VId(1)).expect("the written vertex is readable");
+            let row = db
+                .vertex(VId(1))
+                .expect("reads")
+                .expect("the written vertex is readable");
             assert_eq!(row.labels, vec![LabelId(3), LabelId(5)]);
             assert_eq!(
                 row.props,
@@ -188,10 +191,13 @@ fn written_labels_and_properties_are_readable_and_survive_a_reopen() {
                     (born_key, CanonicalScalar::Int(1815)),
                 ]
             );
-            let bare = db.vertex(VId(2)).expect("the bare vertex is readable too");
+            let bare = db
+                .vertex(VId(2))
+                .expect("reads")
+                .expect("the bare vertex is readable too");
             assert!(bare.labels.is_empty() && bare.props.is_empty());
             assert!(
-                db.vertex(VId(99)).is_none(),
+                db.vertex(VId(99)).expect("reads").is_none(),
                 "a vertex that was never created has no row"
             );
             row
@@ -200,11 +206,11 @@ fn written_labels_and_properties_are_readable_and_survive_a_reopen() {
         // NOTHING crosses this line except `dir` and `keys()`.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
-            db.vertex(VId(1)).expect("still readable"),
+            db.vertex(VId(1)).expect("reads").expect("still readable"),
             before,
             "the reopened database must answer the same labels and properties"
         );
-        assert!(db.vertex(VId(99)).is_none());
+        assert!(db.vertex(VId(99)).expect("reads").is_none());
     });
 }
 
@@ -245,7 +251,10 @@ fn deletes_take_effect_cascade_and_survive_a_reopen() {
             db.write(cx, drop_vertex)
                 .await
                 .expect("vertex delete commits");
-            assert!(db.vertex(VId(1)).is_none(), "the vertex row is retired");
+            assert!(
+                db.vertex(VId(1)).expect("reads").is_none(),
+                "the vertex row is retired"
+            );
             assert!(db.neighbours(VId(1), KNOWS).expect("reads").is_empty());
             assert!(
                 db.neighbours(VId(3), KNOWS).expect("reads").is_empty(),
@@ -271,10 +280,16 @@ fn deletes_take_effect_cascade_and_survive_a_reopen() {
 
         // NOTHING crosses this line except `dir` and `keys()`.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        assert!(db.vertex(VId(1)).is_none(), "no resurrection across reopen");
+        assert!(
+            db.vertex(VId(1)).expect("reads").is_none(),
+            "no resurrection across reopen"
+        );
         assert!(db.neighbours(VId(3), KNOWS).expect("reads").is_empty());
         assert_eq!(
-            db.vertex(VId(2)).expect("undeleted vertex survives").labels,
+            db.vertex(VId(2))
+                .expect("reads")
+                .expect("undeleted vertex survives")
+                .labels,
             vec![]
         );
     });
@@ -299,14 +314,18 @@ fn a_same_batch_create_and_delete_leaves_no_element() {
         db.write(cx, batch).await.expect("commits");
 
         assert!(db.neighbours(VId(1), KNOWS).expect("reads").is_empty());
-        assert!(db.vertex(VId(3)).is_none());
+        assert!(db.vertex(VId(3)).expect("reads").is_none());
         assert!(
-            db.vertex(VId(1)).is_some() && db.vertex(VId(2)).is_some(),
+            db.vertex(VId(1)).expect("reads").is_some()
+                && db.vertex(VId(2)).expect("reads").is_some(),
             "the surviving vertices are untouched"
         );
         drop(db);
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        assert!(db.vertex(VId(3)).is_none(), "and the fold is stable");
+        assert!(
+            db.vertex(VId(3)).expect("reads").is_none(),
+            "and the fold is stable"
+        );
     });
 }
 
@@ -338,7 +357,7 @@ fn label_and_property_updates_are_readable_and_survive_a_reopen() {
             label.set_vertex_label(VId(1), LabelId(5), true);
             db.write(cx, label).await.expect("label update commits");
 
-            let row = db.vertex(VId(1)).expect("readable");
+            let row = db.vertex(VId(1)).expect("reads").expect("readable");
             assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
             assert_eq!(row.labels, vec![LabelId(3), LabelId(5)]);
 
@@ -347,7 +366,7 @@ fn label_and_property_updates_are_readable_and_survive_a_reopen() {
             clear.set_vertex_property(VId(1), key, None);
             clear.set_vertex_label(VId(1), LabelId(3), false);
             db.write(cx, clear).await.expect("clears commit");
-            let row = db.vertex(VId(1)).expect("still readable");
+            let row = db.vertex(VId(1)).expect("reads").expect("still readable");
             assert!(row.props.is_empty());
             assert_eq!(row.labels, vec![LabelId(5)]);
 
@@ -364,7 +383,10 @@ fn label_and_property_updates_are_readable_and_survive_a_reopen() {
 
         // NOTHING crosses this line except `dir` and `keys()`.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        let row = db.vertex(VId(1)).expect("the updated vertex survives");
+        let row = db
+            .vertex(VId(1))
+            .expect("reads")
+            .expect("the updated vertex survives");
         assert!(row.props.is_empty());
         assert_eq!(row.labels, vec![LabelId(5)]);
     });
@@ -386,13 +408,13 @@ fn same_batch_create_and_update_shows_only_the_final_content() {
         batch.set_vertex_label(VId(1), LabelId(9), true);
         db.write(cx, batch).await.expect("commits");
 
-        let row = db.vertex(VId(1)).expect("readable");
+        let row = db.vertex(VId(1)).expect("reads").expect("readable");
         assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
         assert_eq!(row.labels, vec![LabelId(9)]);
         drop(db);
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
-            db.vertex(VId(1)).expect("survives").props,
+            db.vertex(VId(1)).expect("reads").expect("survives").props,
             vec![(key, CanonicalScalar::Int(2))]
         );
     });
@@ -730,7 +752,10 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
             // cannot hide behind either verdict.
             let expected = if after == vec![VId(2)] { 1 } else { 2 };
             assert_eq!(
-                db.vertex(VId(1)).expect("survives").props,
+                db.vertex(VId(1))
+                    .expect("reads")
+                    .expect("survives")
+                    .props,
                 vec![(PropertyKeyId(7), CanonicalScalar::Int(expected))],
                 "{point:?}: the vertex update must share the batch's fate"
             );
@@ -773,6 +798,171 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
          injection has silently become a no-op and every law above went vacuous \
          with it"
     );
+}
+
+/// A failure after D2 must not leave a callable handle whose derived snapshot
+/// is one commit behind the authoritative stream (`fgdb-l96k`).
+///
+/// The fault is real filesystem behaviour, not a mock: after the first publish
+/// we move `manifest.root` aside and put a directory at the same path. The
+/// second commit therefore reaches D2, publishes its immutable Strata objects
+/// and manifest, then fails when the root-slot store tries to open that path as
+/// a file. Restoring the path before the third write is the important control:
+/// without a poisoned-handle transition, that third write succeeds from the
+/// stale fold and publishes a root that omits the already-durable second commit.
+#[test]
+fn post_d2_publication_failure_blocks_the_stale_handle_and_reopen_recovers() {
+    let dir = scratch("post-d2-stale-handle");
+    under_lab(1096, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        db.write(cx, first).await.expect("first commit publishes");
+
+        let root = dir.join(fgdb_chronicle::store::ROOT_FILE_NAME);
+        let saved_root = dir.join("manifest.root.before-post-d2-fault");
+        let fault_artifact = dir.join("manifest.root.post-d2-fault");
+        std::fs::rename(&root, &saved_root).expect("moves the valid root aside");
+        std::fs::create_dir(&root).expect("puts a non-file at the root path");
+
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(2), vec![], vec![]);
+        let write_error = db
+            .write(cx, second)
+            .await
+            .expect_err("root-slot publication must fail after the Chronicle commit is durable");
+        assert!(
+            matches!(
+                &write_error,
+                WriteError::CommittedNeedsRecovery { source, .. }
+                    if matches!(**source, fgdb::RebuildError::Slot(_))
+            ),
+            "the Chronicle commit must be durable before root-slot publication fails: \
+             {write_error:?}"
+        );
+        let WriteError::CommittedNeedsRecovery { recovery, .. } = write_error else {
+            return;
+        };
+        assert_eq!(recovery.durable_frontier, CommitSeq(2));
+        assert_eq!(recovery.published_frontier, CommitSeq(1));
+        assert_eq!(
+            recovery.failed_stage,
+            fgdb::DerivedPublicationStage::PublishRootSlot
+        );
+        assert_eq!(
+            db.state(),
+            fgdb::DatabaseState::NeedsAuthoritativeRecovery(recovery)
+        );
+        let read_fence = db
+            .vertex(VId(2))
+            .expect_err("a post-D2 publication failure must fence reads");
+        let fgdb::ReadError::RecoveryRequired(read_recovery) = read_fence else {
+            return;
+        };
+        assert_eq!(read_recovery, recovery);
+
+        // Restore the ordinary filesystem before probing the SAME handle. A
+        // second error caused merely by the still-present fault would not prove
+        // that stale state was fenced off.
+        std::fs::rename(&root, &fault_artifact).expect("moves the fault aside");
+        std::fs::rename(&saved_root, &root).expect("restores the valid root");
+
+        let mut third = WriteBatch::new(KNOWS);
+        third.create_vertex(VId(3), vec![], vec![]);
+        let retry_fence = db
+            .write(cx, third)
+            .await
+            .expect_err("a post-D2 publication failure must fence later writes");
+        let WriteError::RecoveryRequired(write_recovery) = retry_fence else {
+            return;
+        };
+        assert_eq!(write_recovery, recovery);
+        drop(db);
+
+        let mut reopened = Database::open(cx, &dir, keys())
+            .await
+            .expect("authoritative reopen recovers the durable second commit");
+        assert!(reopened.vertex(VId(1)).expect("reads").is_some());
+        assert!(reopened.vertex(VId(2)).expect("reads").is_some());
+        assert!(reopened.vertex(VId(3)).expect("reads").is_none());
+
+        let mut after_recovery = WriteBatch::new(KNOWS);
+        after_recovery.create_vertex(VId(3), vec![], vec![]);
+        reopened
+            .write(cx, after_recovery)
+            .await
+            .expect("the recovered handle accepts the next write");
+        assert!(reopened.vertex(VId(1)).expect("reads").is_some());
+        assert!(reopened.vertex(VId(2)).expect("reads").is_some());
+        assert!(reopened.vertex(VId(3)).expect("reads").is_some());
+    });
+}
+
+/// Once Chronicle has started appending the marker, an I/O error cannot say
+/// whether the commit is absent or durable. The coordinator already poisons
+/// itself at that instant; the integrated handle must propagate that fence to
+/// reads as well as writes instead of presenting its old snapshot as current.
+#[test]
+fn an_unknown_commit_outcome_fences_reads_and_retries_until_reopen() {
+    let dir = scratch("unknown-commit-outcome");
+    under_lab(1097, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        db.write(cx, first).await.expect("first commit publishes");
+
+        let mut uncertain = WriteBatch::new(KNOWS);
+        uncertain.create_vertex(VId(2), vec![], vec![]);
+        assert!(matches!(
+            db.write_with_crash(cx, uncertain, Some(CrashPoint::AfterMarkerBeforeD2),)
+                .await,
+            Err(WriteError::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(1),
+                ..
+            })
+        ));
+        assert_eq!(
+            db.state(),
+            fgdb::DatabaseState::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(1)
+            }
+        );
+        assert!(matches!(
+            db.neighbours(VId(1), KNOWS),
+            Err(fgdb::ReadError::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(1)
+            })
+        ));
+
+        let mut retry = WriteBatch::new(KNOWS);
+        retry.create_vertex(VId(3), vec![], vec![]);
+        assert!(matches!(
+            db.write(cx, retry).await,
+            Err(WriteError::HandleCommitOutcomeUnknown {
+                published_frontier: CommitSeq(1)
+            })
+        ));
+        drop(db);
+
+        let mut reopened = Database::open(cx, &dir, keys())
+            .await
+            .expect("reopen decides the marker outcome");
+        assert!(matches!(
+            reopened.state(),
+            fgdb::DatabaseState::Healthy { .. }
+        ));
+        assert!(reopened.vertex(VId(1)).expect("reads").is_some());
+        let mut after_recovery = WriteBatch::new(KNOWS);
+        after_recovery.create_vertex(VId(3), vec![], vec![]);
+        reopened
+            .write(cx, after_recovery)
+            .await
+            .expect("a fresh authoritative handle accepts writes");
+        assert!(reopened.vertex(VId(3)).expect("reads").is_some());
+    });
 }
 
 /// The instant the matrix above cannot reach: the capsule directory is created
@@ -981,7 +1171,11 @@ fn the_graph_enumerates_at_every_committed_sequence() {
 
         // The frontier faces answer the last epoch.
         assert_eq!(
-            db.vertices().iter().map(|row| row.vid).collect::<Vec<_>>(),
+            db.vertices()
+                .expect("reads")
+                .iter()
+                .map(|row| row.vid)
+                .collect::<Vec<_>>(),
             vids(s3)
         );
         assert_eq!(db.edges().expect("reads").len(), 0);
@@ -1403,5 +1597,106 @@ fn the_root_slot_names_the_current_manifest_and_open_reconciles_it() {
             Database::open(cx, &dir, keys()).await,
             Err(fgdb::OpenError::ForeignSlot { .. })
         ));
+    });
+}
+
+/// **THE FAST-OPEN EQUIVALENCE LAW (fgdb-ge6a): opening through the slot's
+/// manifest and opening by folding the whole stream are indistinguishable —
+/// same root, same manifest, same frontier, same answers, and the SAME next
+/// root after one more write.** The last clause is the sharp one: it proves
+/// the derived writer state (live maps, chains, versions, birth ordinals)
+/// equals the folded one, because publication is deterministic in exactly
+/// that state.
+#[test]
+fn fast_open_is_indistinguishable_from_the_stream_fold() {
+    let dir = scratch("fast-open");
+    under_lab(99, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        {
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut first = WriteBatch::new(KNOWS);
+            first.create_vertex(VId(1), vec![LabelId(3)], vec![]);
+            first.create_vertex(VId(2), vec![], vec![(key, CanonicalScalar::Int(1))]);
+            first.add_edge(
+                EId(10),
+                VId(1),
+                VId(2),
+                vec![(key, CanonicalScalar::Int(5))],
+            );
+            db.write(cx, first).await.expect("commits");
+            let mut second = WriteBatch::new(KNOWS);
+            second.create_vertex(VId(3), vec![], vec![]);
+            second.add_edge(EId(11), VId(3), VId(1), vec![]);
+            second.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(6)));
+            second.set_vertex_property(VId(2), key, None);
+            db.write(cx, second).await.expect("commits");
+            let mut third = WriteBatch::new(KNOWS);
+            third.delete_edge(EId(11));
+            third.delete_vertex(VId(3));
+            db.write(cx, third).await.expect("commits");
+        }
+
+        // Both open paths, sequentially (the lease is single-writer), each
+        // interrogated identically.
+        let fast = Database::open(cx, &dir, keys()).await.expect("fast opens");
+        let fast_state = (
+            fast.partition_root(),
+            fast.manifest(),
+            fast.frontier(),
+            fast.vertices().expect("reads"),
+            fast.edges().expect("reads"),
+        );
+        drop(fast);
+        let slow = Database::open_rebuilding(cx, &dir, keys())
+            .await
+            .expect("rebuild opens");
+        assert_eq!(
+            (
+                slow.partition_root(),
+                slow.manifest(),
+                slow.frontier(),
+                slow.vertices().expect("reads"),
+                slow.edges().expect("reads"),
+            ),
+            fast_state,
+            "the two open paths must be indistinguishable"
+        );
+        drop(slow);
+
+        // One more write after EACH path — the roots must match, which pins
+        // the derived writer state itself, not just the published artifacts.
+        let mut fast = Database::open(cx, &dir, keys())
+            .await
+            .expect("fast reopens");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(4), vec![], vec![(key, CanonicalScalar::Int(9))]);
+        batch.add_edge(EId(12), VId(4), VId(1), vec![]);
+        batch.set_vertex_label(VId(1), LabelId(3), false);
+        fast.write(cx, batch)
+            .await
+            .expect("commits after fast open");
+        let root_after_fast = fast.partition_root();
+        let scans_after_fast = (
+            fast.vertices().expect("reads"),
+            fast.edges().expect("reads"),
+        );
+        drop(fast);
+
+        // The write above advanced durable history, so the rebuild control
+        // now folds THAT stream — its post-open state must equal what the
+        // fast-opened session already answered.
+        let slow = Database::open_rebuilding(cx, &dir, keys())
+            .await
+            .expect("rebuild reopens");
+        assert_eq!(slow.partition_root(), root_after_fast);
+        assert_eq!(
+            (
+                slow.vertices().expect("reads"),
+                slow.edges().expect("reads"),
+            ),
+            scans_after_fast,
+            "a write through the fast-opened session is the same write"
+        );
     });
 }

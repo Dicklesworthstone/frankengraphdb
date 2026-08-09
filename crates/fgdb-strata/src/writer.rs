@@ -284,6 +284,84 @@ pub struct BlockWriter {
 }
 
 impl BlockWriter {
+    /// Rebuild a writer's fold state from an ADMITTED published partition
+    /// (fgdb-ge6a fast open). Every input is the store's own admission
+    /// output — decoded blocks, hosted columns, vertex patches — so this
+    /// DERIVES the maps a from-scratch stream fold would have built rather
+    /// than trusting a caller's claim about them, and the fast-open
+    /// equivalence law pins the derived writer's publish byte-identical to
+    /// the rebuilt one's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_published_partition(
+        graph: GraphId,
+        branch: BranchId,
+        partition: u64,
+        sealed: Vec<SealedBlock>,
+        sealed_patches: Vec<SealedPatch>,
+        blocks: &[Vec<AdjacencyEntry>],
+        block_props: &[Option<crate::edge_props::BlockProps>],
+        patches: &[Vec<VertexRow>],
+        frontier: CommitSeq,
+    ) -> Result<Self, RootError> {
+        let mut live = BTreeMap::new();
+        for (entry, props) in
+            crate::root::merge_all_edges_with_props(blocks, block_props, frontier)?
+        {
+            live.insert(
+                entry.eid,
+                LiveEdge {
+                    src: entry.src,
+                    relation: entry.relation,
+                    dst: entry.dst,
+                    created_at: entry.created_at,
+                    props,
+                },
+            );
+        }
+        let mut spent = BTreeSet::new();
+        for block in blocks {
+            for entry in block {
+                spent.insert(entry.eid);
+            }
+        }
+        let mut live_vertices = BTreeMap::new();
+        for row in crate::vertex::merge_all_vertices(patches, frontier) {
+            live_vertices.insert(row.vid, row);
+        }
+        let mut spent_vertices = BTreeSet::new();
+        for rows in patches {
+            for row in rows {
+                spent_vertices.insert(row.vid);
+            }
+        }
+        // The chain head per family is the LAST published block of that
+        // family — publication order IS the chain (fgdb-4391).
+        let mut chain_heads = BTreeMap::new();
+        for (sealed_block, entries) in sealed.iter().zip(blocks) {
+            if let Some(first) = entries.first() {
+                chain_heads.insert(
+                    (first.src, first.relation),
+                    DeltaBlockVersion(sealed_block.block_id),
+                );
+            }
+        }
+        Ok(Self {
+            graph,
+            branch,
+            partition,
+            pending: BTreeMap::new(),
+            live,
+            spent,
+            sealed,
+            chain_heads,
+            pending_vertices: BTreeMap::new(),
+            live_vertices,
+            spent_vertices,
+            sealed_patches,
+            last_seq: (frontier.0 > 0).then_some(frontier),
+        })
+    }
+
     pub fn new(graph: GraphId, branch: BranchId, partition: u64) -> Self {
         Self {
             graph,

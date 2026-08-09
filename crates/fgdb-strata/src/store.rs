@@ -867,6 +867,26 @@ impl BlockStore {
         Ok(resolved)
     }
 
+    /// Load the raw bytes of a block-hosted edge property patch, verifying
+    /// identity but not decoding — the FGSP counterpart of
+    /// [`BlockStore::get_bytes`] (fgdb-ge6a fast open reads sealed patches
+    /// back beside their blocks).
+    pub fn get_edge_property_patch_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<Vec<u8>, StoreError> {
+        let bytes = self.read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)?;
+        let actual = crate::edge_props::property_patch_id(&self.k_oid, self.namespace, &bytes);
+        if actual != id {
+            return Err(StoreError::IdentityMismatch {
+                expected: id,
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
     /// Load the raw bytes of a vertex patch, verifying identity but not
     /// decoding — the patch counterpart of [`BlockStore::get_bytes`].
     pub fn get_patch_bytes(

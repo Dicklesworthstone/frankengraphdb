@@ -317,12 +317,64 @@ pub enum RebuildError {
         commit_seq: u64,
         error: BlockWriteError,
     },
+    /// Re-deriving the statement-version transcript for the new snapshot
+    /// failed after the commit was durable.
+    Version {
+        commit_seq: u64,
+        error: CanonicalError,
+    },
     Commit(CommitError),
     Store(StoreError),
     /// Advancing the root slot after a durable publish failed (fgdb-ge6a).
     /// The commit and the manifest are durable; the slot is at most one
     /// publication behind, which the next open heals.
     Slot(SlotStoreError),
+}
+
+/// The derived-publication stage that failed after Chronicle made a commit
+/// durable.
+///
+/// This is deliberately coarse enough to remain a stable diagnostic contract,
+/// but precise enough to tell an operator which immutable/derived boundary to
+/// inspect. The authoritative recovery rule is identical for every variant:
+/// reopen and rebuild from Chronicle; never continue from the retained fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedPublicationStage {
+    FoldCommittedTemplate,
+    SealPartition,
+    PublishEdgeBlocks,
+    PublishVertexPatches,
+    PublishPartitionRoot,
+    PublishManifest,
+    PublishRootSlot,
+    RefreshEdgeSnapshot,
+    RefreshVertexSnapshot,
+}
+
+/// Evidence carried by a handle that must be authoritatively recovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryRequired {
+    /// The Chronicle sequence already made durable by D2.
+    pub durable_frontier: CommitSeq,
+    /// The last sequence represented by the handle's retained snapshot.
+    pub published_frontier: CommitSeq,
+    /// The derived stage that prevented the handle from catching up.
+    pub failed_stage: DerivedPublicationStage,
+}
+
+/// Whether this in-process handle can truthfully serve the current database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseState {
+    Healthy {
+        published_frontier: CommitSeq,
+    },
+    /// Chronicle crossed the point where a marker may be durable but did not
+    /// complete D2 observably. Only reopen can decide whether it committed.
+    CommitOutcomeUnknown {
+        published_frontier: CommitSeq,
+    },
+    /// D2 completed, but derived publication did not catch the handle up.
+    NeedsAuthoritativeRecovery(RecoveryRequired),
 }
 
 /// Why a write could not be committed.
@@ -367,16 +419,42 @@ pub enum WriteError {
         elem: ElementId,
     },
     Canonical(CanonicalError),
+    /// Chronicle failed before the marker could have become durable. Unlike
+    /// [`WriteError::CommitOutcomeUnknown`], retrying after correcting the
+    /// named cause cannot duplicate an unobserved commit.
     Commit(CommitError),
-    /// The write was durable, and republishing the derived partition failed.
-    /// The commit is NOT lost — a reopen rebuilds it from the stream.
-    Rebuild(RebuildError),
+    /// Chronicle may or may not have made the marker durable. The live handle
+    /// is fenced immediately; reopen is the only authority that can decide.
+    CommitOutcomeUnknown {
+        published_frontier: CommitSeq,
+        source: CommitError,
+    },
+    /// A prior call left the handle unable to speak for Chronicle's head.
+    HandleCommitOutcomeUnknown {
+        published_frontier: CommitSeq,
+    },
+    /// A prior durable commit failed during derived publication. The handle is
+    /// fenced so another write cannot publish from its stale fold.
+    RecoveryRequired(RecoveryRequired),
+    /// This call committed at D2, then failed while publishing derived state.
+    /// The commit is NOT lost; `recovery` names the exact stale/current split.
+    CommittedNeedsRecovery {
+        recovery: RecoveryRequired,
+        source: Box<RebuildError>,
+    },
 }
 
 /// Why a read could not be served.
 #[derive(Debug)]
 pub enum ReadError {
     Root(RootError),
+    /// Chronicle may have advanced, so the retained snapshot cannot be
+    /// presented as current until an authoritative reopen resolves the log.
+    CommitOutcomeUnknown {
+        published_frontier: CommitSeq,
+    },
+    /// Chronicle definitely advanced past the retained derived snapshot.
+    RecoveryRequired(RecoveryRequired),
     /// A time-travel read asked about a sequence the published partition has
     /// not reached. Refused rather than clamped: an answer AT the frontier
     /// for a question ABOUT the future would silently change meaning the
@@ -405,7 +483,6 @@ from_error!(RebuildError, Commit, CommitError);
 from_error!(RebuildError, Store, StoreError);
 from_error!(WriteError, Canonical, CanonicalError);
 from_error!(WriteError, Commit, CommitError);
-from_error!(WriteError, Rebuild, RebuildError);
 from_error!(ReadError, Root, RootError);
 
 impl core::fmt::Display for OpenError {
@@ -477,6 +554,10 @@ impl core::fmt::Display for RebuildError {
                 f,
                 "commit {commit_seq}: the tier-D writer refused a committed row: {error}"
             ),
+            Self::Version { commit_seq, error } => write!(
+                f,
+                "commit {commit_seq}: statement-version derivation failed: {error}"
+            ),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
             Self::Store(error) => write!(f, "block store: {error}"),
             Self::Slot(error) => write!(
@@ -519,9 +600,30 @@ impl core::fmt::Display for WriteError {
             }
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
-            Self::Rebuild(error) => write!(
+            Self::CommitOutcomeUnknown {
+                published_frontier,
+                source,
+            } => write!(
                 f,
-                "the commit is durable but the derived partition did not republish: {error}"
+                "commit outcome is unknown after published frontier {published_frontier:?}: \
+                 {source}; reopen before reading or writing"
+            ),
+            Self::HandleCommitOutcomeUnknown { published_frontier } => write!(
+                f,
+                "this handle cannot determine whether Chronicle advanced past \
+                 {published_frontier:?}; reopen before writing"
+            ),
+            Self::RecoveryRequired(recovery) => write!(
+                f,
+                "this handle is at {:?}, but Chronicle durably reached {:?} before \
+                 {:?} failed; reopen before writing",
+                recovery.published_frontier, recovery.durable_frontier, recovery.failed_stage
+            ),
+            Self::CommittedNeedsRecovery { recovery, source } => write!(
+                f,
+                "commit {:?} is durable, but {:?} failed after the handle's published \
+                 frontier {:?}: {source}; reopen before reading or writing",
+                recovery.durable_frontier, recovery.failed_stage, recovery.published_frontier
             ),
         }
     }
@@ -531,6 +633,17 @@ impl core::fmt::Display for ReadError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Root(error) => write!(f, "partition: {error}"),
+            Self::CommitOutcomeUnknown { published_frontier } => write!(
+                f,
+                "this handle cannot determine whether Chronicle advanced past \
+                 {published_frontier:?}; reopen before reading"
+            ),
+            Self::RecoveryRequired(recovery) => write!(
+                f,
+                "this handle is at {:?}, but Chronicle durably reached {:?} before \
+                 {:?} failed; reopen before reading",
+                recovery.published_frontier, recovery.durable_frontier, recovery.failed_stage
+            ),
             Self::BeyondFrontier { asked, frontier } => write!(
                 f,
                 "asked about {asked:?}, beyond the published frontier {frontier:?}"
@@ -897,6 +1010,12 @@ pub struct Database {
     /// recovery path, and `incremental_publish_equals_rebuild.rs` pins that a
     /// clone-publish of this writer is byte-identical to that rebuild.
     writer: BlockWriter,
+    /// Truthfulness fence for the retained writer/snapshot pair. D2 moves
+    /// this out of `Healthy` before any derived work can fail; only completing
+    /// the snapshot swap (or constructing a fresh handle in `open`) moves it
+    /// back. Keeping the stale values allocated is harmless because every
+    /// public graph read and every write checks this state first.
+    state: DatabaseState,
     /// Durability-and-admission receipts for the blocks this session has
     /// already published (fgdb-gieu). Session-scoped like the writer above,
     /// and with the same trust story: never authoritative, never persisted —
@@ -978,10 +1097,76 @@ impl Database {
     ///
     /// The database-ness decision belongs to the two callers above; by here it
     /// has been made.
+    /// The forced-rebuild face, for the fast-open equivalence law: identical
+    /// to [`Database::open`] except the manifest fast path is bypassed and
+    /// the whole stream is folded. Hidden because production has no reason
+    /// to pay O(history) when the slot is present and lawful.
+    #[doc(hidden)]
+    pub async fn open_rebuilding(
+        cx: &CommitCx,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<Self, OpenError> {
+        let path = path.as_ref();
+        if !path.join(CAPSULE_DIR).is_dir() {
+            return Err(OpenError::NotADatabase {
+                path: path.to_path_buf(),
+                missing: CAPSULE_DIR,
+            });
+        }
+        Self::bind_with(cx, path, keys, true).await
+    }
+
     async fn bind(cx: &CommitCx, path: &Path, keys: DatabaseKeys) -> Result<Self, OpenError> {
+        Self::bind_with(cx, path, keys, false).await
+    }
+
+    async fn bind_with(
+        cx: &CommitCx,
+        path: &Path,
+        keys: DatabaseKeys,
+        force_rebuild: bool,
+    ) -> Result<Self, OpenError> {
         let coordinator = CommitCoordinator::open(cx, path, keys.capsule_keys()).await?;
         let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
-        let (snapshot, writer) = rebuild(cx, &coordinator, &store, &keys).await?;
+        // THE FAST PATH (fgdb-ge6a): a lawful slot names a resolvable
+        // manifest, and the partition it names reopens WITHOUT the stream
+        // fold — only the suffix past its publication replays. The stream
+        // remains the source of truth: a missing slot file falls back to the
+        // full rebuild (and the reconciliation below creates the slot), while
+        // a PRESENT slot that is foreign, malformed, or unaccountable
+        // refuses rather than being silently rebuilt over.
+        let probe = RootStore::new(path);
+        let (snapshot, writer) = if force_rebuild {
+            rebuild(cx, &coordinator, &store, &keys).await?
+        } else {
+            match probe.current(cx).await {
+                Ok(slot) => {
+                    if !validate_plain_slot(&slot, &keys) {
+                        return Err(OpenError::ForeignSlot {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
+                    match store.resolve_manifest(cx, claimed) {
+                        Ok(resolved) if resolved.len() == 1 => {
+                            let root = resolved[0].0.root;
+                            fast_rebuild(cx, &coordinator, &store, &keys, root).await?
+                        }
+                        _ => {
+                            return Err(OpenError::SlotDisagreesWithStream {
+                                path: path.to_path_buf(),
+                                slot_manifest: ObjectId(slot.root_manifest_oid),
+                            });
+                        }
+                    }
+                }
+                Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    rebuild(cx, &coordinator, &store, &keys).await?
+                }
+                Err(error) => return Err(OpenError::Slot(error)),
+            }
+        };
         // RECONCILE THE ROOT SLOT (fgdb-ge6a, the PLAIN opener ruling). The
         // stream is the source of truth and the rebuild just derived its
         // manifest; the slot is the durable pointer a fast open will trust,
@@ -1052,6 +1237,9 @@ impl Database {
             slot_store,
             slot_generation,
             keys,
+            state: DatabaseState::Healthy {
+                published_frontier: snapshot.frontier,
+            },
             snapshot,
             writer,
             // Deliberately empty rather than seeded from the rebuild: the first
@@ -1060,6 +1248,46 @@ impl Database {
             // state without a second trust-bearing constructor (fgdb-gieu).
             receipts: PublishReceipts::new(),
         })
+    }
+
+    /// The handle's truthfulness state. This is diagnostic state, not a
+    /// recovery authority: a fenced handle stays fenced; a successful
+    /// publication or a fresh [`Database::open`] is what yields `Healthy`.
+    pub fn state(&self) -> DatabaseState {
+        self.state
+    }
+
+    fn ensure_writable(&self) -> Result<(), WriteError> {
+        match self.state {
+            DatabaseState::Healthy { .. } => Ok(()),
+            DatabaseState::CommitOutcomeUnknown { published_frontier } => {
+                Err(WriteError::HandleCommitOutcomeUnknown { published_frontier })
+            }
+            DatabaseState::NeedsAuthoritativeRecovery(recovery) => {
+                Err(WriteError::RecoveryRequired(recovery))
+            }
+        }
+    }
+
+    fn ensure_readable(&self) -> Result<(), ReadError> {
+        match self.state {
+            DatabaseState::Healthy { .. } => Ok(()),
+            DatabaseState::CommitOutcomeUnknown { published_frontier } => {
+                Err(ReadError::CommitOutcomeUnknown { published_frontier })
+            }
+            DatabaseState::NeedsAuthoritativeRecovery(recovery) => {
+                Err(ReadError::RecoveryRequired(recovery))
+            }
+        }
+    }
+
+    fn mark_recovery_stage(
+        &mut self,
+        recovery: &mut RecoveryRequired,
+        stage: DerivedPublicationStage,
+    ) {
+        recovery.failed_stage = stage;
+        self.state = DatabaseState::NeedsAuthoritativeRecovery(*recovery);
     }
 
     /// Commit a batch through the real two-fsync protocol, then republish the
@@ -1095,6 +1323,7 @@ impl Database {
         batch: WriteBatch,
         crash_at: Option<CrashPoint>,
     ) -> Result<CommitSeq, WriteError> {
+        self.ensure_writable()?;
         if batch.is_empty() {
             return Err(WriteError::EmptyBatch);
         }
@@ -1447,14 +1676,27 @@ impl Database {
         )?;
 
         let capsule = prepare_capsule(&self.keys.k_oid, self.keys.namespace, &template)?;
-        self.coordinator
+        let marker_ref = match self
+            .coordinator
             .commit_with_crash(
                 cx,
                 &capsule.bytes,
                 |seq, oid| marker_for_capsule(seq, oid, &capsule, Vec::new()),
                 crash_at,
             )
-            .await?;
+            .await
+        {
+            Ok(marker_ref) => marker_ref,
+            Err(source) if self.coordinator.is_poisoned() => {
+                let published_frontier = self.snapshot.frontier;
+                self.state = DatabaseState::CommitOutcomeUnknown { published_frontier };
+                return Err(WriteError::CommitOutcomeUnknown {
+                    published_frontier,
+                    source,
+                });
+            }
+            Err(source) => return Err(WriteError::Commit(source)),
+        };
 
         // Incremental snapshot maintenance (fgdb-fujt): the template in hand IS
         // the delta the durable commit just appended, so fold exactly it into
@@ -1466,15 +1708,18 @@ impl Database {
         // bytes it just made durable. Fold-then-swap: a failure leaves
         // `self.writer` at the pre-commit fold exactly as a rebuild failure
         // leaves the snapshot stale — reopen rebuilds from the stream.
-        let frontier = CommitSeq(
-            self.coordinator
-                .chain()
-                .entries()
-                .last()
-                .expect("the commit that just succeeded is in the chain")
-                .marker
-                .commit_seq,
-        );
+        let frontier = marker_ref.commit_seq;
+        let mut recovery = RecoveryRequired {
+            durable_frontier: frontier,
+            published_frontier: self.snapshot.frontier,
+            failed_stage: DerivedPublicationStage::FoldCommittedTemplate,
+        };
+        // D2 has completed. From this assignment until the final snapshot
+        // swap, every early return leaves the handle fenced off from its stale
+        // writer and snapshot. The assignment intentionally precedes even the
+        // first in-memory fold operation: a panic caught by an outer boundary
+        // is no excuse to make the old handle callable again.
+        self.state = DatabaseState::NeedsAuthoritativeRecovery(recovery);
         let mut folded = self.writer.clone();
         let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
         let mut new_versions = self.snapshot.versions.clone();
@@ -1492,20 +1737,56 @@ impl Database {
                 }
                 folded
                     .apply(self.keys.block_keys(), frontier, row)
-                    .map_err(|error| RebuildError::Fold {
-                        commit_seq: frontier.0,
-                        error,
+                    .map_err(|error| WriteError::CommittedNeedsRecovery {
+                        recovery,
+                        source: Box::new(RebuildError::Fold {
+                            commit_seq: frontier.0,
+                            error,
+                        }),
                     })?;
                 touched_elements(row, &mut touched);
             }
         }
-        fold_statement_versions(&mut new_versions, &touched, &folded)?;
+        fold_statement_versions(&mut new_versions, &touched, &folded).map_err(|error| {
+            WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::Version {
+                    commit_seq: frontier.0,
+                    error,
+                }),
+            }
+        })?;
+        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::SealPartition);
+        // The per-commit seal law — see `fold_stream`'s twin comment: the
+        // RETAINED fold seals this commit's statements now, so the durable
+        // layout never depends on which writer held unsealed rows.
+        folded.seal(self.keys.block_keys()).map_err(|error| {
+            WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::Fold {
+                    commit_seq: frontier.0,
+                    error,
+                }),
+            }
+        })?;
+        folded
+            .seal_vertices(self.keys.block_keys())
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::Fold {
+                    commit_seq: frontier.0,
+                    error,
+                }),
+            })?;
         let (root, blocks, patches) = folded
             .clone()
             .publish(self.keys.block_keys(), frontier)
-            .map_err(|error| RebuildError::Fold {
-                commit_seq: frontier.0,
-                error,
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::Fold {
+                    commit_seq: frontier.0,
+                    error,
+                }),
             })?;
         // Strata-side incremental publish (fgdb-gieu): the sealed prefix of a
         // partition is immutable and content-addressed, so of everything the
@@ -1516,6 +1797,7 @@ impl Database {
         // block (read + hash + two fsyncs each) and re-read + re-decoded the
         // whole partition twice more (admission, reopen) — O(blocks) disk work
         // per commit with no new information in it.
+        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishEdgeBlocks);
         for block in &blocks {
             self.store
                 .put_verified(
@@ -1527,25 +1809,40 @@ impl Database {
                         .map(|patch| patch.bytes.as_slice()),
                     &mut self.receipts,
                 )
-                .map_err(RebuildError::from)?;
+                .map_err(|error| WriteError::CommittedNeedsRecovery {
+                    recovery,
+                    source: Box::new(RebuildError::from(error)),
+                })?;
         }
+        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishVertexPatches);
         for patch in &patches {
             self.store
                 .put_patch_verified(cx, &patch.bytes, &mut self.receipts)
-                .map_err(RebuildError::from)?;
+                .map_err(|error| WriteError::CommittedNeedsRecovery {
+                    recovery,
+                    source: Box::new(RebuildError::from(error)),
+                })?;
         }
+        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishPartitionRoot);
         let root_id = self
             .store
             .put_root_verified(cx, &root, &mut self.receipts)
-            .map_err(RebuildError::from)?;
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::from(error)),
+            })?;
         // The manifest names the published root (fgdb-63w2): the durable path
         // from this directory to its partition advances in the same publish.
         let manifest_records =
             records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
+        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishManifest);
         let manifest = self
             .store
             .put_manifest(cx, &manifest_records)
-            .map_err(RebuildError::from)?;
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::from(error)),
+            })?;
         // The slot advances in the same publish (fgdb-ge6a): a crash before
         // this line leaves the slot exactly one publication behind, which is
         // the shape open() heals; there is no window where it runs ahead.
@@ -1553,13 +1850,17 @@ impl Database {
             .map(|bytes| bytes.len() as u64)
             .expect("records_of already proved these records canonical");
         let next_generation = self.slot_generation + 1;
+        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishRootSlot);
         self.slot_store
             .publish_evidenced(
                 cx,
                 &spine_slot(&self.keys, next_generation, manifest, manifest_len),
             )
             .await
-            .map_err(RebuildError::Slot)?;
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::Slot(error)),
+            })?;
         self.slot_generation = next_generation;
 
         // Refresh the snapshot without re-reading the partition: carry forward
@@ -1570,6 +1871,7 @@ impl Database {
         // and `incremental_snapshot.rs` pins that a from-scratch reopen derives
         // this same root and adjacency. Decode failures refuse here, before the
         // old snapshot is disturbed (fold-then-swap, as above).
+        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::RefreshEdgeSnapshot);
         let mut fresh: std::collections::BTreeMap<
             ObjectId,
             (Vec<AdjacencyEntry>, Option<BlockProps>),
@@ -1585,7 +1887,10 @@ impl Database {
                 .find(|block| block.block_id == reference.block_id)
                 .expect("every reference in a publish's root names a block that publish returned");
             let (entries, hosted) = fgdb_strata::decode_block_with_properties(&sealed.bytes)
-                .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+                .map_err(|error| WriteError::CommittedNeedsRecovery {
+                    recovery,
+                    source: Box::new(RebuildError::Store(StoreError::Malformed(error))),
+                })?;
             // A propertied block's rows decode from the exact patch bytes the
             // same publish sealed — the durable path, not the writer's memory.
             let props = match hosted {
@@ -1594,8 +1899,11 @@ impl Database {
                         "a sealed block declaring a hosted patch was sealed beside that patch",
                     );
                     let rows = fgdb_strata::edge_props::decode_property_patch(&patch.bytes)
-                        .map_err(|error| {
-                            RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
+                        .map_err(|error| WriteError::CommittedNeedsRecovery {
+                            recovery,
+                            source: Box::new(RebuildError::Store(
+                                StoreError::MalformedEdgePropertyPatch(error),
+                            )),
                         })?;
                     Some(BlockProps { locators, rows })
                 }
@@ -1633,6 +1941,10 @@ impl Database {
         // The identical carry-forward rule for the vertex half: an unchanged
         // patch reference means an unchanged decoded patch, and new patches
         // decode from the exact bytes `put_patch_verified` just fsynced.
+        self.mark_recovery_stage(
+            &mut recovery,
+            DerivedPublicationStage::RefreshVertexSnapshot,
+        );
         let mut fresh_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> =
             std::collections::BTreeMap::new();
         let carried_patch_ids: std::collections::BTreeSet<ObjectId> = self
@@ -1653,8 +1965,12 @@ impl Database {
                 .expect("every reference in a publish's root names a patch that publish returned");
             fresh_patches.insert(
                 reference.patch_id,
-                fgdb_strata::vertex::decode_patch(&sealed.bytes)
-                    .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?,
+                fgdb_strata::vertex::decode_patch(&sealed.bytes).map_err(|error| {
+                    WriteError::CommittedNeedsRecovery {
+                        recovery,
+                        source: Box::new(RebuildError::Store(StoreError::MalformedPatch(error))),
+                    }
+                })?,
             );
         }
         let mut carried_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> = self
@@ -1689,6 +2005,9 @@ impl Database {
             manifest,
             next_birth_ordinal,
             versions: new_versions,
+        };
+        self.state = DatabaseState::Healthy {
+            published_frontier: self.snapshot.frontier,
         };
         Ok(self.snapshot.frontier)
     }
@@ -1777,8 +2096,8 @@ impl Database {
     /// exactly as [`Database::neighbours`] is served from blocks: the row made
     /// the full encode → content-address → fsync → decode round trip before a
     /// reader can see it.
-    pub fn vertex(&self, vid: VId) -> Option<VertexRow> {
-        merge_vertex(&self.snapshot.patches, vid, self.snapshot.frontier)
+    pub fn vertex(&self, vid: VId) -> Result<Option<VertexRow>, ReadError> {
+        self.vertex_at(vid, self.snapshot.frontier)
     }
 
     /// [`Database::vertex`] as of `as_of` (fgdb-90jx): the version chain's
@@ -1791,8 +2110,8 @@ impl Database {
 
     /// Every vertex visible at the published frontier, in ascending VId
     /// order — the whole-graph scan a query layer starts from (fgdb-9k5w).
-    pub fn vertices(&self) -> Vec<VertexRow> {
-        merge_all_vertices(&self.snapshot.patches, self.snapshot.frontier)
+    pub fn vertices(&self) -> Result<Vec<VertexRow>, ReadError> {
+        self.vertices_at(self.snapshot.frontier)
     }
 
     /// [`Database::vertices`] as of `as_of`, under the same frontier refusal
@@ -1824,6 +2143,7 @@ impl Database {
     /// The shared refusal every `*_at` read applies before answering: the
     /// published frontier bounds what this snapshot can truthfully say.
     fn check_frontier(&self, as_of: CommitSeq) -> Result<(), ReadError> {
+        self.ensure_readable()?;
         if as_of.0 > self.snapshot.frontier.0 {
             return Err(ReadError::BeyondFrontier {
                 asked: as_of,
@@ -1833,19 +2153,23 @@ impl Database {
         Ok(())
     }
 
-    /// The sequence the published partition has caught up to.
+    /// The sequence the retained partition has caught up to.
+    ///
+    /// This remains available as failure diagnostics: when [`Database::state`]
+    /// is not `Healthy`, it is explicitly the stale side of the reported
+    /// stale/current split and must not be read as Chronicle's head.
     pub fn frontier(&self) -> CommitSeq {
         self.snapshot.frontier
     }
 
-    /// The identity of the published partition manifest (fgdb-63w2) — what a
+    /// The identity of the retained partition manifest (fgdb-63w2) — what a
     /// root slot will carry, republished beside every root under the same
     /// determinism law as [`Database::partition_root`].
     pub fn manifest(&self) -> ManifestVersion {
         self.snapshot.manifest
     }
 
-    /// The identity of the published partition root.
+    /// The identity of the retained partition root.
     ///
     /// Exposed because the rebuild is deterministic and content-addressed, so
     /// "reopening the same stream publishes the same root" is a law a caller can
@@ -2149,6 +2473,214 @@ pub fn marker_for_capsule(
 /// Only markers reach this loop, so an orphan capsule — bytes on disk that no
 /// marker names — contributes nothing without needing to be excluded. That is
 /// the marker-is-the-commit rule doing the work.
+/// Derive the version map from a resolved partition alone (fgdb-ge6a v3):
+/// fold each LIVE element's durable statement chain, oldest first. Spent
+/// counts ride along because every create spent exactly one identity, which
+/// is also what the birth-ordinal allocator counted.
+fn derive_versions_and_ordinal(
+    blocks: &[Vec<AdjacencyEntry>],
+    block_props: &[Option<BlockProps>],
+    patches: &[Vec<VertexRow>],
+    frontier: CommitSeq,
+) -> Result<(std::collections::BTreeMap<ElementId, ObjectId>, u64), CanonicalError> {
+    let mut versions = std::collections::BTreeMap::new();
+
+    // Vertices: statements keyed (vid, created_at), later patches restate.
+    let mut vertex_statements: std::collections::BTreeMap<(VId, u64), &VertexRow> =
+        std::collections::BTreeMap::new();
+    for rows in patches {
+        for row in rows {
+            vertex_statements.insert((row.vid, row.created_at.0), row);
+        }
+    }
+    let mut spent_vertices = std::collections::BTreeSet::new();
+    let mut head: Option<(VId, ObjectId, bool)> = None;
+    for ((vid, _), row) in &vertex_statements {
+        spent_vertices.insert(*vid);
+        let previous = match &head {
+            Some((prev_vid, version, _)) if prev_vid == vid => Some(*version),
+            _ => None,
+        };
+        let transcript =
+            vertex_statement_transcript(row.vid, row.birth_ordinal, &row.labels, &row.props)?;
+        let version = statement_successor(previous, &transcript);
+        let live =
+            row.retired_at.is_none_or(|r| r.0 > frontier.0) && row.created_at.0 <= frontier.0;
+        head = Some((*vid, version, live));
+        if live {
+            versions.insert(ElementId::Vertex(*vid), version);
+        } else {
+            versions.remove(&ElementId::Vertex(*vid));
+        }
+    }
+
+    // Edges: statements keyed (eid, created_at) across publication order,
+    // later blocks restate (tombstone supersede).
+    let mut edge_statements: std::collections::BTreeMap<
+        (EId, u64),
+        (AdjacencyEntry, EdgePropertyRow),
+    > = std::collections::BTreeMap::new();
+    for (block, props) in blocks.iter().zip(block_props) {
+        for (index, entry) in block.iter().enumerate() {
+            let row = props
+                .as_ref()
+                .map(|props| props.props_of(index))
+                .unwrap_or_default();
+            edge_statements.insert((entry.eid, entry.created_at.0), (*entry, row));
+        }
+    }
+    let mut spent_edges = std::collections::BTreeSet::new();
+    let mut head: Option<(EId, ObjectId)> = None;
+    for ((eid, _), (entry, row)) in &edge_statements {
+        spent_edges.insert(*eid);
+        let previous = match &head {
+            Some((prev_eid, version)) if prev_eid == eid => Some(*version),
+            _ => None,
+        };
+        let transcript =
+            edge_statement_transcript(*eid, entry.src, entry.relation, entry.dst, row)?;
+        let version = statement_successor(previous, &transcript);
+        head = Some((*eid, version));
+        let live =
+            entry.retired_at.is_none_or(|r| r.0 > frontier.0) && entry.created_at.0 <= frontier.0;
+        if live {
+            versions.insert(ElementId::Edge(*eid), version);
+        } else {
+            versions.remove(&ElementId::Edge(*eid));
+        }
+    }
+
+    Ok((versions, (spent_vertices.len() + spent_edges.len()) as u64))
+}
+
+/// The manifest-based fast open (fgdb-ge6a): resolve the slot's manifest to
+/// a partition, reopen it from disk WITHOUT folding the stream, derive the
+/// writer and version state the fold would have built, then replay only the
+/// chronicle SUFFIX past the partition's publication. The equivalence law
+/// pins this against [`rebuild`] on every generated history.
+async fn fast_rebuild(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+    store: &BlockStore,
+    keys: &DatabaseKeys,
+    root_id: PartitionRootVersion,
+) -> Result<(Snapshot, BlockWriter), RebuildError> {
+    let (root, blocks, block_props, patches) = store.reopen(cx, root_id)?;
+    let published_at = root.published_at;
+
+    // The sealed lists a retained writer would hold: bytes re-read from the
+    // store, which verifies identity on every read.
+    let mut sealed = Vec::with_capacity(root.blocks.len());
+    for (reference, decoded) in root.blocks.iter().zip(&blocks) {
+        let bytes = store.get_bytes(cx, fgdb_strata::DeltaBlockVersion(reference.block_id))?;
+        let property_patch = match fgdb_strata::decode_block_with_properties(&bytes)
+            .map_err(StoreError::Malformed)?
+            .1
+        {
+            Some((patch_id, _)) => Some(fgdb_strata::writer::SealedPropertyPatch {
+                patch_id,
+                bytes: store.get_edge_property_patch_bytes(cx, patch_id)?,
+            }),
+            None => None,
+        };
+        let _ = decoded;
+        sealed.push(fgdb_strata::writer::SealedBlock {
+            block_id: reference.block_id,
+            bytes,
+            first_seq: reference.first_seq,
+            last_seq: reference.last_seq,
+            property_patch,
+        });
+    }
+    let mut sealed_patches = Vec::with_capacity(root.vertex_patches.len());
+    for reference in &root.vertex_patches {
+        sealed_patches.push(fgdb_strata::writer::SealedPatch {
+            patch_id: reference.patch_id,
+            bytes: store.get_patch_bytes(
+                cx,
+                fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
+            )?,
+            first_seq: reference.first_seq,
+            last_seq: reference.last_seq,
+        });
+    }
+
+    let mut writer = BlockWriter::from_published_partition(
+        GRAPH,
+        BRANCH,
+        PARTITION,
+        sealed,
+        sealed_patches,
+        &blocks,
+        &block_props,
+        &patches,
+        published_at,
+    )
+    .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
+    let (mut versions, mut next_birth_ordinal) =
+        derive_versions_and_ordinal(&blocks, &block_props, &patches, published_at).map_err(
+            |error| RebuildError::Decode {
+                commit_seq: published_at.0,
+                error,
+            },
+        )?;
+
+    // The SUFFIX: everything the crash window or plain lag left past the
+    // resolved publication.
+    let frontier = fold_stream(
+        cx,
+        coordinator,
+        keys,
+        &mut writer,
+        &mut versions,
+        &mut next_birth_ordinal,
+        published_at,
+    )
+    .await?;
+
+    if frontier.0 > published_at.0 {
+        // The suffix advanced the fold: republish through the shared tail so
+        // the durable root/manifest catch up (the slot heals in bind).
+        let result = publish_and_snapshot(
+            cx,
+            store,
+            keys,
+            writer,
+            versions,
+            frontier,
+            next_birth_ordinal,
+        );
+        return result;
+    }
+
+    // No suffix: the partition IS current, and the snapshot assembles from
+    // what the reopen already decoded — no publish, no O(blocks) writes.
+    let manifest_records =
+        records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
+    let manifest_bytes =
+        encode_manifest(&manifest_records).expect("records_of proved these records canonical");
+    let manifest = ManifestVersion(fgdb_strata::manifest::manifest_id(
+        &keys.k_oid,
+        keys.namespace,
+        &manifest_bytes,
+    ));
+    Ok((
+        Snapshot {
+            blocks,
+            refs: root.blocks,
+            block_props,
+            patches,
+            patch_refs: root.vertex_patches,
+            frontier: published_at,
+            root: root_id,
+            manifest,
+            next_birth_ordinal,
+            versions,
+        },
+        writer,
+    ))
+}
+
 async fn rebuild(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
@@ -2156,13 +2688,50 @@ async fn rebuild(
     keys: &DatabaseKeys,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
-    let mut frontier = CommitSeq(0);
     let mut next_birth_ordinal = 0u64;
     let mut versions = std::collections::BTreeMap::new();
+    let frontier = fold_stream(
+        cx,
+        coordinator,
+        keys,
+        &mut writer,
+        &mut versions,
+        &mut next_birth_ordinal,
+        CommitSeq(0),
+    )
+    .await?;
+    publish_and_snapshot(
+        cx,
+        store,
+        keys,
+        writer,
+        versions,
+        frontier,
+        next_birth_ordinal,
+    )
+}
+
+/// Fold every committed template with `commit_seq > after` into the writer,
+/// versions map, and birth-ordinal allocator — the one stream fold, shared by
+/// the from-scratch rebuild (`after = 0`) and the fast open's SUFFIX replay
+/// past a resolved partition's `published_at` (fgdb-ge6a).
+async fn fold_stream(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+    keys: &DatabaseKeys,
+    writer: &mut BlockWriter,
+    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
+    next_birth_ordinal: &mut u64,
+    after: CommitSeq,
+) -> Result<CommitSeq, RebuildError> {
+    let mut frontier = after;
     let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
 
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
+        if commit_seq.0 <= after.0 {
+            continue;
+        }
         frontier = commit_seq;
         let EffectSource::Local {
             capsule_ref,
@@ -2209,7 +2778,7 @@ async fn rebuild(
                     row,
                     DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
                 ) {
-                    next_birth_ordinal += 1;
+                    *next_birth_ordinal += 1;
                 }
                 writer
                     .apply(keys.block_keys(), commit_seq, row)
@@ -2220,15 +2789,48 @@ async fn rebuild(
                 touched_elements(row, &mut touched);
             }
         }
-        fold_statement_versions(&mut versions, &touched, &writer).map_err(|error| {
+        fold_statement_versions(versions, &touched, writer).map_err(|error| {
             RebuildError::Decode {
                 commit_seq: commit_seq.0,
                 error,
             }
         })?;
         touched.clear();
+        // THE PER-COMMIT SEAL LAW (fgdb-ge6a): every commit's statements seal
+        // at that commit, so the durable layout is a function of the STREAM —
+        // never of which writer happened to hold unsealed rows. Without this,
+        // a retained writer re-coalesces pending rows across commits and a
+        // fast open (which can only see SEALED durable state) would republish
+        // a different — equally lawful, but not identical — root, breaking
+        // the reopening-publishes-the-same-root determinism law.
+        writer
+            .seal(keys.block_keys())
+            .map_err(|error| RebuildError::Fold {
+                commit_seq: commit_seq.0,
+                error,
+            })?;
+        writer
+            .seal_vertices(keys.block_keys())
+            .map_err(|error| RebuildError::Fold {
+                commit_seq: commit_seq.0,
+                error,
+            })?;
     }
+    Ok(frontier)
+}
 
+/// The publication tail every open path shares: publish from a clone, make
+/// the blocks/patches/root/manifest durable, and assemble the snapshot from
+/// a from-disk reopen — the encode -> address -> fsync -> decode round trip.
+fn publish_and_snapshot(
+    cx: &CommitCx,
+    store: &BlockStore,
+    keys: &DatabaseKeys,
+    writer: BlockWriter,
+    versions: std::collections::BTreeMap<ElementId, ObjectId>,
+    frontier: CommitSeq,
+    next_birth_ordinal: u64,
+) -> Result<(Snapshot, BlockWriter), RebuildError> {
     // Publish from a clone and hand the fold state back: the caller retains it
     // so later commits fold only their own template (fgdb-fujt). The strata
     // equality law pins clone-publish == this very rebuild, byte for byte.
