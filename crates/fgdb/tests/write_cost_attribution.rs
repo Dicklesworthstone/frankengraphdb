@@ -308,15 +308,40 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
         capsule_keys(&control_keys),
     ))
     .expect("control coordinator");
-    let mut control = Vec::new();
+    // Each commit is timed against an ADJACENT constant-work sentinel — a
+    // 4 KiB write + fsync in the same directory — and the verdict is over
+    // the RATIO. Machine load (this box runs many panes, fgdb-j57r measured
+    // three false reds in one session) inflates numerator and denominator
+    // together, so a sustained neighbour build no longer reads as an
+    // O(history) term; only work that grows with THIS stream's history can
+    // move the ratio.
+    let sentinel_path = control_dir.join("sentinel");
+    let sentinel_payload = [0u8; 4096];
+    let mut control: Vec<(Duration, f64)> = Vec::new();
     for round in 0..HISTORY_POINTS[HISTORY_POINTS.len() - 1] as u64 + 1 {
         let (bytes, capsule) = control_capsule_bytes(round);
+        let sentinel_start = Instant::now();
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&sentinel_path)
+                .expect("sentinel opens");
+            file.write_all(&sentinel_payload).expect("sentinel writes");
+            file.sync_all().expect("sentinel syncs");
+        }
+        // Floored against clock quantization so a suspiciously fast sync
+        // cannot manufacture a huge ratio.
+        let sentinel = sentinel_start.elapsed().max(Duration::from_micros(50));
         let start = Instant::now();
         drive(coordinator.commit(&commit, &bytes, |seq, oid| {
             marker_for_capsule(seq, oid, &capsule, Vec::new())
         }))
         .expect("control commit");
-        control.push(start.elapsed());
+        let elapsed = start.elapsed();
+        control.push((elapsed, elapsed.as_secs_f64() / sentinel.as_secs_f64()));
     }
 
     // ---- REPORT, in full, before any verdict: every number the assertions
@@ -336,11 +361,18 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
             stages.publish_and_reopen,
         );
     }
-    let control_early: Duration = control[1..9].iter().sum::<Duration>() / 8;
-    let control_late: Duration = control[control.len() - 8..].iter().sum::<Duration>() / 8;
+    let median = |window: &[(Duration, f64)]| -> f64 {
+        let mut ratios: Vec<f64> = window.iter().map(|(_, ratio)| *ratio).collect();
+        ratios.sort_by(|left, right| left.total_cmp(right));
+        ratios[ratios.len() / 2]
+    };
+    let control_early = median(&control[1..9]);
+    let control_late = median(&control[control.len() - 8..]);
     eprintln!(
-        "  chronicle-only control: early(mean of 8)={control_early:?} \
-         late(mean of 8)={control_late:?}"
+        "  chronicle-only control: early(median commit/sentinel of 8)={control_early:.2} \
+         late={control_late:.2} raw_first={:?} raw_last={:?}",
+        control[1].0,
+        control[control.len() - 1].0,
     );
 
     // ---- VERDICT 1 (the regression lock this file became once the fujt fix
@@ -376,12 +408,15 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
 
     // ---- VERDICT 3: the durable commit protocol is NOT the term — raw
     // chronicle commits stay flat as history grows. 4x is the same coarse
-    // separation the cx_probe sweep uses.
+    // separation the cx_probe sweep uses, applied to the sentinel-normalized
+    // ratio so neighbour load cancels instead of deciding the verdict
+    // (fgdb-j57r).
     assert!(
-        control_late.as_nanos() <= control_early.as_nanos().saturating_mul(4),
-        "the chronicle-only control GREW with history (early {control_early:?} \
-         → late {control_late:?}): the durable commit protocol itself carries \
-         an O(history) term and the rebuild attribution is incomplete."
+        control_late <= control_early * 4.0,
+        "the chronicle-only control GREW with history (early ratio \
+         {control_early:.2} → late ratio {control_late:.2}, sentinel-normalized): \
+         the durable commit protocol itself carries an O(history) term and \
+         the rebuild attribution is incomplete."
     );
 }
 
