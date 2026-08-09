@@ -62,30 +62,65 @@ const LINEAGE_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.snapshot-lineage.v1";
 /// identity; the ordinal is an allocation fact, redundant in this hash.
 /// The engine's deliberately-duplicated derivation (§15.2) changed in the
 /// same commit; the differential proves continued agreement.
-const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v2";
+const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v3";
 
-/// The v2 normalization: the identical function exists, deliberately
-/// duplicated, in `fgdb` (§15.2 — shared code would let one defect agree
-/// with itself).
-fn version_transcript_row(row: &DeltaRow) -> DeltaRow {
-    let mut projected = row.clone();
-    match &mut projected {
-        DeltaRow::CreateEdge {
-            birth_ordinal,
-            canonical_key,
-            valid_time,
-            ..
-        } => {
-            *birth_ordinal = 0;
-            *canonical_key = None;
-            *valid_time = None;
-        }
-        DeltaRow::CreateVertex { valid_time, .. } => {
-            *valid_time = None;
-        }
-        _ => {}
+/// One vertex statement's transcript (v3): identity, birth ordinal, durable
+/// content. Valid time is deliberately absent until it has a durable
+/// carrier (the w4 sidecar) — the chain still advances on a valid-time row
+/// because the element is marked dirty, but the VALUE binds through its
+/// validated before-image, not this hash. Deliberately duplicated in `fgdb`
+/// (§15.2 — shared code would let one defect agree with itself).
+fn vertex_statement_transcript(
+    vid: VId,
+    birth_ordinal: u64,
+    labels: impl Iterator<Item = LabelId>,
+    props: impl Iterator<Item = (PropertyKeyId, CanonicalScalar)>,
+) -> Result<Vec<u8>, ApplyError> {
+    let mut out = vec![0x01];
+    out.extend_from_slice(&vid.0.to_le_bytes());
+    out.extend_from_slice(&birth_ordinal.to_le_bytes());
+    let labels: Vec<LabelId> = labels.collect();
+    out.extend_from_slice(&(labels.len() as u32).to_le_bytes());
+    for label in labels {
+        out.extend_from_slice(&label.0.to_le_bytes());
     }
-    projected
+    append_props_transcript(&mut out, props)?;
+    Ok(out)
+}
+
+/// One edge statement's transcript (v3): identity, immutable topology,
+/// durable content.
+fn edge_statement_transcript(
+    eid: EId,
+    src: VId,
+    relation: RelationId,
+    dst: VId,
+    props: impl Iterator<Item = (PropertyKeyId, CanonicalScalar)>,
+) -> Result<Vec<u8>, ApplyError> {
+    let mut out = vec![0x02];
+    out.extend_from_slice(&eid.0.to_le_bytes());
+    out.extend_from_slice(&src.0.to_le_bytes());
+    out.extend_from_slice(&relation.0.to_le_bytes());
+    out.extend_from_slice(&dst.0.to_le_bytes());
+    append_props_transcript(&mut out, props)?;
+    Ok(out)
+}
+
+fn append_props_transcript(
+    out: &mut Vec<u8>,
+    props: impl Iterator<Item = (PropertyKeyId, CanonicalScalar)>,
+) -> Result<(), ApplyError> {
+    let props: Vec<(PropertyKeyId, CanonicalScalar)> = props.collect();
+    out.extend_from_slice(&(props.len() as u32).to_le_bytes());
+    for (key, value) in props {
+        let encoded = value.encode().map_err(|_| {
+            ApplyError::VersionIdentityEncoding(fgdb_delta_types::CanonicalError::Scalar)
+        })?;
+        out.extend_from_slice(&key.0.to_le_bytes());
+        out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        out.extend_from_slice(&encoded);
+    }
+    Ok(())
 }
 
 /// A materialized vertex.
@@ -638,6 +673,11 @@ pub struct ReferenceGraph {
     spent_vertex_ids: BTreeSet<VId>,
     /// Edge-kind counterpart of `spent_vertex_ids`.
     spent_edge_ids: BTreeSet<EId>,
+    /// Elements whose content changed since the last statement-version
+    /// finalization (fgdb-ge6a v3), each with the chain head captured BEFORE
+    /// this commit's first touch — `None` when the element was born in it.
+    /// Empty at every commit boundary, so equal graphs stay equal.
+    dirty_statements: BTreeMap<ElementId, Option<ObjectId>>,
     /// Counter values, which are their own state rather than ordinary
     /// properties: their rows carry a checked delta and a merge algebra.
     counters: BTreeMap<(ElementId, PropertyKeyId), i128>,
@@ -678,6 +718,7 @@ impl ReferenceGraph {
             edges: BTreeMap::new(),
             spent_vertex_ids: BTreeSet::new(),
             spent_edge_ids: BTreeSet::new(),
+            dirty_statements: BTreeMap::new(),
             counters: BTreeMap::new(),
             escrow: BTreeMap::new(),
             sketches: BTreeMap::new(),
@@ -955,13 +996,7 @@ impl ReferenceGraph {
     /// self-delimiting, and the row's canonical bytes include its family and
     /// stable element identity. No branch population, wall clock, or commit
     /// sequence enters this derivation.
-    fn successor_version(
-        previous: Option<ObjectId>,
-        row: &DeltaRow,
-    ) -> Result<ObjectId, ApplyError> {
-        let canonical = version_transcript_row(row)
-            .canonical_bytes()
-            .map_err(ApplyError::VersionIdentityEncoding)?;
+    fn statement_successor(previous: Option<ObjectId>, transcript: &[u8]) -> ObjectId {
         let mut hasher = fgdb_crypto::Hasher::new();
         hasher.update(ELEMENT_VERSION_DOMAIN);
         match previous {
@@ -973,29 +1008,54 @@ impl ReferenceGraph {
                 hasher.update(&version.0);
             }
         }
-        hasher.update(&(canonical.len() as u64).to_le_bytes());
-        hasher.update(&canonical);
-        Ok(ObjectId(hasher.finalize().0))
+        hasher.update(&(transcript.len() as u64).to_le_bytes());
+        hasher.update(transcript);
+        ObjectId(hasher.finalize().0)
     }
 
-    /// Install a version already derived and validated for an existing element.
-    fn set_element_version(
-        &mut self,
-        elem: ElementId,
-        version: ObjectId,
-    ) -> Result<(), ApplyError> {
-        match elem {
-            ElementId::Vertex(vid) => {
-                self.vertices
-                    .get_mut(&vid)
-                    .ok_or(ApplyError::NoSuchVertex { vid })?
-                    .version = version;
-            }
-            ElementId::Edge(eid) => {
-                self.edges
-                    .get_mut(&eid)
-                    .ok_or(ApplyError::NoSuchEdge { eid })?
-                    .version = version;
+    /// Finalize this commit's statement versions (fgdb-ge6a v3): each dirty
+    /// LIVE element's head steps ONCE over its final materialized state —
+    /// the durable statement — with the pre-commit head (or `None` for an
+    /// element born in this commit) as predecessor. Same-commit intermediate
+    /// content therefore never binds the chain, exactly as the engine's
+    /// in-place folds erase it from the durable tier.
+    pub fn finalize_statement_versions(&mut self) -> Result<(), ApplyError> {
+        let dirty = std::mem::take(&mut self.dirty_statements);
+        for (elem, previous) in dirty {
+            match elem {
+                ElementId::Vertex(vid) => {
+                    let Some(vertex) = self.vertices.get(&vid) else {
+                        continue;
+                    };
+                    let transcript = vertex_statement_transcript(
+                        vid,
+                        vertex.birth_ordinal,
+                        vertex.labels.iter().copied(),
+                        vertex.props.iter().map(|(k, v)| (*k, v.clone())),
+                    )?;
+                    let version = Self::statement_successor(previous, &transcript);
+                    self.vertices
+                        .get_mut(&vid)
+                        .expect("presence checked above")
+                        .version = version;
+                }
+                ElementId::Edge(eid) => {
+                    let Some(edge) = self.edges.get(&eid) else {
+                        continue;
+                    };
+                    let transcript = edge_statement_transcript(
+                        eid,
+                        edge.src,
+                        edge.relation,
+                        edge.dst,
+                        edge.props.iter().map(|(k, v)| (*k, v.clone())),
+                    )?;
+                    let version = Self::statement_successor(previous, &transcript);
+                    self.edges
+                        .get_mut(&eid)
+                        .expect("presence checked above")
+                        .version = version;
+                }
             }
         }
         Ok(())
@@ -1008,6 +1068,15 @@ impl ReferenceGraph {
     /// fixing the row sees exactly the state it had before that row. This does
     /// not make a sequence of separate [`Self::apply_row`] calls atomic.
     pub fn apply_row(&mut self, row: &DeltaRow) -> Result<(), ApplyError> {
+        // The public face treats ONE ROW as one committed mutation, so the
+        // statement version finalizes here (fgdb-ge6a v3). Template
+        // application — where several rows share a commit — goes through
+        // [`ReferenceGraph::apply_row_open`] and finalizes per commit.
+        self.apply_row_open(row)?;
+        self.finalize_statement_versions()
+    }
+
+    pub(crate) fn apply_row_open(&mut self, row: &DeltaRow) -> Result<(), ApplyError> {
         match row {
             DeltaRow::CreateVertex {
                 vid,
@@ -1023,7 +1092,16 @@ impl ReferenceGraph {
                 if self.spent_vertex_ids.contains(vid) {
                     return Err(ApplyError::VertexIdentitySpent { vid: *vid });
                 }
-                let version = Self::successor_version(None, row)?;
+                let transcript = vertex_statement_transcript(
+                    *vid,
+                    *birth_ordinal,
+                    labels.iter().copied(),
+                    props.iter().cloned(),
+                )?;
+                let version = Self::statement_successor(None, &transcript);
+                self.dirty_statements
+                    .entry(ElementId::Vertex(*vid))
+                    .or_insert(None);
                 self.vertices.insert(
                     *vid,
                     Vertex {
@@ -1065,7 +1143,12 @@ impl ReferenceGraph {
                         });
                     }
                 }
-                let version = Self::successor_version(None, row)?;
+                let transcript =
+                    edge_statement_transcript(*eid, *src, *relation, *dst, props.iter().cloned())?;
+                let version = Self::statement_successor(None, &transcript);
+                self.dirty_statements
+                    .entry(ElementId::Edge(*eid))
+                    .or_insert(None);
                 self.edges.insert(
                     *eid,
                     Edge {
@@ -1161,7 +1244,6 @@ impl ReferenceGraph {
                     .get(vid)
                     .ok_or(ApplyError::NoSuchVertex { vid: *vid })?
                     .version;
-                let version = Self::successor_version(Some(previous), row)?;
                 let vertex = self
                     .vertices
                     .get_mut(vid)
@@ -1175,12 +1257,18 @@ impl ReferenceGraph {
                         actual,
                     });
                 }
+                self.dirty_statements
+                    .entry(ElementId::Vertex(*vid))
+                    .or_insert(Some(previous));
+                let vertex = self
+                    .vertices
+                    .get_mut(vid)
+                    .ok_or(ApplyError::NoSuchVertex { vid: *vid })?;
                 if *after {
                     vertex.labels.insert(*label);
                 } else {
                     vertex.labels.remove(label);
                 }
-                vertex.version = version;
             }
             DeltaRow::Property {
                 elem,
@@ -1192,7 +1280,6 @@ impl ReferenceGraph {
                     ElementId::Vertex(vid) => ApplyError::NoSuchVertex { vid: *vid },
                     ElementId::Edge(eid) => ApplyError::NoSuchEdge { eid: *eid },
                 })?;
-                let version = Self::successor_version(Some(previous), row)?;
                 match elem {
                     ElementId::Vertex(vid) => {
                         let vertex = self
@@ -1208,6 +1295,11 @@ impl ReferenceGraph {
                                 actual: actual.map(Box::new),
                             });
                         }
+                        self.dirty_statements.entry(*elem).or_insert(Some(previous));
+                        let vertex = self
+                            .vertices
+                            .get_mut(vid)
+                            .ok_or(ApplyError::NoSuchVertex { vid: *vid })?;
                         match after {
                             Some(value) => {
                                 vertex.props.insert(*property, value.clone());
@@ -1216,7 +1308,6 @@ impl ReferenceGraph {
                                 vertex.props.remove(property);
                             }
                         }
-                        vertex.version = version;
                     }
                     ElementId::Edge(eid) => {
                         let edge = self
@@ -1232,6 +1323,11 @@ impl ReferenceGraph {
                                 actual: actual.map(Box::new),
                             });
                         }
+                        self.dirty_statements.entry(*elem).or_insert(Some(previous));
+                        let edge = self
+                            .edges
+                            .get_mut(eid)
+                            .ok_or(ApplyError::NoSuchEdge { eid: *eid })?;
                         match after {
                             Some(value) => {
                                 edge.props.insert(*property, value.clone());
@@ -1240,7 +1336,6 @@ impl ReferenceGraph {
                                 edge.props.remove(property);
                             }
                         }
-                        edge.version = version;
                     }
                 }
             }
@@ -1257,7 +1352,7 @@ impl ReferenceGraph {
                             .vertices
                             .get_mut(vid)
                             .ok_or(ApplyError::NoSuchVertex { vid: *vid })?;
-                        let version = Self::successor_version(Some(vertex.version), row)?;
+                        let previous = vertex.version;
                         let actual = vertex.valid_time;
                         if actual != *before {
                             return Err(ApplyError::ValidTimeBeforeMismatch {
@@ -1267,14 +1362,15 @@ impl ReferenceGraph {
                             });
                         }
                         vertex.valid_time = *after;
-                        vertex.version = version;
+                        self.dirty_statements.entry(*elem).or_insert(Some(previous));
+                        // (validation preceded both the mutation and this capture)
                     }
                     ElementId::Edge(eid) => {
                         let edge = self
                             .edges
                             .get_mut(eid)
                             .ok_or(ApplyError::NoSuchEdge { eid: *eid })?;
-                        let version = Self::successor_version(Some(edge.version), row)?;
+                        let previous = edge.version;
                         let actual = edge.valid_time;
                         if actual != *before {
                             return Err(ApplyError::ValidTimeBeforeMismatch {
@@ -1284,7 +1380,7 @@ impl ReferenceGraph {
                             });
                         }
                         edge.valid_time = *after;
-                        edge.version = version;
+                        self.dirty_statements.entry(*elem).or_insert(Some(previous));
                     }
                 }
             }
@@ -1309,7 +1405,6 @@ impl ReferenceGraph {
                     ElementId::Vertex(vid) => ApplyError::NoSuchVertex { vid: *vid },
                     ElementId::Edge(eid) => ApplyError::NoSuchEdge { eid: *eid },
                 })?;
-                let version = Self::successor_version(Some(previous), row)?;
                 Self::require_closing(*before, *delta, *after)?;
                 let actual = self.counter(*elem, *property).unwrap_or(0);
                 if actual != *before {
@@ -1320,7 +1415,7 @@ impl ReferenceGraph {
                         actual,
                     });
                 }
-                self.set_element_version(*elem, version)?;
+                self.dirty_statements.entry(*elem).or_insert(Some(previous));
                 self.counters.insert((*elem, *property), *after);
                 self.operation_keys.insert(*operation_key, row.clone());
             }
@@ -1347,7 +1442,6 @@ impl ReferenceGraph {
                     ElementId::Vertex(vid) => ApplyError::NoSuchVertex { vid: *vid },
                     ElementId::Edge(eid) => ApplyError::NoSuchEdge { eid: *eid },
                 })?;
-                let version = Self::successor_version(Some(previous), row)?;
                 Self::require_closing(*before_value, *delta, *after_value)?;
                 let actual = self.escrow_balance(*domain_id);
                 if actual != *before_value {
@@ -1357,7 +1451,9 @@ impl ReferenceGraph {
                         actual,
                     });
                 }
-                self.set_element_version(*subject, version)?;
+                self.dirty_statements
+                    .entry(*subject)
+                    .or_insert(Some(previous));
                 self.escrow.insert(*domain_id, *after_value);
                 self.operation_keys.insert(*operation_key, row.clone());
             }
@@ -1436,7 +1532,7 @@ impl ReferenceGraph {
     /// succeed; a direct caller needing the same boundary must stage likewise.
     pub fn apply_entry(&mut self, entry: &CoordinateEntry) -> Result<(), ApplyError> {
         for row in &entry.rows {
-            self.apply_row(row)?;
+            self.apply_row_open(row)?;
         }
         Ok(())
     }
@@ -2639,6 +2735,7 @@ impl ReferenceDatabase {
             let Some(records) = self.history.get(&key) else {
                 continue;
             };
+            let mut open_commit: Option<CommitSeq> = None;
             for record in records {
                 // Both axes ascend together across committed records. A record
                 // above either cap means every later record is above it too.
@@ -2647,11 +2744,36 @@ impl ReferenceDatabase {
                 {
                     break;
                 }
+                // Statement versions step once per COMMIT (fgdb-ge6a v3):
+                // several records may share a commit's sequence, so the
+                // finalize runs at each boundary, exactly as live
+                // application finalizes per template.
+                if open_commit.is_some_and(|seq| seq != record.commit_seq) {
+                    graph.finalize_statement_versions().map_err(|cause| {
+                        SnapshotError::HistoryNotApplicable {
+                            graph: key.0,
+                            branch: key.1,
+                            seq: record.commit_seq,
+                            cause: Box::new(cause),
+                        }
+                    })?;
+                }
+                open_commit = Some(record.commit_seq);
                 graph.apply_entry(&record.entry).map_err(|cause| {
                     SnapshotError::HistoryNotApplicable {
                         graph: key.0,
                         branch: key.1,
                         seq: record.commit_seq,
+                        cause: Box::new(cause),
+                    }
+                })?;
+            }
+            if let Some(seq) = open_commit {
+                graph.finalize_statement_versions().map_err(|cause| {
+                    SnapshotError::HistoryNotApplicable {
+                        graph: key.0,
+                        branch: key.1,
+                        seq,
                         cause: Box::new(cause),
                     }
                 })?;
@@ -3177,6 +3299,16 @@ impl ReferenceDatabase {
                     entry: entry.clone(),
                 });
         }
+        // One statement-version step per commit per element (fgdb-ge6a v3):
+        // dirty sets accumulated across this template's entries — several
+        // relation entries for one coordinate share the commit, and
+        // `or_insert` pinned each element's FIRST pre-head — finalize once
+        // per touched coordinate, inside the all-or-nothing candidate.
+        for entry in template.coordinate_entries() {
+            if let Some(graph) = candidate.coordinates.get_mut(&(entry.graph, entry.branch)) {
+                graph.finalize_statement_versions()?;
+            }
+        }
         *self = candidate;
         Ok(())
     }
@@ -3296,50 +3428,53 @@ mod provenance_internal_tests {
 
 #[cfg(test)]
 mod version_transcript_laws {
-    use super::ReferenceGraph;
-    use fgdb_delta_types::{DeltaRow, PropertyKeyId, RelationId};
+    use super::{ReferenceGraph, edge_statement_transcript, vertex_statement_transcript};
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
     use fgdb_types::{CanonicalScalar, EId, VId};
 
-    fn create_edge(birth_ordinal: u64, eid: u128) -> DeltaRow {
-        DeltaRow::CreateEdge {
-            eid: EId(eid),
-            birth_ordinal,
-            src: VId(1),
-            relation: RelationId(1),
-            dst: VId(2),
-            canonical_key: None,
-            props: vec![],
-            valid_time: None,
-        }
-    }
-
-    /// The v2 projection law, witnessed on THIS derivation independently of
-    /// the engine's deliberate duplicate: the chain base is blind to the
-    /// allocation ordinal and remains bound to identity and durable content.
+    /// The v3 statement-chain laws, witnessed on THIS deliberate duplicate
+    /// independently of the engine's: the predecessor binds the chain, the
+    /// element family and identity bind the transcript, durable content
+    /// binds it — and nothing else does.
     #[test]
-    fn the_chain_base_hashes_the_durable_projection_only() {
-        let a = ReferenceGraph::successor_version(None, &create_edge(7, 10)).expect("derives");
-        let b = ReferenceGraph::successor_version(None, &create_edge(8, 10)).expect("derives");
-        assert_eq!(
-            a, b,
-            "the ordinal is not durable and must not bind the chain"
-        );
-        let other = ReferenceGraph::successor_version(None, &create_edge(7, 11)).expect("derives");
-        assert_ne!(a, other, "the stable identity still binds it");
-        let propertied = ReferenceGraph::successor_version(
-            None,
-            &DeltaRow::CreateEdge {
-                eid: EId(10),
-                birth_ordinal: 7,
-                src: VId(1),
-                relation: RelationId(1),
-                dst: VId(2),
-                canonical_key: None,
-                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(1))],
-                valid_time: None,
-            },
+    fn the_chain_steps_over_statement_transcripts() {
+        let props = [(PropertyKeyId(3), CanonicalScalar::Int(1))];
+        let edge = edge_statement_transcript(
+            EId(10),
+            VId(1),
+            RelationId(1),
+            VId(2),
+            props.iter().cloned(),
         )
-        .expect("derives");
-        assert_ne!(a, propertied, "durable content still binds it");
+        .expect("encodes");
+        let base = ReferenceGraph::statement_successor(None, &edge);
+        assert_ne!(
+            base,
+            ReferenceGraph::statement_successor(Some(base), &edge),
+            "the predecessor binds the chain"
+        );
+        let other = edge_statement_transcript(
+            EId(11),
+            VId(1),
+            RelationId(1),
+            VId(2),
+            props.iter().cloned(),
+        )
+        .expect("encodes");
+        assert_ne!(
+            base,
+            ReferenceGraph::statement_successor(None, &other),
+            "identity binds"
+        );
+        let vertex = vertex_statement_transcript(VId(10), 0, [].into_iter(), [].into_iter())
+            .expect("encodes");
+        let shadow =
+            edge_statement_transcript(EId(10), VId(0), RelationId(0), VId(0), [].into_iter())
+                .expect("encodes");
+        assert_ne!(
+            ReferenceGraph::statement_successor(None, &vertex),
+            ReferenceGraph::statement_successor(None, &shadow),
+            "the family tag is load-bearing"
+        );
     }
 }

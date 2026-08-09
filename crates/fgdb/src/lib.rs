@@ -1163,8 +1163,18 @@ impl Database {
                         valid_time: None,
                     };
                     birth_ordinal += 1;
-                    prefix_versions.insert(ElementId::Vertex(vid), successor_version(None, &row)?);
-                    if let DeltaRow::CreateVertex { labels, props, .. } = &row {
+                    if let DeltaRow::CreateVertex {
+                        birth_ordinal: ordinal,
+                        labels,
+                        props,
+                        ..
+                    } = &row
+                    {
+                        let transcript = vertex_statement_transcript(vid, *ordinal, labels, props)?;
+                        prefix_versions.insert(
+                            ElementId::Vertex(vid),
+                            statement_successor(None, &transcript),
+                        );
                         prefix_content.insert(vid, (labels.clone(), props.clone()));
                     }
                     row
@@ -1196,9 +1206,12 @@ impl Database {
                         valid_time: None,
                     };
                     birth_ordinal += 1;
-                    prefix_versions.insert(ElementId::Edge(eid), successor_version(None, &row)?);
                     prefix_edges.insert(eid, (src, dst));
                     if let DeltaRow::CreateEdge { props, .. } = &row {
+                        let transcript =
+                            edge_statement_transcript(eid, src, batch.relation, dst, props)?;
+                        prefix_versions
+                            .insert(ElementId::Edge(eid), statement_successor(None, &transcript));
                         prefix_edge_rows.insert(eid, props.clone());
                     }
                     row
@@ -1316,13 +1329,11 @@ impl Database {
                             }
                         }
                     }
-                    let elem = ElementId::Vertex(vid);
-                    let previous = prefix_versions
-                        .get(&elem)
-                        .or_else(|| self.snapshot.versions.get(&elem))
-                        .copied()
-                        .expect("a live vertex always has a version chain head");
-                    prefix_versions.insert(elem, successor_version(Some(previous), &row)?);
+                    // v3 (fgdb-ge6a): updates do not advance the batch's
+                    // version overlay — the chain steps once per COMMIT over
+                    // the durable statement, and no row a batch may lawfully
+                    // contain reads an intra-batch head after an update
+                    // (delete-after-update is an order-sensitivity refusal).
                     row
                 }
                 PendingRow::SetEdgeProperty { eid, key, value } => {
@@ -1365,13 +1376,11 @@ impl Database {
                             }
                         }
                     }
-                    let elem = ElementId::Edge(eid);
-                    let previous = prefix_versions
-                        .get(&elem)
-                        .or_else(|| self.snapshot.versions.get(&elem))
-                        .copied()
-                        .expect("a live edge always has a version chain head");
-                    prefix_versions.insert(elem, successor_version(Some(previous), &row)?);
+                    // v3 (fgdb-ge6a): updates do not advance the batch's
+                    // version overlay — the chain steps once per COMMIT over
+                    // the durable statement, and no row a batch may lawfully
+                    // contain reads an intra-batch head after an update
+                    // (delete-after-update is an order-sensitivity refusal).
                     row
                 }
                 PendingRow::SetProperty { vid, key, value } => {
@@ -1413,13 +1422,11 @@ impl Database {
                             }
                         }
                     }
-                    let elem = ElementId::Vertex(vid);
-                    let previous = prefix_versions
-                        .get(&elem)
-                        .or_else(|| self.snapshot.versions.get(&elem))
-                        .copied()
-                        .expect("a live vertex always has a version chain head");
-                    prefix_versions.insert(elem, successor_version(Some(previous), &row)?);
+                    // v3 (fgdb-ge6a): updates do not advance the batch's
+                    // version overlay — the chain steps once per COMMIT over
+                    // the durable statement, and no row a batch may lawfully
+                    // contain reads an intra-batch head after an update
+                    // (delete-after-update is an order-sensitivity refusal).
                     row
                 }
             };
@@ -1471,6 +1478,7 @@ impl Database {
         let mut folded = self.writer.clone();
         let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
         let mut new_versions = self.snapshot.versions.clone();
+        let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
                 continue;
@@ -1488,9 +1496,10 @@ impl Database {
                         commit_seq: frontier.0,
                         error,
                     })?;
-                fold_version(&mut new_versions, row)?;
+                touched_elements(row, &mut touched);
             }
         }
+        fold_statement_versions(&mut new_versions, &touched, &folded)?;
         let (root, blocks, patches) = folded
             .clone()
             .publish(self.keys.block_keys(), frontier)
@@ -1858,31 +1867,65 @@ impl Database {
 /// law, and the differential's replay validates every engine-emitted
 /// `before_version` against the oracle's chains — shared code here would gut
 /// that check (§15.2).
-/// Domain v2: the transcript hashes each row's DURABLE LOGICAL PROJECTION —
-/// see the twin constant in `fgdb-reference` for the full ruling record.
-/// Deliberately duplicated, not shared (§15.2).
-const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v2";
+/// Domain v3 — STATEMENT-CHAIN versions (ruled on fgdb-ge6a): the chain
+/// advances once per DURABLE STATEMENT, hashing exactly what the statement
+/// durably is — element identity plus content — never DeltaRow bytes. Same-
+/// commit folds (create+update in place) therefore advance the chain once,
+/// which is what makes the head a pure function of durable state: a
+/// manifest-based fast open recomputes identical chains from blocks and
+/// patches alone. Commit sequences are deliberately OUTSIDE the transcript —
+/// the predecessor link already orders the chain, and a batch stamps a
+/// same-batch create's head before any sequence exists. Deliberately
+/// duplicated in `fgdb-reference` (§15.2).
+const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v3";
 
-/// The v2 normalization — the deliberate duplicate of the oracle's.
-fn version_transcript_row(row: &DeltaRow) -> DeltaRow {
-    let mut projected = row.clone();
-    match &mut projected {
-        DeltaRow::CreateEdge {
-            birth_ordinal,
-            canonical_key,
-            valid_time,
-            ..
-        } => {
-            *birth_ordinal = 0;
-            *canonical_key = None;
-            *valid_time = None;
-        }
-        DeltaRow::CreateVertex { valid_time, .. } => {
-            *valid_time = None;
-        }
-        _ => {}
+/// One vertex statement's transcript: identity, birth ordinal, content.
+fn vertex_statement_transcript(
+    vid: VId,
+    birth_ordinal: u64,
+    labels: &[LabelId],
+    props: &[(PropertyKeyId, CanonicalScalar)],
+) -> Result<Vec<u8>, CanonicalError> {
+    let mut out = vec![0x01];
+    out.extend_from_slice(&vid.0.to_le_bytes());
+    out.extend_from_slice(&birth_ordinal.to_le_bytes());
+    out.extend_from_slice(&(labels.len() as u32).to_le_bytes());
+    for label in labels {
+        out.extend_from_slice(&label.0.to_le_bytes());
     }
-    projected
+    append_props_transcript(&mut out, props)?;
+    Ok(out)
+}
+
+/// One edge statement's transcript: identity, immutable topology, content.
+fn edge_statement_transcript(
+    eid: EId,
+    src: VId,
+    relation: RelationId,
+    dst: VId,
+    props: &[(PropertyKeyId, CanonicalScalar)],
+) -> Result<Vec<u8>, CanonicalError> {
+    let mut out = vec![0x02];
+    out.extend_from_slice(&eid.0.to_le_bytes());
+    out.extend_from_slice(&src.0.to_le_bytes());
+    out.extend_from_slice(&relation.0.to_le_bytes());
+    out.extend_from_slice(&dst.0.to_le_bytes());
+    append_props_transcript(&mut out, props)?;
+    Ok(out)
+}
+
+fn append_props_transcript(
+    out: &mut Vec<u8>,
+    props: &[(PropertyKeyId, CanonicalScalar)],
+) -> Result<(), CanonicalError> {
+    out.extend_from_slice(&(props.len() as u32).to_le_bytes());
+    for (key, value) in props {
+        let encoded = value.encode().map_err(|_| CanonicalError::Scalar)?;
+        out.extend_from_slice(&key.0.to_le_bytes());
+        out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        out.extend_from_slice(&encoded);
+    }
+    Ok(())
 }
 
 /// Extend one element's version chain with one canonical effect — the
@@ -1890,11 +1933,7 @@ fn version_transcript_row(row: &DeltaRow) -> DeltaRow {
 /// predecessor tag distinguishing creation from an all-zero prior digest, a
 /// self-delimiting row length, and the row's canonical bytes. No branch
 /// population, wall clock, or commit sequence enters it.
-fn successor_version(
-    previous: Option<ObjectId>,
-    row: &DeltaRow,
-) -> Result<ObjectId, CanonicalError> {
-    let canonical = version_transcript_row(row).canonical_bytes()?;
+fn statement_successor(previous: Option<ObjectId>, transcript: &[u8]) -> ObjectId {
     let mut hasher = fgdb_crypto::Hasher::new();
     hasher.update(ELEMENT_VERSION_DOMAIN);
     match previous {
@@ -1906,53 +1945,82 @@ fn successor_version(
             hasher.update(&version.0);
         }
     }
-    hasher.update(&(canonical.len() as u64).to_le_bytes());
-    hasher.update(&canonical);
-    Ok(ObjectId(hasher.finalize().0))
+    hasher.update(&(transcript.len() as u64).to_le_bytes());
+    hasher.update(transcript);
+    ObjectId(hasher.finalize().0)
 }
 
-/// Advance the version map by one row — creation opens a chain, deletion
-/// removes the element. A closed chain's head is never consulted again
-/// because identities never recycle (§6.2), which is also why the map holds
-/// LIVE elements only.
-fn fold_version(
-    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
-    row: &DeltaRow,
-) -> Result<(), CanonicalError> {
+/// The elements one row touches for the version chain — deletes touch to
+/// REMOVE, everything else to advance; the cascade names its members.
+fn touched_elements(row: &DeltaRow, touched: &mut std::collections::BTreeSet<ElementId>) {
     match row {
         DeltaRow::CreateVertex { vid, .. } => {
-            versions.insert(ElementId::Vertex(*vid), successor_version(None, row)?);
+            touched.insert(ElementId::Vertex(*vid));
         }
         DeltaRow::CreateEdge { eid, .. } => {
-            versions.insert(ElementId::Edge(*eid), successor_version(None, row)?);
+            touched.insert(ElementId::Edge(*eid));
         }
         DeltaRow::DeleteVertex {
             vid,
             sorted_retired_incident_edges,
             ..
         } => {
-            versions.remove(&ElementId::Vertex(*vid));
+            touched.insert(ElementId::Vertex(*vid));
             for eid in sorted_retired_incident_edges {
-                versions.remove(&ElementId::Edge(*eid));
+                touched.insert(ElementId::Edge(*eid));
             }
         }
         DeltaRow::DeleteEdge { eid, .. } => {
-            versions.remove(&ElementId::Edge(*eid));
+            touched.insert(ElementId::Edge(*eid));
         }
         DeltaRow::LabelMembership { vid, .. } => {
-            let elem = ElementId::Vertex(*vid);
-            let previous = *versions
-                .get(&elem)
-                .expect("the writer proved this vertex live before the version fold ran");
-            versions.insert(elem, successor_version(Some(previous), row)?);
+            touched.insert(ElementId::Vertex(*vid));
         }
         DeltaRow::Property { elem, .. } => {
-            let previous = *versions
-                .get(elem)
-                .expect("the writer proved this element live before the version fold ran");
-            versions.insert(*elem, successor_version(Some(previous), row)?);
+            touched.insert(*elem);
         }
         _ => {}
+    }
+}
+
+/// Advance the version map by ONE COMMIT (fgdb-ge6a v3): after the writer
+/// folded every row, each touched element's head steps once over the
+/// STATEMENT the fold left live — or leaves the map when the element did.
+/// The map still holds pre-commit heads when this runs, and each element is
+/// visited once, so `prev` is exactly the durable chain's predecessor.
+fn fold_statement_versions(
+    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
+    touched: &std::collections::BTreeSet<ElementId>,
+    writer: &BlockWriter,
+) -> Result<(), CanonicalError> {
+    for elem in touched {
+        match elem {
+            ElementId::Vertex(vid) => match writer.live_vertex_row(*vid) {
+                Some(row) => {
+                    let transcript = vertex_statement_transcript(
+                        row.vid,
+                        row.birth_ordinal,
+                        &row.labels,
+                        &row.props,
+                    )?;
+                    let previous = versions.get(elem).copied();
+                    versions.insert(*elem, statement_successor(previous, &transcript));
+                }
+                None => {
+                    versions.remove(elem);
+                }
+            },
+            ElementId::Edge(eid) => match writer.live_edge_statement(*eid) {
+                Some((src, relation, dst, _created_at, props)) => {
+                    let transcript = edge_statement_transcript(*eid, src, relation, dst, &props)?;
+                    let previous = versions.get(elem).copied();
+                    versions.insert(*elem, statement_successor(previous, &transcript));
+                }
+                None => {
+                    versions.remove(elem);
+                }
+            },
+        }
     }
     Ok(())
 }
@@ -2091,6 +2159,7 @@ async fn rebuild(
     let mut frontier = CommitSeq(0);
     let mut next_birth_ordinal = 0u64;
     let mut versions = std::collections::BTreeMap::new();
+    let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
 
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
@@ -2148,12 +2217,16 @@ async fn rebuild(
                         commit_seq: commit_seq.0,
                         error,
                     })?;
-                fold_version(&mut versions, row).map_err(|error| RebuildError::Decode {
-                    commit_seq: commit_seq.0,
-                    error,
-                })?;
+                touched_elements(row, &mut touched);
             }
         }
+        fold_statement_versions(&mut versions, &touched, &writer).map_err(|error| {
+            RebuildError::Decode {
+                commit_seq: commit_seq.0,
+                error,
+            }
+        })?;
+        touched.clear();
     }
 
     // Publish from a clone and hand the fold state back: the caller retains it
@@ -2202,46 +2275,61 @@ async fn rebuild(
 mod version_transcript_laws {
     use super::*;
 
-    fn create_edge(birth_ordinal: u64, eid: u128) -> DeltaRow {
-        DeltaRow::CreateEdge {
-            eid: EId(eid),
-            birth_ordinal,
-            src: VId(1),
-            relation: RelationId(1),
-            dst: VId(2),
-            canonical_key: None,
-            props: vec![],
-            valid_time: None,
-        }
-    }
-
-    /// The v2 projection law: the chain base is blind to the allocation
-    /// ordinal — the fact tier-D does not persist — and remains bound to the
-    /// stable identity and every durable field.
+    /// The v3 statement-chain laws, witnessed on THIS deliberate duplicate:
+    /// the predecessor binds the chain, the element family and identity bind
+    /// the transcript, durable content binds it — and nothing else does.
     #[test]
-    fn the_chain_base_hashes_the_durable_projection_only() {
-        let a = successor_version(None, &create_edge(7, 10)).expect("derives");
-        let b = successor_version(None, &create_edge(8, 10)).expect("derives");
-        assert_eq!(
-            a, b,
-            "the ordinal is not durable and must not bind the chain"
-        );
-        let other_identity = successor_version(None, &create_edge(7, 11)).expect("derives");
-        assert_ne!(a, other_identity, "the stable identity still binds it");
-        let propertied = successor_version(
-            None,
-            &DeltaRow::CreateEdge {
-                eid: EId(10),
-                birth_ordinal: 7,
-                src: VId(1),
-                relation: RelationId(1),
-                dst: VId(2),
-                canonical_key: None,
-                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(1))],
-                valid_time: None,
-            },
+    fn the_chain_steps_over_statement_transcripts() {
+        let edge = edge_statement_transcript(
+            EId(10),
+            VId(1),
+            RelationId(1),
+            VId(2),
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
         )
-        .expect("derives");
-        assert_ne!(a, propertied, "durable content still binds it");
+        .expect("encodes");
+        let base = statement_successor(None, &edge);
+        assert_ne!(
+            base,
+            statement_successor(Some(base), &edge),
+            "the predecessor binds the chain — a restated statement still advances"
+        );
+        let other_eid = edge_statement_transcript(
+            EId(11),
+            VId(1),
+            RelationId(1),
+            VId(2),
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
+        )
+        .expect("encodes");
+        assert_ne!(
+            base,
+            statement_successor(None, &other_eid),
+            "identity binds"
+        );
+        let other_content = edge_statement_transcript(
+            EId(10),
+            VId(1),
+            RelationId(1),
+            VId(2),
+            &[(PropertyKeyId(3), CanonicalScalar::Int(2))],
+        )
+        .expect("encodes");
+        assert_ne!(
+            base,
+            statement_successor(None, &other_content),
+            "content binds"
+        );
+        // Family separation: a vertex whose fields shadow the edge's bytes
+        // cannot alias it — the tag byte is load-bearing.
+        let vertex = vertex_statement_transcript(VId(10), 0, &[], &[]).expect("encodes");
+        assert_ne!(
+            statement_successor(None, &vertex),
+            statement_successor(
+                None,
+                &edge_statement_transcript(EId(10), VId(0), RelationId(0), VId(0), &[])
+                    .expect("encodes")
+            ),
+        );
     }
 }

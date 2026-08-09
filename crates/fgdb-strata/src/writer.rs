@@ -357,6 +357,29 @@ impl BlockWriter {
         self.live_vertices.contains_key(&vid)
     }
 
+    /// The full LIVE statement of `vid` — the row the statement-chain
+    /// version transcript encodes (fgdb-ge6a v3).
+    pub fn live_vertex_row(&self, vid: VId) -> Option<VertexRow> {
+        self.live_vertices.get(&vid).cloned()
+    }
+
+    /// The full LIVE statement of `eid` — topology, birth of the current
+    /// content version, and its row (fgdb-ge6a v3).
+    pub fn live_edge_statement(
+        &self,
+        eid: EId,
+    ) -> Option<(VId, RelationId, VId, CommitSeq, EdgePropertyRow)> {
+        self.live.get(&eid).map(|edge| {
+            (
+                edge.src,
+                edge.relation,
+                edge.dst,
+                edge.created_at,
+                edge.props.clone(),
+            )
+        })
+    }
+
     /// Every live edge touching `vid`, in canonical ascending-EId order —
     /// the exact set a vertex deletion's cascade before-image must equal
     /// (both directions, the reference semantics).
