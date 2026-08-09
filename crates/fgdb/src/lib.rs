@@ -2300,18 +2300,25 @@ impl Database {
             });
         }
 
-        // The vertex half is carried unchanged: no vertex-patch compactor
-        // exists yet, and inventing layout here would be a second opinion.
-        let mut sealed_patches = Vec::with_capacity(self.snapshot.patch_refs.len());
-        for reference in &self.snapshot.patch_refs {
+        // The vertex half consolidates the same way: restatements collapse,
+        // canonical repack, spans re-derived from the rows themselves.
+        let (compacted_patches, _superseded) =
+            fgdb_strata::compact::compact_vertex_patches(&self.snapshot.patches, CommitSeq(0));
+        let mut sealed_patches = Vec::with_capacity(compacted_patches.len());
+        for rows in &compacted_patches {
+            let bytes = fgdb_strata::vertex::encode_patch(rows)
+                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
+            let (first_seq, last_seq) =
+                fgdb_strata::vertex::span_of_rows(rows).expect("the packer emits no empty patches");
             sealed_patches.push(fgdb_strata::writer::SealedPatch {
-                patch_id: reference.patch_id,
-                bytes: self.store.get_patch_bytes(
-                    cx,
-                    fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
-                )?,
-                first_seq: reference.first_seq,
-                last_seq: reference.last_seq,
+                patch_id: fgdb_strata::vertex::vertex_patch_id(
+                    &self.keys.k_oid,
+                    self.keys.namespace,
+                    &bytes,
+                ),
+                bytes,
+                first_seq,
+                last_seq,
             });
         }
 
@@ -2324,7 +2331,7 @@ impl Database {
             sealed_patches,
             &compaction.blocks,
             &compaction.block_props,
-            &self.snapshot.patches,
+            &compacted_patches,
             frontier,
         )
         .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;

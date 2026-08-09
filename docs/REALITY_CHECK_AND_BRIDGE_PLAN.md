@@ -1,8 +1,496 @@
 # Reality Check and Bridge Plan
 
-**Measured 2026-07-31.** Revised in place on each pass — do not fork this document.
+**Current measurement: 2026-08-09.** This document is revised in place. The
+2026-07-31 through 2026-08-01 assessment is retained below as a superseded historical
+snapshot because it explains several decisions, but its counts and product verdict are
+not current.
 
 ---
+
+## Current reality — 2026-08-09
+
+### The answer in one paragraph
+
+**FrankenGraphDB now has a real, durable, low-level embedded storage spine; it is not
+yet the database product described by the README.** The integrated path creates a
+database, commits graph mutations through Chronicle's implemented D1/D2 capsule-and-
+marker path, folds them into real Tier-D Strata objects, reads them, drops the handle,
+and reopens the same data. That is a material advance over the older snapshot below.
+It is still a
+narrow fixed-coordinate API with no sanctioned production `Cx` acquisition path; the
+example runs under lab, while a non-lab all-capability context is available only through
+development/test internals. There are no sessions, prepared statements, GQL/openCypher
+execution, production transaction manager, capability-filtered views, streaming result
+API, server, product CLI, Python package, or installable release. Open still
+reconstructs the partition by replaying history, and the in-memory `Snapshot` retains
+every decoded block and patch. Thus neither the larger-than-memory promise nor any
+G1–G4 product gate has been demonstrated.
+
+The most important governance result is equally stark: all registered clauses under the
+20 FG-INV IDs remain stubs, with **zero enforced clauses and zero enforced invariants**.
+The gate and registry machinery is substantial, but machinery for checking claims is
+not the same thing as a promoted claim.
+
+### Evidence boundary
+
+| Item | Measured state |
+|---|---|
+| Architecture source of truth | `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`; README is explicitly a target-state 1.0 document |
+| Tracked implementation read | architecture audit pinned to `62cb97970c4666a7228f73c38cb1625d150c775f`; focused landing probes pinned to later spine commit `d87ae4eb4104eae86a353bafd64dc6c2c68d6d74` |
+| Shared-tree condition | concurrent uncommitted work existed in `fgdb`, `fgdb-chronicle`, registry tooling, tests, `.beads/`, and `rc/`; it was neither edited nor reverted by this audit |
+| Runtime evidence | `62cb9797` did not compile the example because `RebuildError::Slot` lacked a `Display` arm; that fix landed in `d87ae4e`, where the focused reopen test and runnable example both exited 0 on an unchanged HEAD |
+| Full repository gate | **UNRUN at this point in the audit**; it is run only after the exact bead export and final document content, with the final handoff as the result record |
+| Tracker snapshot | 688 records after this audit's delivery task and P0 bug: 384 closed, 278 open, 19 in progress, 7 blocked |
+
+The passing `d87ae4e` probes are focused behavior evidence, not a full repository-gate
+result and not retroactive evidence for `62cb9797`. A line number, benchmark, or test
+result without a content identity and tree condition is not durable evidence.
+
+#### Pinned evidence index
+
+The source line references in this table are bound to tracked commit `62cb9797`; the
+registry/doc references were re-read in the same audit before this document was edited.
+
+| Claim | Primary evidence |
+|---|---|
+| README is target state, not a readiness claim | `README.md:20`, `README.md:397` |
+| advertised install/API/Python surfaces | `README.md:234-280` |
+| advertised performance and verification state | `README.md:354-382` |
+| spine is real and its omitted surfaces are explicit | `crates/fgdb/src/lib.rs:1-16`, `:50-71` |
+| production `Cx` is unavailable | `crates/fgdb/src/lib.rs:113-145`; `crates/fgdb/tests/cx_probe.rs:20-46` |
+| fixed coordinate and caller-supplied raw keys | `crates/fgdb/src/lib.rs:197-217` |
+| `WriteBatch` is not a transaction | `crates/fgdb/src/lib.rs:543-552` |
+| snapshot retains decoded structures and live version heads | `crates/fgdb/src/lib.rs:709-744` |
+| actual async create/open surface | `crates/fgdb/src/lib.rs:905-958` |
+| incremental write path | `crates/fgdb/src/lib.rs:1425-1556` |
+| post-D2 errors can precede the live-state swap | `crates/fgdb/src/lib.rs:371-373`, `:1438-1665` |
+| normal Chronicle open uses pass-through validation | `crates/fgdb-chronicle/src/commit.rs:254-258`, `:329-337`; `crates/fgdb-chronicle/src/validate.rs:96-110` |
+| Strata store persists plain canonical bytes | `crates/fgdb-strata/src/store.rs:44-50` |
+| low-level current/historical reads | `crates/fgdb/src/lib.rs:1680-1805` |
+| open/recovery walks the marker chain | `crates/fgdb/src/lib.rs:2038-2105` |
+| Tier-D scope and missing Tier R/anchors/selective reads | `crates/fgdb-strata/src/lib.rs:1-28` |
+| measured point-read and recovery observations | `crates/fgdb/tests/cx_probe.rs:157-184`, `:285-304` |
+| measured write-cost repair | `crates/fgdb/tests/write_cost_attribution.rs:1-16` |
+| 20 invariants and deliberate zero-live ledger | `registries/invariants.toml:13-17`, `:44-50`, `:97-120` |
+| one checked formal lane and stale header | `registries/proof_lanes.toml:74-80`, `:127-133` |
+| topology and posture state | `docs/WORKSPACE_TOPOLOGY.md:10-18`, `:185-193` |
+| normative gates G0-G4/W12 | `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md:1311-1358` |
+| normative invariant statements | `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md:3200-3225` |
+
+### What the code actually does
+
+```text
+WriteBatch
+  -> canonical LogicalDeltaTemplate
+  -> Chronicle capsule (authenticated encryption + RaptorQ symbols)
+  -> fsync D1
+  -> chained commit marker
+  -> fsync D2                         commit authority
+  -> Tier-D Strata block/patch/root   derived publication
+  -> decoded in-memory Snapshot
+  -> low-level vertex/edge/neighbour reads
+```
+
+The implemented slice follows the intended authority direction: the chained Chronicle
+marker is the commit point, while Strata is rebuildable derived state. Capsule
+identities, marker linkage, torn-tail handling, authenticated symbols, real durable
+object writes, and reopen-from-identity are implemented rather than mocked. This is not
+yet a proved sound authority boundary. Normal Chronicle open installs a
+`PassThroughValidator`, so no production first-committer-wins, SSI, merge-ladder, or
+constraint validator examines the draft before commit. The reference crate and
+simulation harness provide focused differential and crash/recovery coverage for the
+semantics they currently contain; no full-gate or invariant-promotion result upgrades
+that to product correctness.
+
+There is also an inferred post-D2 correctness hazard in tracked code. After the marker
+is durable, the write path performs fallible fold, Strata, manifest, root-slot, decode,
+and snapshot-refresh work. `self.writer` and `self.snapshot` are replaced only at the
+end. A failure in between returns a rebuild error while leaving the handle callable
+with pre-commit derived state; a later write can therefore derive from stale state and
+publish a root omitting the prior durable commit until reopen. This audit filed P0 bug
+`fgdb-l96k` to require an explicit poisoned/recovery-required state and deterministic
+fault proof.
+
+The durability envelope is narrower than the README also implies: Chronicle capsules
+use authenticated encryption and RaptorQ, but the current `BlockStore` explicitly
+persists ordinary Strata blocks, patches, roots, and manifests as canonical plain bytes.
+Capsule composition for those derived objects is not yet wired.
+
+The public integrated API is nevertheless lower level than the README contract:
+`Database::create` and `Database::open` are asynchronous and require a caller-supplied
+`CommitCx`, path, and raw keys. `WriteBatch` explicitly disclaims transaction semantics.
+The database currently hard-codes one graph, one branch, and one partition. Production
+context acquisition is unavailable at the pinned asupersync revision, so the runnable
+example constructs a lab runtime and states that it is not a product binary.
+
+On write, the persistent writer is now incremental rather than rebuilding all history.
+On open, however, recovery still reads and decodes the full marker chain, folds all
+history, and retains all decoded blocks and patches plus live version-chain heads in
+memory. Tier R, archived anchors/checkpoints, stable-ID lookup, adaptive tier migration,
+and selective
+unopened-block reads do not exist. This is an honest early subset, not a disguised
+`HashMap<VId, Vec<EId>>`, but it cannot yet support the finished larger-than-memory
+claim.
+
+### Current measured inventory
+
+| Measure | Current value | Interpretation |
+|---|---:|---|
+| Workspace topology | 70 crate slots: 19 active, 50 planned, 1 reserved | embedded posture is live; server and CLI are deferred |
+| Cargo metadata | 20 packages, 20 library targets, 96 integration-test targets, 5 examples, 5 binaries | all five binaries are checker tools, not `fgdb` or `fgdbd` |
+| Implemented Cargo benchmark targets | 0 | the plan declares product targets, but no `benches/`, benchmark executable, activated manifest, committed baseline, or gate artifact exists |
+| Invariant registry | 20 IDs; 0 enforced clauses; 0 enforced invariants | G1 invariant coverage is not active |
+| Checker registry | 41 live rows, 42 stub rows | strong scaffolding with more than half the declared rows still stubbed |
+| Formal lanes | 1 checked of 10; 9 declared | one Lean version-chain lane; five other Lean and four TLA+ lanes are not checked |
+| Tracker | 688 records, 1,946 dependency edges, no cycles | 304 not closed; 279 dependency-blocked (91.8%) |
+| Tracker types | 232 bugs, 22 epics, 5 features, 429 tasks | all 22 epics remain open |
+| Recent tracker velocity | 77 closed in 7 days; 384 in 30 days | activity is high, but completion is concentrated before product gates |
+| Source census | approximately 270,000 tracked Rust lines and 2,400 `#[test]` declarations | size/declared tests are not executed-test or quality claims |
+
+`bv --robot-triage` reported `phase2_ready=true` and no graph cycles. Its 25
+“actionable” records include states that `br ready --json` does not return, so the two
+commands must not be compared as if they implement the same readiness predicate. The
+highest-centrality blockers remain G0 identity registries, the W2 commit protocol,
+command contracts, durable-format arms, the Appendix-A catalog, generated parsers,
+object identity, the cost registry, and A01 reference roots.
+
+### Vision-to-code matrix
+
+| Vision goal | Verdict | Present reality | Missing exit condition |
+|---|---|---|---|
+| B1 — One Version Universe | **PARTIAL** | real Chronicle capsules, two-fsync markers, low-level historical reconstruction | production MVCC ownership, branches, bounded history/checkpoints, replication, subscriptions |
+| B2 — Strata | **PARTIAL** | durable Tier-D blocks, patches, roots, compaction, reopen | Tier R, anchors, stable IDs, migration decision cards, selective larger-than-memory access |
+| B3 — Loom | **NOT_STARTED** | operator types/catalog groundwork only | parser-to-algebra lowering, planner, vectorized/morsel execution, Free Join/WCO/factorization |
+| B4 — Ripple | **NOT_STARTED** | delta and weight foundations only | DBSP engine, recursive fixpoint, incremental views/subscriptions/analytics |
+| B5 — deterministic product | **PARTIAL** | canonical encodings, deterministic reference semantics, lab/simulation infrastructure | production plan certificates, decision cards, STRICT result replay, bounded registered DPOR/chaos campaigns |
+| B6 — agent-native product | **NOT_STARTED** | branch semantics exist in the test oracle | production branch isolation, macaroons, pre-expansion masking, provenance graph, hybrid retrieval |
+| Embedded Rust library | **PARTIAL** | durable low-level `Database` spine and runnable lab example | production `Cx`, sessions, prepared statements, transactions, streaming typed rows, multiple coordinates |
+| Server `fgdbd` | **NOT_STARTED** | protocol/architecture contracts only | multi-database service and FGP/HTTP2/gRPC/WebSocket/Bolt surfaces |
+| CLI `fgdb` | **NOT_STARTED** | robot-mode contract beads only | human CLI, versioned NDJSON robot mode, schema self-description, contract tests |
+| GQL/openCypher/FQL | **NOT_STARTED** | language contracts and planned crates | generated parser, semantic analysis, algebra, execution, conformance corpus |
+| Transactions | **NOT_STARTED in production** | SI/SSI semantics and anomaly logic in reference/testing crates | connection/session ownership, FCW/SSI, constraints, merge ladder, typed aborts |
+| Warden security | **NOT_STARTED in production** | capability/context type groundwork | macaroon caveats, mandatory planner predicates, descriptor masking, audit proofs |
+| Prism/fnx | **NOT_STARTED in production** | development-only generator use | snapshot bridge, cache/materialize/spill semantics, differential results |
+| Beacon search/GraphRAG | **NOT_STARTED** | registries/design only | native vector/text/graph indexes and one hybrid retrieval operator |
+| Fabric/admin/config | **NOT_STARTED** | contract and tracker work | catalog, migrations, backup/restore, validated configuration, multi-tenancy |
+| Python ABI3 | **NOT_STARTED** | binding-semantics bead | ABI boundary, wheels, import/install tests |
+| Larger-than-memory | **NOT DEMONSTRATED** | durable objects exist; integrated snapshot is materialized | bounded open/recovery, spillable operators, admission control, 1 TB scale proof |
+| §17 performance | **UNPROVEN** | diagnostic probes and one write-cost improvement exist | gated harness, baselines, variance policy, scale data, complexity witnesses |
+| Verification ladder | **PARTIAL** | reference oracle, focused simulations and crash/bit-rot tests, one Lean lane | 20 enforced invariants, remaining formal lanes, TCK/differentials, bounded DPOR, fuzz and scale closure |
+
+No row above meets the plan's G4 definition. G0 has substantial apparatus but its epic
+remains open. G1 cannot pass while the invariant registry intentionally expects zero
+enforced clauses; G2 and G3 depend on missing transaction, query, incremental,
+security, and product layers; G4 additionally requires conformance and benchmark
+evidence that does not yet exist.
+
+### Performance reality
+
+There are now measurements, which corrects the historical claim that no number had
+ever been taken, but they are diagnostics rather than product gates. A shared-box
+supernode probe recorded p99 around 121.7 us against a 15 us target, and a leaf probe
+around 69 us. The recovery probe documents full replay as linear and therefore
+incompatible with the 1 TB recovery objective without checkpoints/anchors. Conversely,
+the persistent-writer work removed a history-proportional write regression: its
+attribution test records roughly flat later writes where the old path grew sharply.
+
+These numbers are useful direction. They are not §17 passes: they are unpinned,
+non-isolated observations without the required benchmark binary, hardware manifest,
+sample distribution, committed baseline, regression policy, or flamegraph evidence.
+
+### Documentation conflicts found
+
+The master plan is the architectural source of truth. Machine registries are the exact
+authorities for the rendered topology, threat model, durable catalog, invariants, and
+cost contracts they own. Several README statements are useful aspirations but conflict
+with those sources and must be repaired under the existing documentation-sync work:
+
+1. “Unbounded history” conflicts with the plan's explicit configurable retention and
+   compaction policy.
+2. A universally zero-copy Prism bridge conflicts with the current fnx slice contract,
+   which permits cache, materialize, and spill behavior.
+3. “Every result” replay overstates the plan's eligible STRICT-result contract and its
+   evidence-closure preconditions.
+4. “Sharding is activation, not rewrite” conflicts directly with the plan, which calls
+   sharding non-configuration-only activation requiring new protocols, its own
+   workstream, and a separate proof gate after G4.
+5. A single sub-100-us figure for snapshot and branch creation hides the plan's
+   distinction between an in-memory handle and a durably forked branch requiring fsync.
+6. README install commands, signed binaries, Rust installation, and Python wheels have
+   no implementation or release pipeline yet.
+7. README reduces mutable state to one `manifest.root` and truth to an unqualified
+   commit stream, while the master defines two fixed root-pointer slots and, after
+   retention cuts, recovery from an installed checkpoint plus the complete retained
+   logical-command suffix, including nontransaction control commands.
+8. README states every performance gate already has a bench binary/baseline/variance
+   budget/flamegraph and presents the complete lab/formal/invariant apparatus as live;
+   the repository has zero benchmark targets, one checked formal lane, and zero
+   enforced invariants.
+9. README promises a synchronous embedded API whose runtime is internally owned; the
+   current slice is asynchronous and requires a caller-supplied `CommitCx`.
+
+Two implementation-adjacent descriptions are also stale: `fgdb`'s crate-level prose
+still says the root pointer is undefined and every write rebuilds history, while the
+current code contains a dual-slot root and incremental writer; `proof_lanes.toml`
+claims zero artifacts even though one Lean lane is checked. These are documentation
+bugs, not evidence that the missing product layers exist.
+
+### Gap analysis: the seams that matter next
+
+The largest gaps are not isolated missing functions. They are executable seams between
+already-serious foundations:
+
+1. **Authority to bounded recovery.** Preserve Chronicle as the source of truth while
+   making root/checkpoint open bounded, validated, and fail-closed. Add load admission
+   and use the authenticated installed checkpoint plus complete retained logical-command
+   suffix as the post-retention authority. Full genesis replay remains only an
+   oracle/fallback where that complete history is actually retained.
+2. **Durability to real transactions.** Replace raw `WriteBatch` ownership with
+   session/transaction lifecycle, first-committer-wins and SSI validation, constraints,
+   graph intents, cancellation, and deterministic merge-ladder evaluation.
+3. **Stored graph to executable language.** Land the minimum GQL slice end to end:
+   generated grammar -> typed AST -> GLA -> Loom -> streaming results, always
+   differential against the reference oracle. Parser breadth without algebra is not a
+   product increment.
+4. **Context types to production authority.** Obtain the upstream asupersync production
+   `Cx` acquisition contract, thread purpose-narrowed contexts through storage and
+   transactions, and make lab VFS injection cover Strata as well as Chronicle.
+5. **Single-machine spine to larger-than-memory behavior.** Tier R, anchors, stable-ID
+   lookup, buffer/scratch admission, spill, and adaptive migrations must compose before
+   any scale or throughput claim.
+6. **Semantics to product surfaces.** Only after one correct query/transaction seam,
+   expose the same contract through the embedded library, CLI robot mode, server
+   transports, and Python ABI rather than creating four divergent engines.
+7. **Claims to enforced invariants.** Promote invariant clauses only with their live
+   checker and negative evidence; keep the current zero count honest until then.
+8. **Source tree to distributable product.** Treat installers, signed artifacts,
+   crates/Python packaging, and README command smoke tests as conformance surfaces.
+
+Before those seams can close, the normative appendices need executable coverage rather
+than implied completeness:
+
+| Normative contract | Current state |
+|---|---|
+| Appendix A — formats/identity/references | substantial catalog scaffold and live source/projection/closure checker, but catalog/field/union/identity blockers remain open; G0 is not frozen |
+| Appendix B — graph intent vocabulary | partial intent/template and reference semantics exist; the complete registered intent-to-canonical-final-effect vocabulary is not implemented end to end |
+| Appendix C — GLA inventory | **NOT_STARTED** as a complete registered operator/algebra/executor surface |
+| Appendix D — FGP protocol | **NOT_STARTED** as a product protocol/state-machine implementation; only contracts and beads exist |
+| Appendix F — invariants | all 20 IDs materialized, every clause still stub, zero enforced |
+| Appendix G — operation costs | plan table and ownership bead exist; no complete live operation-cost registry or derivability gate |
+
+### Threat and trust boundary
+
+“Memory safe” and “capability-scoped” must not be read as a stronger adversary model
+than the project claims. The current threat registry assumes a trusted host/process and
+administrator boundary, no TEE, crash-fault rather than Byzantine Raft, and explicit
+external authority/time/continuity assumptions. `DirectoryBound` continuity does not
+protect against every volume rollback. Side-channel/leakage properties are measured
+and bounded, not globally proved; BFT, FHE, ORAM, malicious-host confidentiality, and
+universal noninterference are outside the declared 1.0 boundary. Warden is not yet a
+production enforcement layer, so these are future-contract qualifiers, not current
+security guarantees (`docs/THREAT_AND_TRUST_MODEL.md:56-89`, `:197-265`).
+
+### Bead coverage and the one uncovered delivery surface
+
+The live graph already has broad ownership for every engine and product subsystem:
+Chronicle (`fgdb-epic-w2-6hc`), Strata (`fgdb-epic-w3-umx`), Loom
+(`fgdb-w5-executor-olp` and related epics), Ripple (`fgdb-epic-w6-65w`), Beacon
+(`fgdb-epic-w7-xmk0`), Prism (`fgdb-epic-w8-syz`), Fabric/product
+(`fgdb-epic-w10-mhq`), transactions (`fgdb-epic-w4-7en`), Warden/security
+(`fgdb-w1-authz-policy-10y`, `fgdb-w9-enforcement-j0fg`), Aegis
+(`fgdb-epic-w11-5r8`), server and protocols
+(`fgdb-w10-server-rte`, `fgdb-w10-fgp-core-5b1`, `fgdb-w10-adapters-b1f`,
+`fgdb-w10-bolt-a0s`), CLI robot mode (`fgdb-huu9`), language
+(`fgdb-g0-language-contracts-54g`, `fgdb-w5-parsers-nje`), embedded API
+(`fgdb-w10-embedded-54r`), Python (`fgdb-w10-python-kkb`), and performance/verification
+(`fgdb-epic-perf-4xe` and `fgdb-verif-*`). Duplicating these would make the graph worse.
+
+One genuine `NO_BEAD` surface survived a search of open and closed records: delivery
+of the README's installable artifacts. This audit created
+`fgdb-epic-w10-mhq.1`, **“Ship and verify installable release artifacts for CLI,
+server, Rust library, and Python wheels.”** It owns signed target binaries, manifest
+verification and rollback-safe `scripts/install.sh`, the Rust publication/install
+story, the ABI3 wheel matrix, and smoke tests for every advertised install command. It
+depends on the existing CLI, server, embedded, Python, and production-context work and
+does not duplicate their implementations. `fgdb-gate-g4-3uc` now depends on this
+delivery task, so the graph cannot report G4 complete while those artifacts are absent.
+
+The architecture re-review found one additional unowned P0 correctness seam and filed
+`fgdb-l96k`, **“Poison or recover the Database handle after any post-D2
+derived-publication failure.”** `fgdb-j0vu` now depends on it. The task requires fault
+injection across every D2-to-snapshot boundary, typed committed-needs-recovery state,
+refusal of stale reads/writes, and a two-write proof that no derived root can omit an
+already-durable commit.
+
+Tracker reconciliation was recorded without premature closure:
+
+- `fgdb-ge6a` has landed root-slot code but still owns fast-open/catalog residue.
+- `fgdb-j0vu` no longer accurately says there is no runnable human path; it still owns
+  the missing supported product posture and attributable full-gate evidence.
+- `fgdb-g0-doc-sync-usq` now carries the README/source/proof-lane drift above.
+- the stale close reason on `fgdb-0b8r` was annotated; production context acquisition
+  remains live in `fgdb-r8fa`.
+
+### Dependency-ordered bridge
+
+This is a bridge through existing beads, not a second planning system.
+
+**Track 0 — land and attest the current spine.** Fix P0 `fgdb-l96k`, reconcile
+`fgdb-ge6a` and `fgdb-j0vu`, finish `fgdb-r8fa`, correct the stale code/docs, and obtain a clean
+current-HEAD `scripts/check.sh` result. Exit: the durable example is supported,
+production-context construction is real, open is bounded by an explicit policy, and
+every claim is bound to the landed commit.
+
+**Track 1 — close G0's actual critical frontier.** Prioritize the central blockers
+identified by `bv`: identity registries, commit protocol, command/language contracts,
+format arms, Appendix-A rows, generated parsers, object identity, cost registry, and
+A01 reference roots. Exit: G0's own acceptance criteria pass; not merely a large count
+of registry files.
+
+**Track 2 — prove one secure transactional query slice (G1).** Complete the W2/W3
+authority and storage seam, W4 transaction ownership/SSI/constraints, the minimum W5
+language-to-Loom path, reference differential, and simulation/fault oracles. Promote
+only the invariants exercised by live checkers. Exit: one supported transaction can
+prepare and stream a deterministic query result, crash/reopen, and reproduce it under
+lab with no unauthorized observation.
+
+**Track 3 — compose B1–B4, Beacon, and Prism (G2).** Add Tier R/anchors/bounded open,
+full Loom families and spill, Ripple incremental maintenance/recursion, branches and
+subscriptions, then W7 Beacon and W8 Prism in their declared order. Exit: Local
+one-version-universe workloads pass under bounded memory, including tail-correct
+indexes, safe ANN roots, authorized Prism projections, recovery, conformance, and
+complexity witnesses.
+
+**Track 4 — secure, expose, and replicate the product (G3).** Continue in declared
+order through W9 Warden, W10 Fabric, and W11 Aegis. Expose the same engine through
+embedded sessions, server transports, CLI robot mode, and Python; add multi-member
+replication here rather than in G2. Exit: the networked/secured/replicated product gate
+passes, including pre-expansion authorization and negative-observation tests.
+
+**Track 5 — earn G4 and ship.** Build the §17 benchmark/conformance apparatus, run the
+1 TB and crash/recovery campaigns, finish installer/signing/package automation under
+`fgdb-epic-w10-mhq.1`, and smoke-test every README command. Only after G4 should W12
+sharding begin, because the master plan defines it as non-configuration-only activation
+with new protocols, a separate workstream, and a separate gate.
+
+### Ambition rounds
+
+#### Round 1 — make recovery an indexed authority proof
+
+The dual-slot root should evolve into a bounded recovery certificate: authenticate the
+root, validate its Chronicle high-water mark and Strata closure, admit the referenced
+working set under a memory budget, and fall back to the authenticated checkpoint plus
+complete retained logical-command suffix on inconsistency. Full replay is admissible
+only in a posture that retains the complete history; otherwise recovery fails closed.
+This is more ambitious than “open faster” because it keeps the commit stream
+authoritative while turning recovery cost into an explicit, testable contract. Crash
+and corruption campaigns should mutate every root/checkpoint boundary and prove both
+bounded success and fail-closed fallback.
+
+#### Round 2 — use the first transaction/query slice as an invariant crucible
+
+Do not grow a broad parser ahead of execution. Choose one standards-keyed GQL slice
+that exercises visibility, adjacency expansion, projection, deterministic ordering,
+and a write conflict. Carry it through generated parsing, typed GLA, Loom, capability
+predicates, Chronicle/Strata, reference differential, SSI oracle, cancellation, and
+replay evidence. This single vertical slice forces the architectural seams to agree
+and provides a reusable conformance harness for every later language feature.
+
+#### Round 3 — make distribution part of semantic conformance
+
+An installer or wheel is not a marketing afterthought. Each published artifact should
+embed its format/protocol/policy epochs, invariant/checker manifest, source revision,
+and signed evidence digest. CI should install into clean target environments, execute
+the README's embedded/CLI/server/Python examples, crash/reopen the same portable
+fixture, and reject incompatible or unsigned upgrades. This turns packaging into the
+last link of the database's determinism and provenance story.
+
+### Risks and mitigations
+
+| Risk | Current signal | Mitigation / owning frontier |
+|---|---|---|
+| Full replay and retained decoded history defeat scale | integrated open is O(history) and snapshot holds all blocks | bounded root/checkpoint recovery, anchors, admission, spill; `fgdb-ge6a` plus W3 |
+| Post-D2 failure leaves a stale live handle | durable marker precedes fallible derived publication and final state swap | poison or authoritatively recover before any later read/write; P0 `fgdb-l96k` |
+| Transaction claims get inferred from durability | `WriteBatch` explicitly is not a transaction | W4 lifecycle/FCW/SSI/constraints before ACID language |
+| Security becomes a post-filter | no production planner or Warden path | capability predicates and descriptor masking in the first vertical slice |
+| Registry volume is mistaken for invariant enforcement | 41 live checker rows but 0 enforced FG-INV clauses | report both counts; promote clause and checker atomically |
+| Lab-only success is called a product API | production `Cx` remains upstream-blocked | finish `fgdb-r8fa`; retain compile-time tripwire |
+| Direct Strata filesystem access weakens fault injection | Chronicle has VFS seam; integrated Strata uses `std::fs` | thread purpose-scoped VFS through Strata before recovery claims |
+| Strata durability is mistaken for encrypt-and-code coverage | current BlockStore writes canonical plain derived bytes | wire derived objects through the registered Chronicle/FEC/encryption contract before making the README claim |
+| Performance anecdotes become benchmark claims | diagnostic probes, no benchmark target | §17 harness, manifests, distributions, baselines, witnesses |
+| README becomes a competing specification | several direct conflicts with master plan | `fgdb-g0-doc-sync-usq`; label target state and link precise gates |
+| Tracker progress hides critical-path blockage | 91.8% of not-closed work dependency-blocked | use `bv` centrality/impact, finish deepest blockers, avoid duplicate beads |
+| Product exists in source but cannot be obtained safely | no installer, signing, Rust/Python publication | `fgdb-epic-w10-mhq.1` after surface implementations |
+
+### Refinement record
+
+The skill's bridge and beads were refined to stability rather than accepted after the
+first inventory:
+
+1. **Completeness pass:** compared every README, master-plan, appendix, and threat-model
+   promise against source and all tracker states. Found the uncovered delivery surface
+   and created `fgdb-epic-w10-mhq.1`.
+2. **Overlap pass:** searched headline subsystem, protocol, language, Python, CLI,
+   embedded, security, and performance terms across open and closed records. Reused the
+   existing beads and removed no work; the new task owns only artifact delivery.
+3. **Dependency pass:** attached the new task under W10 and made CLI, server, embedded,
+   Python, and production-context completion explicit prerequisites; then made the G4
+   gate depend on the delivery task rather than leaving release closure as prose.
+4. **Executability/evidence pass:** strengthened its acceptance criteria to require
+   signed manifests, failure modes, clean-environment smoke tests, and durable logs;
+   annotated stale tracker claims instead of closing them from code existence alone.
+5. **Conflict/graph pass:** peer re-derivation found that delivery did not actually
+   block G4 and that post-D2 failure left an unowned stale-handle risk. The G4 edge was
+   repaired, P0 `fgdb-l96k` was created and made a spine prerequisite, and graph triage
+   was rerun. The graph remained cycle-free; no further uncovered or overlapping bead
+   survived, so refinement stopped.
+
+### Validation and provenance
+
+- Tracked architecture read: `62cb97970c4666a7228f73c38cb1625d150c775f`;
+  focused landing probes: unchanged `d87ae4eb4104eae86a353bafd64dc6c2c68d6d74`.
+- `rch exec -- cargo test ...` did not run because remote build admission was paused
+  during daemon-restart remediation; this is an infrastructure refusal, not a test
+  result.
+- Tracked-HEAD focused test at `d87ae4e`:
+  `cargo test -p fgdb --test spine open_write_read_drop_reopen_returns_the_same_graph -- --exact`
+  exited 0 with 1 passed and 23 filtered.
+- Tracked-HEAD example at `d87ae4e`: `cargo run -p fgdb --example open_a_database`
+  exited 0 and demonstrated create/write/read/drop/reopen. Cargo also printed the
+  expected parse diagnostic from asupersync's intentionally malformed migration fixture;
+  both commands nevertheless exited 0.
+- Exact export through `scripts/br_sync.sh` was attempted for the eight audit-owned
+  record IDs and refused before writing: the shared database had 50 dirty records, which
+  cannot fit an eight-ID intent. `.beads/issues.jsonl` remained byte-unchanged; foreign
+  records were not widened into this landing.
+- The first full `bash scripts/check.sh` attempt started and ended at `d87ae4e` but
+  exited 1 after concurrent edits moved `crates/fgdb-reference/src/lib.rs` and
+  `crates/fgdb/src/lib.rs`. Shell lint passed; file coverage was voided and 8 of 9 core
+  plus all 24 registered live gates were explicitly `UNRUN`. This is neither a test
+  failure nor a pass.
+- The exact full-gate command, start/end identities, and exit status are intentionally
+  recorded in the final handoff after the final document and exact bead export exist;
+  they are never inferred from these partial cargo results.
+
+### Corrections to the historical snapshot
+
+The older analysis below remains valuable as a dated account, but these statements are
+now superseded:
+
+- “no library” and “nothing a user could open/write/read” are false after the durable
+  `fgdb` spine; the supported session/query product remains absent.
+- topology is now 70 slots/19 active, not 71/19.
+- the tracker is now 688 records, not 600 or 633.
+- performance observations now exist, although no §17 benchmark gate exists.
+- Chronicle now has an asupersync VFS seam; the fault-injection closure is still
+  incomplete because integrated Strata uses direct filesystem calls.
+- the root pointer and incremental writer now exist; bounded fast open remains open.
+- “there is no significant `NO_BEAD` gap” was almost true for subsystems but missed
+  release/install/package delivery; that gap now has `fgdb-epic-w10-mhq.1`.
+
+---
+
+## Historical snapshot — 2026-07-31 through 2026-08-01 (superseded)
 
 ## Phase 1 — Where we REALLY are
 
@@ -425,6 +913,14 @@ gate on shipping, not a gate on building.
 
 ## Revision history
 
+- **2026-08-09, current pass** — re-read the complete governing corpus and current
+  implementation; replaced the obsolete “no library/spine” verdict with an
+  evidence-bound assessment of the durable embedded slice; measured the live tracker,
+  invariant/checker/formal state, topology, target surface, and runtime probes; added
+  the dependency-ordered bridge, three ambition rounds, risk register, and five-pass
+  refinement record; created the previously missing release/install/package delivery
+  task `fgdb-epic-w10-mhq.1`; and preserved the earlier report as an explicitly
+  superseded snapshot.
 - **2026-07-31, pass 1** — initial measurement and bridge plan (JadeSnow).
 - **2026-08-01, pass 3** — `fgdb-z5y0` landed (`8c53adb`), `fgdb-1xqd` fixed
   (`89c969e`), and `fgdb-ge6a` was re-derived by its own author **twice**, wrong both

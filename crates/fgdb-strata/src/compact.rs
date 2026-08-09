@@ -155,6 +155,50 @@ fn compact_with_limit(
     })
 }
 
+/// Consolidate a vertex patch publication history: fewer patches, the same
+/// answer at every sequence (fgdb-ge6a, the vertex half of [`compact`]).
+///
+/// Later patches restate a statement `(vid, created_at)` to add its
+/// retirement, and the later statement wins — exactly the block model, per
+/// statement. The floor licenses dropping nothing here until the transaction
+/// layer owns snapshot tracking, so this collapses RESTATEMENTS only; the
+/// result repacks in canonical `(vid, created_at)` order at the format's
+/// row ceiling, which [`crate::vertex::validate_succession`]'s chain laws
+/// admit because collapse preserves every surviving statement byte-for-byte.
+pub fn compact_vertex_patches(
+    patches: &[Vec<crate::vertex::VertexRow>],
+    floor: CommitSeq,
+) -> (Vec<Vec<crate::vertex::VertexRow>>, usize) {
+    let mut statements: BTreeMap<(fgdb_types::VId, CommitSeq), crate::vertex::VertexRow> =
+        BTreeMap::new();
+    let mut seen = 0usize;
+    for rows in patches {
+        for row in rows {
+            seen += 1;
+            statements.insert((row.vid, row.created_at), row.clone());
+        }
+    }
+    let retained: Vec<crate::vertex::VertexRow> = statements
+        .into_values()
+        .filter(|row| row.retired_at.is_none_or(|r| r.0 > floor.0))
+        .collect();
+    let superseded = seen - retained.len();
+    let ceiling = usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX);
+    let mut packed: Vec<Vec<crate::vertex::VertexRow>> = retained
+        .chunks(ceiling)
+        .map(<[crate::vertex::VertexRow]>::to_vec)
+        .collect();
+    // A root's patch list is publication order, witnessed by nondecreasing
+    // frontiers — canonical row packing does not preserve it, so sort by the
+    // truthful span exactly as the block packer does.
+    packed.sort_by_key(|rows| {
+        crate::vertex::span_of_rows(rows)
+            .map(|(first_seq, last_seq)| (last_seq, first_seq))
+            .unwrap_or((CommitSeq(0), CommitSeq(0)))
+    });
+    (packed, superseded)
+}
+
 type PackedBlocks = (Vec<Vec<AdjacencyEntry>>, Vec<Option<BlockProps>>);
 
 fn pack_retained(

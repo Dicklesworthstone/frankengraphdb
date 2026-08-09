@@ -1840,9 +1840,12 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
         let mut second = WriteBatch::new(KNOWS);
         second.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(2)));
         second.delete_edge(EId(11));
+        second.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(3)));
         epochs.push(db.write(cx, second).await.expect("commits"));
         let mut third = WriteBatch::new(KNOWS);
         third.add_edge(EId(12), VId(2), VId(1), vec![]);
+        third.set_vertex_label(VId(1), LabelId(3), true);
+        third.set_vertex_property(VId(2), key, Some(CanonicalScalar::Int(4)));
         epochs.push(db.write(cx, third).await.expect("commits"));
 
         let blocks_before = db.partition_root();
@@ -1861,11 +1864,27 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
         };
         let before = answers(&db, &epochs);
 
+        let patches_before = db.partition_root();
+        let _ = patches_before;
         db.compact(cx).await.expect("compacts");
         assert_ne!(
             db.partition_root(),
             blocks_before,
             "consolidation published a replacement generation"
+        );
+        // Vertex churn built restatement chains across three per-commit
+        // patches; consolidation collapses them into one canonical patch.
+        let resolved = {
+            let store =
+                fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            store
+                .get_root(cx, db.partition_root())
+                .expect("the compacted root resolves")
+        };
+        assert_eq!(
+            resolved.vertex_patches.len(),
+            1,
+            "three per-commit patches consolidated into one"
         );
         assert_eq!(
             answers(&db, &epochs),
