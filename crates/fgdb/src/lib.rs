@@ -1150,8 +1150,29 @@ impl Database {
                     let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
                     match store.resolve_manifest(cx, claimed) {
                         Ok(resolved) if resolved.len() == 1 => {
-                            let root = resolved[0].0.root;
-                            fast_rebuild(cx, &coordinator, &store, &keys, root).await?
+                            let (record, root) = &resolved[0];
+                            let describes_spine = record.graph == GRAPH
+                                && record.branch == BRANCH
+                                && record.partition == PARTITION
+                                && root.graph == GRAPH
+                                && root.branch == BRANCH
+                                && root.partition == PARTITION;
+                            if !describes_spine
+                                || !checkpoint_matches_stream(
+                                    cx,
+                                    &coordinator,
+                                    &store,
+                                    &keys,
+                                    record.root,
+                                )
+                                .await?
+                            {
+                                return Err(OpenError::SlotDisagreesWithStream {
+                                    path: path.to_path_buf(),
+                                    slot_manifest: ObjectId(slot.root_manifest_oid),
+                                });
+                            }
+                            fast_rebuild(cx, &coordinator, &store, &keys, record.root).await?
                         }
                         _ => {
                             return Err(OpenError::SlotDisagreesWithStream {
@@ -1200,15 +1221,26 @@ impl Database {
                     slot.slot_generation
                 } else {
                     let stale = ManifestVersion(ObjectId(slot.root_manifest_oid));
-                    let resolvable =
-                        store
-                            .resolve_manifest(cx, stale)
-                            .ok()
-                            .is_some_and(|resolved| {
-                                resolved
-                                    .iter()
-                                    .all(|(_, root)| root.published_at.0 <= snapshot.frontier.0)
-                            });
+                    let resolvable = match store.resolve_manifest(cx, stale) {
+                        Ok(resolved) if resolved.len() == 1 => {
+                            let (record, root) = &resolved[0];
+                            record.graph == GRAPH
+                                && record.branch == BRANCH
+                                && record.partition == PARTITION
+                                && root.graph == GRAPH
+                                && root.branch == BRANCH
+                                && root.partition == PARTITION
+                                && checkpoint_matches_stream(
+                                    cx,
+                                    &coordinator,
+                                    &store,
+                                    &keys,
+                                    record.root,
+                                )
+                                .await?
+                        }
+                        _ => false,
+                    };
                     if !resolvable {
                         return Err(OpenError::SlotDisagreesWithStream {
                             path: path.to_path_buf(),
@@ -2163,6 +2195,161 @@ impl Database {
     }
 
     /// The identity of the retained partition manifest (fgdb-63w2) — what a
+    /// Consolidate the partition's durable history: fewer blocks, the SAME
+    /// answer at EVERY committed sequence (fgdb-ge6a).
+    ///
+    /// **CONSOLIDATION ONLY — the floor is zero.** Time-travel reads promise
+    /// every committed sequence, and deciding that no reader can ask below
+    /// some sequence is the transaction layer's snapshot-tracking question;
+    /// until it exists, nothing is droppable and this method refuses to
+    /// guess. What it does reclaim: cross-block restatements collapse, and
+    /// the block count stops growing with tombstone churn.
+    ///
+    /// **DURABLE because open prefers the manifest**: the compacted root is
+    /// republished through manifest and slot, and the fast open lands on it.
+    /// The full-stream rebuild remains the AUTHORITATIVE recovery and
+    /// re-derives the uncompacted layout by design (doctrine 5: derived
+    /// state is discarded and rebuilt) — its answers are identical, and its
+    /// republication simply supersedes the compacted root again.
+    pub async fn compact(&mut self, cx: &CommitCx) -> Result<(), RebuildError> {
+        let compaction = fgdb_strata::compact::compact_with_props(
+            &self.snapshot.blocks,
+            &self.snapshot.block_props,
+            CommitSeq(0),
+        )
+        .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
+
+        // Encode the replacement generation: chains RESTART per family
+        // (state-chain semantics, fgdb-4391) and multi-chunk families link
+        // in emission order — the contract compact_with_props documents.
+        let mut chain_heads: std::collections::BTreeMap<
+            (VId, RelationId),
+            fgdb_strata::DeltaBlockVersion,
+        > = std::collections::BTreeMap::new();
+        let mut sealed = Vec::with_capacity(compaction.blocks.len());
+        for (entries, props) in compaction.blocks.iter().zip(&compaction.block_props) {
+            let family = entries
+                .first()
+                .map(|entry| (entry.src, entry.relation))
+                .expect("the packer emits no empty blocks");
+            let predecessor = chain_heads.get(&family).copied();
+            let (bytes, property_patch) = match props {
+                Some(props) => {
+                    let patch_bytes = fgdb_strata::edge_props::encode_property_patch(&props.rows)
+                        .map_err(|error| {
+                        RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
+                    })?;
+                    let patch_id = fgdb_strata::edge_props::property_patch_id(
+                        &self.keys.k_oid,
+                        self.keys.namespace,
+                        &patch_bytes,
+                    );
+                    let bytes = fgdb_strata::encode_block_with_properties(
+                        PARTITION,
+                        predecessor,
+                        entries,
+                        patch_id,
+                        &props.locators,
+                        &props.rows,
+                    )
+                    .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+                    (
+                        bytes,
+                        Some(fgdb_strata::writer::SealedPropertyPatch {
+                            patch_id,
+                            bytes: patch_bytes,
+                        }),
+                    )
+                }
+                None => (
+                    fgdb_strata::encode_block(PARTITION, predecessor, entries)
+                        .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?,
+                    None,
+                ),
+            };
+            let (first_seq, last_seq) =
+                fgdb_strata::root::span_of(entries).expect("the packer emits no empty blocks");
+            let block_id = fgdb_strata::block_id(&self.keys.k_oid, self.keys.namespace, &bytes);
+            chain_heads.insert(family, fgdb_strata::DeltaBlockVersion(block_id));
+            sealed.push(fgdb_strata::writer::SealedBlock {
+                block_id,
+                bytes,
+                first_seq,
+                last_seq,
+                property_patch,
+            });
+        }
+
+        // The vertex half is carried unchanged: no vertex-patch compactor
+        // exists yet, and inventing layout here would be a second opinion.
+        let mut sealed_patches = Vec::with_capacity(self.snapshot.patch_refs.len());
+        for reference in &self.snapshot.patch_refs {
+            sealed_patches.push(fgdb_strata::writer::SealedPatch {
+                patch_id: reference.patch_id,
+                bytes: self.store.get_patch_bytes(
+                    cx,
+                    fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
+                )?,
+                first_seq: reference.first_seq,
+                last_seq: reference.last_seq,
+            });
+        }
+
+        let frontier = self.snapshot.frontier;
+        let writer = BlockWriter::from_published_partition(
+            GRAPH,
+            BRANCH,
+            PARTITION,
+            sealed,
+            sealed_patches,
+            &compaction.blocks,
+            &compaction.block_props,
+            &self.snapshot.patches,
+            frontier,
+        )
+        .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
+
+        // The logical state is unchanged, so versions and the allocator pass
+        // through; the shared tail republishes and reopens from disk.
+        let versions = self.snapshot.versions.clone();
+        let next_birth_ordinal = self.snapshot.next_birth_ordinal;
+        let (snapshot, writer) = publish_and_snapshot(
+            cx,
+            &self.store,
+            &self.keys,
+            writer,
+            versions,
+            frontier,
+            next_birth_ordinal,
+        )?;
+        // The slot advances so the compacted generation is what the next
+        // open lands on — the exact durability fast open added.
+        let manifest_records = [ManifestRecord {
+            graph: GRAPH,
+            branch: BRANCH,
+            partition: PARTITION,
+            root: snapshot.root,
+        }];
+        let manifest_len = encode_manifest(&manifest_records)
+            .map(|bytes| bytes.len() as u64)
+            .expect("one root is one canonical record");
+        let next_generation = self.slot_generation + 1;
+        self.slot_store
+            .publish_evidenced(
+                cx,
+                &spine_slot(&self.keys, next_generation, snapshot.manifest, manifest_len),
+            )
+            .await
+            .map_err(RebuildError::Slot)?;
+        self.slot_generation = next_generation;
+        self.snapshot = snapshot;
+        self.writer = writer;
+        // Receipts describe the superseded generation; the replacement earns
+        // its own on the next publish.
+        self.receipts = PublishReceipts::new();
+        Ok(())
+    }
+
     /// root slot will carry, republished beside every root under the same
     /// determinism law as [`Database::partition_root`].
     pub fn manifest(&self) -> ManifestVersion {
@@ -2553,6 +2740,107 @@ fn derive_versions_and_ordinal(
     Ok((versions, (spent_vertices.len() + spent_edges.len()) as u64))
 }
 
+/// Layout-independent graph history carried by one checkpoint projection.
+/// Later blocks may restate an older statement (for example to add its
+/// retirement), so publication order deliberately overwrites an identical
+/// `(identity, created_at)` key.
+#[derive(Debug, PartialEq, Eq)]
+struct CheckpointProjection {
+    vertices: std::collections::BTreeMap<(VId, u64), VertexRow>,
+    edges: std::collections::BTreeMap<(EId, u64), (AdjacencyEntry, EdgePropertyRow)>,
+}
+
+fn checkpoint_projection(
+    blocks: &[Vec<AdjacencyEntry>],
+    block_props: &[Option<BlockProps>],
+    patches: &[Vec<VertexRow>],
+) -> CheckpointProjection {
+    let mut vertices = std::collections::BTreeMap::new();
+    for rows in patches {
+        for row in rows {
+            vertices.insert((row.vid, row.created_at.0), row.clone());
+        }
+    }
+    let mut edges = std::collections::BTreeMap::new();
+    for (block, props) in blocks.iter().zip(block_props) {
+        for (index, entry) in block.iter().enumerate() {
+            let row = props
+                .as_ref()
+                .map(|props| props.props_of(index))
+                .unwrap_or_default();
+            edges.insert((entry.eid, entry.created_at.0), (*entry, row));
+        }
+    }
+    CheckpointProjection { vertices, edges }
+}
+
+/// Reconstruct the graph at exactly `through` from Chronicle. This pays the
+/// prefix fold until the durable checkpoint contract carries an authenticated
+/// logical-prefix commitment; correctness outranks the shortcut.
+async fn reconstruct_checkpoint_snapshot(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+    store: &BlockStore,
+    keys: &DatabaseKeys,
+    through: CommitSeq,
+) -> Result<Option<ManifestVersion>, RebuildError> {
+    let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
+    let mut next_birth_ordinal = 0u64;
+    let mut versions = std::collections::BTreeMap::new();
+    let frontier = fold_stream_through(
+        cx,
+        coordinator,
+        keys,
+        &mut writer,
+        &mut versions,
+        &mut next_birth_ordinal,
+        CommitSeq(0),
+        Some(through),
+    )
+    .await?;
+    if frontier != through {
+        return Ok(None);
+    }
+    let (snapshot, _) = publish_and_snapshot(
+        cx,
+        store,
+        keys,
+        writer,
+        versions,
+        frontier,
+        next_birth_ordinal,
+    )?;
+    Ok(Some(snapshot))
+}
+
+/// Prove that a slot-selected checkpoint is the same temporal graph projection
+/// as Chronicle's complete prefix. Content identity alone proves authentic
+/// bytes, not membership in this history. Comparing normalized statements (not
+/// root bytes) also admits answer-preserving compaction layouts.
+async fn checkpoint_matches_stream(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+    store: &BlockStore,
+    keys: &DatabaseKeys,
+    root_id: PartitionRootVersion,
+) -> Result<bool, RebuildError> {
+    let (root, blocks, block_props, patches) = store.reopen(cx, root_id)?;
+    let candidate = checkpoint_projection(&blocks, &block_props, &patches);
+    let Some(rebuilt) = reconstruct_checkpoint_snapshot(
+        cx,
+        coordinator,
+        store,
+        keys,
+        root.published_at,
+    )
+    .await?
+    else {
+        return Ok(false);
+    };
+    Ok(candidate
+        == checkpoint_projection(&rebuilt.blocks, &rebuilt.block_props, &rebuilt.patches))
+}
+
 /// The manifest-based fast open (fgdb-ge6a): resolve the slot's manifest to
 /// a partition, reopen it from disk WITHOUT folding the stream, derive the
 /// writer and version state the fold would have built, then replay only the
@@ -2724,6 +3012,32 @@ async fn fold_stream(
     next_birth_ordinal: &mut u64,
     after: CommitSeq,
 ) -> Result<CommitSeq, RebuildError> {
+    fold_stream_through(
+        cx,
+        coordinator,
+        keys,
+        writer,
+        versions,
+        next_birth_ordinal,
+        after,
+        None,
+    )
+    .await
+}
+
+/// The bounded form used to authenticate a checkpoint against one exact
+/// Chronicle prefix. `None` is the ordinary full-tail fold.
+#[allow(clippy::too_many_arguments)]
+async fn fold_stream_through(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+    keys: &DatabaseKeys,
+    writer: &mut BlockWriter,
+    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
+    next_birth_ordinal: &mut u64,
+    after: CommitSeq,
+    through: Option<CommitSeq>,
+) -> Result<CommitSeq, RebuildError> {
     let mut frontier = after;
     let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
 
@@ -2731,6 +3045,9 @@ async fn fold_stream(
         let commit_seq = CommitSeq(entry.marker.commit_seq);
         if commit_seq.0 <= after.0 {
             continue;
+        }
+        if through.is_some_and(|limit| commit_seq.0 > limit.0) {
+            break;
         }
         frontier = commit_seq;
         let EffectSource::Local {

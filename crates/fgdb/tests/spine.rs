@@ -1600,6 +1600,103 @@ fn the_root_slot_names_the_current_manifest_and_open_reconciles_it() {
     });
 }
 
+/// A content-addressed checkpoint is authentic BYTES, not proof that those
+/// bytes project this Chronicle prefix. Two databases under the same keys and
+/// namespace can each produce a perfectly resolvable sequence-1 manifest. A
+/// slot transplant must therefore be refused even though every object-level
+/// identity check succeeds; accepting it would replace committed history A
+/// with unrelated history B without changing Chronicle at all.
+#[test]
+fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
+    let primary = scratch("checkpoint-primary");
+    let divergent = scratch("checkpoint-divergent");
+    under_lab(101, move |cx| async move {
+        let cx = &cx;
+        let (primary_manifest, primary_root) = {
+            let mut db = Database::create(cx, &primary, keys())
+                .await
+                .expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(1), vec![], vec![]);
+            db.write(cx, batch).await.expect("commits primary history");
+            (db.manifest(), db.partition_root())
+        };
+        let (divergent_manifest, divergent_root) = {
+            let mut db = Database::create(cx, &divergent, keys())
+                .await
+                .expect("creates divergent database");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(999), vec![], vec![]);
+            db.write(cx, batch)
+                .await
+                .expect("commits divergent history");
+            (db.manifest(), db.partition_root())
+        };
+        assert_ne!(primary_manifest, divergent_manifest);
+        assert_ne!(primary_root, divergent_root);
+
+        // Copy the complete immutable closure, preserving every real identity.
+        // The destination can resolve and admit this manifest; only its absent
+        // Chronicle-prefix binding makes it unlawful here.
+        let source = fgdb_strata::store::BlockStore::open(cx, &divergent, K_OID, NAMESPACE)
+            .expect("opens divergent object store");
+        let destination = fgdb_strata::store::BlockStore::open(cx, &primary, K_OID, NAMESPACE)
+            .expect("opens primary object store");
+        let root = source
+            .get_root(cx, divergent_root)
+            .expect("reads divergent root");
+        for reference in &root.blocks {
+            let bytes = source
+                .get_bytes(cx, fgdb_strata::DeltaBlockVersion(reference.block_id))
+                .expect("reads divergent block");
+            let stored = destination.put(cx, &bytes).expect("copies divergent block");
+            assert_eq!(stored.0, reference.block_id);
+        }
+        for reference in &root.vertex_patches {
+            let bytes = source
+                .get_patch_bytes(
+                    cx,
+                    fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
+                )
+                .expect("reads divergent vertex patch");
+            let stored = destination
+                .put_patch(cx, &bytes)
+                .expect("copies divergent vertex patch");
+            assert_eq!(stored.0, reference.patch_id);
+        }
+        let stored_root = destination
+            .put_root(cx, &root)
+            .expect("admits divergent root");
+        assert_eq!(stored_root, divergent_root);
+        let stored_manifest = destination
+            .put_manifest(
+                cx,
+                &[fgdb_strata::manifest::ManifestRecord {
+                    graph: root.graph,
+                    branch: root.branch,
+                    partition: root.partition,
+                    root: stored_root,
+                }],
+            )
+            .expect("copies divergent manifest");
+        assert_eq!(stored_manifest, divergent_manifest);
+
+        let slot_store = fgdb_chronicle::RootStore::new(&primary);
+        let mut transplanted = slot_store.current(cx).await.expect("selects current slot");
+        transplanted.slot_generation += 1;
+        transplanted.root_manifest_oid = divergent_manifest.0.0;
+        slot_store
+            .publish_evidenced(cx, &transplanted)
+            .await
+            .expect("publishes a structurally valid transplant");
+
+        assert!(matches!(
+            Database::open(cx, &primary, keys()).await,
+            Err(fgdb::OpenError::SlotDisagreesWithStream { .. })
+        ));
+    });
+}
+
 /// **THE FAST-OPEN EQUIVALENCE LAW (fgdb-ge6a): opening through the slot's
 /// manifest and opening by folding the whole stream are indistinguishable —
 /// same root, same manifest, same frontier, same answers, and the SAME next
@@ -1697,6 +1794,96 @@ fn fast_open_is_indistinguishable_from_the_stream_fold() {
             ),
             scans_after_fast,
             "a write through the fast-opened session is the same write"
+        );
+    });
+}
+
+/// **THE DURABLE COMPACTION LAW (fgdb-ge6a): consolidation shrinks the
+/// partition, changes NO answer at ANY committed sequence, and — because
+/// open prefers the manifest — the compacted generation is what a reopen
+/// actually lands on.** The rebuild face remains the authoritative recovery
+/// and re-derives the uncompacted layout with identical answers.
+#[test]
+fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
+    let dir = scratch("durable-compact");
+    under_lab(103, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        // Churn: creates, updates, deletes — the shapes consolidation folds.
+        let mut epochs = Vec::new();
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(
+            EId(10),
+            VId(1),
+            VId(2),
+            vec![(key, CanonicalScalar::Int(1))],
+        );
+        first.add_edge(EId(11), VId(1), VId(2), vec![]);
+        epochs.push(db.write(cx, first).await.expect("commits"));
+        let mut second = WriteBatch::new(KNOWS);
+        second.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(2)));
+        second.delete_edge(EId(11));
+        epochs.push(db.write(cx, second).await.expect("commits"));
+        let mut third = WriteBatch::new(KNOWS);
+        third.add_edge(EId(12), VId(2), VId(1), vec![]);
+        epochs.push(db.write(cx, third).await.expect("commits"));
+
+        let blocks_before = db.partition_root();
+        let answers = |db: &Database, epochs: &[CommitSeq]| {
+            epochs
+                .iter()
+                .map(|as_of| {
+                    (
+                        db.vertices_at(*as_of).expect("reads"),
+                        db.edges_at(*as_of).expect("reads"),
+                        db.neighbours_at(VId(1), KNOWS, *as_of).expect("reads"),
+                        db.in_neighbours_at(VId(1), KNOWS, *as_of).expect("reads"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = answers(&db, &epochs);
+
+        db.compact(cx).await.expect("compacts");
+        assert_ne!(
+            db.partition_root(),
+            blocks_before,
+            "consolidation published a replacement generation"
+        );
+        assert_eq!(
+            answers(&db, &epochs),
+            before,
+            "consolidation must not move ANY answer at ANY sequence"
+        );
+        let compacted_root = db.partition_root();
+        let compacted_manifest = db.manifest();
+        drop(db);
+
+        // SURVIVAL: the fast reopen lands on the compacted generation.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(db.partition_root(), compacted_root);
+        assert_eq!(db.manifest(), compacted_manifest);
+        assert_eq!(answers(&db, &epochs), before);
+        // And a write on top of the compacted generation composes.
+        let mut db = db;
+        let mut fourth = WriteBatch::new(KNOWS);
+        fourth.add_edge(EId(13), VId(1), VId(2), vec![]);
+        epochs.push(db.write(cx, fourth).await.expect("commits"));
+        assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(2)],);
+        drop(db);
+
+        // AUTHORITATIVE RECOVERY: the stream fold re-derives its own layout
+        // — different root, identical answers (doctrine 5).
+        let slow = Database::open_rebuilding(cx, &dir, keys())
+            .await
+            .expect("rebuild opens");
+        assert_eq!(
+            answers(&slow, &epochs[..3]),
+            before,
+            "the rebuilt layout answers identically at every epoch"
         );
     });
 }
