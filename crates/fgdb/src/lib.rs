@@ -151,15 +151,15 @@ use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
 use fgdb_chronicle::identity::IdentifiedObject;
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate};
+use fgdb_chronicle::{
+    RootBootstrap, RootSelection, RootSlot, RootStore, store::StoreError as SlotStoreError,
+};
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, LabelId, LogicalDeltaTemplate,
     PropertyKeyId, RelationId, SchemaEpoch,
 };
 use fgdb_strata::edge_props::BlockProps;
-use fgdb_chronicle::{
-    RootBootstrap, RootSelection, RootSlot, RootStore, store::StoreError as SlotStoreError,
-};
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
 use fgdb_strata::root::{
     BlockRef, PatchRef, RootError, merge_all_edges_with_props, merge_edge_with_props,
@@ -373,7 +373,6 @@ pub enum WriteError {
     Rebuild(RebuildError),
 }
 
-
 /// Why a read could not be served.
 #[derive(Debug)]
 pub enum ReadError {
@@ -480,6 +479,11 @@ impl core::fmt::Display for RebuildError {
             ),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
             Self::Store(error) => write!(f, "block store: {error}"),
+            Self::Slot(error) => write!(
+                f,
+                "root slot publication after a durable publish: {error} (the \
+                 slot is at most one publication behind; the next open heals it)"
+            ),
         }
     }
 }
@@ -778,8 +782,7 @@ fn spine_database_id(namespace: &DatabaseSecurityNamespaceId) -> [u8; 16] {
 /// everywhere the FEC/crypto machinery would live.
 fn plain_bootstrap(manifest_len: u64) -> RootBootstrap {
     let mut opener_payload = [0u8; fgdb_chronicle::root::OPENER_PAYLOAD_LEN];
-    opener_payload[..2]
-        .copy_from_slice(&fgdb_strata::manifest::MANIFEST_OBJECT_KIND.to_le_bytes());
+    opener_payload[..2].copy_from_slice(&fgdb_strata::manifest::MANIFEST_OBJECT_KIND.to_le_bytes());
     RootBootstrap {
         root_encoding_id: [0; 32],
         root_placement_id: [0; 32],
@@ -1012,14 +1015,15 @@ impl Database {
                     slot.slot_generation
                 } else {
                     let stale = ManifestVersion(ObjectId(slot.root_manifest_oid));
-                    let resolvable = store
-                        .resolve_manifest(cx, stale)
-                        .ok()
-                        .is_some_and(|resolved| {
-                            resolved
-                                .iter()
-                                .all(|(_, root)| root.published_at.0 <= snapshot.frontier.0)
-                        });
+                    let resolvable =
+                        store
+                            .resolve_manifest(cx, stale)
+                            .ok()
+                            .is_some_and(|resolved| {
+                                resolved
+                                    .iter()
+                                    .all(|(_, root)| root.published_at.0 <= snapshot.frontier.0)
+                            });
                     if !resolvable {
                         return Err(OpenError::SlotDisagreesWithStream {
                             path: path.to_path_buf(),
@@ -1541,7 +1545,10 @@ impl Database {
             .expect("records_of already proved these records canonical");
         let next_generation = self.slot_generation + 1;
         self.slot_store
-            .publish_evidenced(cx, &spine_slot(&self.keys, next_generation, manifest, manifest_len))
+            .publish_evidenced(
+                cx,
+                &spine_slot(&self.keys, next_generation, manifest, manifest_len),
+            )
             .await
             .map_err(RebuildError::Slot)?;
         self.slot_generation = next_generation;

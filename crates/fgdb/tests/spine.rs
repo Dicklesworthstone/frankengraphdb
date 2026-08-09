@@ -1317,3 +1317,91 @@ fn in_neighbours_answers_sources_and_respects_direction() {
         ));
     });
 }
+
+/// **THE ROOT SLOT LAW (fgdb-ge6a, PLAIN opener ruling): every publish
+/// advances the one mutable object in the directory to name the current
+/// manifest; open continues, heals a lagging slot forward, and refuses a
+/// slot the stream cannot account for or that is not this database's.**
+#[test]
+fn the_root_slot_names_the_current_manifest_and_open_reconciles_it() {
+    let dir = scratch("root-slot");
+    under_lab(95, move |cx| async move {
+        let cx = &cx;
+        let (manifest_first, manifest_second) = {
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut first = WriteBatch::new(KNOWS);
+            first.create_vertex(VId(1), vec![], vec![]);
+            db.write(cx, first).await.expect("commits");
+            let manifest_first = db.manifest();
+            let mut second = WriteBatch::new(KNOWS);
+            second.create_vertex(VId(2), vec![], vec![]);
+            db.write(cx, second).await.expect("commits");
+            (manifest_first, db.manifest())
+        };
+
+        // The slot is durably CURRENT with nothing held in memory: a fresh
+        // RootStore selects a slot naming the last manifest.
+        let slot_store = fgdb_chronicle::RootStore::new(&dir);
+        let published = slot_store.current(cx).await.expect("a slot exists");
+        assert_eq!(published.root_manifest_oid, manifest_second.0.0);
+        let generation_before = published.slot_generation;
+        assert!(generation_before >= 3, "create + two writes each published");
+
+        // Reopen continues the generation — no spurious heal.
+        {
+            let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+            assert_eq!(db.manifest(), manifest_second);
+        }
+        let after_reopen = slot_store.current(cx).await.expect("still selects");
+        assert_eq!(
+            after_reopen.slot_generation, generation_before,
+            "an agreeing slot is continued, not republished"
+        );
+
+        // A LAGGING slot — the crash window's exact shape: a newer generation
+        // naming the previous (resolvable) manifest. Open heals it forward.
+        let mut lagging = after_reopen.clone();
+        lagging.slot_generation += 1;
+        lagging.root_manifest_oid = manifest_first.0.0;
+        slot_store
+            .publish_evidenced(cx, &lagging)
+            .await
+            .expect("publishes the lag shape");
+        {
+            let db = Database::open(cx, &dir, keys())
+                .await
+                .expect("heals and opens");
+            assert_eq!(db.manifest(), manifest_second);
+        }
+        let healed = slot_store.current(cx).await.expect("selects");
+        assert_eq!(healed.root_manifest_oid, manifest_second.0.0);
+        assert_eq!(healed.slot_generation, lagging.slot_generation + 1);
+
+        // A slot naming a manifest the stream cannot account for: refused.
+        let mut phantom = healed.clone();
+        phantom.slot_generation += 1;
+        phantom.root_manifest_oid = [0xEE; 32];
+        slot_store
+            .publish_evidenced(cx, &phantom)
+            .await
+            .expect("publishes the phantom shape");
+        assert!(matches!(
+            Database::open(cx, &dir, keys()).await,
+            Err(fgdb::OpenError::SlotDisagreesWithStream { .. })
+        ));
+
+        // A slot whose identity tuple is not this database's: refused as
+        // foreign even though it points at the right manifest.
+        let mut foreign = healed.clone();
+        foreign.slot_generation = phantom.slot_generation + 1;
+        foreign.database_security_namespace_id = [0x01; 32];
+        slot_store
+            .publish_evidenced(cx, &foreign)
+            .await
+            .expect("publishes the foreign shape");
+        assert!(matches!(
+            Database::open(cx, &dir, keys()).await,
+            Err(fgdb::OpenError::ForeignSlot { .. })
+        ));
+    });
+}

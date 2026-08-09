@@ -276,6 +276,14 @@ fn bytes_per_live_edge_swept_across_scale() {
 
     // MEASURED 2026-08-04, (edges, bytes/edge):
     //   1 -> 4992,  4 -> 1408,  16 -> 539,  64 -> 328,  256 -> 277
+    // RE-MEASURED 2026-08-09 after fgdb-ge6a's slot binding, (edges, bytes/edge):
+    //   1 -> 13620, 4 -> 3557,  16 -> 1067, 64 -> 451,  256 -> 299
+    // The jump is the dual-slot root file (doctrine 5's ONE mutable object,
+    // fixed size) plus one retained manifest object per publish joining the
+    // durable set — per-DATABASE and per-COMMIT costs, not per-edge ones,
+    // exactly the fixed overhead the doctrine below says not to optimise.
+    // The steady-state end moved 277 -> 299 and stays under its ceiling,
+    // which is the evidence the added cost amortises as claimed.
     //
     // BOTH ENDS ARE PUBLISHED because they say different things. 4,992 B for a
     // one-edge database is the honest cost of a manifest plus a root plus a
@@ -295,7 +303,7 @@ fn bytes_per_live_edge_swept_across_scale() {
     //
     // Ceilings sit ~1.4-1.6x above measured: tight enough to catch a real
     // regression, loose enough not to red on an unrelated format change.
-    const WORST_CASE_CEILING: u64 = 8192;
+    const WORST_CASE_CEILING: u64 = 20480;
     const STEADY_STATE_CEILING: u64 = 384;
 
     assert!(
