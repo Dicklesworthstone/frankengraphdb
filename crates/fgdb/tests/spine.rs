@@ -684,17 +684,23 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
             {
                 let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
                 let mut first = WriteBatch::new(KNOWS);
-                first.create_vertex(VId(1), vec![], vec![]);
+                first.create_vertex(VId(1), vec![], vec![(PropertyKeyId(7), CanonicalScalar::Int(1))]);
                 first.create_vertex(VId(2), vec![], vec![]);
-                first.add_edge(EId(10), VId(1), VId(2), vec![]);
+                first.add_edge(EId(10), VId(1), VId(2), vec![(PropertyKeyId(7), CanonicalScalar::Int(1))]);
                 db.write(cx, first).await.expect("the first batch commits");
                 assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(2)]);
 
+                // Creates AND updates in the crashed batch (fgdb-ls5b): the
+                // retire + content-successor chains must be exactly as atomic
+                // as the creations beside them — a crash can never leave a
+                // retired statement without its successor.
                 let mut second = WriteBatch::new(KNOWS);
                 second.create_vertex(VId(3), vec![], vec![]);
                 second.create_vertex(VId(4), vec![], vec![]);
                 second.add_edge(EId(11), VId(1), VId(3), vec![]);
                 second.add_edge(EId(12), VId(1), VId(4), vec![]);
+                second.set_vertex_property(VId(1), PropertyKeyId(7), Some(CanonicalScalar::Int(2)));
+                second.set_edge_property(EId(10), PropertyKeyId(7), Some(CanonicalScalar::Int(2)));
                 crashed = db.write_with_crash(cx, second, Some(point)).await.is_err();
                 // The process dies here. Nothing republishes, nothing cleans up.
             }
@@ -716,6 +722,22 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
             assert!(
                 after.contains(&VId(2)),
                 "{point:?}: the previously acknowledged batch must survive, got {after:?}"
+            );
+            // The updates share the batch's fate exactly: the answered rows
+            // are the OLD content when the batch is absent and the NEW when
+            // present — decided by the same adjacency answer, so a chain that
+            // half-applied (retired without its successor, or vice versa)
+            // cannot hide behind either verdict.
+            let expected = if after == vec![VId(2)] { 1 } else { 2 };
+            assert_eq!(
+                db.vertex(VId(1)).expect("survives").props,
+                vec![(PropertyKeyId(7), CanonicalScalar::Int(expected))],
+                "{point:?}: the vertex update must share the batch's fate"
+            );
+            assert_eq!(
+                db.edge(EId(10)).expect("reads").expect("survives").props,
+                vec![(PropertyKeyId(7), CanonicalScalar::Int(expected))],
+                "{point:?}: the edge update must share the batch's fate"
             );
             // A write that reported success must be wholly present: "all or
             // nothing" allows nothing only when the write did not complete.
