@@ -51,7 +51,42 @@ use std::sync::Arc;
 /// collide with any other transcript that happens to hash the same material.
 const PREFIX_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.stream-prefix.v2";
 const LINEAGE_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.snapshot-lineage.v1";
-const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v1";
+/// Domain v2 (ruled 2026-08-09 on fgdb-ge6a under the owner's delegation):
+/// the transcript hashes the DURABLE LOGICAL PROJECTION of each row — the
+/// fields tier-D and the vertex patches actually persist — with the
+/// non-durable ones normalized before encoding. v1 bound `CreateEdge`'s
+/// `birth_ordinal` (durable nowhere in tier-D; §6.3 assigns OriginBirthOrder
+/// columns to tier-R) plus `canonical_key`/`valid_time` (no durable carrier
+/// yet), which made every edge's chain unrecomputable from durable state and
+/// therefore made manifest-based fast open impossible. `EId` is the
+/// identity; the ordinal is an allocation fact, redundant in this hash.
+/// The engine's deliberately-duplicated derivation (§15.2) changed in the
+/// same commit; the differential proves continued agreement.
+const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v2";
+
+/// The v2 normalization: the identical function exists, deliberately
+/// duplicated, in `fgdb` (§15.2 — shared code would let one defect agree
+/// with itself).
+fn version_transcript_row(row: &DeltaRow) -> DeltaRow {
+    let mut projected = row.clone();
+    match &mut projected {
+        DeltaRow::CreateEdge {
+            birth_ordinal,
+            canonical_key,
+            valid_time,
+            ..
+        } => {
+            *birth_ordinal = 0;
+            *canonical_key = None;
+            *valid_time = None;
+        }
+        DeltaRow::CreateVertex { valid_time, .. } => {
+            *valid_time = None;
+        }
+        _ => {}
+    }
+    projected
+}
 
 /// A materialized vertex.
 #[derive(Clone, Debug, PartialEq)]
@@ -924,7 +959,7 @@ impl ReferenceGraph {
         previous: Option<ObjectId>,
         row: &DeltaRow,
     ) -> Result<ObjectId, ApplyError> {
-        let canonical = row
+        let canonical = version_transcript_row(row)
             .canonical_bytes()
             .map_err(ApplyError::VersionIdentityEncoding)?;
         let mut hasher = fgdb_crypto::Hasher::new();
@@ -3256,5 +3291,55 @@ mod provenance_internal_tests {
                 commit_seq: CommitSeq(1),
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod version_transcript_laws {
+    use super::ReferenceGraph;
+    use fgdb_delta_types::{DeltaRow, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, EId, VId};
+
+    fn create_edge(birth_ordinal: u64, eid: u128) -> DeltaRow {
+        DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal,
+            src: VId(1),
+            relation: RelationId(1),
+            dst: VId(2),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        }
+    }
+
+    /// The v2 projection law, witnessed on THIS derivation independently of
+    /// the engine's deliberate duplicate: the chain base is blind to the
+    /// allocation ordinal and remains bound to identity and durable content.
+    #[test]
+    fn the_chain_base_hashes_the_durable_projection_only() {
+        let a = ReferenceGraph::successor_version(None, &create_edge(7, 10)).expect("derives");
+        let b = ReferenceGraph::successor_version(None, &create_edge(8, 10)).expect("derives");
+        assert_eq!(
+            a, b,
+            "the ordinal is not durable and must not bind the chain"
+        );
+        let other = ReferenceGraph::successor_version(None, &create_edge(7, 11)).expect("derives");
+        assert_ne!(a, other, "the stable identity still binds it");
+        let propertied = ReferenceGraph::successor_version(
+            None,
+            &DeltaRow::CreateEdge {
+                eid: EId(10),
+                birth_ordinal: 7,
+                src: VId(1),
+                relation: RelationId(1),
+                dst: VId(2),
+                canonical_key: None,
+                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(1))],
+                valid_time: None,
+            },
+        )
+        .expect("derives");
+        assert_ne!(a, propertied, "durable content still binds it");
     }
 }

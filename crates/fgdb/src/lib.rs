@@ -1858,7 +1858,32 @@ impl Database {
 /// law, and the differential's replay validates every engine-emitted
 /// `before_version` against the oracle's chains — shared code here would gut
 /// that check (§15.2).
-const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v1";
+/// Domain v2: the transcript hashes each row's DURABLE LOGICAL PROJECTION —
+/// see the twin constant in `fgdb-reference` for the full ruling record.
+/// Deliberately duplicated, not shared (§15.2).
+const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v2";
+
+/// The v2 normalization — the deliberate duplicate of the oracle's.
+fn version_transcript_row(row: &DeltaRow) -> DeltaRow {
+    let mut projected = row.clone();
+    match &mut projected {
+        DeltaRow::CreateEdge {
+            birth_ordinal,
+            canonical_key,
+            valid_time,
+            ..
+        } => {
+            *birth_ordinal = 0;
+            *canonical_key = None;
+            *valid_time = None;
+        }
+        DeltaRow::CreateVertex { valid_time, .. } => {
+            *valid_time = None;
+        }
+        _ => {}
+    }
+    projected
+}
 
 /// Extend one element's version chain with one canonical effect — the
 /// engine's independent spelling of the reference derivation: a domain, a
@@ -1869,7 +1894,7 @@ fn successor_version(
     previous: Option<ObjectId>,
     row: &DeltaRow,
 ) -> Result<ObjectId, CanonicalError> {
-    let canonical = row.canonical_bytes()?;
+    let canonical = version_transcript_row(row).canonical_bytes()?;
     let mut hasher = fgdb_crypto::Hasher::new();
     hasher.update(ELEMENT_VERSION_DOMAIN);
     match previous {
@@ -2171,4 +2196,52 @@ async fn rebuild(
         },
         writer,
     ))
+}
+
+#[cfg(test)]
+mod version_transcript_laws {
+    use super::*;
+
+    fn create_edge(birth_ordinal: u64, eid: u128) -> DeltaRow {
+        DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal,
+            src: VId(1),
+            relation: RelationId(1),
+            dst: VId(2),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        }
+    }
+
+    /// The v2 projection law: the chain base is blind to the allocation
+    /// ordinal — the fact tier-D does not persist — and remains bound to the
+    /// stable identity and every durable field.
+    #[test]
+    fn the_chain_base_hashes_the_durable_projection_only() {
+        let a = successor_version(None, &create_edge(7, 10)).expect("derives");
+        let b = successor_version(None, &create_edge(8, 10)).expect("derives");
+        assert_eq!(
+            a, b,
+            "the ordinal is not durable and must not bind the chain"
+        );
+        let other_identity = successor_version(None, &create_edge(7, 11)).expect("derives");
+        assert_ne!(a, other_identity, "the stable identity still binds it");
+        let propertied = successor_version(
+            None,
+            &DeltaRow::CreateEdge {
+                eid: EId(10),
+                birth_ordinal: 7,
+                src: VId(1),
+                relation: RelationId(1),
+                dst: VId(2),
+                canonical_key: None,
+                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(1))],
+                valid_time: None,
+            },
+        )
+        .expect("derives");
+        assert_ne!(a, propertied, "durable content still binds it");
+    }
 }
