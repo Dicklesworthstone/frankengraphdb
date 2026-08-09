@@ -855,6 +855,11 @@ fn post_d2_publication_failure_blocks_the_stale_handle_and_reopen_recovers() {
             db.state(),
             fgdb::DatabaseState::NeedsAuthoritativeRecovery(recovery)
         );
+        let stale_state = db.state();
+        assert!(matches!(
+            db.compact(cx).await,
+            Err(fgdb::RebuildError::HandleNotHealthy(found)) if found == stale_state
+        ));
         let read_fence = db
             .vertex(VId(2))
             .expect_err("a post-D2 publication failure must fence reads");
@@ -930,6 +935,11 @@ fn an_unknown_commit_outcome_fences_reads_and_retries_until_reopen() {
                 published_frontier: CommitSeq(1)
             }
         );
+        let uncertain_state = db.state();
+        assert!(matches!(
+            db.compact(cx).await,
+            Err(fgdb::RebuildError::HandleNotHealthy(found)) if found == uncertain_state
+        ));
         assert!(matches!(
             db.neighbours(VId(1), KNOWS),
             Err(fgdb::ReadError::CommitOutcomeUnknown {

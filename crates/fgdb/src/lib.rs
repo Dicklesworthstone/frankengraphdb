@@ -292,6 +292,9 @@ pub enum OpenError {
 /// Why rebuilding the tier-D fold from the durable stream failed.
 #[derive(Debug)]
 pub enum RebuildError {
+    /// A retained handle whose Chronicle/publication relationship is unknown
+    /// cannot run maintenance from its cached snapshot.
+    HandleNotHealthy(DatabaseState),
     /// A committed marker names a capsule whose bytes are not on disk. The
     /// marker IS the commit, so its capsule was durable before the marker was
     /// written: absence means something deleted bytes the stream references.
@@ -536,6 +539,10 @@ impl core::fmt::Display for OpenError {
 impl core::fmt::Display for RebuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::HandleNotHealthy(state) => write!(
+                f,
+                "maintenance requires a healthy reopened handle, found {state:?}"
+            ),
             Self::MissingCapsule {
                 commit_seq,
                 capsule_oid,
@@ -2194,7 +2201,6 @@ impl Database {
         self.snapshot.frontier
     }
 
-    /// The identity of the retained partition manifest (fgdb-63w2) — what a
     /// Consolidate the partition's durable history: fewer blocks, the SAME
     /// answer at EVERY committed sequence (fgdb-ge6a).
     ///
@@ -2212,6 +2218,9 @@ impl Database {
     /// state is discarded and rebuilt) — its answers are identical, and its
     /// republication simply supersedes the compacted root again.
     pub async fn compact(&mut self, cx: &CommitCx) -> Result<(), RebuildError> {
+        if !matches!(self.state, DatabaseState::Healthy { .. }) {
+            return Err(RebuildError::HandleNotHealthy(self.state));
+        }
         let compaction = fgdb_strata::compact::compact_with_props(
             &self.snapshot.blocks,
             &self.snapshot.block_props,
@@ -2350,6 +2359,7 @@ impl Database {
         Ok(())
     }
 
+    /// The identity of the retained partition manifest (fgdb-63w2) — what a
     /// root slot will carry, republished beside every root under the same
     /// determinism law as [`Database::partition_root`].
     pub fn manifest(&self) -> ManifestVersion {
@@ -2783,7 +2793,7 @@ async fn reconstruct_checkpoint_snapshot(
     store: &BlockStore,
     keys: &DatabaseKeys,
     through: CommitSeq,
-) -> Result<Option<ManifestVersion>, RebuildError> {
+) -> Result<Option<Snapshot>, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut next_birth_ordinal = 0u64;
     let mut versions = std::collections::BTreeMap::new();
@@ -2826,19 +2836,12 @@ async fn checkpoint_matches_stream(
 ) -> Result<bool, RebuildError> {
     let (root, blocks, block_props, patches) = store.reopen(cx, root_id)?;
     let candidate = checkpoint_projection(&blocks, &block_props, &patches);
-    let Some(rebuilt) = reconstruct_checkpoint_snapshot(
-        cx,
-        coordinator,
-        store,
-        keys,
-        root.published_at,
-    )
-    .await?
+    let Some(rebuilt) =
+        reconstruct_checkpoint_snapshot(cx, coordinator, store, keys, root.published_at).await?
     else {
         return Ok(false);
     };
-    Ok(candidate
-        == checkpoint_projection(&rebuilt.blocks, &rebuilt.block_props, &rebuilt.patches))
+    Ok(candidate == checkpoint_projection(&rebuilt.blocks, &rebuilt.block_props, &rebuilt.patches))
 }
 
 /// The manifest-based fast open (fgdb-ge6a): resolve the slot's manifest to

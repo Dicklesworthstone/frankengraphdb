@@ -233,8 +233,9 @@ fn the_spine_agrees_with_the_reference_oracle() {
             .iter()
             .map(|(vid, rel)| engine.neighbours(*vid, *rel).expect("engine reads"))
             .collect();
-        let engine_vertices: Vec<Option<fgdb::VertexRow>> =
-            (1..=6u128).map(|vid| engine.vertex(VId(vid))).collect();
+        let engine_vertices: Vec<Option<fgdb::VertexRow>> = (1..=6u128)
+            .map(|vid| engine.vertex(VId(vid)).expect("engine vertex reads"))
+            .collect();
         let engine_edges: Vec<Option<fgdb::EdgeRecord>> = (10..=17u128)
             .map(|eid| engine.edge(EId(eid)).expect("engine edge reads"))
             .collect();
