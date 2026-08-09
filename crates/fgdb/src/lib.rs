@@ -289,6 +289,11 @@ pub enum RebuildError {
         commit_seq: u64,
         error: CanonicalError,
     },
+    /// A deterministic verification probe stopped derived publication at the
+    /// named post-D2 stage. This is emitted only by
+    /// [`Database::write_with_publication_failure`]; the durable commit and the
+    /// recovery obligation are otherwise identical to a real failure there.
+    InjectedPublicationFailure(DerivedPublicationStage),
     Commit(CommitError),
     Store(StoreError),
     /// Advancing the root slot after a durable publish failed (fgdb-ge6a).
@@ -528,6 +533,9 @@ impl core::fmt::Display for RebuildError {
                 f,
                 "commit {commit_seq}: statement-version derivation failed: {error}"
             ),
+            Self::InjectedPublicationFailure(stage) => {
+                write!(f, "injected derived-publication failure at {stage:?}")
+            }
             Self::Commit(error) => write!(f, "commit stream: {error}"),
             Self::Store(error) => write!(f, "block store: {error}"),
             Self::Slot(error) => write!(
@@ -1302,6 +1310,21 @@ impl Database {
         self.state = DatabaseState::NeedsAuthoritativeRecovery(*recovery);
     }
 
+    fn fail_publication_if_requested(
+        recovery: RecoveryRequired,
+        fail_at: Option<DerivedPublicationStage>,
+    ) -> Result<(), WriteError> {
+        if fail_at == Some(recovery.failed_stage) {
+            return Err(WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::InjectedPublicationFailure(
+                    recovery.failed_stage,
+                )),
+            });
+        }
+        Ok(())
+    }
+
     /// Commit a batch through the real two-fsync protocol, then republish the
     /// derived partition.
     ///
@@ -1314,7 +1337,7 @@ impl Database {
         cx: &CommitCx,
         batch: WriteBatch,
     ) -> Result<CommitSeq, WriteError> {
-        self.write_with_crash(cx, batch, None).await
+        self.write_with_faults(cx, batch, None, None).await
     }
 
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
@@ -1334,6 +1357,33 @@ impl Database {
         cx: &CommitCx,
         batch: WriteBatch,
         crash_at: Option<CrashPoint>,
+    ) -> Result<CommitSeq, WriteError> {
+        self.write_with_faults(cx, batch, crash_at, None).await
+    }
+
+    /// Commit through Chronicle D2, then stop at one exact derived-publication
+    /// stage with the same fenced-handle result a real failure produces.
+    ///
+    /// This is a verification surface for the §15 fault matrix, not a cheaper
+    /// write path. It executes the ordinary durable commit and ordinary
+    /// publication code up to `fail_at`; the injected error is checked only
+    /// after D2 and after the handle records that exact recovery stage. Drop the
+    /// fenced handle and reopen to recover the committed graph from Chronicle.
+    pub async fn write_with_publication_failure(
+        &mut self,
+        cx: &CommitCx,
+        batch: WriteBatch,
+        fail_at: DerivedPublicationStage,
+    ) -> Result<CommitSeq, WriteError> {
+        self.write_with_faults(cx, batch, None, Some(fail_at)).await
+    }
+
+    async fn write_with_faults(
+        &mut self,
+        cx: &CommitCx,
+        batch: WriteBatch,
+        crash_at: Option<CrashPoint>,
+        publication_failure: Option<DerivedPublicationStage>,
     ) -> Result<CommitSeq, WriteError> {
         self.ensure_writable()?;
         if batch.is_empty() {
@@ -1732,6 +1782,7 @@ impl Database {
         // first in-memory fold operation: a panic caught by an outer boundary
         // is no excuse to make the old handle callable again.
         self.state = DatabaseState::NeedsAuthoritativeRecovery(recovery);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut folded = self.writer.clone();
         let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
         let mut new_versions = self.snapshot.versions.clone();
@@ -1769,6 +1820,7 @@ impl Database {
             }
         })?;
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::SealPartition);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         // The per-commit seal law — see `fold_stream`'s twin comment: the
         // RETAINED fold seals this commit's statements now, so the durable
         // layout never depends on which writer held unsealed rows.
@@ -1810,6 +1862,7 @@ impl Database {
         // whole partition twice more (admission, reopen) — O(blocks) disk work
         // per commit with no new information in it.
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishEdgeBlocks);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         for block in &blocks {
             self.store
                 .put_verified(
@@ -1827,6 +1880,7 @@ impl Database {
                 })?;
         }
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishVertexPatches);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         for patch in &patches {
             self.store
                 .put_patch_verified(cx, &patch.bytes, &mut self.receipts)
@@ -1836,6 +1890,7 @@ impl Database {
                 })?;
         }
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishPartitionRoot);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         let root_id = self
             .store
             .put_root_verified(cx, &root, &mut self.receipts)
@@ -1848,6 +1903,7 @@ impl Database {
         let manifest_records =
             records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishManifest);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         let manifest = self
             .store
             .put_manifest(cx, &manifest_records)
@@ -1863,6 +1919,7 @@ impl Database {
             .expect("records_of already proved these records canonical");
         let next_generation = self.slot_generation + 1;
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishRootSlot);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         self.slot_store
             .publish_evidenced(
                 cx,
@@ -1884,6 +1941,7 @@ impl Database {
         // this same root and adjacency. Decode failures refuse here, before the
         // old snapshot is disturbed (fold-then-swap, as above).
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::RefreshEdgeSnapshot);
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut fresh: std::collections::BTreeMap<
             ObjectId,
             (Vec<AdjacencyEntry>, Option<BlockProps>),
@@ -1957,6 +2015,7 @@ impl Database {
             &mut recovery,
             DerivedPublicationStage::RefreshVertexSnapshot,
         );
+        Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut fresh_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> =
             std::collections::BTreeMap::new();
         let carried_patch_ids: std::collections::BTreeSet<ObjectId> = self
