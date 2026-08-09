@@ -2191,6 +2191,14 @@ impl Database {
     /// re-derives the uncompacted layout by design (doctrine 5: derived
     /// state is discarded and rebuilt) — its answers are identical, and its
     /// republication simply supersedes the compacted root again.
+    ///
+    /// **CRASH-SAFE BY SHAPE, not by hooks**: every durable step before the
+    /// final slot publication is a content-addressed APPEND — patches,
+    /// blocks, root, manifest — so a crash anywhere in them leaves only
+    /// unreferenced objects and the slot still naming the previous
+    /// generation, which the next open lands on unchanged. The slot swap
+    /// itself is the dual-slot atomic publication the root-store laws pin,
+    /// and the slot law's lag case covers the one observable window.
     pub async fn compact(&mut self, cx: &CommitCx) -> Result<(), RebuildError> {
         if !matches!(self.state, DatabaseState::Healthy { .. }) {
             return Err(RebuildError::HandleNotHealthy(self.state));
