@@ -1140,8 +1140,8 @@ impl Database {
         // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
         // resolvable manifest. Before accepting it, bind verifies the selected
         // partition's temporal graph projection against Chronicle's complete
-        // prefix; fast_rebuild then reopens that partition and folds only the
-        // suffix. A missing slot falls back to a full rebuild (and the
+        // prefix; reopen_from_verified_checkpoint then reopens that partition
+        // and folds only the suffix. A missing slot falls back to a full rebuild (and the
         // reconciliation below creates it), while a present slot that is
         // foreign, malformed, or unaccountable refuses rather than being
         // silently rebuilt over. Prefix verification is currently O(history),
@@ -1182,7 +1182,14 @@ impl Database {
                                     slot_manifest: ObjectId(slot.root_manifest_oid),
                                 });
                             }
-                            fast_rebuild(cx, &coordinator, &store, &keys, record.root).await?
+                            reopen_from_verified_checkpoint(
+                                cx,
+                                &coordinator,
+                                &store,
+                                &keys,
+                                record.root,
+                            )
+                            .await?
                         }
                         _ => {
                             return Err(OpenError::SlotDisagreesWithStream {
@@ -1200,8 +1207,8 @@ impl Database {
         };
         // RECONCILE THE ROOT SLOT (fgdb-ge6a, the PLAIN opener ruling). The
         // stream is the source of truth and the rebuild just derived its
-        // manifest; the slot is the durable pointer a fast open will trust,
-        // so every open leaves it CURRENT or refuses:
+        // manifest; the slot is the durable pointer checkpoint-selected open
+        // verifies and uses, so every open leaves it CURRENT or refuses:
         //   - missing file: an interrupted create (the crash window between
         //     the coordinator's birth and the first slot write) — create it;
         //   - naming the rebuilt manifest: continue from its generation;
@@ -2214,8 +2221,9 @@ impl Database {
     /// guess. What it does reclaim: cross-block restatements collapse, and
     /// the block count stops growing with tombstone churn.
     ///
-    /// **DURABLE because open prefers the manifest**: the compacted root is
-    /// republished through manifest and slot, and the fast open lands on it.
+    /// **DURABLE because open selects the manifest**: the compacted root is
+    /// republished through manifest and slot, and checkpoint-selected open
+    /// lands on it after authenticating its temporal projection.
     /// The full-stream rebuild remains the AUTHORITATIVE recovery and
     /// re-derives the uncompacted layout by design (doctrine 5: derived
     /// state is discarded and rebuilt) — its answers are identical, and its
@@ -2335,7 +2343,7 @@ impl Database {
             next_birth_ordinal,
         )?;
         // The slot advances so the compacted generation is what the next
-        // open lands on — the exact durability fast open added.
+        // checkpoint-selected open lands on.
         let manifest_records = [ManifestRecord {
             graph: GRAPH,
             branch: BRANCH,
@@ -2396,8 +2404,9 @@ impl Database {
 /// durably is — element identity plus content — never DeltaRow bytes. Same-
 /// commit folds (create+update in place) therefore advance the chain once,
 /// which is what makes the head a pure function of durable state: a
-/// manifest-based fast open recomputes identical chains from blocks and
-/// patches alone. Commit sequences are deliberately OUTSIDE the transcript —
+/// manifest-selected reopen recomputes identical chains from blocks and
+/// patches alone after authenticating the prefix. Commit sequences are
+/// deliberately OUTSIDE the transcript —
 /// the predecessor link already orders the chain, and a batch stamps a
 /// same-batch create's head before any sequence exists. Deliberately
 /// duplicated in `fgdb-reference` (§15.2).
@@ -2854,7 +2863,7 @@ async fn checkpoint_matches_stream(
 /// folded and compared the complete prefix before this function is called.
 /// The equivalence law pins the result against [`rebuild`] on generated
 /// histories.
-async fn fast_rebuild(
+async fn reopen_from_verified_checkpoint(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
     store: &BlockStore,
@@ -3125,9 +3134,9 @@ async fn fold_stream_through(
         // at that commit, so the durable layout is a function of the STREAM —
         // never of which writer happened to hold unsealed rows. Without this,
         // a retained writer re-coalesces pending rows across commits and a
-        // fast open (which can only see SEALED durable state) would republish
-        // a different — equally lawful, but not identical — root, breaking
-        // the reopening-publishes-the-same-root determinism law.
+        // checkpoint-selected open (which can only see SEALED durable state)
+        // would republish a different — equally lawful, but not identical —
+        // root, breaking the reopening-publishes-the-same-root determinism law.
         writer
             .seal(keys.block_keys())
             .map_err(|error| RebuildError::Fold {

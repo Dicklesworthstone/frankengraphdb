@@ -1707,15 +1707,16 @@ fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
     });
 }
 
-/// **THE FAST-OPEN EQUIVALENCE LAW (fgdb-ge6a): opening through the slot's
-/// manifest and opening by folding the whole stream are indistinguishable —
+/// **THE CHECKPOINT-SELECTED OPEN EQUIVALENCE LAW (fgdb-ge6a): opening through
+/// the slot's verified manifest and opening by folding the whole stream are
+/// indistinguishable —
 /// same root, same manifest, same frontier, same answers, and the SAME next
 /// root after one more write.** The last clause is the sharp one: it proves
 /// the derived writer state (live maps, chains, versions, birth ordinals)
 /// equals the folded one, because publication is deterministic in exactly
 /// that state.
 #[test]
-fn fast_open_is_indistinguishable_from_the_stream_fold() {
+fn checkpoint_selected_open_is_indistinguishable_from_the_stream_fold() {
     let dir = scratch("fast-open");
     under_lab(99, move |cx| async move {
         let cx = &cx;
@@ -1746,15 +1747,17 @@ fn fast_open_is_indistinguishable_from_the_stream_fold() {
 
         // Both open paths, sequentially (the lease is single-writer), each
         // interrogated identically.
-        let fast = Database::open(cx, &dir, keys()).await.expect("fast opens");
-        let fast_state = (
-            fast.partition_root(),
-            fast.manifest(),
-            fast.frontier(),
-            fast.vertices().expect("reads"),
-            fast.edges().expect("reads"),
+        let selected = Database::open(cx, &dir, keys())
+            .await
+            .expect("checkpoint-selected open succeeds");
+        let selected_state = (
+            selected.partition_root(),
+            selected.manifest(),
+            selected.frontier(),
+            selected.vertices().expect("reads"),
+            selected.edges().expect("reads"),
         );
-        drop(fast);
+        drop(selected);
         let slow = Database::open_rebuilding(cx, &dir, keys())
             .await
             .expect("rebuild opens");
@@ -1766,44 +1769,45 @@ fn fast_open_is_indistinguishable_from_the_stream_fold() {
                 slow.vertices().expect("reads"),
                 slow.edges().expect("reads"),
             ),
-            fast_state,
+            selected_state,
             "the two open paths must be indistinguishable"
         );
         drop(slow);
 
         // One more write after EACH path — the roots must match, which pins
         // the derived writer state itself, not just the published artifacts.
-        let mut fast = Database::open(cx, &dir, keys())
+        let mut selected = Database::open(cx, &dir, keys())
             .await
-            .expect("fast reopens");
+            .expect("checkpoint-selected open succeeds");
         let mut batch = WriteBatch::new(KNOWS);
         batch.create_vertex(VId(4), vec![], vec![(key, CanonicalScalar::Int(9))]);
         batch.add_edge(EId(12), VId(4), VId(1), vec![]);
         batch.set_vertex_label(VId(1), LabelId(3), false);
-        fast.write(cx, batch)
+        selected
+            .write(cx, batch)
             .await
-            .expect("commits after fast open");
-        let root_after_fast = fast.partition_root();
-        let scans_after_fast = (
-            fast.vertices().expect("reads"),
-            fast.edges().expect("reads"),
+            .expect("commits after checkpoint-selected open");
+        let root_after_selected = selected.partition_root();
+        let scans_after_selected = (
+            selected.vertices().expect("reads"),
+            selected.edges().expect("reads"),
         );
-        drop(fast);
+        drop(selected);
 
         // The write above advanced durable history, so the rebuild control
         // now folds THAT stream — its post-open state must equal what the
-        // fast-opened session already answered.
+        // checkpoint-selected session already answered.
         let slow = Database::open_rebuilding(cx, &dir, keys())
             .await
             .expect("rebuild reopens");
-        assert_eq!(slow.partition_root(), root_after_fast);
+        assert_eq!(slow.partition_root(), root_after_selected);
         assert_eq!(
             (
                 slow.vertices().expect("reads"),
                 slow.edges().expect("reads"),
             ),
-            scans_after_fast,
-            "a write through the fast-opened session is the same write"
+            scans_after_selected,
+            "a write through the checkpoint-selected session is the same write"
         );
     });
 }
