@@ -675,7 +675,7 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                 let mut touched: std::collections::BTreeSet<(u8, u128)> =
                     std::collections::BTreeSet::new();
                 for _ in 0..ops {
-                    match rng.below(7) {
+                    match rng.below(8) {
                         0 | 1 => {
                             let vid = model.next_vid;
                             model.next_vid += 1;
@@ -745,6 +745,14 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                                 .then(|| CanonicalScalar::Int(rng.next() as i64 % 1000));
                             batch.set_edge_property(EId(eid), PropertyKeyId(11), value);
                         }
+                        7 if !model.live_vertices.is_empty() => {
+                            let vid = model.live_vertices[rng.below(model.live_vertices.len())];
+                            if !touched.insert((0, vid)) {
+                                continue; // coarser than the engine's per-field law: safe
+                            }
+                            let member = rng.below(2) == 0;
+                            batch.set_vertex_label(VId(vid), LabelId(3), member);
+                        }
                         _ => {
                             // The preferred family had no lawful target yet;
                             // create a vertex instead so the batch stays
@@ -764,13 +772,24 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                 epochs.push(frontier);
             }
 
-            // Gather every epoch's engine scans before the lease drops.
-            let engine_epochs: Vec<(Vec<fgdb::VertexRow>, Vec<fgdb::EdgeRecord>)> = epochs
+            // Gather every epoch's engine scans AND every vertex's
+            // neighbours before the lease drops — the neighbour merge is its
+            // own read path (a contiguous in-place scan), so agreement on
+            // edge scans alone would leave it unwitnessed.
+            let probe_vids = model.next_vid;
+            type GenEpoch = (Vec<fgdb::VertexRow>, Vec<fgdb::EdgeRecord>, Vec<Vec<VId>>);
+            let engine_epochs: Vec<GenEpoch> = epochs
                 .iter()
                 .map(|as_of| {
                     (
                         db.vertices_at(*as_of).expect("engine scans"),
                         db.edges_at(*as_of).expect("engine scans"),
+                        (1..probe_vids)
+                            .map(|vid| {
+                                db.neighbours_at(VId(vid), KNOWS, *as_of)
+                                    .expect("engine reads")
+                            })
+                            .collect(),
                     )
                 })
                 .collect();
@@ -781,7 +800,7 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
             let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
                 .await
                 .expect("oracle opens");
-            for (as_of, (vertex_scan, edge_scan)) in epochs.iter().zip(&engine_epochs) {
+            for (as_of, (vertex_scan, edge_scan, hoods)) in epochs.iter().zip(&engine_epochs) {
                 let replayed = fgdb_sim::replay_through(cx, &coordinator, *as_of)
                     .await
                     .expect("the prefix replays");
@@ -846,6 +865,13 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                             .collect::<Vec<_>>(),
                         "seed {seed} epoch {as_of:?}: {:?} properties",
                         record.entry.eid
+                    );
+                }
+                for (vid, hood) in (1..probe_vids).map(VId).zip(hoods) {
+                    assert_eq!(
+                        hood,
+                        &graph.neighbours(vid, KNOWS),
+                        "seed {seed} epoch {as_of:?}: {vid:?} neighbours"
                     );
                 }
             }
