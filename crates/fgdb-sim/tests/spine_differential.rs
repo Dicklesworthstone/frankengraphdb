@@ -28,7 +28,10 @@
 //! agree about.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch};
+use fgdb::{
+    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, DatabaseState, DerivedPublicationStage, ReadError,
+    RebuildError, WriteBatch, WriteError,
+};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -85,6 +88,17 @@ where
         "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
     );
     output
+}
+
+fn assert_recovery_fence<T>(
+    stage: DerivedPublicationStage,
+    recovery: fgdb::RecoveryRequired,
+    result: Result<T, ReadError>,
+) {
+    assert!(
+        matches!(result, Err(ReadError::RecoveryRequired(found)) if found == recovery),
+        "{stage:?}: every state-bearing read must carry the same recovery evidence"
+    );
 }
 
 /// Write a history through the ENGINE's public surface only.
@@ -401,6 +415,194 @@ fn agreement_survives_a_reopen() {
              means the fixture stopped exercising the fold"
         );
     });
+}
+
+/// Every derived-publication boundary after Chronicle D2 has the same law:
+/// the retained handle is totally fenced, and a fresh open agrees with the
+/// independent reference replay about the commit that triggered the failure
+/// (`fgdb-l96k`).
+#[test]
+fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
+    const STAGES: [DerivedPublicationStage; 9] = [
+        DerivedPublicationStage::FoldCommittedTemplate,
+        DerivedPublicationStage::SealPartition,
+        DerivedPublicationStage::PublishEdgeBlocks,
+        DerivedPublicationStage::PublishVertexPatches,
+        DerivedPublicationStage::PublishPartitionRoot,
+        DerivedPublicationStage::PublishManifest,
+        DerivedPublicationStage::PublishRootSlot,
+        DerivedPublicationStage::RefreshEdgeSnapshot,
+        DerivedPublicationStage::RefreshVertexSnapshot,
+    ];
+
+    for (ordinal, stage) in STAGES.into_iter().enumerate() {
+        let dir = scratch(&format!("post-d2-{ordinal}-{stage:?}"));
+        under_lab(1_200 + ordinal as u64, move |cx| async move {
+            let cx = &cx;
+            let mut db = Database::create(cx, &dir, engine_keys())
+                .await
+                .expect("creates");
+
+            let mut first = WriteBatch::new(KNOWS);
+            first.create_vertex(
+                VId(1),
+                vec![LabelId(3)],
+                vec![(PropertyKeyId(7), CanonicalScalar::Int(1))],
+            );
+            first.create_vertex(VId(2), vec![], vec![]);
+            first.add_edge(EId(10), VId(1), VId(2), vec![]);
+            db.write(cx, first).await.expect("first commit publishes");
+
+            let mut second = WriteBatch::new(KNOWS);
+            second.create_vertex(
+                VId(3),
+                vec![LabelId(5)],
+                vec![(PropertyKeyId(7), CanonicalScalar::Int(2))],
+            );
+            second.add_edge(
+                EId(11),
+                VId(1),
+                VId(3),
+                vec![(PropertyKeyId(11), CanonicalScalar::Bool(true))],
+            );
+            let error = db
+                .write_with_publication_failure(cx, second, stage)
+                .await
+                .expect_err("the named post-D2 stage must fail");
+            let (recovery, source) = match error {
+                WriteError::CommittedNeedsRecovery { recovery, source } => (recovery, source),
+                other => {
+                    assert!(
+                        false,
+                        "{stage:?}: injected failure returned the wrong error: {other:?}"
+                    );
+                    return;
+                }
+            };
+            assert_eq!(recovery.durable_frontier.0, 2, "{stage:?}");
+            assert_eq!(recovery.published_frontier.0, 1, "{stage:?}");
+            assert_eq!(recovery.failed_stage, stage);
+            assert!(
+                matches!(*source, RebuildError::InjectedPublicationFailure(found) if found == stage),
+                "{stage:?}: the source must identify the injection boundary"
+            );
+            assert_eq!(
+                db.state(),
+                DatabaseState::NeedsAuthoritativeRecovery(recovery)
+            );
+
+            assert_recovery_fence(stage, recovery, db.neighbours(VId(1), KNOWS));
+            assert_recovery_fence(
+                stage,
+                recovery,
+                db.neighbours_at(VId(1), KNOWS, recovery.published_frontier),
+            );
+            assert_recovery_fence(stage, recovery, db.in_neighbours(VId(3), KNOWS));
+            assert_recovery_fence(
+                stage,
+                recovery,
+                db.in_neighbours_at(VId(3), KNOWS, recovery.published_frontier),
+            );
+            assert_recovery_fence(stage, recovery, db.edge(EId(11)));
+            assert_recovery_fence(
+                stage,
+                recovery,
+                db.edge_at(EId(11), recovery.published_frontier),
+            );
+            assert_recovery_fence(stage, recovery, db.vertex(VId(3)));
+            assert_recovery_fence(
+                stage,
+                recovery,
+                db.vertex_at(VId(3), recovery.published_frontier),
+            );
+            assert_recovery_fence(stage, recovery, db.vertices());
+            assert_recovery_fence(stage, recovery, db.vertices_at(recovery.published_frontier));
+            assert_recovery_fence(stage, recovery, db.edges());
+            assert_recovery_fence(stage, recovery, db.edges_at(recovery.published_frontier));
+            let compact_error = db
+                .compact(cx)
+                .await
+                .expect_err("a fenced handle must refuse maintenance");
+            let RebuildError::HandleNotHealthy(found) = compact_error else {
+                assert!(
+                    false,
+                    "{stage:?}: maintenance returned the wrong fence: {compact_error:?}"
+                );
+                return;
+            };
+            assert_eq!(found, DatabaseState::NeedsAuthoritativeRecovery(recovery));
+            let mut third = WriteBatch::new(KNOWS);
+            third.create_vertex(VId(4), vec![], vec![]);
+            assert!(matches!(
+                db.write(cx, third).await,
+                Err(WriteError::RecoveryRequired(found)) if found == recovery
+            ));
+            drop(db);
+
+            // ENGINE SIDE: only the directory and keys cross the reopen.
+            let engine = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("authoritative reopen recovers the durable commit");
+            let engine_neighbours = engine.neighbours(VId(1), KNOWS).expect("reads");
+            let engine_vertices = engine.vertices().expect("reads");
+            let engine_edges = engine.edges().expect("reads");
+            drop(engine);
+
+            // ORACLE SIDE: independently replay the Chronicle bytes and compare
+            // the whole visible universe, not just one point lookup.
+            let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+                .await
+                .expect("oracle opens");
+            let replayed = replay(cx, &coordinator).await.expect("stream replays");
+            let graph = replayed
+                .database
+                .graph(GRAPH, BRANCH)
+                .expect("oracle materialized the coordinate");
+            assert_eq!(
+                engine_neighbours,
+                graph.neighbours(VId(1), KNOWS),
+                "{stage:?}"
+            );
+            assert_eq!(engine_vertices.len(), graph.vertex_count(), "{stage:?}");
+            assert_eq!(engine_edges.len(), graph.edge_count(), "{stage:?}");
+            for row in &engine_vertices {
+                let oracle = graph.vertex(row.vid).expect("engine-only vertex");
+                assert_eq!(
+                    row.labels,
+                    oracle.labels.iter().copied().collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    row.props,
+                    oracle
+                        .props
+                        .iter()
+                        .map(|(key, value)| (*key, value.clone()))
+                        .collect::<Vec<_>>()
+                );
+            }
+            for record in &engine_edges {
+                let oracle = graph.edge(record.entry.eid).expect("engine-only edge");
+                assert_eq!(
+                    (record.entry.src, record.entry.relation, record.entry.dst),
+                    (oracle.src, oracle.relation, oracle.dst)
+                );
+                assert_eq!(
+                    record.props,
+                    oracle
+                        .props
+                        .iter()
+                        .map(|(key, value)| (*key, value.clone()))
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(
+                engine_vertices.len(),
+                3,
+                "{stage:?}: second commit must exist"
+            );
+            assert_eq!(engine_edges.len(), 2, "{stage:?}: second commit must exist");
+        });
+    }
 }
 
 /// **THE TIME-TRAVEL DIFFERENTIAL (fgdb-90jx): at EVERY epoch frontier, the
