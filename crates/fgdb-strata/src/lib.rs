@@ -39,6 +39,7 @@
 
 pub mod compact;
 pub mod edge_props;
+pub mod manifest;
 pub mod root;
 pub mod store;
 pub mod vertex;

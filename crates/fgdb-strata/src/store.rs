@@ -83,6 +83,11 @@ const PUBLICATION_STAGING_FILE: &str = ".block-publication.staging";
 /// an unrelated process-local allocation policy.
 const MAX_STORED_OBJECT_BYTES: u64 = (crate::MAX_BLOCK_ENTRIES as u64) * 64;
 
+/// The largest manifest this store will materialize: header plus the record
+/// ceiling, derived beside the format exactly as the root ceiling is.
+const MANIFEST_HEADER_AND_RECORDS_CEILING: u64 =
+    (10 + crate::manifest::MAX_MANIFEST_RECORDS as usize * 72) as u64;
+
 /// Creation-only crash instants that distinguish inode durability from
 /// namespace durability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +180,7 @@ enum StoredObjectKind {
     Root,
     VertexPatch,
     EdgePropertyPatch,
+    Manifest,
 }
 
 impl StoredObjectKind {
@@ -191,6 +197,7 @@ impl StoredObjectKind {
             Self::EdgePropertyPatch => {
                 crate::edge_props::property_patch_id(k_oid, namespace, bytes)
             }
+            Self::Manifest => crate::manifest::manifest_id(k_oid, namespace, bytes),
         }
     }
 }
@@ -259,6 +266,16 @@ pub enum StoreError {
         at: usize,
         error: Box<StoreError>,
     },
+    /// The stored bytes are not a lawful partition manifest (fgdb-63w2).
+    MalformedManifest(crate::manifest::ManifestError),
+    /// Loading one of a manifest's named partition roots failed — the missing
+    /// identity is IN the error, because a manifest that quietly resolved to
+    /// fewer partitions would look exactly like correct operation.
+    ManifestRootLoad {
+        at: usize,
+        root: ObjectId,
+        error: Box<StoreError>,
+    },
     /// The stored bytes are not a lawful edge property patch, or a block and
     /// its hosted patch violated the locator bijection (fgdb-yqor).
     MalformedEdgePropertyPatch(crate::edge_props::EdgePropertyPatchError),
@@ -308,6 +325,12 @@ impl core::fmt::Display for StoreError {
             Self::BlockPatchLoad { at, error } => {
                 write!(f, "loading block {at}'s hosted property patch: {error}")
             }
+            Self::MalformedManifest(error) => {
+                write!(f, "stored manifest is malformed: {error}")
+            }
+            Self::ManifestRootLoad { at, root, error } => {
+                write!(f, "loading manifest record {at}'s root {root:?}: {error}")
+            }
         }
     }
 }
@@ -320,8 +343,10 @@ impl core::error::Error for StoreError {
             Self::MalformedRoot(error) => Some(error),
             Self::MalformedPatch(error) => Some(error),
             Self::MalformedEdgePropertyPatch(error) => Some(error),
+            Self::MalformedManifest(error) => Some(error),
             Self::RootBlockLoad { error, .. }
             | Self::RootPatchLoad { error, .. }
+            | Self::ManifestRootLoad { error, .. }
             | Self::BlockPatchLoad { error, .. } => Some(error.as_ref()),
             Self::ObjectTooLarge { .. }
             | Self::IdentityMismatch { .. }
@@ -798,6 +823,48 @@ impl BlockStore {
             || {},
         )
         .map(EdgePropertyPatchVersion)
+    }
+
+    /// Store a partition manifest's canonical bytes (fgdb-63w2) — the object
+    /// a database's `root_manifest_oid` resolves to. The caller stores every
+    /// root the manifest names FIRST, or [`BlockStore::resolve_manifest`]
+    /// fails closed on the unreachable partition.
+    pub fn put_manifest(
+        &self,
+        cx: &CommitCx,
+        records: &[crate::manifest::ManifestRecord],
+    ) -> Result<crate::manifest::ManifestVersion, StoreError> {
+        let bytes =
+            crate::manifest::encode_manifest(records).map_err(StoreError::MalformedManifest)?;
+        self.put_object_with_steps(StoredObjectKind::Manifest, cx, &bytes, None, || {}, || {})
+            .map(crate::manifest::ManifestVersion)
+    }
+
+    /// Resolve a manifest to every partition root it names, failing closed —
+    /// with the missing identity in the error — rather than ever answering a
+    /// silently smaller graph (fgdb-63w2, the ge6a law).
+    pub fn resolve_manifest(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::manifest::ManifestVersion,
+    ) -> Result<Vec<(crate::manifest::ManifestRecord, crate::root::PartitionRoot)>, StoreError>
+    {
+        let limit = MANIFEST_HEADER_AND_RECORDS_CEILING;
+        let bytes = self.read_object_bytes(cx, id.0, limit)?;
+        let records = crate::manifest::read_manifest(&self.k_oid, self.namespace, &bytes, id)
+            .map_err(StoreError::MalformedManifest)?;
+        let mut resolved = Vec::with_capacity(records.len());
+        for (at, record) in records.into_iter().enumerate() {
+            let root =
+                self.get_root(cx, record.root)
+                    .map_err(|error| StoreError::ManifestRootLoad {
+                        at,
+                        root: record.root.0,
+                        error: Box::new(error),
+                    })?;
+            resolved.push((record, root));
+        }
+        Ok(resolved)
     }
 
     /// Load the raw bytes of a vertex patch, verifying identity but not
