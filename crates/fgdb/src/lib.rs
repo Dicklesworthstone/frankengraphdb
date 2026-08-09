@@ -70,26 +70,26 @@
 //! a reopen — doctrine 7 prohibits both, and a slice that stubbed the durable
 //! path would prove nothing about the durable path.
 //!
-//! # Why reopen replays the commit stream, and why that is not a gap
+//! # Checkpoint-selected reopen and Chronicle authority
 //!
-//! `RootSlot.root_manifest_oid` points at an object nobody has defined yet
-//! (`fgdb-ge6a`), so there is no durable index from "here is a database
-//! directory" to "here are its partition roots". This crate therefore does not
-//! use one. [`Database::open`] recovers the commit stream — which IS reachable
-//! from the directory alone, via `CommitCoordinator::open` — and REBUILDS the
-//! tier-D fold from it.
+//! `manifest.root` can select a durable Strata checkpoint and reopen its
+//! immutable objects directly. Content identity proves that those objects are
+//! authentic, but not that they belong to this database's Chronicle history.
+//! [`Database::open`] therefore reconstructs the checkpoint's temporal graph
+//! projection from Chronicle through the checkpoint sequence and compares the
+//! two before accepting the slot; only the suffix is then applied to the
+//! selected checkpoint.
 //!
-//! That is not a workaround for the missing manifest; it is doctrine 5 and
-//! FG-INV-18's primary path, spelled out: *derived structures are never more
-//! authoritative than the commit stream, and recovery discards and rebuilds
-//! them.* Adjacency blocks are derived. What `fgdb-ge6a` will add is the FAST
-//! path — resolving published roots directly so a reopen need not replay — and
-//! when it lands, [`Database::open`] gains a fast path and keeps this one as the
-//! authority it is checked against.
+//! This is the correctness path required by doctrine 5 and FG-INV-18: derived
+//! structures are never more authoritative than the commit stream. Its cost is
+//! stated rather than hidden: **open still performs an O(history) prefix fold
+//! to authenticate the checkpoint.** A true cost-fast open requires a durable,
+//! independently authenticated binding from the checkpoint to its exact
+//! Chronicle prefix. Until that contract exists, this implementation makes no
+//! end-to-end fast-open claim.
 //!
-//! The cost is stated rather than hidden: **rebuilding is O(history), and it runs
-//! on open AND after every write.** Incremental publication is part of tier-D's
-//! writer lifecycle (`fgdb-w3-tier-d-ctj`) and is deliberately not invented here.
+//! Writes publish incrementally through tier D; a forced full rebuild remains
+//! available as the equivalence oracle for the checkpoint-selected path.
 //! The rebuild is deterministic, which is worth more than it sounds: the root is
 //! content-addressed, so replaying the same stream twice publishes the SAME
 //! `PartitionRootVersion`, and [`Database::partition_root`] exposes it so that
@@ -1104,10 +1104,11 @@ impl Database {
     ///
     /// The database-ness decision belongs to the two callers above; by here it
     /// has been made.
-    /// The forced-rebuild face, for the fast-open equivalence law: identical
-    /// to [`Database::open`] except the manifest fast path is bypassed and
-    /// the whole stream is folded. Hidden because production has no reason
-    /// to pay O(history) when the slot is present and lawful.
+    /// The forced-rebuild face for checkpoint equivalence: identical to
+    /// [`Database::open`] except that the manifest-selected checkpoint is
+    /// bypassed and the whole stream is folded into a fresh root. Ordinary
+    /// open also folds the checkpoint prefix today, but uses that fold only
+    /// to authenticate the selected root before replaying its suffix.
     #[doc(hidden)]
     pub async fn open_rebuilding(
         cx: &CommitCx,
@@ -1136,13 +1137,15 @@ impl Database {
     ) -> Result<Self, OpenError> {
         let coordinator = CommitCoordinator::open(cx, path, keys.capsule_keys()).await?;
         let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
-        // THE FAST PATH (fgdb-ge6a): a lawful slot names a resolvable
-        // manifest, and the partition it names reopens WITHOUT the stream
-        // fold — only the suffix past its publication replays. The stream
-        // remains the source of truth: a missing slot file falls back to the
-        // full rebuild (and the reconciliation below creates the slot), while
-        // a PRESENT slot that is foreign, malformed, or unaccountable
-        // refuses rather than being silently rebuilt over.
+        // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
+        // resolvable manifest. Before accepting it, bind verifies the selected
+        // partition's temporal graph projection against Chronicle's complete
+        // prefix; fast_rebuild then reopens that partition and folds only the
+        // suffix. A missing slot falls back to a full rebuild (and the
+        // reconciliation below creates it), while a present slot that is
+        // foreign, malformed, or unaccountable refuses rather than being
+        // silently rebuilt over. Prefix verification is currently O(history),
+        // so this is not yet an end-to-end cost-fast open.
         let probe = RootStore::new(path);
         let (snapshot, writer) = if force_rebuild {
             rebuild(cx, &coordinator, &store, &keys).await?
@@ -2844,11 +2847,13 @@ async fn checkpoint_matches_stream(
     Ok(candidate == checkpoint_projection(&rebuilt.blocks, &rebuilt.block_props, &rebuilt.patches))
 }
 
-/// The manifest-based fast open (fgdb-ge6a): resolve the slot's manifest to
-/// a partition, reopen it from disk WITHOUT folding the stream, derive the
-/// writer and version state the fold would have built, then replay only the
-/// chronicle SUFFIX past the partition's publication. The equivalence law
-/// pins this against [`rebuild`] on every generated history.
+/// Post-verification checkpoint reopen (fgdb-ge6a): resolve the slot's
+/// manifest to a partition, reopen it from disk, derive the writer and version
+/// state the fold would have built, then replay only the Chronicle suffix past
+/// the partition's publication. [`checkpoint_matches_stream`] has already
+/// folded and compared the complete prefix before this function is called.
+/// The equivalence law pins the result against [`rebuild`] on generated
+/// histories.
 async fn fast_rebuild(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
@@ -3004,8 +3009,8 @@ async fn rebuild(
 
 /// Fold every committed template with `commit_seq > after` into the writer,
 /// versions map, and birth-ordinal allocator — the one stream fold, shared by
-/// the from-scratch rebuild (`after = 0`) and the fast open's SUFFIX replay
-/// past a resolved partition's `published_at` (fgdb-ge6a).
+/// the from-scratch rebuild (`after = 0`), checkpoint authentication, and the
+/// selected checkpoint's suffix replay past `published_at` (fgdb-ge6a).
 async fn fold_stream(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
