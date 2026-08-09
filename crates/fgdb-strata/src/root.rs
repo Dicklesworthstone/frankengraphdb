@@ -861,6 +861,33 @@ fn visible_statement(
         .filter(|entry| entry.visible_at(as_of))
 }
 
+/// The SOURCES of every live edge arriving at `dst` over `relation` at
+/// `as_of`, ascending — the reverse face of [`merge_neighbours`] (fgdb-x164).
+///
+/// **A DERIVED SCAN, HONESTLY.** §6.1's reverse runs are synchronously
+/// maintained Tier-R materializations; none exist yet, and pretending with a
+/// process-local reverse index would be the substitute doctrine 7 prohibits.
+/// This face walks the same validated whole history the forward merge walks
+/// and pays O(entries) for it, which is the truthful cost until the reverse
+/// family lands.
+pub fn merge_in_neighbours(
+    blocks: &[Vec<crate::AdjacencyEntry>],
+    dst: fgdb_types::VId,
+    relation: fgdb_delta_types::RelationId,
+    as_of: CommitSeq,
+) -> Result<Vec<fgdb_types::VId>, RootError> {
+    let (statements, _) = collapse_edge_history(blocks)?;
+    let mut sources = std::collections::BTreeSet::<fgdb_types::VId>::new();
+    for entry in statements
+        .values()
+        .filter(|entry| entry.dst == dst && entry.relation == relation)
+        .filter(|entry| entry.visible_at(as_of))
+    {
+        sources.insert(entry.src);
+    }
+    Ok(sources.into_iter().collect())
+}
+
 /// [`merge_edge`], answering the winning statement's PROPERTIES beside it
 /// (fgdb-yqor). The properties ride the winning statement's own block — a
 /// tombstone restated them, so the supersede model needs no cross-block

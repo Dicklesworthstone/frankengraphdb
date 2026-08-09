@@ -160,7 +160,7 @@ use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestVersion, records_of};
 use fgdb_strata::root::{
     BlockRef, PatchRef, RootError, merge_all_edges_with_props, merge_edge_with_props,
-    merge_neighbours,
+    merge_in_neighbours, merge_neighbours,
 };
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::vertex::{merge_all_vertices, merge_vertex};
@@ -1422,6 +1422,31 @@ impl Database {
     /// frontier.
     pub fn neighbours(&self, src: VId, relation: RelationId) -> Result<Vec<VId>, ReadError> {
         self.neighbours_at(src, relation, self.snapshot.frontier)
+    }
+
+    /// The live SOURCES of edges arriving at `dst` over `relation`, at the
+    /// published frontier (fgdb-x164) — the reverse face of
+    /// [`Database::neighbours`], served as an honest derived scan until the
+    /// Tier-R reverse family exists.
+    pub fn in_neighbours(&self, dst: VId, relation: RelationId) -> Result<Vec<VId>, ReadError> {
+        self.in_neighbours_at(dst, relation, self.snapshot.frontier)
+    }
+
+    /// [`Database::in_neighbours`] as of `as_of`, under the same frontier
+    /// refusal as every `*_at` read.
+    pub fn in_neighbours_at(
+        &self,
+        dst: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(merge_in_neighbours(
+            &self.snapshot.blocks,
+            dst,
+            relation,
+            as_of,
+        )?)
     }
 
     /// [`Database::neighbours`] as of `as_of` — the system-time read B1 makes

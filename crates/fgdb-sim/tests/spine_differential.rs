@@ -777,7 +777,11 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
             // own read path (a contiguous in-place scan), so agreement on
             // edge scans alone would leave it unwitnessed.
             let probe_vids = model.next_vid;
-            type GenEpoch = (Vec<fgdb::VertexRow>, Vec<fgdb::EdgeRecord>, Vec<Vec<VId>>);
+            type GenEpoch = (
+                Vec<fgdb::VertexRow>,
+                Vec<fgdb::EdgeRecord>,
+                Vec<(Vec<VId>, Vec<VId>)>,
+            );
             let engine_epochs: Vec<GenEpoch> = epochs
                 .iter()
                 .map(|as_of| {
@@ -786,8 +790,12 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                         db.edges_at(*as_of).expect("engine scans"),
                         (1..probe_vids)
                             .map(|vid| {
-                                db.neighbours_at(VId(vid), KNOWS, *as_of)
-                                    .expect("engine reads")
+                                (
+                                    db.neighbours_at(VId(vid), KNOWS, *as_of)
+                                        .expect("engine reads"),
+                                    db.in_neighbours_at(VId(vid), KNOWS, *as_of)
+                                        .expect("engine reads"),
+                                )
                             })
                             .collect(),
                     )
@@ -867,11 +875,25 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                         record.entry.eid
                     );
                 }
-                for (vid, hood) in (1..probe_vids).map(VId).zip(hoods) {
+                for (vid, (hood, arrivals)) in (1..probe_vids).map(VId).zip(hoods) {
                     assert_eq!(
                         hood,
                         &graph.neighbours(vid, KNOWS),
                         "seed {seed} epoch {as_of:?}: {vid:?} neighbours"
+                    );
+                    // The oracle has no reverse face; derive arrivals from the
+                    // already-agreed edge scan — an independent construction,
+                    // which is the point (fgdb-x164).
+                    let mut expected: Vec<VId> = edge_scan
+                        .iter()
+                        .filter(|record| record.entry.dst == vid)
+                        .map(|record| record.entry.src)
+                        .collect();
+                    expected.sort();
+                    expected.dedup();
+                    assert_eq!(
+                        arrivals, &expected,
+                        "seed {seed} epoch {as_of:?}: {vid:?} in-neighbours"
                     );
                 }
             }

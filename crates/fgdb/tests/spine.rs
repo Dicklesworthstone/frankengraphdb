@@ -1261,3 +1261,59 @@ fn order_sensitive_batches_refuse_before_anything_is_durable() {
         assert!(db.vertex_at(VId(1), s1).expect("reads").is_some());
     });
 }
+
+/// **THE REVERSE READ LAW (fgdb-x164): `in_neighbours` answers the sources
+/// arriving at a vertex — with the direction controls that catch a face
+/// accidentally answering the forward merge.** A self-loop appears on both
+/// faces; an asymmetric pair appears on exactly one each; deletes and
+/// history behave as everywhere else.
+#[test]
+fn in_neighbours_answers_sources_and_respects_direction() {
+    let dir = scratch("in-neighbours");
+    under_lab(87, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(1), vec![], vec![]);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        batch.create_vertex(VId(3), vec![], vec![]);
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        batch.add_edge(EId(11), VId(3), VId(2), vec![]);
+        batch.add_edge(EId(12), VId(2), VId(2), vec![]); // self-loop
+        let s1 = db.write(cx, batch).await.expect("commits");
+        let mut second = WriteBatch::new(KNOWS);
+        second.delete_edge(EId(11));
+        let s2 = db.write(cx, second).await.expect("commits");
+        drop(db);
+
+        // NOTHING crosses this line except `dir`, `keys()`, and sequences.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(
+            db.in_neighbours_at(VId(2), KNOWS, s1).expect("reads"),
+            vec![VId(1), VId(2), VId(3)],
+            "every arriving source, self-loop included"
+        );
+        assert_eq!(
+            db.in_neighbours(VId(2), KNOWS).expect("reads"),
+            vec![VId(1), VId(2)],
+            "the deleted arrival is gone at the frontier"
+        );
+        assert_eq!(
+            db.in_neighbours(VId(1), KNOWS).expect("reads"),
+            vec![],
+            "nothing arrives at the pure source — the face that answered the \
+             forward merge here would say [2]"
+        );
+        assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(2)]);
+        assert_eq!(
+            db.in_neighbours(VId(2), WORKS_WITH).expect("reads"),
+            vec![],
+            "keyed on relation, as every read is"
+        );
+        let future = CommitSeq(s2.0 + 1);
+        assert!(matches!(
+            db.in_neighbours_at(VId(2), KNOWS, future),
+            Err(fgdb::ReadError::BeyondFrontier { .. })
+        ));
+    });
+}
