@@ -157,7 +157,10 @@ use fgdb_delta_types::{
     PropertyKeyId, RelationId, SchemaEpoch,
 };
 use fgdb_strata::edge_props::BlockProps;
-use fgdb_strata::manifest::{ManifestVersion, records_of};
+use fgdb_chronicle::{
+    RootBootstrap, RootSelection, RootSlot, RootStore, store::StoreError as SlotStoreError,
+};
+use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
 use fgdb_strata::root::{
     BlockRef, PatchRef, RootError, merge_all_edges_with_props, merge_edge_with_props,
     merge_in_neighbours, merge_neighbours,
@@ -252,6 +255,27 @@ pub enum OpenError {
     AlreadyADatabase {
         path: PathBuf,
     },
+    /// The root slot file failed at the storage boundary (fgdb-ge6a).
+    Slot(SlotStoreError),
+    /// The selected slot is well-formed and is NOT this database's: its
+    /// identity tuple or PLAIN-opener form disagrees with the keys in hand.
+    /// Refused, never reinterpreted — a slot from another database, another
+    /// posture, or a tampered one must not steer recovery.
+    ForeignSlot {
+        path: PathBuf,
+    },
+    /// The selected slot names a manifest the stream cannot account for —
+    /// not the rebuilt one, and not a resolvable ancestor of it. The stream
+    /// is the source of truth, and a pointer it cannot explain is damage.
+    SlotDisagreesWithStream {
+        path: PathBuf,
+        slot_manifest: ObjectId,
+    },
+    /// The root file exists but recovery selected no credible slot.
+    SlotUnrecoverable {
+        path: PathBuf,
+        detail: String,
+    },
     /// [`Database::create`] was asked for a non-empty directory that is not a
     /// database. Refused rather than adopted: this slice cannot prove that
     /// foreign contents are not a half-written database.
@@ -295,6 +319,10 @@ pub enum RebuildError {
     },
     Commit(CommitError),
     Store(StoreError),
+    /// Advancing the root slot after a durable publish failed (fgdb-ge6a).
+    /// The commit and the manifest are durable; the slot is at most one
+    /// publication behind, which the next open heals.
+    Slot(SlotStoreError),
 }
 
 /// Why a write could not be committed.
@@ -345,6 +373,7 @@ pub enum WriteError {
     Rebuild(RebuildError),
 }
 
+
 /// Why a read could not be served.
 #[derive(Debug)]
 pub enum ReadError {
@@ -386,6 +415,27 @@ impl core::fmt::Display for OpenError {
             Self::NotADirectory { path } => {
                 write!(f, "{} exists and is not a directory", path.display())
             }
+            Self::Slot(error) => write!(f, "root slot: {error}"),
+            Self::ForeignSlot { path } => write!(
+                f,
+                "the root slot in {} is not this database's — identity tuple or \
+                 opener form disagrees with the keys in hand",
+                path.display()
+            ),
+            Self::SlotDisagreesWithStream {
+                path,
+                slot_manifest,
+            } => write!(
+                f,
+                "the root slot in {} names manifest {slot_manifest:?}, which the \
+                 commit stream cannot account for",
+                path.display()
+            ),
+            Self::SlotUnrecoverable { path, detail } => write!(
+                f,
+                "the root file in {} selected no credible slot: {detail}",
+                path.display()
+            ),
             Self::NotADatabase { path, missing } => write!(
                 f,
                 "{} is not a database: {missing} is absent",
@@ -698,10 +748,142 @@ struct Snapshot {
 /// Holding one holds the commit stream's single-writer lease, so a second
 /// `Database` over the same directory is refused by Chronicle rather than by a
 /// convention here.
+/// `opener_kind` 2 — PLAIN_STRATA_OBJECT (ruled on fgdb-ge6a, 2026-08-09,
+/// under the owner's delegation). The slot's `root_manifest_oid` resolves
+/// through the content-addressed [`BlockStore`], whose read-time identity
+/// verification discharges the bootstrap's self-description duty. Under this
+/// kind the object kind and byte lengths are REAL and every crypto/FEC
+/// descriptor field is ZERO AND MUST BE ZERO — validated at open, refused
+/// nonzero. A future FEC-backed posture is a DIFFERENT opener kind, never a
+/// reinterpretation of this one.
+pub const SLOT_OPENER_PLAIN_STRATA_OBJECT: u16 = 2;
+
+/// The registered `IncarnationContinuityProfile` id for `DirectoryBound` —
+/// the W1 embedded posture, which holds no external continuity head.
+const SLOT_PROFILE_DIRECTORY_BOUND: u16 = 1;
+
+/// The documented stand-in for Appendix A's `DatabaseId` until the root
+/// stack owns it (the fgdb-sim precedent): deterministic in the security
+/// namespace, replaced by the real field without changing the slot format.
+fn spine_database_id(namespace: &DatabaseSecurityNamespaceId) -> [u8; 16] {
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(b"fgdb.spine.database-id.v1");
+    hasher.update(&namespace.0);
+    hasher.finalize().0[..16]
+        .try_into()
+        .expect("a 32-byte digest always yields 16")
+}
+
+/// The PLAIN opener's bootstrap: real object kind and lengths, zeros
+/// everywhere the FEC/crypto machinery would live.
+fn plain_bootstrap(manifest_len: u64) -> RootBootstrap {
+    let mut opener_payload = [0u8; fgdb_chronicle::root::OPENER_PAYLOAD_LEN];
+    opener_payload[..2]
+        .copy_from_slice(&fgdb_strata::manifest::MANIFEST_OBJECT_KIND.to_le_bytes());
+    RootBootstrap {
+        root_encoding_id: [0; 32],
+        root_placement_id: [0; 32],
+        root_placement_epoch: 0,
+        failure_domain_policy_id: 0,
+        root_failure_domain_id: 0,
+        segment_id: 0,
+        offset: 0,
+        encoded_len: manifest_len,
+        root_symbol_inventory_digest: [0; 32],
+        object_kind: fgdb_strata::manifest::MANIFEST_OBJECT_KIND,
+        canonical_plaintext_len: manifest_len,
+        codec_profile: 0,
+        compressed_len: manifest_len,
+        data_crypto_profile: 0,
+        dek_id: [0; 16],
+        nonce_len: 0,
+        nonce_or_siv: [0; fgdb_chronicle::root::NONCE_CAPACITY],
+        object_tag_len: 0,
+        fec_profile: 0,
+        transfer_length: manifest_len,
+        oti_common: 0,
+        oti_scheme: 0,
+        symbol_size: 0,
+        source_block_count: 0,
+        symbol_auth_profile: 0,
+        ciphertext_id: [0; 32],
+        ciphertext_digest: [0; 32],
+        opener_kind: SLOT_OPENER_PLAIN_STRATA_OBJECT,
+        oid_key_id: [0; 16],
+        opener_payload_len: 2,
+        opener_payload,
+        opener_digest: [0; 32],
+    }
+}
+
+fn spine_slot(
+    keys: &DatabaseKeys,
+    generation: u64,
+    manifest: ManifestVersion,
+    manifest_len: u64,
+) -> RootSlot {
+    RootSlot {
+        format_major: 1,
+        format_minor: 0,
+        slot_generation: generation,
+        local_writer_fence_epoch: 1,
+        database_id: spine_database_id(&keys.namespace),
+        database_security_namespace_id: keys.namespace.0,
+        cluster_incarnation: 1,
+        incarnation_continuity_profile_id: SLOT_PROFILE_DIRECTORY_BOUND,
+        cluster_incarnation_continuity_digest: [0; 32],
+        continuity_cas_version: 0,
+        service_visibility_epoch: 0,
+        root_manifest_oid: manifest.0.0,
+        bootstrap: plain_bootstrap(manifest_len),
+    }
+}
+
+/// The zero-validation half of the PLAIN opener ruling: a slot whose
+/// identity tuple, opener form, or must-be-zero region disagrees is not this
+/// database's slot and is refused, never reinterpreted.
+fn validate_plain_slot(slot: &RootSlot, keys: &DatabaseKeys) -> bool {
+    let expected_zeroed = {
+        let mut probe = spine_slot(
+            keys,
+            slot.slot_generation,
+            ManifestVersion(ObjectId(slot.root_manifest_oid)),
+            slot.bootstrap.canonical_plaintext_len,
+        );
+        probe.root_manifest_oid = slot.root_manifest_oid;
+        probe
+    };
+    *slot == expected_zeroed
+}
+
+/// The canonical byte length of the snapshot's single-record manifest —
+/// recomputed rather than stored, because the slot's bootstrap carries it
+/// and a stored copy could drift from the encoder.
+fn manifest_bytes_len(snapshot: &Snapshot) -> Result<u64, OpenError> {
+    let records = [ManifestRecord {
+        graph: GRAPH,
+        branch: BRANCH,
+        partition: PARTITION,
+        root: snapshot.root,
+    }];
+    let bytes = encode_manifest(&records).map_err(|_| OpenError::NotADatabase {
+        path: PathBuf::new(),
+        missing: "an encodable manifest",
+    })?;
+    Ok(bytes.len() as u64)
+}
+
 #[derive(Debug)]
 pub struct Database {
     coordinator: CommitCoordinator,
     store: BlockStore,
+    /// The ONE mutable object in the directory (doctrine 5): the dual-slot
+    /// root file whose selected slot names the current manifest (fgdb-ge6a,
+    /// PLAIN opener ruling). Published after every manifest, reconciled at
+    /// every open.
+    slot_store: RootStore,
+    /// The generation the NEXT slot publication will carry; monotone.
+    slot_generation: u64,
     keys: DatabaseKeys,
     snapshot: Snapshot,
     /// The persistent fold over every committed row, retained so a commit can
@@ -797,9 +979,74 @@ impl Database {
         let coordinator = CommitCoordinator::open(cx, path, keys.capsule_keys()).await?;
         let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
         let (snapshot, writer) = rebuild(cx, &coordinator, &store, &keys).await?;
+        // RECONCILE THE ROOT SLOT (fgdb-ge6a, the PLAIN opener ruling). The
+        // stream is the source of truth and the rebuild just derived its
+        // manifest; the slot is the durable pointer a fast open will trust,
+        // so every open leaves it CURRENT or refuses:
+        //   - missing file: an interrupted create (the crash window between
+        //     the coordinator's birth and the first slot write) — create it;
+        //   - naming the rebuilt manifest: continue from its generation;
+        //   - naming a RESOLVABLE older manifest: the crash window between a
+        //     commit's manifest and its slot — heal forward;
+        //   - anything else: not this database's lawful slot; refuse.
+        let slot_store = RootStore::new(path);
+        let manifest_len = manifest_bytes_len(&snapshot)?;
+        let slot_generation = match slot_store.recover(cx).await {
+            Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                let slot = spine_slot(&keys, 1, snapshot.manifest, manifest_len);
+                slot_store
+                    .create(cx, &slot)
+                    .await
+                    .map_err(OpenError::Slot)?;
+                1
+            }
+            Err(error) => return Err(OpenError::Slot(error)),
+            Ok(RootSelection::Selected { slot, .. })
+            | Ok(RootSelection::IdenticalPair { slot }) => {
+                if !validate_plain_slot(&slot, &keys) {
+                    return Err(OpenError::ForeignSlot {
+                        path: path.to_path_buf(),
+                    });
+                }
+                if slot.root_manifest_oid == snapshot.manifest.0.0 {
+                    slot.slot_generation
+                } else {
+                    let stale = ManifestVersion(ObjectId(slot.root_manifest_oid));
+                    let resolvable = store
+                        .resolve_manifest(cx, stale)
+                        .ok()
+                        .is_some_and(|resolved| {
+                            resolved
+                                .iter()
+                                .all(|(_, root)| root.published_at.0 <= snapshot.frontier.0)
+                        });
+                    if !resolvable {
+                        return Err(OpenError::SlotDisagreesWithStream {
+                            path: path.to_path_buf(),
+                            slot_manifest: ObjectId(slot.root_manifest_oid),
+                        });
+                    }
+                    let healed = slot.slot_generation + 1;
+                    let next = spine_slot(&keys, healed, snapshot.manifest, manifest_len);
+                    slot_store
+                        .publish_evidenced(cx, &next)
+                        .await
+                        .map_err(OpenError::Slot)?;
+                    healed
+                }
+            }
+            Ok(selection) => {
+                return Err(OpenError::SlotUnrecoverable {
+                    path: path.to_path_buf(),
+                    detail: format!("{selection:?}"),
+                });
+            }
+        };
         Ok(Self {
             coordinator,
             store,
+            slot_store,
+            slot_generation,
             keys,
             snapshot,
             writer,
@@ -1286,6 +1533,18 @@ impl Database {
             .store
             .put_manifest(cx, &manifest_records)
             .map_err(RebuildError::from)?;
+        // The slot advances in the same publish (fgdb-ge6a): a crash before
+        // this line leaves the slot exactly one publication behind, which is
+        // the shape open() heals; there is no window where it runs ahead.
+        let manifest_len = encode_manifest(&manifest_records)
+            .map(|bytes| bytes.len() as u64)
+            .expect("records_of already proved these records canonical");
+        let next_generation = self.slot_generation + 1;
+        self.slot_store
+            .publish_evidenced(cx, &spine_slot(&self.keys, next_generation, manifest, manifest_len))
+            .await
+            .map_err(RebuildError::Slot)?;
+        self.slot_generation = next_generation;
 
         // Refresh the snapshot without re-reading the partition: carry forward
         // the decoded blocks whose references are unchanged, and decode the new
