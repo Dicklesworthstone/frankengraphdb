@@ -157,6 +157,7 @@ use fgdb_delta_types::{
     PropertyKeyId, RelationId, SchemaEpoch,
 };
 use fgdb_strata::edge_props::BlockProps;
+use fgdb_strata::manifest::{ManifestVersion, records_of};
 use fgdb_strata::root::{
     BlockRef, PatchRef, RootError, merge_all_edges_with_props, merge_edge_with_props,
     merge_neighbours,
@@ -612,6 +613,9 @@ struct Snapshot {
     patch_refs: Vec<PatchRef>,
     frontier: CommitSeq,
     root: PartitionRootVersion,
+    /// The manifest published beside `root` (fgdb-63w2) — the identity a
+    /// root slot carries, re-derived identically by every rebuild.
+    manifest: ManifestVersion,
     /// The next unspent birth ordinal, derived by counting the creations the
     /// durable stream already contains. Derived rather than stored: identity
     /// allocation is `fgdb-w2`'s, and a counter persisted here would be a second
@@ -1080,6 +1084,14 @@ impl Database {
             .store
             .put_root_verified(cx, &root, &mut self.receipts)
             .map_err(RebuildError::from)?;
+        // The manifest names the published root (fgdb-63w2): the durable path
+        // from this directory to its partition advances in the same publish.
+        let manifest_records =
+            records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
+        let manifest = self
+            .store
+            .put_manifest(cx, &manifest_records)
+            .map_err(RebuildError::from)?;
 
         // Refresh the snapshot without re-reading the partition: carry forward
         // the decoded blocks whose references are unchanged, and decode the new
@@ -1205,6 +1217,7 @@ impl Database {
             patch_refs: root.vertex_patches,
             frontier,
             root: root_id,
+            manifest,
             next_birth_ordinal,
             versions: new_versions,
         };
@@ -1329,6 +1342,13 @@ impl Database {
     /// The sequence the published partition has caught up to.
     pub fn frontier(&self) -> CommitSeq {
         self.snapshot.frontier
+    }
+
+    /// The identity of the published partition manifest (fgdb-63w2) — what a
+    /// root slot will carry, republished beside every root under the same
+    /// determinism law as [`Database::partition_root`].
+    pub fn manifest(&self) -> ManifestVersion {
+        self.snapshot.manifest
     }
 
     /// The identity of the published partition root.
@@ -1646,6 +1666,9 @@ async fn rebuild(
         store.put_patch(cx, &patch.bytes)?;
     }
     let root_id = store.put_root(cx, &root)?;
+    let manifest_records =
+        records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
+    let manifest = store.put_manifest(cx, &manifest_records)?;
     let (reopened_root, decoded, decoded_props, decoded_patches) = store.reopen(cx, root_id)?;
 
     Ok((
@@ -1657,6 +1680,7 @@ async fn rebuild(
             patch_refs: reopened_root.vertex_patches,
             frontier,
             root: root_id,
+            manifest,
             next_birth_ordinal,
             versions,
         },

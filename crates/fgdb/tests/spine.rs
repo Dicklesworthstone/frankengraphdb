@@ -997,3 +997,58 @@ fn the_graph_enumerates_at_every_committed_sequence() {
         ));
     });
 }
+
+/// **THE MANIFEST LAW (fgdb-63w2): every publish leaves a durable manifest
+/// naming the current root, the identity re-derives across a reopen, and it
+/// resolves through a FRESH store handle** — the exact object a root slot
+/// carries, proven to work with nothing held in memory.
+#[test]
+fn every_publish_leaves_a_resolvable_manifest() {
+    let dir = scratch("manifest");
+    under_lab(89, move |cx| async move {
+        let cx = &cx;
+        let (manifest_after_writes, root_after_writes) = {
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(1), vec![], vec![]);
+            batch.create_vertex(VId(2), vec![], vec![]);
+            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+            db.write(cx, batch).await.expect("commits");
+            let manifest_first = db.manifest();
+            let mut second = WriteBatch::new(KNOWS);
+            second.delete_edge(EId(10));
+            db.write(cx, second).await.expect("commits");
+            assert_ne!(
+                db.manifest(),
+                manifest_first,
+                "a new root means a new manifest — the binding is per publish"
+            );
+            (db.manifest(), db.partition_root())
+        };
+
+        // NOTHING crosses this line except `dir`, `keys()`, and the two
+        // identities a root slot would durably hold.
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(
+            db.manifest(),
+            manifest_after_writes,
+            "the rebuild re-derives the same manifest identity"
+        );
+
+        // The manifest resolves through a fresh store handle to the root the
+        // database is actually serving from.
+        drop(db);
+        let store =
+            fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+        let resolved = store
+            .resolve_manifest(cx, manifest_after_writes)
+            .expect("the manifest resolves");
+        assert_eq!(resolved.len(), 1, "one partition in the spine");
+        let root_bytes = fgdb_strata::root::encode_root(&resolved[0].1).expect("re-encodes");
+        assert_eq!(
+            fgdb_strata::root::root_id(&K_OID, NAMESPACE, &root_bytes),
+            root_after_writes.0,
+            "the manifest names the root the database published last"
+        );
+    });
+}
