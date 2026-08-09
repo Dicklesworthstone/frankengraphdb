@@ -307,7 +307,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
             // Republish: new blocks, a new root, the old one untouched.
             let mut references = Vec::new();
             for entries in &result.blocks {
-                let bytes = fgdb_strata::encode_block(0, entries).expect("lawful");
+                let bytes = fgdb_strata::encode_block(0, None, entries).expect("lawful");
                 let id = store.put(cx, &bytes).expect("stores");
                 let span = fgdb_strata::root::span_of(entries).expect("non-empty");
                 references.push(fgdb_strata::root::BlockRef {

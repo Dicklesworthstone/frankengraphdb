@@ -71,7 +71,7 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
 }
 
 fn sample() -> Vec<u8> {
-    encode_block(0, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes")
+    encode_block(0, None, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes")
 }
 
 /// A stored block reads back as the same entries, under the identity the store
@@ -274,7 +274,7 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
         let id = store.put(cx, &mine).expect("stores");
 
         // A different, perfectly lawful block written over the path.
-        let other = encode_block(0, &[entry(9, 9, 7)]).expect("encodes");
+        let other = encode_block(0, None, &[entry(9, 9, 7)]).expect("encodes");
         assert_ne!(other, mine);
         std::fs::write(store.path(id.0), &other).expect("overwrite");
 
@@ -365,7 +365,7 @@ fn a_damaged_existing_file_is_not_misreported_as_a_collision() {
         let id = store.put(cx, &bytes).expect("stores");
 
         // Something else has taken this identity's path with different bytes.
-        let other = encode_block(0, &[entry(4, 5, 6)]).expect("encodes");
+        let other = encode_block(0, None, &[entry(4, 5, 6)]).expect("encodes");
         std::fs::write(store.path(id.0), &other).expect("plant");
 
         let error = store.put(cx, &bytes).expect_err("damage must be refused");
@@ -565,9 +565,16 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let early = edge(10, 1, 2, 1, Some(3));
         let future = edge(10, 1, 2, 5, None);
-        let early_bytes = encode_block(0, &[early]).expect("early block encodes");
-        let future_bytes = encode_block(0, &[future]).expect("future block encodes");
+        let early_bytes = encode_block(0, None, &[early]).expect("early block encodes");
         let early_id = store.put(cx, &early_bytes).expect("stores early block");
+        // The future block LINKS the early one lawfully (V6), so the refusal
+        // under test stays the identity law rather than the chain law.
+        let future_bytes = encode_block(
+            0,
+            Some(fgdb_strata::DeltaBlockVersion(early_id.0)),
+            &[future],
+        )
+        .expect("future block encodes");
         let future_id = store.put(cx, &future_bytes).expect("stores future block");
         let root = PartitionRoot {
             graph: GraphId(1),
@@ -1005,7 +1012,7 @@ fn a_receipted_block_is_admitted_without_rereading_its_file() {
             .expect("earns the receipt");
         assert!(receipts.holds(id));
 
-        let other = encode_block(0, &[entry(9, 9, 7)]).expect("encodes");
+        let other = encode_block(0, None, &[entry(9, 9, 7)]).expect("encodes");
         std::fs::write(store.path(id.0), &other).expect("plants damage");
 
         assert!(
@@ -1130,8 +1137,8 @@ fn receipted_puts_refuse_eid_reuse_as_the_receipt_is_earned() {
         let mut receipts = PublishReceipts::new();
         let early = edge(10, 1, 2, 1, Some(3));
         let future = edge(10, 1, 2, 5, None);
-        let early_bytes = encode_block(0, &[early]).expect("encodes");
-        let future_bytes = encode_block(0, &[future]).expect("encodes");
+        let early_bytes = encode_block(0, None, &[early]).expect("encodes");
+        let future_bytes = encode_block(0, None, &[future]).expect("encodes");
 
         store
             .put_verified(cx, &early_bytes, None, &mut receipts)
@@ -1403,7 +1410,7 @@ fn a_root_refuses_a_block_transplanted_from_another_partition() {
     let dir = scratch_dir("partition-transplant");
     under_lab(52, move |cx| {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        let foreign = encode_block(9, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
+        let foreign = encode_block(9, None, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
         let block_id = store.put(cx, &foreign).expect("stores block");
         let root = PartitionRoot {
             graph: GraphId(1),
@@ -1430,7 +1437,7 @@ fn a_root_refuses_a_block_transplanted_from_another_partition() {
 
         // CONTROL: the same content at the root's own partition admits — the
         // refusal above is the partition law firing, not fixture debris.
-        let home = encode_block(0, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
+        let home = encode_block(0, None, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
         let home_id = store.put(cx, &home).expect("stores block");
         let root = PartitionRoot {
             blocks: vec![BlockRef {
@@ -1462,7 +1469,7 @@ fn admission_refuses_a_propertied_block_with_a_forged_digest() {
         let patch_id = property_patch_id(&K_OID, NAMESPACE, &patch_bytes);
         let entries = vec![entry(1, 2, 1), entry(1, 3, 2)];
         let mut bytes =
-            fgdb_strata::encode_block_with_properties(0, &entries, patch_id, &[1, 0], &rows)
+            fgdb_strata::encode_block_with_properties(0, None, &entries, patch_id, &[1, 0], &rows)
                 .expect("encodes");
         bytes[49] ^= 0x01; // forge the digest; content addressing follows the bytes
         store
@@ -1487,5 +1494,97 @@ fn admission_refuses_a_propertied_block_with_a_forged_digest() {
                 fgdb_strata::BlockError::LogicalDigestMismatch { .. }
             )),
         ));
+    });
+}
+
+/// **THE CHAIN LAW AT ADMISSION (V6, fgdb-4391): a family's blocks must link
+/// in exactly the root's publication order.** A missing link and a forged
+/// link are both refused; the lawful chain is the control. The chain IS
+/// publication order restricted to one family, so FG-INV-03's finite /
+/// acyclic / newer-first properties hold by construction once this law does.
+#[test]
+fn a_root_refuses_a_broken_or_forged_family_chain() {
+    use fgdb_strata::DeltaBlockVersion;
+
+    let dir = scratch_dir("family-chain");
+    under_lab(54, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let first_bytes = encode_block(0, None, &[edge(10, 1, 2, 1, None)]).expect("encodes");
+        let first_id = store.put(cx, &first_bytes).expect("stores");
+        let reference = |id: fgdb_strata::DeltaBlockVersion, first: u64, last: u64| BlockRef {
+            block_id: id.0,
+            first_seq: CommitSeq(first),
+            last_seq: CommitSeq(last),
+        };
+        let root_of = |blocks: Vec<BlockRef>| PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(6),
+            blocks,
+            vertex_patches: vec![],
+        };
+
+        // A second family block that LINKS NOTHING: the chain skips.
+        let unlinked = encode_block(0, None, &[edge(11, 1, 3, 5, None)]).expect("encodes");
+        let unlinked_id = store.put(cx, &unlinked).expect("stores");
+        assert!(matches!(
+            store.put_root(
+                cx,
+                &root_of(vec![
+                    reference(first_id, 1, 1),
+                    reference(unlinked_id, 5, 5),
+                ])
+            ),
+            Err(StoreError::MalformedRoot(RootError::BlockChainMismatch {
+                at: 1,
+                declared: None,
+                expected: Some(_),
+            })),
+        ));
+
+        // A second family block that links a FOREIGN identity.
+        let forged = encode_block(
+            0,
+            Some(DeltaBlockVersion(ObjectId([0xee; 32]))),
+            &[edge(11, 1, 3, 5, None)],
+        )
+        .expect("encodes");
+        let forged_id = store.put(cx, &forged).expect("stores");
+        assert!(matches!(
+            store.put_root(
+                cx,
+                &root_of(vec![reference(first_id, 1, 1), reference(forged_id, 5, 5),])
+            ),
+            Err(StoreError::MalformedRoot(RootError::BlockChainMismatch {
+                at: 1,
+                ..
+            })),
+        ));
+
+        // CONTROL: the lawful link admits.
+        let chained = encode_block(0, Some(first_id), &[edge(11, 1, 3, 5, None)]).expect("encodes");
+        let chained_id = store.put(cx, &chained).expect("stores");
+        store
+            .put_root(
+                cx,
+                &root_of(vec![reference(first_id, 1, 1), reference(chained_id, 5, 5)]),
+            )
+            .expect("the lawful chain admits");
+
+        // And a DIFFERENT family in between does not break the chain: the
+        // law is family-scoped, not adjacency-scoped.
+        let other_family = encode_block(0, None, &[edge(20, 2, 4, 3, None)]).expect("encodes");
+        let other_id = store.put(cx, &other_family).expect("stores");
+        store
+            .put_root(
+                cx,
+                &root_of(vec![
+                    reference(first_id, 1, 1),
+                    reference(other_id, 3, 3),
+                    reference(chained_id, 5, 5),
+                ]),
+            )
+            .expect("an interleaved foreign family leaves the chain lawful");
     });
 }

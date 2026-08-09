@@ -121,6 +121,25 @@ pub const BLOCK_FORMAT_V4: u16 = 4;
 /// `predecessor` (MVCC chain semantics change the root model — its own
 /// increment). V4 is refused by name; no production database predates V5.
 pub const BLOCK_FORMAT_V5: u16 = 5;
+/// Format version. V6 is a breaking bump (§16.6, fgdb-4391): the header gains
+/// `predecessor: ConditionalCoordinateRef<DeltaBlockVersion>?` — the per-block
+/// MVCC chain link (§6.2 item 2) — as a presence byte plus a fixed 32-byte
+/// identity slot after the digest, ZERO-FILLED and refused non-zero when
+/// absent (one byte string per value).
+///
+/// The link is PHYSICAL LINEAGE, deliberately OUTSIDE the canonical logical
+/// digest: two re-encodings of one logical state under different chain
+/// histories must digest identically, exactly as `partition_id` is excluded.
+/// In this increment the chain is written and law-checked at admission
+/// (publication order per descriptor family, FG-INV-03's finite / acyclic /
+/// newer-first by construction) while READS stay whole-list — the answers are
+/// provably identical because a family's chain IS the publication order
+/// restricted to that family. `fgdb-ge6a` flips reads to chain-walk as its
+/// own increment. Compaction restarts chains: a repacked generation's blocks
+/// link None, and the retired root remains reachable (state-chain semantics,
+/// plan L536's no-stamping law). V5 is refused by name; no production
+/// database predates V6.
+pub const BLOCK_FORMAT_V6: u16 = 6;
 
 /// Domain string for the block logical digest transcript, v1.
 ///
@@ -202,7 +221,7 @@ pub struct PartitionRootVersion(pub ObjectId);
 /// word, mirroring §6.2's field order) and `canonical_logical_digest` (32 B,
 /// closing the header). Fixed offsets are named below in `read_header`; the
 /// arithmetic here stays a sum so the layout reads left to right.
-const HEADER_LEN: usize = 4 + 2 + 8 + 4 + 16 + 8 + 1 + 4 + 2 + 32;
+const HEADER_LEN: usize = 4 + 2 + 8 + 4 + 16 + 8 + 1 + 4 + 2 + 32 + 1 + 32;
 const COLUMN_FRAME_LEN: usize = 2 + 1 + 4 + 4;
 const VISIBILITY_SPAN_LEN: usize = 4 + 4 + 8 + 8;
 const MAX_IDENTITY_COLUMN_BYTES: usize = 4096;
@@ -367,6 +386,11 @@ pub enum BlockError {
     DigestScalarEncode {
         at: usize,
     },
+    /// The predecessor slot violates its canonical form (V6, fgdb-4391): an
+    /// absent link must be an all-zero slot, a present link must not name the
+    /// zero identity, and the presence byte is 0 or 1 — one byte string per
+    /// value, even for an optional field.
+    NonCanonicalPredecessor,
 }
 
 impl core::fmt::Display for BlockError {
@@ -448,6 +472,10 @@ impl core::fmt::Display for BlockError {
                 f,
                 "entry {at}'s property row failed to re-encode for the digest transcript"
             ),
+            Self::NonCanonicalPredecessor => write!(
+                f,
+                "the predecessor slot violates its canonical presence/zero form"
+            ),
         }
     }
 }
@@ -466,8 +494,12 @@ pub const MAX_BLOCK_ENTRIES: u32 = 256;
 /// REFUSES rather than sorts. A caller whose entries are out of order or repeated
 /// is describing something other than what a block means, and quietly repairing it
 /// would let two callers store different intents and both be told they succeeded.
-pub fn encode_block(partition_id: u64, entries: &[AdjacencyEntry]) -> Result<Vec<u8>, BlockError> {
-    encode_block_inner(partition_id, entries, None)
+pub fn encode_block(
+    partition_id: u64,
+    predecessor: Option<DeltaBlockVersion>,
+    entries: &[AdjacencyEntry],
+) -> Result<Vec<u8>, BlockError> {
+    encode_block_inner(partition_id, predecessor, entries, None)
 }
 
 /// The block's canonical logical digest (fgdb-da6b): UNKEYED, domain-separated,
@@ -526,6 +558,14 @@ pub(crate) fn header_partition_and_digest(bytes: &[u8]) -> (u64, [u8; 32]) {
     )
 }
 
+/// The V6 header's predecessor link, for admission seams that already ran the
+/// full decode (which proved the slot canonical).
+pub(crate) fn header_predecessor(bytes: &[u8]) -> Option<DeltaBlockVersion> {
+    debug_assert!(bytes.len() >= HEADER_LEN, "caller decoded these bytes");
+    (bytes[81] == 1)
+        .then(|| DeltaBlockVersion(ObjectId(bytes[82..114].try_into().expect("fixed header"))))
+}
+
 /// Resolve each entry's row from the hosted patch shape — locator column plus
 /// patch rows — into the per-entry form [`block_logical_digest`] takes.
 pub(crate) fn rows_by_entry(
@@ -552,8 +592,10 @@ pub(crate) fn rows_by_entry(
 /// order [`edge_props::validate_locator_sequence`] enforces. The patch itself
 /// is a separate content-addressed object; the joint law is proven at
 /// admission with both in hand.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_block_with_properties(
     partition_id: u64,
+    predecessor: Option<DeltaBlockVersion>,
     entries: &[AdjacencyEntry],
     patch_id: ObjectId,
     locators: &[u8],
@@ -586,11 +628,17 @@ pub fn encode_block_with_properties(
             declared: rows.len(),
         });
     }
-    encode_block_inner(partition_id, entries, Some((patch_id, locators, rows)))
+    encode_block_inner(
+        partition_id,
+        predecessor,
+        entries,
+        Some((patch_id, locators, rows)),
+    )
 }
 
 fn encode_block_inner(
     partition_id: u64,
+    predecessor: Option<DeltaBlockVersion>,
     entries: &[AdjacencyEntry],
     patch: Option<(ObjectId, &[u8], &[edge_props::EdgePropertyRow])>,
 ) -> Result<Vec<u8>, BlockError> {
@@ -653,7 +701,7 @@ fn encode_block_inner(
     };
 
     out.extend_from_slice(&BLOCK_MAGIC);
-    out.extend_from_slice(&BLOCK_FORMAT_V5.to_be_bytes());
+    out.extend_from_slice(&BLOCK_FORMAT_V6.to_be_bytes());
     out.extend_from_slice(&partition_id.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     let descriptor = descriptor.unwrap_or(DescriptorKey {
@@ -669,6 +717,16 @@ fn encode_block_inner(
     // zero or one patch in this slice — see HEADER_LEN's doc.
     out.extend_from_slice(&u16::from(patch.is_some()).to_be_bytes());
     out.extend_from_slice(&digest);
+    match predecessor {
+        Some(link) => {
+            out.push(1);
+            out.extend_from_slice(&link.0.0);
+        }
+        None => {
+            out.push(0);
+            out.extend_from_slice(&[0u8; 32]);
+        }
+    }
     append_identity_column(&mut out, destinations.descriptor(), &destination_payload);
     append_identity_column(&mut out, edge_ids.descriptor(), &edge_id_payload);
     for span in spans {
@@ -774,7 +832,7 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
         return Err(BlockError::NotABlock);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != BLOCK_FORMAT_V5 {
+    if format != BLOCK_FORMAT_V6 {
         return Err(BlockError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes(bytes[14..18].try_into().expect("fixed header"));
@@ -796,6 +854,25 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<DecodedFrame, BlockError> {
     let span_count = u32::from_be_bytes(bytes[43..47].try_into().expect("fixed header")) as usize;
     let patch_ref_count = u16::from_be_bytes(bytes[47..49].try_into().expect("fixed header"));
     let logical_digest: [u8; 32] = bytes[49..81].try_into().expect("fixed header");
+    match bytes[81] {
+        0 => {
+            if bytes[82..114].iter().any(|&byte| byte != 0) {
+                // One byte string per value: an absent link is all-zero, so a
+                // hand-built frame cannot smuggle an identity behind an
+                // absence flag.
+                return Err(BlockError::NonCanonicalPredecessor);
+            }
+        }
+        1 => {
+            let id: [u8; 32] = bytes[82..114].try_into().expect("fixed header");
+            if id == [0u8; 32] {
+                // The zero identity is no object's name; a "present" link to
+                // it is a malformed frame, not a chain end.
+                return Err(BlockError::NonCanonicalPredecessor);
+            }
+        }
+        _ => return Err(BlockError::NonCanonicalPredecessor),
+    }
     if patch_ref_count > 1 {
         // The ruled shape is a SET; this slice implements at most one patch
         // per block, and the further arm stays fail-closed (2t7q 3B).

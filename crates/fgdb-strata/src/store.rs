@@ -835,7 +835,7 @@ impl BlockStore {
         at: usize,
         partition: u64,
         reference: &crate::root::BlockRef,
-    ) -> Result<(Vec<crate::AdjacencyEntry>, Option<BlockProps>), StoreError> {
+    ) -> Result<ResolvedBlock, StoreError> {
         let bytes = self
             .get_bytes(cx, DeltaBlockVersion(reference.block_id))
             .map_err(|error| StoreError::RootBlockLoad {
@@ -856,6 +856,7 @@ impl BlockStore {
         // transplant into a foreign partition's root refuses here, at the
         // seam where the root and the block's own bytes first meet.
         let (block_partition, declared_digest) = crate::header_partition_and_digest(&bytes);
+        let predecessor = crate::header_predecessor(&bytes);
         if block_partition != partition {
             return Err(StoreError::MalformedRoot(
                 crate::root::RootError::BlockPartitionMismatch {
@@ -899,7 +900,7 @@ impl BlockStore {
         } else {
             None
         };
-        Ok((entries, props))
+        Ok((entries, props, predecessor))
     }
 
     /// Prove every block named by an already-structural root while retaining only
@@ -922,8 +923,31 @@ impl BlockStore {
 
         let mut blocks = Vec::new();
         let mut history = crate::root::EdgeHistoryValidator::default();
+        let mut chain_heads: std::collections::BTreeMap<
+            (fgdb_types::VId, fgdb_delta_types::RelationId),
+            ObjectId,
+        > = std::collections::BTreeMap::new();
         for (at, reference) in root.blocks.iter().enumerate() {
-            let (entries, props) = self.resolve_root_block(cx, at, root.partition, reference)?;
+            let (entries, props, predecessor) =
+                self.resolve_root_block(cx, at, root.partition, reference)?;
+            // THE CHAIN LAW (V6, fgdb-4391): a family's blocks link in exactly
+            // this root's publication order — finite, acyclic, newer-first by
+            // construction. Checked here so every full read of a root walks a
+            // lawful chain, not only the publish that minted it.
+            if let Some(first) = entries.first() {
+                let family = (first.src, first.relation);
+                let expected = chain_heads.get(&family).copied();
+                if predecessor.map(|link| link.0) != expected {
+                    return Err(StoreError::MalformedRoot(
+                        crate::root::RootError::BlockChainMismatch {
+                            at,
+                            declared: predecessor.map(|link| link.0),
+                            expected,
+                        },
+                    ));
+                }
+                chain_heads.insert(family, reference.block_id);
+            }
             history
                 .observe_block(at, &entries)
                 .map_err(StoreError::MalformedRoot)?;
@@ -1175,6 +1199,13 @@ impl BlockStore {
             .map_err(StoreError::MalformedRoot)?;
         if let Some(span) = crate::root::span_of(&entries) {
             receipts.spans.insert(id, span);
+            receipts.chains.insert(
+                id,
+                (
+                    entries.first().map(|entry| (entry.src, entry.relation)),
+                    crate::header_predecessor(bytes),
+                ),
+            );
         }
         Ok(stored)
     }
@@ -1208,22 +1239,51 @@ impl BlockStore {
         receipts: &mut PublishReceipts,
     ) -> Result<PartitionRootVersion, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
+        let mut chain_heads: std::collections::BTreeMap<
+            (fgdb_types::VId, fgdb_delta_types::RelationId),
+            ObjectId,
+        > = std::collections::BTreeMap::new();
         for (at, reference) in root.blocks.iter().enumerate() {
-            if receipts.spans.get(&reference.block_id)
-                == Some(&(reference.first_seq, reference.last_seq))
-            {
-                continue;
+            let receipted = receipts.spans.get(&reference.block_id)
+                == Some(&(reference.first_seq, reference.last_seq));
+            let (family, predecessor) = if receipted {
+                *receipts
+                    .chains
+                    .get(&reference.block_id)
+                    .expect("every span receipt records its chain fields in the same insertion")
+            } else {
+                let (entries, _props, predecessor) =
+                    self.resolve_root_block(cx, at, root.partition, reference)?;
+                receipts
+                    .validator
+                    .observe_block(at, &entries)
+                    .map_err(StoreError::MalformedRoot)?;
+                let family = entries.first().map(|entry| (entry.src, entry.relation));
+                // `resolve_root_block` proved the actual span equals the claim.
+                receipts.spans.insert(
+                    reference.block_id,
+                    (reference.first_seq, reference.last_seq),
+                );
+                receipts
+                    .chains
+                    .insert(reference.block_id, (family, predecessor));
+                (family, predecessor)
+            };
+            // THE CHAIN LAW (V6) holds on the memoised path too: receipts
+            // prove a block admissible, never that a root ORDERS it lawfully.
+            if let Some(family) = family {
+                let expected = chain_heads.get(&family).copied();
+                if predecessor.map(|link| link.0) != expected {
+                    return Err(StoreError::MalformedRoot(
+                        crate::root::RootError::BlockChainMismatch {
+                            at,
+                            declared: predecessor.map(|link| link.0),
+                            expected,
+                        },
+                    ));
+                }
+                chain_heads.insert(family, reference.block_id);
             }
-            let (entries, _props) = self.resolve_root_block(cx, at, root.partition, reference)?;
-            receipts
-                .validator
-                .observe_block(at, &entries)
-                .map_err(StoreError::MalformedRoot)?;
-            // `resolve_root_block` proved the actual span equals the claim.
-            receipts.spans.insert(
-                reference.block_id,
-                (reference.first_seq, reference.last_seq),
-            );
         }
         for (at, reference) in root.vertex_patches.iter().enumerate() {
             if receipts.patch_spans.get(&reference.patch_id)
@@ -1399,10 +1459,29 @@ impl BlockStore {
 /// a receipt is a statement about what THIS process has proven and fsynced,
 /// and a fresh process must re-earn those proofs from disk, which the
 /// fallback path does automatically on the first publication after open.
+/// One root-named block, fully admitted: its decoded entries, its hosted
+/// property column, and its declared predecessor link (V6, fgdb-4391).
+type ResolvedBlock = (
+    Vec<crate::AdjacencyEntry>,
+    Option<BlockProps>,
+    Option<DeltaBlockVersion>,
+);
+
 #[derive(Debug, Default)]
 pub struct PublishReceipts {
     validator: crate::root::EdgeHistoryValidator,
     spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
+    /// Each receipted block's descriptor family and declared predecessor —
+    /// recorded beside its span so the memoised publish path can still run
+    /// the root-scope chain law (V6, fgdb-4391).
+    #[allow(clippy::type_complexity)]
+    chains: BTreeMap<
+        ObjectId,
+        (
+            Option<(fgdb_types::VId, fgdb_delta_types::RelationId)>,
+            Option<DeltaBlockVersion>,
+        ),
+    >,
     vertex_validator: crate::root::VertexHistoryValidator,
     patch_spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
 }

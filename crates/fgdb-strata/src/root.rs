@@ -304,6 +304,16 @@ pub enum RootError {
         root_partition: u64,
         block_partition: u64,
     },
+    /// A block's declared predecessor is not its descriptor family's previous
+    /// block in this root's publication order (V6, fgdb-4391). The chain IS
+    /// the publication order restricted to one family — finite, acyclic, and
+    /// newer-first by construction (FG-INV-03) — so a link that skips,
+    /// forges, or omits is a malformed history, not an alternative one.
+    BlockChainMismatch {
+        at: usize,
+        declared: Option<ObjectId>,
+        expected: Option<ObjectId>,
+    },
 }
 
 impl core::fmt::Display for RootError {
@@ -446,6 +456,15 @@ impl core::fmt::Display for RootError {
                 f,
                 "block {at} durably names partition {block_partition}, but the root is \
                  partition {root_partition}'s"
+            ),
+            Self::BlockChainMismatch {
+                at,
+                declared,
+                expected,
+            } => write!(
+                f,
+                "block {at} links predecessor {declared:?}, but its family's chain \
+                 expects {expected:?}"
             ),
         }
     }

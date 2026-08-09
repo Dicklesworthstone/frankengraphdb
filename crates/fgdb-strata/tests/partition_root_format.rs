@@ -72,7 +72,7 @@ fn identity_mismatch(expected: AdjacencyEntry, found: AdjacencyEntry) -> RootErr
 
 /// A block plus its identity and the span it actually covers.
 fn block(entries: Vec<AdjacencyEntry>) -> (ObjectId, Vec<u8>, (CommitSeq, CommitSeq)) {
-    let bytes = encode_block(0, &entries).expect("encodes");
+    let bytes = encode_block(0, None, &entries).expect("encodes");
     let id = block_id(&K_OID, namespace(), &bytes);
     let span = span_of(&entries).expect("non-empty");
     (id, bytes, span)

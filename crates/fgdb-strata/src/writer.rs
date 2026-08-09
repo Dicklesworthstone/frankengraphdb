@@ -34,7 +34,7 @@ use crate::edge_props::{
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
 use crate::vertex::{VertexPatchError, VertexRow, encode_patch, span_of_rows, vertex_patch_id};
 use crate::{
-    AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES, block_id, encode_block,
+    AdjacencyEntry, BlockError, DeltaBlockVersion, MAX_BLOCK_ENTRIES, block_id, encode_block,
     encode_block_with_properties, validate_entry,
 };
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
@@ -258,6 +258,11 @@ pub struct BlockWriter {
     /// defense-in-depth check over the history visible to this fold.
     spent: BTreeSet<EId>,
     sealed: Vec<SealedBlock>,
+    /// The newest sealed block per descriptor family — the predecessor each
+    /// family's NEXT block links (V6, fgdb-4391). Rebuilt deterministically by
+    /// the same replay fold that rebuilds everything else here; never
+    /// authoritative — the durable chain is in the block headers.
+    chain_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
     /// Vertex rows not yet sealed into a patch, keyed by STATEMENT identity
     /// `(vid, created_at)` — the vertex half of the fold (fgdb-3xoi), keyed
     /// per version since FGSV V2 chains statements (fgdb-stb6). The same
@@ -287,6 +292,7 @@ impl BlockWriter {
             live: BTreeMap::new(),
             spent: BTreeSet::new(),
             sealed: Vec::new(),
+            chain_heads: BTreeMap::new(),
             pending_vertices: BTreeMap::new(),
             live_vertices: BTreeMap::new(),
             spent_vertices: BTreeSet::new(),
@@ -719,7 +725,14 @@ impl BlockWriter {
                 .or_default()
                 .push(statement);
         }
-        let mut sealed = Vec::with_capacity(by_descriptor.len());
+        struct StagedChunk {
+            first_seq: CommitSeq,
+            last_seq: CommitSeq,
+            family: (VId, RelationId),
+            family_ordinal: usize,
+            statements: Vec<PendingStatement>,
+        }
+        let mut staged: Vec<StagedChunk> = Vec::with_capacity(by_descriptor.len());
         for statements in by_descriptor.into_values() {
             // The locator addresses at most MAX_PROPERTY_PATCH_ROWS propertied
             // entries per block — a FORMAT ceiling, so a descriptor run whose
@@ -741,57 +754,98 @@ impl BlockWriter {
             if !chunk.is_empty() {
                 chunks.push(chunk);
             }
-            for statements in chunks {
+            for (family_ordinal, statements) in chunks.into_iter().enumerate() {
                 let entries: Vec<AdjacencyEntry> =
                     statements.iter().map(|statement| statement.entry).collect();
-                let mut locators = Vec::with_capacity(statements.len());
-                let mut rows: Vec<EdgePropertyRow> = Vec::new();
-                for statement in &statements {
-                    if statement.props.is_empty() {
-                        locators.push(0u8);
-                    } else {
-                        rows.push(statement.props.clone());
-                        locators.push(u8::try_from(rows.len()).expect("chunked to the ceiling"));
-                    }
-                }
-                let (bytes, property_patch) = if rows.is_empty() {
-                    (
-                        encode_block(self.partition, &entries).map_err(WriteError::Block)?,
-                        None,
-                    )
-                } else {
-                    let patch_bytes =
-                        encode_property_patch(&rows).map_err(WriteError::EdgeProps)?;
-                    let patch_id = property_patch_id(keys.0, keys.1, &patch_bytes);
-                    let bytes = encode_block_with_properties(
-                        self.partition,
-                        &entries,
-                        patch_id,
-                        &locators,
-                        &rows,
-                    )
-                    .map_err(WriteError::Block)?;
-                    (
-                        bytes,
-                        Some(SealedPropertyPatch {
-                            patch_id,
-                            bytes: patch_bytes,
-                        }),
-                    )
-                };
                 let (first_seq, last_seq) = span_of(&entries).expect("non-empty");
-                sealed.push(SealedBlock {
-                    block_id: block_id(keys.0, keys.1, &bytes),
-                    bytes,
+                let family = (
+                    entries.first().expect("chunks are non-empty").src,
+                    entries.first().expect("chunks are non-empty").relation,
+                );
+                staged.push(StagedChunk {
                     first_seq,
                     last_seq,
-                    property_patch,
+                    family,
+                    family_ordinal,
+                    statements,
                 });
             }
         }
         // Roots publish in nondecreasing frontier order even when descriptor
         // keys sort differently from the commit stream that populated them.
-        sealed.sort_by_key(|block| (block.last_seq, block.first_seq, block.block_id));
+        // The predecessor chain (V6, fgdb-4391) must follow the PUBLISHED
+        // order, so ordering is decided BEFORE encoding — the sort key is
+        // fully derived from content, never from the block identity the
+        // predecessor link is about to change.
+        staged.sort_by_key(|chunk| {
+            (
+                chunk.last_seq,
+                chunk.first_seq,
+                chunk.family,
+                chunk.family_ordinal,
+            )
+        });
+        let mut sealed = Vec::with_capacity(staged.len());
+        for chunk in staged {
+            let StagedChunk {
+                first_seq,
+                last_seq,
+                family,
+                statements,
+                ..
+            } = chunk;
+            let entries: Vec<AdjacencyEntry> =
+                statements.iter().map(|statement| statement.entry).collect();
+            let mut locators = Vec::with_capacity(statements.len());
+            let mut rows: Vec<EdgePropertyRow> = Vec::new();
+            for statement in &statements {
+                if statement.props.is_empty() {
+                    locators.push(0u8);
+                } else {
+                    rows.push(statement.props.clone());
+                    locators.push(u8::try_from(rows.len()).expect("chunked to the ceiling"));
+                }
+            }
+            let predecessor = self.chain_heads.get(&family).copied();
+            let (bytes, property_patch) = if rows.is_empty() {
+                (
+                    encode_block(self.partition, predecessor, &entries)
+                        .map_err(WriteError::Block)?,
+                    None,
+                )
+            } else {
+                let patch_bytes = encode_property_patch(&rows).map_err(WriteError::EdgeProps)?;
+                let patch_id = property_patch_id(keys.0, keys.1, &patch_bytes);
+                let bytes = encode_block_with_properties(
+                    self.partition,
+                    predecessor,
+                    &entries,
+                    patch_id,
+                    &locators,
+                    &rows,
+                )
+                .map_err(WriteError::Block)?;
+                (
+                    bytes,
+                    Some(SealedPropertyPatch {
+                        patch_id,
+                        bytes: patch_bytes,
+                    }),
+                )
+            };
+            let sealed_id = block_id(keys.0, keys.1, &bytes);
+            // The family's chain advances to this block; the next chunk of
+            // the same family — even within THIS seal — links to it.
+            self.chain_heads
+                .insert(family, DeltaBlockVersion(sealed_id));
+            sealed.push(SealedBlock {
+                block_id: sealed_id,
+                bytes,
+                first_seq,
+                last_seq,
+                property_patch,
+            });
+        }
         let first = sealed.first().cloned();
         self.pending.clear();
         self.sealed.extend(sealed);

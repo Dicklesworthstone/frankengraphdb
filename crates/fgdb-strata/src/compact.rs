@@ -89,6 +89,11 @@ pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Result<Compa
 /// same rule the read path applies — and packing cuts a block early when its
 /// propertied entries would overflow one hosted patch, exactly as the writer's
 /// seal does.
+///
+/// **THE ENCODING CALLER OWNS THE CHAIN RESTART** (V6, fgdb-4391): a repacked
+/// generation's blocks link `None` at each family's first block, and when
+/// packing splits one family into several blocks the caller must link each to
+/// its predecessor in emission order, or root admission refuses the chain.
 pub fn compact_with_props(
     blocks: &[Vec<AdjacencyEntry>],
     block_props: &[Option<BlockProps>],
@@ -278,7 +283,7 @@ mod tests {
                 block.len(),
                 "one compacted block contains two versions of a key"
             );
-            crate::encode_block(0, block).expect("every compacted block remains encodable");
+            crate::encode_block(0, None, block).expect("every compacted block remains encodable");
             upper_frontiers.push(
                 crate::root::span_of(block)
                     .expect("the packer emits no empty blocks")
