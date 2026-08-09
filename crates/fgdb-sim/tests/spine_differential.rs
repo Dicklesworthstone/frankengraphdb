@@ -668,6 +668,12 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                         .await
                         .expect("a mid-history reopen rebuilds and continues");
                 }
+                if round == 6 {
+                    // Consolidate mid-history: every epoch comparison below
+                    // must still hold over the compacted generation — the
+                    // answer-preservation law under shapes nobody hand-wrote.
+                    db.compact(cx).await.expect("consolidates");
+                }
                 let mut batch = WriteBatch::new(KNOWS);
                 let ops = 1 + rng.below(5);
                 // Per-batch order-sensitivity bookkeeping (fgdb-kokz): the
