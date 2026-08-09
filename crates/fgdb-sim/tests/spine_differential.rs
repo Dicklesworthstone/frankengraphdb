@@ -651,12 +651,22 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                 ..GenModel::default()
             };
 
-            // ENGINE SIDE: generate and commit 8 batches of 1..=5 lawful ops.
+            // ENGINE SIDE: generate and commit 8 batches of 1..=5 lawful ops,
+            // dropping and REOPENING the database halfway — the retained
+            // writer's incremental fold and the from-scratch rebuild must be
+            // indistinguishable under every random shape, not only under the
+            // fixtures that were written knowing the answer.
             let mut db = Database::create(cx, &dir, engine_keys())
                 .await
                 .expect("creates");
             let mut epochs = Vec::new();
-            for _ in 0..8 {
+            for round in 0..8 {
+                if round == 4 {
+                    drop(db);
+                    db = Database::open(cx, &dir, engine_keys())
+                        .await
+                        .expect("a mid-history reopen rebuilds and continues");
+                }
                 let mut batch = WriteBatch::new(KNOWS);
                 let ops = 1 + rng.below(5);
                 // Per-batch order-sensitivity bookkeeping (fgdb-kokz): the
