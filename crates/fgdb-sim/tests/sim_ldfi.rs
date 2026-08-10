@@ -175,8 +175,9 @@ use asupersync::io::AsyncWrite;
 use asupersync::lab::ldfi::{
     HittingSetBudget, LdfiExperimentBudget, LdfiExperimentObservation, LdfiExperimentStatus,
 };
-use asupersync::lab::run_async_under_lab;
+use asupersync::lab::{AutoAdvanceTermination, LabConfig, LabRuntime, run_async_under_lab};
 use asupersync::trace::{TraceData, TraceEvent};
+use asupersync::types::Budget;
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, RootSlot};
 use fgdb_chronicle::store::{ContinuityAuthority, ContinuityHead, RootStore, StoreError};
@@ -211,6 +212,47 @@ where
         "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
     );
     output
+}
+
+/// The timer-bearing counterpart to [`under_lab`]. `run_async_under_lab`
+/// deliberately does not auto-advance virtual time, so an injected latency
+/// would otherwise spin to its step budget and escape the LDFI report as a
+/// harness panic instead of completing the exact generated experiment.
+fn under_lab_auto_advance<T, Fut>(
+    seed: u64,
+    test: impl FnOnce(asupersync::Cx<asupersync::cx::cap::All>) -> Fut + Send + 'static,
+) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).with_auto_advance());
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let (task_id, mut handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = asupersync::Cx::current().expect("lab task runs with an ambient Cx");
+            test(cx).await
+        })
+        .expect("lab task spawns");
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, Budget::INFINITE.priority);
+    let auto_report = runtime.run_with_auto_advance();
+    assert!(
+        matches!(auto_report.termination, AutoAdvanceTermination::Quiescent),
+        "lab run did not quiesce: {auto_report:?}"
+    );
+    let report = runtime.report();
+    assert!(
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+    );
+    handle
+        .try_join()
+        .expect("lab task joined")
+        .expect("lab task finished")
 }
 
 fn bootstrap(seed: u8) -> RootBootstrap {
@@ -547,7 +589,7 @@ fn a_stale_forked_or_absent_continuity_head_refuses_before_the_slot_write() {
 // ---------------------------------------------------------------------------
 
 const DURABLE_APPEND_OUTCOME: &str = "fgdb.sim.outcome/v1:durable-append-survived";
-const SPINE_OUTCOME: &str = "fgdb.sim.outcome/v1:embedded-spine-read-after-write";
+const SPINE_OUTCOME: &str = "fgdb.sim.outcome/v1:embedded-spine-acknowledged-write-survives-crash";
 
 fn ldfi_keys() -> DatabaseKeys {
     DatabaseKeys {
@@ -598,9 +640,7 @@ fn successful_durable_append_trace(dir: PathBuf) -> Vec<TraceEvent> {
     events
 }
 
-#[test]
-fn successful_embedded_spine_trace_reaches_the_upstream_ldfi_search() {
-    let dir = scratch_dir("lineage-spine");
+fn successful_embedded_spine_trace(dir: PathBuf) -> Vec<TraceEvent> {
     let (events, report) = run_async_under_lab(1_400, move |root| async move {
         let trace = root.trace_buffer().expect("lab root has a trace buffer");
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -612,7 +652,7 @@ fn successful_embedded_spine_trace_reaches_the_upstream_ldfi_search() {
         );
 
         let vfs = FaultVfs::unix(FaultPlan::faultless());
-        let mut database = Database::open_with_vfs(&cx, vfs, &dir, ldfi_keys())
+        let mut database = Database::open_with_vfs(&cx, vfs.clone(), &dir, ldfi_keys())
             .await
             .expect("spine opens through the traced VFS");
         let mut batch = WriteBatch::new(RelationId(1));
@@ -625,10 +665,38 @@ fn successful_embedded_spine_trace_reaches_the_upstream_ldfi_search() {
                 .is_some(),
             "the outcome marker must follow a real graph read"
         );
+        vfs.crash()
+            .await
+            .expect("the successful run crashes cleanly");
+        drop(database);
+
+        let reopened = Database::open(&cx, &dir, ldfi_keys())
+            .await
+            .expect("the successful run reopens after process loss");
+        assert_eq!(
+            reopened
+                .frontier()
+                .expect("the reopened frontier is readable"),
+            fgdb_types::CommitSeq(1),
+            "the outcome marker must follow recovery of the acknowledged frontier"
+        );
+        assert!(
+            reopened
+                .vertex(VId(1))
+                .expect("the reopened graph is readable")
+                .is_some(),
+            "the outcome marker must follow recovery of the acknowledged vertex"
+        );
         root.trace(SPINE_OUTCOME);
         trace.snapshot()
     });
     assert!(report.lab_test_passed(), "spine lab report: {report:?}");
+    events
+}
+
+#[test]
+fn successful_embedded_spine_trace_reaches_the_upstream_ldfi_search() {
+    let events = successful_embedded_spine_trace(scratch_dir("lineage-spine"));
 
     let derived = derive_fault_hypotheses(
         &events,
@@ -678,6 +746,206 @@ fn successful_embedded_spine_trace_reaches_the_upstream_ldfi_search() {
         derive_fault_hypotheses(&malformed, SPINE_OUTCOME, HittingSetBudget::default()),
         Err(TraceLdfiError::MalformedFaultPoint { .. })
     ));
+}
+
+#[derive(Debug)]
+struct SpineExperimentResult {
+    observation: LdfiExperimentObservation,
+    acknowledged: Option<u64>,
+    recovered_frontier: Option<u64>,
+    recovered_vertex: bool,
+    events: Vec<fgdb_sim::vfs::FaultEvent>,
+    detail: String,
+}
+
+/// Execute one generated plan against the same integrated create/open/write/
+/// crash/reopen workload that produced [`SPINE_OUTCOME`].
+///
+/// A clean refusal is not a safety failure. The only falsifying result is an
+/// acknowledged write whose commit frontier or vertex is absent after process
+/// loss. This keeps LDFI from winning by turning an ordinary I/O error into an
+/// alleged durability counterexample.
+fn execute_spine_hypothesis(plan: FaultPlan, dir: PathBuf, lab_seed: u64) -> SpineExperimentResult {
+    under_lab_auto_advance(lab_seed, move |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        drop(
+            Database::create(&cx, &dir, ldfi_keys())
+                .await
+                .expect("experiment genesis"),
+        );
+
+        let vfs = FaultVfs::unix_with_clock(plan, root);
+        let opened = Database::open_with_vfs(&cx, vfs.clone(), &dir, ldfi_keys()).await;
+        let mut database = match opened {
+            Ok(database) => database,
+            Err(error) => {
+                return SpineExperimentResult {
+                    observation: LdfiExperimentObservation::InvariantHeld,
+                    acknowledged: None,
+                    recovered_frontier: None,
+                    recovered_vertex: false,
+                    events: vfs.events(),
+                    detail: format!("open refused before an acknowledgement: {error}"),
+                };
+            }
+        };
+
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(1), vec![], vec![]);
+        let write = database.write(&cx, batch).await;
+        let acknowledged = write.as_ref().ok().map(|seq| seq.0);
+        let write_detail = write.as_ref().err().map_or_else(
+            || "write acknowledged".to_string(),
+            |error| error.to_string(),
+        );
+
+        let crash = vfs.crash().await;
+        drop(database);
+        let reopened = Database::open(&cx, &dir, ldfi_keys()).await;
+        let recovered_frontier = reopened
+            .as_ref()
+            .ok()
+            .and_then(|database| database.frontier().ok())
+            .map(|seq| seq.0);
+        let recovered_vertex = reopened
+            .as_ref()
+            .ok()
+            .and_then(|database| database.vertex(VId(1)).ok())
+            .flatten()
+            .is_some();
+        let reopen_detail = reopened
+            .as_ref()
+            .map_or_else(|error| error.to_string(), |_| "ok".to_string());
+
+        let acknowledgement_survived = acknowledged.is_none()
+            || (crash.is_ok() && recovered_frontier == acknowledged && recovered_vertex);
+        let observation = if acknowledgement_survived {
+            LdfiExperimentObservation::InvariantHeld
+        } else {
+            LdfiExperimentObservation::InvariantViolated
+        };
+        let detail = format!(
+            "{write_detail}; crash={crash:?}; reopen={reopen_detail}; \
+             acknowledged={acknowledged:?}; recovered_frontier={recovered_frontier:?}; \
+             recovered_vertex={recovered_vertex}"
+        );
+        SpineExperimentResult {
+            observation,
+            acknowledged,
+            recovered_frontier,
+            recovered_vertex,
+            events: vfs.events(),
+            detail,
+        }
+    })
+}
+
+#[test]
+fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() {
+    let events = successful_embedded_spine_trace(scratch_dir("lineage-spine-exec-baseline"));
+    let derived = derive_fault_hypotheses(
+        &events,
+        SPINE_OUTCOME,
+        HittingSetBudget {
+            max_depth: 2,
+            max_hypotheses: 512,
+        },
+    )
+    .expect("the successful spine trace derives hypotheses");
+    assert!(
+        derived.search.exhausted,
+        "the bounded spine trace must be exhausted before making a campaign claim"
+    );
+
+    // Planted negative: the same full database workload under a faultless plan
+    // acknowledges and recovers. If the experiment merely reports failure (or
+    // the reopen check is disconnected), this control catches it.
+    let control = execute_spine_hypothesis(
+        FaultPlan::faultless(),
+        scratch_dir("lineage-spine-exec-control"),
+        1_410,
+    );
+    assert!(
+        matches!(
+            control.observation,
+            LdfiExperimentObservation::InvariantHeld
+        ),
+        "faultless control failed: {control:?}"
+    );
+    assert_eq!(control.acknowledged, Some(1));
+    assert_eq!(control.recovered_frontier, Some(1));
+    assert!(control.recovered_vertex);
+    assert!(control.events.is_empty());
+
+    let mut experiment_ordinal = 0usize;
+    let mut results = Vec::new();
+    let report = derived.run_experiments(
+        LdfiExperimentBudget {
+            max_experiments: 512,
+        },
+        |hypothesis| {
+            experiment_ordinal += 1;
+            let plan = hypothesis
+                .to_plan(0x1df2_0000 + experiment_ordinal as u64, 100)
+                .expect("the bounded spine hypotheses map exactly");
+            eprintln!(
+                "spine LDFI experiment={experiment_ordinal} lab_seed={} hypothesis={hypothesis:?} plan={plan:?}",
+                1_410 + experiment_ordinal as u64
+            );
+            let result = execute_spine_hypothesis(
+                plan,
+                scratch_dir(&format!("lineage-spine-exec-{experiment_ordinal}")),
+                1_410 + experiment_ordinal as u64,
+            );
+            let observation = result.observation;
+            results.push(result);
+            observation
+        },
+    );
+    assert!(
+        matches!(report.status, LdfiExperimentStatus::FoundViolation { .. }),
+        "the full Database workload found no acknowledged-loss counterexample; \
+         results={results:#?}; status={:?}",
+        report.status
+    );
+    let LdfiExperimentStatus::FoundViolation { hypothesis: found } = &report.status else {
+        return;
+    };
+    let fault = derived
+        .hypotheses
+        .iter()
+        .find(|hypothesis| &hypothesis.events == found)
+        .expect("the reported event set came from the derived spine hypotheses");
+    let reproduced = execute_spine_hypothesis(
+        fault
+            .to_plan(0x1df2_ffff, 100)
+            .expect("the found spine hypothesis maps exactly"),
+        scratch_dir("lineage-spine-exec-replay"),
+        1_999,
+    );
+    assert!(
+        matches!(
+            reproduced.observation,
+            LdfiExperimentObservation::InvariantViolated
+        ),
+        "the reported full-spine violation did not reproduce: {reproduced:?}"
+    );
+    assert_eq!(
+        reproduced.acknowledged,
+        Some(1),
+        "only an acknowledged write may count as this safety violation: {}",
+        reproduced.detail
+    );
+    assert!(
+        reproduced.recovered_frontier != reproduced.acknowledged || !reproduced.recovered_vertex,
+        "the alleged lost acknowledgement actually recovered: {reproduced:?}"
+    );
+    assert_eq!(
+        reproduced.events.len(),
+        fault.points.len(),
+        "the replay broadened the exact generated fault set: {reproduced:?}"
+    );
 }
 
 #[test]
