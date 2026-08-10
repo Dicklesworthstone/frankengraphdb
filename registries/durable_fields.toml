@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 84
+registry_epoch = 85
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -12072,6 +12072,34 @@ max_size_bytes = 159
 
 [[field]]
 containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0004
+stable_name = "reopen_confirm_applied_identity"
+exact_wire_type = "WeakAuthorityAppliedIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "inline nonretaining applied identity of the shard's ShardRestoreReopenConfirmSpec application; the reopen publication certificate must byte-match it, and retention rides the certificate evidence, never this entry (a04:1586 precedent, a20:2599)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0005
+stable_name = "source_access_close_applied_identity"
+exact_wire_type = "WeakAuthorityAppliedIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "inline nonretaining applied identity of the shard's ShardRestoreSourceAccessCloseSpec application; the source-access closure evidence byte-matches it, retained and cut with the ack (a04:1586 precedent, a20:2599)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreShardOperationalAck"
 field_tag = 0x0006
 stable_name = "post_close_state_root_ref"
 exact_wire_type = "StrongRef"
@@ -20548,7 +20576,7 @@ containing_schema = "WeakAuthorityAppliedIdentity"
 union_path = "WeakAuthorityAppliedIdentity"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
+allowed_containing_schemas = ["RestoreShardOperationalAck", "ValidatedRemoteConfigurationAnchor"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

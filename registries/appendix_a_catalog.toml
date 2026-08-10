@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3824
+target_count = 3826
 projection_fallback_count = 178
-target_source_assignment_sha256 = "44cfcb4b1465cecfb8f47ea78e32e2cac02290582a992d8ad75ac9b1a22a4a85"
+target_source_assignment_sha256 = "1373521cb367abe419519fc89312fbdb22eb31f7a7f7383c542cd77060fb3376"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 47
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 84
+registry_epoch = 85
 
 [[logical_kind]]
 slice_id = "a03"
@@ -7891,7 +7891,7 @@ name = "WeakAuthorityAppliedIdentity"
 kind = "union"
 status = "reserved"
 encoding_context = "canonical nonretaining authority applied-identity union"
-allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
+allowed_containing_schemas = ["RestoreShardOperationalAck", "ValidatedRemoteConfigurationAnchor"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -27611,7 +27611,7 @@ containing_schema = "WeakAuthorityAppliedIdentity"
 union_path = "WeakAuthorityAppliedIdentity"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
+allowed_containing_schemas = ["RestoreShardOperationalAck", "ValidatedRemoteConfigurationAnchor"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -116258,5 +116258,53 @@ row_id = "a09:target:field-partition-manifest-published-chain-hash"
 target_row_id = "a09:field:partition-manifest-published-chain-hash"
 slice_id = "a09"
 source_key = "projection|durable_fields|PartitionManifest.published_chain_hash"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-reopen-confirm-applied-identity"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0004
+stable_name = "reopen_confirm_applied_identity"
+exact_wire_type = "WeakAuthorityAppliedIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "inline nonretaining applied identity of the shard's ShardRestoreReopenConfirmSpec application; the reopen publication certificate must byte-match it, and retention rides the certificate evidence, never this entry (a04:1586 precedent, a20:2599)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-reopen-confirm-applied-identity"
+target_row_id = "a20:field:restore-shard-operational-ack-reopen-confirm-applied-identity"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.reopen_confirm_applied_identity|reopen_confirm_applied_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-source-access-close-applied-identity"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0005
+stable_name = "source_access_close_applied_identity"
+exact_wire_type = "WeakAuthorityAppliedIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "inline nonretaining applied identity of the shard's ShardRestoreSourceAccessCloseSpec application; the source-access closure evidence byte-matches it, retained and cut with the ack (a04:1586 precedent, a20:2599)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-source-access-close-applied-identity"
+target_row_id = "a20:field:restore-shard-operational-ack-source-access-close-applied-identity"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.source_access_close_applied_identity|source_access_close_applied_identity"
 target_kind = "field"
 definition_status = "declared"

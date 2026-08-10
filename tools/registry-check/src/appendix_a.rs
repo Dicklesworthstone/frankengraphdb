@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3824;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3826;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "065e73c85696c7d2686ae2c78f921c4a4a9ebc849f51b6ab4481fd7a2a22c3b8";
+    "12006ef0d09b0fab0ac43e3cd162ffe347e2f0814b3c28c41d5634c9ca3f5d3f";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 178;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "44cfcb4b1465cecfb8f47ea78e32e2cac02290582a992d8ad75ac9b1a22a4a85";
+    "1373521cb367abe419519fc89312fbdb22eb31f7a7f7383c542cd77060fb3376";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15876,10 +15876,10 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            18,
-            "the coverage law must still evaluate a20's 18 uncovered keys after \
-             fgdb-a20-restore-promotion-ivsp registers the ready certificate's \
-             one_digest_signer_lock_ref against the minted CertificateSignerLock"
+            16,
+            "the coverage law must still evaluate a20's 16 uncovered keys after \
+             fgdb-a20-restore-promotion-ivsp lands the two RestoreShardOperationalAck \
+             applied-identity fields under the WeakAuthorityAppliedIdentity ruling"
         );
 
         // CONFORMANT CONTROL: certify the universe and only the universe code
@@ -15893,7 +15893,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            18,
+            16,
             "certification must not change what the coverage law finds"
         );
     }
@@ -17428,7 +17428,12 @@ name = "Probe"
                 0x0071,
                 "union",
                 "canonical nonretaining authority applied-identity union",
-                &["ValidatedRemoteConfigurationAnchor"][..],
+                // fgdb-a20-restore-promotion-ivsp: the applied-identity ruling
+                // names RestoreShardOperationalAck a consumer.
+                &[
+                    "RestoreShardOperationalAck",
+                    "ValidatedRemoteConfigurationAnchor",
+                ][..],
                 16_777_216,
             ),
         ];
@@ -17766,7 +17771,10 @@ name = "Probe"
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["ValidatedRemoteConfigurationAnchor"]
+            [
+                "RestoreShardOperationalAck",
+                "ValidatedRemoteConfigurationAnchor"
+            ]
         );
 
         let unions = catalog
@@ -17789,7 +17797,10 @@ name = "Probe"
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["ValidatedRemoteConfigurationAnchor"]
+            [
+                "RestoreShardOperationalAck",
+                "ValidatedRemoteConfigurationAnchor"
+            ]
         );
         assert_eq!(union.role_predicate, "true");
         assert_eq!(union.version_status, "reserved");

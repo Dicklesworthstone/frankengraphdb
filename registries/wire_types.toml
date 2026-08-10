@@ -1092,7 +1092,7 @@ name = "WeakAuthorityAppliedIdentity"
 kind = "union"
 status = "reserved"
 encoding_context = "canonical nonretaining authority applied-identity union"
-allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
+allowed_containing_schemas = ["RestoreShardOperationalAck", "ValidatedRemoteConfigurationAnchor"]
 max_size_bytes = 16777216
 
 [[type]]

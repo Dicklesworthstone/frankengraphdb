@@ -3452,7 +3452,11 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // VisibilitySpan -> DeltaBlockVersion, PropertyEntry -> VertexRowPatch,
         // PropertyEntryList -> EdgePropertyPatch); id128 is wildcard and adds
         // no citation.
-        (615, 436),
+        // 615 -> 616 / 436 -> 437 (fgdb-a20-restore-promotion-ivsp): the
+        // WeakAuthorityAppliedIdentity closure names RestoreShardOperationalAck
+        // as a consumer in both generated artifacts (the applied-identity
+        // ruling).
+        (616, 437),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -11106,6 +11110,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "RestoreShardOperationalAck",
                     "operational_terminal_pin_basis_ref"
                 )
+                // fgdb-a20-restore-promotion-ivsp: the two applied-identity
+                // fields ruled onto WeakAuthorityAppliedIdentity (a04:1586
+                // precedent), landed at tags 0x0004/0x0005 and younger than
+                // the historical witness for the same reason.
+                | (
+                    "RestoreShardOperationalAck",
+                    "reopen_confirm_applied_identity"
+                )
+                | (
+                    "RestoreShardOperationalAck",
+                    "source_access_close_applied_identity"
+                )
                 | (
                     "LocalRestoreServiceCompletionSpec",
                     "expected_restore_registry_state"
@@ -12234,7 +12250,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // FGSM v2 per-record authority binding, claimed by the same cohort
         // filter (accounting 26 -> 27). The current field count carries it and
         // the reconstruction remains 225.
-        pre_erratum.fields.len() + 881,
+        // 881 -> 883 (fgdb-a20-restore-promotion-ivsp): the two
+        // RestoreShardOperationalAck applied-identity fields, claimed by
+        // post_erratum_a20_field and enumerated there. The current field count
+        // carries them and the frozen reconstruction remains 225.
+        pre_erratum.fields.len() + 883,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
