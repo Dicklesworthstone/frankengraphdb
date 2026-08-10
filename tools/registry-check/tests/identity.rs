@@ -11720,6 +11720,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TxnAllocationBindingRoot"
         )
     };
+    // ge6a's Tier-D reachability cohort: PartitionManifest, DeltaPartitionRoot,
+    // and DeltaBlockVersion each had ZERO field rows before the fgdb-ge6a
+    // reachability landing, so the whole schema is a post-erratum addition and
+    // the historical witness reconstructs without it. Filtered separately from
+    // post_erratum_a09_field so that cohort's three-schema membership note stays
+    // a true accounting. ACCOUNTING: exactly 5 transcript lines — root (1),
+    // blocks + vertex_patches (2), property_patch_refs + predecessor (2).
+    let post_erratum_ge6a_reachability_field = |schema: &str| {
+        matches!(
+            schema,
+            "PartitionManifest" | "DeltaPartitionRoot" | "DeltaBlockVersion"
+        )
+    };
     // A16's four exact AuthorityBoundHeader<Role> fields use the already
     // registered generic-free wire family inline. They postdate the erratum
     // and therefore stay out of its historical namespace witness.
@@ -11946,6 +11959,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a08_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a08_lifecycle_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a09_field(&field.containing_schema)
+            && !post_erratum_ge6a_reachability_field(&field.containing_schema)
             && !post_erratum_a16_inline_authority_headers(
                 &field.containing_schema,
                 &field.stable_name,
@@ -12185,7 +12199,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // service_visibility_epoch, signer_set_epoch, threshold_signatures) are
         // claimed by post_erratum_a20_field. The current field count carries
         // them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 854,
+        // 854 -> 859 (fgdb-ge6a): the five Tier-D reachability field rows —
+        // PartitionManifest.root, DeltaPartitionRoot.{blocks,vertex_patches},
+        // DeltaBlockVersion.{property_patch_refs,predecessor} — are claimed by
+        // post_erratum_ge6a_reachability_field (whole-schema cohort: all three
+        // hosts had zero field rows before this landing). The current field
+        // count carries them and the frozen reconstruction remains 225.
+        pre_erratum.fields.len() + 859,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

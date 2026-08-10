@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3791
-projection_fallback_count = 145
-target_source_assignment_sha256 = "9c9ce3bb55b6c3d6bf478a8c3d9094f215081d954c1696af15ab6d04ee449e59"
+target_count = 3796
+projection_fallback_count = 150
+target_source_assignment_sha256 = "4b6f7ddf09e7824233e2bc2b532d7855e93dcfd861800f01400a55fa3eebe7e3"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 46
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 80
+registry_epoch = 81
 
 [[logical_kind]]
 slice_id = "a03"
@@ -115440,6 +115440,91 @@ retention_and_cut_rule = "strong reference to the exact CertificateSignerLock na
 version_status = "reserved"
 max_size_bytes = 40
 
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:partition-manifest-root"
+containing_schema = "PartitionManifest"
+field_tag = 0x0004
+stable_name = "root"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaPartitionRoot"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "strong while this manifest is the slot's published target or retained for time-travel"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-blocks"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0005
+stable_name = "blocks"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaBlockVersion"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong while this root is published or retained; the ref carries the block's own first_seq/last_seq bounds"
+version_status = "active"
+max_size_bytes = 48
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-vertex-patches"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0006
+stable_name = "vertex_patches"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "VertexRowPatch"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong while this root is published or retained; same publication-order and frontier laws as blocks (fgdb-3xoi)"
+version_status = "active"
+max_size_bytes = 48
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-block-version-property-patch-refs"
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0007
+stable_name = "property_patch_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "EdgePropertyPatch"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "strong while the hosting block is live in a published root (ruled shape fgdb-2t7q 3B: block-level ref set indexed by per-entry locator)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-block-version-predecessor"
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0008
+stable_name = "predecessor"
+exact_wire_type = "digest256"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "lineage comparison anchor over the family's prior block identity; compared, never traversed, and never a retaining edge — retention of predecessors is the root's block refs' job; absent for a family's first block"
+version_status = "active"
+max_size_bytes = 33
+digest_class = "weak_identity"
+
 [[target]]
 row_id = "a01:target:field-remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
 target_row_id = "a01:field:remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
@@ -115486,4 +115571,44 @@ target_row_id = "a09:logical-kind:partition-manifest"
 slice_id = "a09"
 source_key = "projection|logical_object_kinds|PartitionManifest"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-partition-manifest-root"
+target_row_id = "a09:field:partition-manifest-root"
+slice_id = "a09"
+source_key = "projection|durable_fields|PartitionManifest.root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-blocks"
+target_row_id = "a09:field:delta-partition-root-blocks"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.blocks"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-vertex-patches"
+target_row_id = "a09:field:delta-partition-root-vertex-patches"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.vertex_patches"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-delta-block-version-property-patch-refs"
+target_row_id = "a09:field:delta-block-version-property-patch-refs"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaBlockVersion.property_patch_refs"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-delta-block-version-predecessor"
+target_row_id = "a09:field:delta-block-version-predecessor"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaBlockVersion.predecessor"
+target_kind = "field"
 definition_status = "declared"

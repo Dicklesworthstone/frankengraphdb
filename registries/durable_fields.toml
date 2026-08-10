@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 80
+registry_epoch = 81
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -2716,6 +2716,36 @@ digest_class = "transcript"
 transcript_recipe = "BLAKE3(\"fgdb:delivered-zset:v1\" || canonical(format,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_canonical_zset_bytes)); excludes storage-only canonical_zset_segment_refs and output_payload_digest (a11:1932)"
 
 [[field]]
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0007
+stable_name = "property_patch_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "EdgePropertyPatch"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "strong while the hosting block is live in a published root (ruled shape fgdb-2t7q 3B: block-level ref set indexed by per-entry locator)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0008
+stable_name = "predecessor"
+exact_wire_type = "digest256"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "lineage comparison anchor over the family's prior block identity; compared, never traversed, and never a retaining edge — retention of predecessors is the root's block refs' job; absent for a family's first block"
+version_status = "active"
+max_size_bytes = 33
+digest_class = "weak_identity"
+
+[[field]]
 containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -2789,6 +2819,36 @@ version_status = "reserved"
 max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "BLAKE3(canonical every DeltaDeliveryEnvelope field except internal_delivery_digest); commits the full authority-bound header, service epoch, role, payload contract, and Atomic|Coalesced provenance (a11:1934)"
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0005
+stable_name = "blocks"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaBlockVersion"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong while this root is published or retained; the ref carries the block's own first_seq/last_seq bounds"
+version_status = "active"
+max_size_bytes = 48
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0006
+stable_name = "vertex_patches"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "VertexRowPatch"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong while this root is published or retained; same publication-order and frontier laws as blocks (fgdb-3xoi)"
+version_status = "active"
+max_size_bytes = 48
 
 [[field]]
 containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"
@@ -7815,6 +7875,21 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the TopologyState this ParticipantRoutingDerivationProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "PartitionManifest"
+field_tag = 0x0004
+stable_name = "root"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaPartitionRoot"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "strong while this manifest is the slot's published target or retained for time-travel"
+version_status = "active"
+max_size_bytes = 32
 
 [[field]]
 containing_schema = "PlacementRecord"
