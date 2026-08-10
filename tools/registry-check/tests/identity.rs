@@ -11730,7 +11730,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // post-erratum addition and the historical witness reconstructs without
     // it. Filtered separately from post_erratum_a09_field so that cohort's
     // three-schema membership note stays a true accounting. ACCOUNTING:
-    // exactly 25 transcript lines — the 5 reachability rows (increment 2:
+    // exactly 26 transcript lines — the fgdb-6lyc root digest row plus
+    // the 25 ge6a rows: the 5 reachability rows (increment 2:
     // manifest root, root blocks + vertex_patches, block property_patch_refs
     // + predecessor) plus the 20 full-table rows (increment 3: block
     // format/partition_id/descriptor_key/sorted_entries/visibility_intervals/
@@ -12224,7 +12225,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // cohort filter (extended to VertexRowPatch and EdgePropertyPatch,
         // which also had zero rows before ge6a). The current field count
         // carries them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 879,
+        // 879 -> 880 (fgdb-6lyc): DeltaPartitionRoot.canonical_partition_digest,
+        // the FGSR V3 root transcript commitment, claimed by the same cohort
+        // filter (its 25-line accounting note becomes 26 with this row). The
+        // current field count carries it and the reconstruction remains 225.
+        pre_erratum.fields.len() + 880,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3822
-projection_fallback_count = 176
-target_source_assignment_sha256 = "14b7c7ce41701d421d4e989f17e310344e8d19373a6e865d3e23f5e317953ce2"
+target_count = 3823
+projection_fallback_count = 177
+target_source_assignment_sha256 = "ee525cb35f5f0ee783f9c2b51ba0fc04a8d10b27a15d99bf9f3433d256d5e422"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 47
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 82
+registry_epoch = 83
 
 [[logical_kind]]
 slice_id = "a03"
@@ -115913,6 +115913,24 @@ retention_and_cut_rule = "positional rows indexed by the hosting block's locator
 version_status = "active"
 max_size_bytes = 16384
 
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-canonical-partition-digest"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0007
+stable_name = "canonical_partition_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1, fgdb-6lyc): comparison only, verified on decode, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc)"
+
 [[target]]
 row_id = "a01:target:field-remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
 target_row_id = "a01:field:remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
@@ -116206,5 +116224,13 @@ row_id = "a09:target:field-edge-property-patch-rows"
 target_row_id = "a09:field:edge-property-patch-rows"
 slice_id = "a09"
 source_key = "projection|durable_fields|EdgePropertyPatch.rows"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-canonical-partition-digest"
+target_row_id = "a09:field:delta-partition-root-canonical-partition-digest"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.canonical_partition_digest"
 target_kind = "field"
 definition_status = "declared"

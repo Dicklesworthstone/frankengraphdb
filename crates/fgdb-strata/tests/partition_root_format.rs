@@ -344,11 +344,12 @@ fn the_decoder_re_checks_the_range_laws() {
         vertex_patches: vec![],
     };
     let mut bytes = encode_root(&lawful).expect("encodes");
-    // header(62) + the id(32) + first_seq(8) inside the first ref. Verified before
+    // header(94) + the id(32) + first_seq(8) inside the first ref. Verified before
     // it is touched, because an offset slip here would silently patch a field this
-    // law says nothing about. The trailing `+ 4 + 4` is the V2 header's block
-    // count AND vertex-patch count (fgdb-3xoi).
-    const HEADER: usize = 4 + 2 + 16 + 16 + 8 + 8 + 4 + 4;
+    // law says nothing about. The trailing `+ 4 + 4 + 32` is the header's block
+    // count, vertex-patch count (fgdb-3xoi), and the V3 canonical partition
+    // digest (fgdb-6lyc).
+    const HEADER: usize = 4 + 2 + 16 + 16 + 8 + 8 + 4 + 4 + 32;
     let first_last_seq = HEADER + 32 + 8;
     assert_eq!(
         u64::from_be_bytes(
@@ -876,5 +877,49 @@ fn a_merge_unions_disjoint_keys_and_stays_scoped() {
             .expect("merges"),
         vec![fgdb_types::VId(9)],
         "another source's edges are not in this answer"
+    );
+}
+
+/// **THE ROOT COMMITS TO ITS OWN LOGICAL CONTENT (fgdb-6lyc).** Content
+/// addressing proves the bytes are the ones written; the canonical partition
+/// digest proves the bytes still SAY what the publisher's logical state said.
+/// The decisive mutation is one the range laws cannot see: a flipped byte
+/// inside an opaque block id changes WHICH block the root names while every
+/// sequence bound stays lawful — only the digest refuses it.
+#[test]
+fn the_root_digest_refuses_content_the_range_laws_cannot_see() {
+    let (id_a, _, _) = block(vec![entry(1, 2, 1, None)]);
+    let lawful = PartitionRoot {
+        graph: GRAPH,
+        branch: BRANCH,
+        partition: 0,
+        published_at: CommitSeq(9),
+        blocks: vec![reference(id_a, (CommitSeq(1), CommitSeq(1)))],
+        vertex_patches: vec![],
+    };
+    let bytes = encode_root(&lawful).expect("encodes");
+    assert_eq!(decode_root(&bytes).as_ref(), Ok(&lawful), "control decodes");
+
+    const HEADER: usize = 4 + 2 + 16 + 16 + 8 + 8 + 4 + 4 + 32;
+    // Mutation one: a byte inside the first block's opaque id. All range laws
+    // still hold; the recomputation disagrees with the declared digest.
+    let mut renamed = bytes.clone();
+    renamed[HEADER] ^= 0x01;
+    assert!(
+        matches!(decode_root(&renamed), Err(RootError::DigestMismatch { .. })),
+        "a renamed block must be refused by the digest, not silently served"
+    );
+
+    // Mutation two: the declared digest itself. The content is intact, so the
+    // recomputation is right and the declaration is the lie.
+    const OFF_DIGEST: usize = 4 + 2 + 16 + 16 + 8 + 8 + 4 + 4;
+    let mut declared_lie = bytes.clone();
+    declared_lie[OFF_DIGEST] ^= 0x01;
+    assert!(
+        matches!(
+            decode_root(&declared_lie),
+            Err(RootError::DigestMismatch { .. })
+        ),
+        "a lying declaration must be refused even over intact content"
     );
 }

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 82
+registry_epoch = 83
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -2991,6 +2991,22 @@ role_predicate = "true"
 retention_and_cut_rule = "strong while this root is published or retained; same publication-order and frontier laws as blocks (fgdb-3xoi)"
 version_status = "active"
 max_size_bytes = 48
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0007
+stable_name = "canonical_partition_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1, fgdb-6lyc): comparison only, verified on decode, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc)"
 
 [[field]]
 containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"

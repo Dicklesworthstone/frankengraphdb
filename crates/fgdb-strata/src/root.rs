@@ -37,8 +37,21 @@ pub const ROOT_MAGIC: [u8; 4] = *b"FGSR";
 /// predates V2 — the spine's databases live in per-run scratch directories —
 /// so there is deliberately no V1 decode path to maintain and drift.
 pub const ROOT_FORMAT_V1: u16 = 1;
-/// Format version, versioned from day one (§16.6).
+/// The retired second cut: V2's header ended at the patch count, so the root
+/// was the one Tier-D object with no commitment over its own logical content.
+/// V3 is a breaking bump for the same reason V2 was (§16.6, no production
+/// database predates it) and there is deliberately no V2 decode path.
 pub const ROOT_FORMAT_V2: u16 = 2;
+/// Format version, versioned from day one (§16.6). V3 closes the header with
+/// `canonical_partition_digest` (fgdb-6lyc), mirroring the block's own
+/// transcript commitment.
+pub const ROOT_FORMAT_V3: u16 = 3;
+
+/// Domain separator for [`root_logical_digest`] — an UNKEYED transcript digest
+/// over the root's LOGICAL content (coordinate, publication, and the ordered
+/// ref lists), not its frame bytes, so a re-encoding under a future layout
+/// digests identically.
+pub const ROOT_LOGICAL_DIGEST_DOMAIN: &[u8] = b"fgdb.strata.root-logical-digest.v1";
 
 // Header field offsets, written out rather than computed at each use site. The
 // first draft of the decoder read `published_at` at 38 (the partition field) and
@@ -50,9 +63,10 @@ const OFF_PARTITION: usize = OFF_BRANCH + 16;
 const OFF_PUBLISHED: usize = OFF_PARTITION + 8;
 const OFF_BLOCK_COUNT: usize = OFF_PUBLISHED + 8;
 const OFF_PATCH_COUNT: usize = OFF_BLOCK_COUNT + 4;
+const OFF_DIGEST: usize = OFF_PATCH_COUNT + 4;
 /// magic + format + graph + branch + partition + published_at + block_count
-/// + vertex_patch_count
-const HEADER_LEN: usize = OFF_PATCH_COUNT + 4;
+/// + vertex_patch_count + canonical_partition_digest
+const HEADER_LEN: usize = OFF_DIGEST + 32;
 /// block_id(32) + first_seq(8) + last_seq(8) — and identically
 /// patch_id(32) + first_seq(8) + last_seq(8).
 const REF_LEN: usize = 32 + 8 + 8;
@@ -191,6 +205,17 @@ pub enum RootError {
     },
     ImplausibleBlockCount {
         declared: u32,
+    },
+    /// The declared `canonical_partition_digest` does not match a
+    /// recomputation over the decoded logical content.
+    ///
+    /// Content-addressing already proves these are the bytes that were
+    /// written; this proves the bytes still SAY what the publisher's logical
+    /// state said — an encoder that dropped or reordered a ref would keep a
+    /// stable identity for the wrong content.
+    DigestMismatch {
+        declared: [u8; 32],
+        recomputed: [u8; 32],
     },
     /// The bytes are not the root that was asked for.
     IdentityMismatch {
@@ -420,6 +445,14 @@ impl core::fmt::Display for RootError {
                     "a root naming {declared} vertex patches is not readable here"
                 )
             }
+            Self::DigestMismatch {
+                declared,
+                recomputed,
+            } => write!(
+                f,
+                "the root's declared canonical partition digest {declared:02x?} does not match \
+                 the recomputation {recomputed:02x?} over its decoded content"
+            ),
             Self::PatchRangeMismatch {
                 at,
                 declared,
@@ -558,6 +591,32 @@ pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
     Ok(())
 }
 
+/// The root's canonical partition digest (fgdb-6lyc): UNKEYED,
+/// domain-separated, over the LOGICAL content — coordinate, publication, and
+/// the ordered ref lists with their sequence bounds. Infallible: every field
+/// digests, so there is no skipped-field path for a defect to hide behind.
+pub fn root_logical_digest(root: &PartitionRoot) -> [u8; 32] {
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(ROOT_LOGICAL_DIGEST_DOMAIN);
+    hasher.update(&root.graph.0.to_be_bytes());
+    hasher.update(&root.branch.0.to_be_bytes());
+    hasher.update(&root.partition.to_be_bytes());
+    hasher.update(&root.published_at.0.to_be_bytes());
+    hasher.update(&(root.blocks.len() as u32).to_be_bytes());
+    for block in &root.blocks {
+        hasher.update(&block.block_id.0);
+        hasher.update(&block.first_seq.0.to_be_bytes());
+        hasher.update(&block.last_seq.0.to_be_bytes());
+    }
+    hasher.update(&(root.vertex_patches.len() as u32).to_be_bytes());
+    for patch in &root.vertex_patches {
+        hasher.update(&patch.patch_id.0);
+        hasher.update(&patch.first_seq.0.to_be_bytes());
+        hasher.update(&patch.last_seq.0.to_be_bytes());
+    }
+    hasher.finalize().0
+}
+
 /// Encode a root canonically, refusing anything that is not.
 pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
     validate_root(root)?;
@@ -565,13 +624,14 @@ pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
     let mut out =
         Vec::with_capacity(HEADER_LEN + (root.blocks.len() + root.vertex_patches.len()) * REF_LEN);
     out.extend_from_slice(&ROOT_MAGIC);
-    out.extend_from_slice(&ROOT_FORMAT_V2.to_be_bytes());
+    out.extend_from_slice(&ROOT_FORMAT_V3.to_be_bytes());
     out.extend_from_slice(&root.graph.0.to_be_bytes());
     out.extend_from_slice(&root.branch.0.to_be_bytes());
     out.extend_from_slice(&root.partition.to_be_bytes());
     out.extend_from_slice(&root.published_at.0.to_be_bytes());
     out.extend_from_slice(&(root.blocks.len() as u32).to_be_bytes());
     out.extend_from_slice(&(root.vertex_patches.len() as u32).to_be_bytes());
+    out.extend_from_slice(&root_logical_digest(root));
     for block in &root.blocks {
         out.extend_from_slice(&block.block_id.0);
         out.extend_from_slice(&block.first_seq.0.to_be_bytes());
@@ -591,7 +651,7 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
         return Err(RootError::NotARoot);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != ROOT_FORMAT_V2 {
+    if format != ROOT_FORMAT_V3 {
         return Err(RootError::UnsupportedFormat { format });
     }
     let u128_at = |at: usize| -> u128 {
@@ -662,6 +722,15 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
         vertex_patches,
     };
     validate_root(&root)?;
+    let mut declared = [0u8; 32];
+    declared.copy_from_slice(&bytes[OFF_DIGEST..OFF_DIGEST + 32]);
+    let recomputed = root_logical_digest(&root);
+    if declared != recomputed {
+        return Err(RootError::DigestMismatch {
+            declared,
+            recomputed,
+        });
+    }
     Ok(root)
 }
 
