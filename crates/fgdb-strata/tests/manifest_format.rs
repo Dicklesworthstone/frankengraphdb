@@ -14,7 +14,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
 use fgdb_strata::manifest::{
-    MANIFEST_FORMAT_V1, ManifestError, ManifestRecord, ManifestVersion, decode_manifest,
+    MANIFEST_FORMAT_V2, ManifestError, ManifestRecord, ManifestVersion, decode_manifest,
     encode_manifest, manifest_id, read_manifest,
 };
 use fgdb_strata::root::{BlockRef, PartitionRoot};
@@ -58,18 +58,21 @@ fn distinct_records() -> Vec<ManifestRecord> {
             branch: BranchId(5),
             partition: 7,
             root: PartitionRootVersion(ObjectId([0x11; 32])),
+            published_chain_hash: fgdb_crypto::Digest([0xa1; 32]),
         },
         ManifestRecord {
             graph: GraphId(3),
             branch: BranchId(5),
             partition: 9,
             root: PartitionRootVersion(ObjectId([0x22; 32])),
+            published_chain_hash: fgdb_crypto::Digest([0xa2; 32]),
         },
         ManifestRecord {
             graph: GraphId(4),
             branch: BranchId(2),
             partition: 1,
             root: PartitionRootVersion(ObjectId([0x33; 32])),
+            published_chain_hash: fgdb_crypto::Digest([0xa3; 32]),
         },
     ]
 }
@@ -117,11 +120,11 @@ fn foreign_bytes_future_formats_and_identity_are_distinct_refusals() {
     );
 
     let mut future = bytes.clone();
-    future[4..6].copy_from_slice(&(MANIFEST_FORMAT_V1 + 1).to_be_bytes());
+    future[4..6].copy_from_slice(&(MANIFEST_FORMAT_V2 + 1).to_be_bytes());
     assert_eq!(
         decode_manifest(&future),
         Err(ManifestError::UnsupportedFormat {
-            format: MANIFEST_FORMAT_V1 + 1
+            format: MANIFEST_FORMAT_V2 + 1
         })
     );
 
@@ -168,7 +171,7 @@ fn order_duplicates_and_the_zero_root_are_refused_in_both_directions() {
     // of the first — bytes the encoder cannot emit.
     let bytes = encode_manifest(&records).expect("encodes");
     let mut spliced = bytes.clone();
-    let (first, second) = (10, 10 + 72);
+    let (first, second) = (10, 10 + 104);
     let head: Vec<u8> = spliced[first..first + 40].to_vec();
     spliced[second..second + 40].copy_from_slice(&head);
     assert_eq!(
@@ -246,12 +249,14 @@ fn a_reopened_store_resolves_every_partition_the_manifest_names() {
                     branch: BranchId(1),
                     partition: 0,
                     root: first,
+                    published_chain_hash: fgdb_crypto::Digest([0xb1; 32]),
                 },
                 ManifestRecord {
                     graph: GraphId(1),
                     branch: BranchId(1),
                     partition: 1,
                     root: second,
+                    published_chain_hash: fgdb_crypto::Digest([0xb2; 32]),
                 },
             ];
             store.put_manifest(cx, &records).expect("manifest stores")
@@ -301,12 +306,14 @@ fn a_manifest_naming_an_absent_root_fails_closed_with_the_identity() {
                 branch: BranchId(1),
                 partition: 0,
                 root: real,
+                published_chain_hash: fgdb_crypto::Digest([0xc1; 32]),
             },
             ManifestRecord {
                 graph: GraphId(1),
                 branch: BranchId(1),
                 partition: 1,
                 root: ghost,
+                published_chain_hash: fgdb_crypto::Digest([0xc2; 32]),
             },
         ];
         let id = store.put_manifest(cx, &records).expect("manifest stores");

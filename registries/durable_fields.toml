@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 83
+registry_epoch = 84
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -8104,6 +8104,22 @@ role_predicate = "true"
 retention_and_cut_rule = "strong while this manifest is the slot's published target or retained for time-travel"
 version_status = "active"
 max_size_bytes = 32
+
+[[field]]
+containing_schema = "PartitionManifest"
+field_tag = 0x0005
+stable_name = "published_chain_hash"
+exact_wire_type = "digest256"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "per-record authority binding (fgdb-90hw): the Chronicle marker-chain commitment at the record's root publication, compared against the recovered chain by open; comparison only, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "the Chronicle marker-chain value AFTER the marker at the root's published_at (ChainedMarker.chain_hash, re-derived and verified by chain recovery), or the chain origin for a publication over the empty stream (fgdb-90hw)"
 
 [[field]]
 containing_schema = "PlacementRecord"

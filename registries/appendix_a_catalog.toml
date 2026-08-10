@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3823
-projection_fallback_count = 177
-target_source_assignment_sha256 = "ee525cb35f5f0ee783f9c2b51ba0fc04a8d10b27a15d99bf9f3433d256d5e422"
+target_count = 3824
+projection_fallback_count = 178
+target_source_assignment_sha256 = "44cfcb4b1465cecfb8f47ea78e32e2cac02290582a992d8ad75ac9b1a22a4a85"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 47
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 83
+registry_epoch = 84
 
 [[logical_kind]]
 slice_id = "a03"
@@ -115931,6 +115931,24 @@ max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc)"
 
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:partition-manifest-published-chain-hash"
+containing_schema = "PartitionManifest"
+field_tag = 0x0005
+stable_name = "published_chain_hash"
+exact_wire_type = "digest256"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "per-record authority binding (fgdb-90hw): the Chronicle marker-chain commitment at the record's root publication, compared against the recovered chain by open; comparison only, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "the Chronicle marker-chain value AFTER the marker at the root's published_at (ChainedMarker.chain_hash, re-derived and verified by chain recovery), or the chain origin for a publication over the empty stream (fgdb-90hw)"
+
 [[target]]
 row_id = "a01:target:field-remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
 target_row_id = "a01:field:remote-retention-release-ack-certificate-one-digest-signer-lock-ref"
@@ -116232,5 +116250,13 @@ row_id = "a09:target:field-delta-partition-root-canonical-partition-digest"
 target_row_id = "a09:field:delta-partition-root-canonical-partition-digest"
 slice_id = "a09"
 source_key = "projection|durable_fields|DeltaPartitionRoot.canonical_partition_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-partition-manifest-published-chain-hash"
+target_row_id = "a09:field:partition-manifest-published-chain-hash"
+slice_id = "a09"
+source_key = "projection|durable_fields|PartitionManifest.published_chain_hash"
 target_kind = "field"
 definition_status = "declared"

@@ -959,12 +959,28 @@ fn manifest_bytes_len(snapshot: &Snapshot) -> Result<u64, OpenError> {
         branch: BRANCH,
         partition: PARTITION,
         root: snapshot.root,
+        // Length-only computation: every V2 record is RECORD_LEN regardless of
+        // the commitment value, so the zero digest cannot drift the answer.
+        published_chain_hash: Digest([0u8; 32]),
     }];
     let bytes = encode_manifest(&records).map_err(|_| OpenError::NotADatabase {
         path: PathBuf::new(),
         missing: "an encodable manifest",
     })?;
     Ok(bytes.len() as u64)
+}
+
+/// The Chronicle chain commitment at `at` (fgdb-90hw): the chain value AFTER
+/// the marker committed at that sequence, the origin for the empty stream, or
+/// `None` when the recovered chain is SHORTER than `at` — which is exactly the
+/// future-frontier slot a checkpoint binding must refuse.
+fn chain_commitment_at(chain: &fgdb_chronicle::MarkerChain, at: CommitSeq) -> Option<Digest> {
+    if at.0 == 0 {
+        return Some(fgdb_chronicle::marker::CHAIN_ORIGIN);
+    }
+    let entry = chain.entries().get((at.0 - 1) as usize)?;
+    debug_assert_eq!(entry.marker.commit_seq, at.0, "the chain is gap-free");
+    Some(entry.chain_hash)
 }
 
 #[derive(Debug)]
@@ -1153,16 +1169,19 @@ impl Database {
                                 && root.graph == GRAPH
                                 && root.branch == BRANCH
                                 && root.partition == PARTITION;
-                            if !describes_spine
-                                || !checkpoint_matches_stream(
-                                    cx,
-                                    &coordinator,
-                                    &store,
-                                    &keys,
-                                    record.root,
-                                )
-                                .await?
-                            {
+                            // THE CHAIN BINDING (fgdb-90hw): the record claims
+                            // "the history whose chain at published_at hashes
+                            // to exactly this published my root", and the
+                            // recovered chain is the judge — one comparison,
+                            // no capsule folding. A future-frontier root falls
+                            // off the chain (None); a same-namespace FOREIGN
+                            // history hashes differently; a lagging root
+                            // matches at its own seq and heals below. WHAT was
+                            // published stays the equivalence law's question —
+                            // this binding answers WHO published it.
+                            let bound = chain_commitment_at(coordinator.chain(), root.published_at)
+                                .is_some_and(|expected| expected == record.published_chain_hash);
+                            if !describes_spine || !bound {
                                 return Err(OpenError::SlotDisagreesWithStream {
                                     path: path.to_path_buf(),
                                     slot_manifest: ObjectId(slot.root_manifest_oid),
@@ -1233,14 +1252,13 @@ impl Database {
                                 && root.graph == GRAPH
                                 && root.branch == BRANCH
                                 && root.partition == PARTITION
-                                && checkpoint_matches_stream(
-                                    cx,
-                                    &coordinator,
-                                    &store,
-                                    &keys,
-                                    record.root,
-                                )
-                                .await?
+                                // The same chain binding as checkpoint-selected
+                                // open (fgdb-90hw): a stale-but-OURS manifest
+                                // heals forward; a foreign or future one refuses.
+                                && chain_commitment_at(coordinator.chain(), root.published_at)
+                                    .is_some_and(|expected| {
+                                        expected == record.published_chain_hash
+                                    })
                         }
                         _ => false,
                     };
@@ -1940,10 +1958,14 @@ impl Database {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
-        // The manifest names the published root (fgdb-63w2): the durable path
-        // from this directory to its partition advances in the same publish.
-        let manifest_records =
-            records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
+        // The manifest names the published root (fgdb-63w2) and binds it to
+        // the chain commitment at this very commit (fgdb-90hw): the durable
+        // path from this directory to its partition advances in the same
+        // publish, carrying the authority claim open verifies.
+        let published_chain_hash = chain_commitment_at(self.coordinator.chain(), root.published_at)
+            .expect("the commit that published this root is on its own chain");
+        let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
+            .expect("one root is one canonical record");
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishManifest);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let manifest = self
@@ -2415,6 +2437,8 @@ impl Database {
         // through; the shared tail republishes and reopens from disk.
         let versions = self.snapshot.versions.clone();
         let next_birth_ordinal = self.snapshot.next_birth_ordinal;
+        let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
+            .expect("a healthy handle's frontier is on its own recovered chain");
         let (snapshot, writer) = publish_and_snapshot(
             cx,
             &self.store,
@@ -2423,6 +2447,7 @@ impl Database {
             versions,
             frontier,
             next_birth_ordinal,
+            published_chain_hash,
         )?;
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
@@ -2431,6 +2456,9 @@ impl Database {
             branch: BRANCH,
             partition: PARTITION,
             root: snapshot.root,
+            // Length-only computation, as in manifest_bytes_len: every V2
+            // record is RECORD_LEN regardless of the commitment value.
+            published_chain_hash: Digest([0u8; 32]),
         }];
         let manifest_len = encode_manifest(&manifest_records)
             .map(|bytes| bytes.len() as u64)
@@ -2848,147 +2876,14 @@ fn derive_versions_and_ordinal(
     Ok((versions, (spent_vertices.len() + spent_edges.len()) as u64))
 }
 
-/// Layout-independent graph history carried by one checkpoint projection.
-/// Later blocks may restate an older statement (for example to add its
-/// retirement), so publication order deliberately overwrites an identical
-/// `(identity, created_at)` key.
-#[derive(Debug, PartialEq, Eq)]
-struct CheckpointProjection {
-    vertices: std::collections::BTreeMap<(VId, u64), VertexRow>,
-    edges: std::collections::BTreeMap<(EId, u64), (AdjacencyEntry, EdgePropertyRow)>,
-}
-
-fn checkpoint_projection(
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
-    patches: &[Vec<VertexRow>],
-) -> CheckpointProjection {
-    let mut vertices = std::collections::BTreeMap::new();
-    for rows in patches {
-        for row in rows {
-            vertices.insert((row.vid, row.created_at.0), row.clone());
-        }
-    }
-    let mut edges = std::collections::BTreeMap::new();
-    for (block, props) in blocks.iter().zip(block_props) {
-        for (index, entry) in block.iter().enumerate() {
-            let row = props
-                .as_ref()
-                .map(|props| props.props_of(index))
-                .unwrap_or_default();
-            edges.insert((entry.eid, entry.created_at.0), (*entry, row));
-        }
-    }
-    CheckpointProjection { vertices, edges }
-}
-
-/// Reconstruct the graph projection at exactly `through` from Chronicle.
-///
-/// This still pays the complete prefix fold until the durable checkpoint
-/// contract carries an authenticated logical-prefix commitment. It does NOT
-/// publish that temporary fold: checkpoint authentication needs a semantic
-/// comparison, not a second durable derived generation. Publishing here made
-/// every open rewrite and fsync the whole prefix merely to throw the resulting
-/// snapshot away before reopening the already-selected checkpoint.
-async fn reconstruct_checkpoint_projection(
-    cx: &CommitCx,
-    coordinator: &CommitCoordinator,
-    keys: &DatabaseKeys,
-    through: CommitSeq,
-) -> Result<Option<CheckpointProjection>, RebuildError> {
-    let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
-    let mut next_birth_ordinal = 0u64;
-    let mut versions = std::collections::BTreeMap::new();
-    let frontier = fold_stream_through(
-        cx,
-        coordinator,
-        keys,
-        &mut writer,
-        &mut versions,
-        &mut next_birth_ordinal,
-        CommitSeq(0),
-        Some(through),
-    )
-    .await?;
-    if frontier != through {
-        return Ok(None);
-    }
-
-    // Seal and decode the replayed bytes in memory. The candidate checkpoint
-    // below is independently reopened through BlockStore, which authenticates
-    // its durable object identities. Rewriting these deterministic replay
-    // bytes to that same store would add I/O, not evidence about membership in
-    // Chronicle's history.
-    let (_root, blocks, patches) =
-        writer
-            .publish(keys.block_keys(), frontier)
-            .map_err(|error| RebuildError::Fold {
-                commit_seq: frontier.0,
-                error,
-            })?;
-    let mut decoded_blocks = Vec::with_capacity(blocks.len());
-    let mut decoded_props = Vec::with_capacity(blocks.len());
-    for block in &blocks {
-        let (entries, hosted) = fgdb_strata::decode_block_with_properties(&block.bytes)
-            .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
-        let props = match hosted {
-            Some((_, locators)) => {
-                let patch = block.property_patch.as_ref().expect(
-                    "a replayed block declaring hosted properties was sealed beside its patch",
-                );
-                let rows = fgdb_strata::edge_props::decode_property_patch(&patch.bytes).map_err(
-                    |error| RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error)),
-                )?;
-                Some(BlockProps { locators, rows })
-            }
-            None => None,
-        };
-        decoded_blocks.push(entries);
-        decoded_props.push(props);
-    }
-    let decoded_patches = patches
-        .iter()
-        .map(|patch| {
-            fgdb_strata::vertex::decode_patch(&patch.bytes)
-                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(Some(checkpoint_projection(
-        &decoded_blocks,
-        &decoded_props,
-        &decoded_patches,
-    )))
-}
-
-/// Prove that a slot-selected checkpoint is the same temporal graph projection
-/// as Chronicle's complete prefix. Content identity alone proves authentic
-/// bytes, not membership in this history. Comparing normalized statements (not
-/// root bytes) also admits answer-preserving compaction layouts.
-async fn checkpoint_matches_stream(
-    cx: &CommitCx,
-    coordinator: &CommitCoordinator,
-    store: &BlockStore,
-    keys: &DatabaseKeys,
-    root_id: PartitionRootVersion,
-) -> Result<bool, RebuildError> {
-    let (root, blocks, block_props, patches) = store.reopen(cx, root_id)?;
-    let candidate = checkpoint_projection(&blocks, &block_props, &patches);
-    let Some(rebuilt) =
-        reconstruct_checkpoint_projection(cx, coordinator, keys, root.published_at).await?
-    else {
-        return Ok(false);
-    };
-    Ok(candidate == rebuilt)
-}
-
 /// Post-verification checkpoint reopen (fgdb-ge6a): resolve the slot's
 /// manifest to a partition, reopen it from disk, derive the writer and version
 /// state the fold would have built, then replay only the Chronicle suffix past
-/// the partition's publication. [`checkpoint_matches_stream`] has already
-/// folded and compared the complete prefix before this function is called.
-/// The equivalence law pins the result against [`rebuild`] on generated
-/// histories.
+/// the partition's publication. The manifest record's chain binding has
+/// already been verified against the recovered marker chain (fgdb-90hw) —
+/// one comparison, no prefix fold — so this path is O(partition + suffix).
+/// WHAT the checkpoint contains is pinned by the equivalence law against
+/// [`rebuild`] on generated histories, including the element-version heads.
 async fn reopen_from_verified_checkpoint(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
@@ -3072,6 +2967,8 @@ async fn reopen_from_verified_checkpoint(
     if frontier.0 > published_at.0 {
         // The suffix advanced the fold: republish through the shared tail so
         // the durable root/manifest catch up (the slot heals in bind).
+        let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
+            .expect("the fold's frontier is on the recovered chain it folded");
         let result = publish_and_snapshot(
             cx,
             store,
@@ -3080,14 +2977,17 @@ async fn reopen_from_verified_checkpoint(
             versions,
             frontier,
             next_birth_ordinal,
+            published_chain_hash,
         );
         return result;
     }
 
     // No suffix: the partition IS current, and the snapshot assembles from
     // what the reopen already decoded — no publish, no O(blocks) writes.
-    let manifest_records =
-        records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
+    let published_chain_hash = chain_commitment_at(coordinator.chain(), published_at)
+        .expect("bind verified this publication against the recovered chain");
+    let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
+        .expect("one root is one canonical record");
     let manifest_bytes =
         encode_manifest(&manifest_records).expect("records_of proved these records canonical");
     let manifest = ManifestVersion(fgdb_strata::manifest::manifest_id(
@@ -3131,6 +3031,8 @@ async fn rebuild(
         CommitSeq(0),
     )
     .await?;
+    let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
+        .expect("the fold's frontier is on the recovered chain it folded");
     publish_and_snapshot(
         cx,
         store,
@@ -3139,6 +3041,7 @@ async fn rebuild(
         versions,
         frontier,
         next_birth_ordinal,
+        published_chain_hash,
     )
 }
 
@@ -3282,6 +3185,7 @@ async fn fold_stream_through(
 /// The publication tail every open path shares: publish from a clone, make
 /// the blocks/patches/root/manifest durable, and assemble the snapshot from
 /// a from-disk reopen — the encode -> address -> fsync -> decode round trip.
+#[allow(clippy::too_many_arguments)]
 fn publish_and_snapshot(
     cx: &CommitCx,
     store: &BlockStore,
@@ -3290,6 +3194,7 @@ fn publish_and_snapshot(
     versions: std::collections::BTreeMap<ElementId, ObjectId>,
     frontier: CommitSeq,
     next_birth_ordinal: u64,
+    published_chain_hash: Digest,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
     // Publish from a clone and hand the fold state back: the caller retains it
     // so later commits fold only their own template (fgdb-fujt). The strata
@@ -3311,8 +3216,8 @@ fn publish_and_snapshot(
         store.put_patch(cx, &patch.bytes)?;
     }
     let root_id = store.put_root(cx, &root)?;
-    let manifest_records =
-        records_of(&[(root.clone(), root_id)]).expect("one root is one canonical record");
+    let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
+        .expect("one root is one canonical record");
     let manifest = store.put_manifest(cx, &manifest_records)?;
     let (reopened_root, decoded, decoded_props, decoded_patches) = store.reopen(cx, root_id)?;
 

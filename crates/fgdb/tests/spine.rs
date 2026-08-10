@@ -1767,16 +1767,20 @@ fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
             .put_root(cx, &root)
             .expect("admits divergent root");
         assert_eq!(stored_root, divergent_root);
+        // The transplant carries the divergent history's OWN record verbatim —
+        // including its published_chain_hash (fgdb-90hw), which was validly
+        // produced by THAT history's chain. The refusal below is therefore the
+        // binding law itself: the primary's recovered chain hashes differently
+        // at the same sequence, and no amount of structural validity survives
+        // the one comparison.
+        let divergent_records: Vec<_> = source
+            .resolve_manifest(cx, divergent_manifest)
+            .expect("resolves the divergent manifest in its own store")
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect();
         let stored_manifest = destination
-            .put_manifest(
-                cx,
-                &[fgdb_strata::manifest::ManifestRecord {
-                    graph: root.graph,
-                    branch: root.branch,
-                    partition: root.partition,
-                    root: stored_root,
-                }],
-            )
+            .put_manifest(cx, &divergent_records)
             .expect("copies divergent manifest");
         assert_eq!(stored_manifest, divergent_manifest);
 

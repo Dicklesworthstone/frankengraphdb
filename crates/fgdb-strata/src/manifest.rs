@@ -25,11 +25,19 @@ use fgdb_types::{BranchId, GraphId};
 
 /// `FGSM` — FrankenGraph Strata Manifest.
 pub const MANIFEST_MAGIC: [u8; 4] = *b"FGSM";
-/// Format version, versioned from day one (§16.6).
+/// The retired first cut: a V1 record carried no Chronicle commitment, so a
+/// resolvable manifest from ANOTHER same-namespace history was
+/// indistinguishable from this one's without folding the whole prefix
+/// (GoldBarn's fast-open authority review, thread fgdb-l96k). V2 is a
+/// breaking bump (§16.6; no production database predates it) and there is
+/// deliberately no V1 decode path.
 pub const MANIFEST_FORMAT_V1: u16 = 1;
+/// Format version, versioned from day one (§16.6). A V2 record binds its root
+/// to the marker-chain commitment at its publication (fgdb-90hw).
+pub const MANIFEST_FORMAT_V2: u16 = 2;
 /// Durable object kind for the §5.1 logical-identity header — distinct from
-/// blocks (0x0301), vertex patches (0x0302), and edge property patches
-/// (0x0303) for the reason each of those is distinct: equal payload bytes
+/// blocks (0x04d4), vertex patches (0x057f), and edge property patches
+/// (0x0580) for the reason each of those is distinct: equal payload bytes
 /// must never alias a different kind's identity.
 pub const MANIFEST_OBJECT_KIND: u16 = 0x0581;
 
@@ -38,17 +46,28 @@ pub const MAX_MANIFEST_RECORDS: u32 = 1 << 20;
 
 /// magic + format + record count.
 const HEADER_LEN: usize = 4 + 2 + 4;
-/// graph(16) + branch(16) + partition(8) + root(32).
-const RECORD_LEN: usize = 16 + 16 + 8 + 32;
+/// graph(16) + branch(16) + partition(8) + root(32) + published_chain_hash(32).
+const RECORD_LEN: usize = 16 + 16 + 8 + 32 + 32;
 
 /// One live partition: its coordinate and the identity of its published root.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ManifestRecord {
     pub graph: GraphId,
     pub branch: BranchId,
     pub partition: u64,
     /// The published [`PartitionRoot`]'s content identity.
     pub root: crate::PartitionRootVersion,
+    /// The Chronicle marker-chain commitment at the root's `published_at`
+    /// (fgdb-90hw): the chain value AFTER the marker that published this root,
+    /// or the chain origin for a root published over the empty stream.
+    ///
+    /// This is the record's AUTHORITY claim — "the history whose chain at
+    /// `published_at` hashes to exactly this published my root" — and it is
+    /// what lets open verify a checkpoint against the recovered chain by one
+    /// comparison instead of folding every capsule in the prefix. It commits
+    /// to WHICH history published; the root's own digest commits to WHAT was
+    /// published.
+    pub published_chain_hash: fgdb_crypto::Digest,
 }
 
 /// The content identity of one immutable manifest version.
@@ -139,13 +158,14 @@ pub fn encode_manifest(records: &[ManifestRecord]) -> Result<Vec<u8>, ManifestEr
     validate_records(records)?;
     let mut out = Vec::with_capacity(HEADER_LEN + records.len() * RECORD_LEN);
     out.extend_from_slice(&MANIFEST_MAGIC);
-    out.extend_from_slice(&MANIFEST_FORMAT_V1.to_be_bytes());
+    out.extend_from_slice(&MANIFEST_FORMAT_V2.to_be_bytes());
     out.extend_from_slice(&count.to_be_bytes());
     for record in records {
         out.extend_from_slice(&record.graph.0.to_be_bytes());
         out.extend_from_slice(&record.branch.0.to_be_bytes());
         out.extend_from_slice(&record.partition.to_be_bytes());
         out.extend_from_slice(&record.root.0.0);
+        out.extend_from_slice(&record.published_chain_hash.0);
     }
     Ok(out)
 }
@@ -156,7 +176,7 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestRecord>, ManifestErro
         return Err(ManifestError::NotAManifest);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != MANIFEST_FORMAT_V1 {
+    if format != MANIFEST_FORMAT_V2 {
         return Err(ManifestError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes(bytes[6..10].try_into().expect("fixed header"));
@@ -187,11 +207,14 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestRecord>, ManifestErro
         let partition =
             u64::from_be_bytes(bytes[at + 32..at + 40].try_into().expect("bounded record"));
         let root: [u8; 32] = bytes[at + 40..at + 72].try_into().expect("bounded record");
+        let published_chain_hash: [u8; 32] =
+            bytes[at + 72..at + 104].try_into().expect("bounded record");
         records.push(ManifestRecord {
             graph,
             branch,
             partition,
             root: crate::PartitionRootVersion(ObjectId(root)),
+            published_chain_hash: fgdb_crypto::Digest(published_chain_hash),
         });
         at += RECORD_LEN;
     }
@@ -252,20 +275,27 @@ pub fn read_manifest(
 
 /// The record set a publish derives from its live roots — the ONE lawful
 /// construction, so callers cannot disagree about ordering by building
-/// records ad hoc.
+/// records ad hoc. Each root arrives with the Chronicle chain commitment at
+/// its own `published_at` (fgdb-90hw); the caller holds the recovered chain,
+/// so the binding is an input here, never derived from the root.
 pub fn records_of(
-    roots: &[(PartitionRoot, crate::PartitionRootVersion)],
+    roots: &[(
+        PartitionRoot,
+        crate::PartitionRootVersion,
+        fgdb_crypto::Digest,
+    )],
 ) -> Result<Vec<ManifestRecord>, ManifestError> {
     let mut records: Vec<ManifestRecord> = roots
         .iter()
-        .map(|(root, id)| ManifestRecord {
+        .map(|(root, id, published_chain_hash)| ManifestRecord {
             graph: root.graph,
             branch: root.branch,
             partition: root.partition,
             root: *id,
+            published_chain_hash: *published_chain_hash,
         })
         .collect();
-    records.sort();
+    records.sort_by_key(|record| (record.graph, record.branch, record.partition));
     validate_records(&records)?;
     Ok(records)
 }
