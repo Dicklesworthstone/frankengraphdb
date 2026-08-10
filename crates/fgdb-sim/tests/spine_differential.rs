@@ -34,8 +34,12 @@ use fgdb::{
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
+use fgdb_chronicle::store::{ROOT_FILE_NAME, StoreError as SlotStoreError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_sim::replay;
+use fgdb_sim::{
+    replay,
+    vfs::{FaultKind, FaultPlan, FaultVfs, Trigger},
+};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
@@ -98,6 +102,61 @@ fn assert_recovery_fence<T>(
     assert!(
         matches!(result, Err(ReadError::RecoveryRequired(found)) if found == recovery),
         "{stage:?}: every state-bearing read must carry the same recovery evidence"
+    );
+}
+
+fn vfs_fault_batch() -> WriteBatch {
+    let mut batch = WriteBatch::new(KNOWS);
+    batch.create_vertex(
+        VId(1),
+        vec![LabelId(3)],
+        vec![(PropertyKeyId(7), CanonicalScalar::Int(1))],
+    );
+    batch
+}
+
+async fn create_genesis(cx: &CommitCx, dir: &Path) {
+    drop(
+        Database::create(cx, dir, engine_keys())
+            .await
+            .expect("genesis database"),
+    );
+}
+
+async fn assert_reopened_vertex_matches_oracle(cx: &CommitCx, dir: &Path) {
+    let engine = Database::open(cx, dir, engine_keys())
+        .await
+        .expect("authoritative reopen repairs the root slot");
+    assert_eq!(engine.frontier().expect("healthy frontier").0, 1);
+    let engine_vertex = engine.vertex(VId(1)).expect("healthy read");
+    drop(engine);
+
+    let coordinator = CommitCoordinator::open(cx, dir, oracle_keys())
+        .await
+        .expect("oracle opens the durable stream");
+    let replayed = replay(cx, &coordinator).await.expect("stream replays");
+    let graph = replayed
+        .database
+        .graph(GRAPH, BRANCH)
+        .expect("oracle materialized the coordinate");
+    let oracle_vertex = graph.vertex(VId(1)).expect("durable vertex exists");
+    let engine_vertex = engine_vertex.expect("engine recovered durable vertex");
+    assert_eq!(engine_vertex.labels, vec![LabelId(3)]);
+    assert_eq!(
+        engine_vertex.props,
+        vec![(PropertyKeyId(7), CanonicalScalar::Int(1))]
+    );
+    assert_eq!(
+        engine_vertex.labels,
+        oracle_vertex.labels.iter().copied().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        engine_vertex.props,
+        oracle_vertex
+            .props
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -595,6 +654,179 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             assert_eq!(engine_edges.len(), 2, "{stage:?}: second commit must exist");
         });
     }
+}
+
+/// The integrated `Database` must not erase the faultable root-store seam.
+/// A byte budget measured by the same public write first proves how many bytes
+/// an honest write flushes; one byte less must reach Chronicle D2, fail at
+/// `manifest.root`, fence the handle, and recover the committed vertex exactly
+/// once from the authoritative stream.
+#[test]
+fn root_slot_enospc_fences_the_database_and_reopen_matches_the_oracle() {
+    let control_dir = scratch("database-vfs-enospc-control");
+    let faulted_dir = scratch("database-vfs-enospc-faulted");
+    under_lab(1_210, move |cx| async move {
+        let cx = &cx;
+        create_genesis(cx, &control_dir).await;
+        create_genesis(cx, &faulted_dir).await;
+
+        let control_vfs = FaultVfs::unix(FaultPlan::faultless());
+        let mut control =
+            Database::open_with_vfs(cx, control_vfs.clone(), &control_dir, engine_keys())
+                .await
+                .expect("control opens through the VFS");
+        assert_eq!(
+            control
+                .write(cx, vfs_fault_batch())
+                .await
+                .expect("control commits")
+                .0,
+            1
+        );
+        let honest_bytes = control_vfs.flushed_bytes();
+        assert!(
+            honest_bytes > 1,
+            "a zero-byte control would make the ENOSPC placement vacuous"
+        );
+        assert_eq!(control_vfs.events(), Vec::new());
+        drop(control);
+
+        let faulted_vfs = FaultVfs::unix(FaultPlan {
+            space_budget: Some(honest_bytes - 1),
+            ..FaultPlan::faultless()
+        });
+        let mut db = Database::open_with_vfs(cx, faulted_vfs.clone(), &faulted_dir, engine_keys())
+            .await
+            .expect("faulted database opens");
+        let error = db
+            .write(cx, vfs_fault_batch())
+            .await
+            .expect_err("the root-slot barrier must exhaust the measured budget");
+        let committed = match &error {
+            WriteError::CommittedNeedsRecovery { recovery, source } => {
+                Some((*recovery, source.as_ref()))
+            }
+            _ => None,
+        };
+        assert!(
+            committed.is_some(),
+            "root-slot ENOSPC returned the wrong error: {error:?}"
+        );
+        let Some((recovery, source)) = committed else {
+            return;
+        };
+        assert_eq!(recovery.durable_frontier.0, 1);
+        assert_eq!(recovery.published_frontier.0, 0);
+        assert_eq!(
+            recovery.failed_stage,
+            DerivedPublicationStage::PublishRootSlot
+        );
+        let raw_os_error = match source {
+            RebuildError::Slot(SlotStoreError::Io(error)) => error.raw_os_error(),
+            _ => None,
+        };
+        assert_eq!(
+            raw_os_error,
+            Some(28),
+            "root-slot ENOSPC lost its typed source: {source:?}"
+        );
+        assert_eq!(
+            db.state(),
+            DatabaseState::NeedsAuthoritativeRecovery(recovery)
+        );
+        assert_recovery_fence(
+            DerivedPublicationStage::PublishRootSlot,
+            recovery,
+            db.vertex(VId(1)),
+        );
+        assert!(matches!(
+            db.write(cx, vfs_fault_batch()).await,
+            Err(WriteError::RecoveryRequired(found)) if found == recovery
+        ));
+
+        let events = faulted_vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned fault must fire");
+        assert!(matches!(events[0].kind, FaultKind::OutOfSpace { .. }));
+        assert_eq!(events[0].path, faulted_dir.join(ROOT_FILE_NAME));
+
+        faulted_vfs.crash().await.expect("simulate process loss");
+        drop(db);
+        assert_reopened_vertex_matches_oracle(cx, &faulted_dir).await;
+    });
+}
+
+/// A lying root-slot fsync is harder than an ordinary I/O error: the barrier
+/// returns success. `RootStore`'s post-barrier reread must detect the lie,
+/// `Database` must fence rather than swap snapshots, and crash/reopen must
+/// still derive the acknowledged commit from Chronicle.
+#[test]
+fn root_slot_fsync_lie_is_detected_fenced_and_recovered_from_chronicle() {
+    let dir = scratch("database-vfs-root-slot-lie");
+    under_lab(1_211, move |cx| async move {
+        let cx = &cx;
+        create_genesis(cx, &dir).await;
+
+        // A database write performs D1, D2, then the root-slot barrier. The
+        // event-path assertion below pins that arithmetic and fails loudly if
+        // another eligible sync is introduced ahead of the slot.
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::Nth(3),
+            ..FaultPlan::faultless()
+        });
+        let mut db = Database::open_with_vfs(cx, vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("faulted database opens");
+        let error = db
+            .write(cx, vfs_fault_batch())
+            .await
+            .expect_err("the evidence reread must expose the fsync lie");
+        let committed = match &error {
+            WriteError::CommittedNeedsRecovery { recovery, source } => {
+                Some((*recovery, source.as_ref()))
+            }
+            _ => None,
+        };
+        assert!(
+            committed.is_some(),
+            "root-slot fsync lie returned the wrong error: {error:?}"
+        );
+        let Some((recovery, source)) = committed else {
+            return;
+        };
+        assert_eq!(recovery.durable_frontier.0, 1);
+        assert_eq!(recovery.published_frontier.0, 0);
+        assert_eq!(
+            recovery.failed_stage,
+            DerivedPublicationStage::PublishRootSlot
+        );
+        assert!(
+            matches!(
+                source,
+                RebuildError::Slot(SlotStoreError::PublicationNotObservable {
+                    expected_generation: 2
+                })
+            ),
+            "the reread must name the unobservable generation: {source:?}"
+        );
+        assert_eq!(
+            db.state(),
+            DatabaseState::NeedsAuthoritativeRecovery(recovery)
+        );
+        assert_recovery_fence(
+            DerivedPublicationStage::PublishRootSlot,
+            recovery,
+            db.frontier(),
+        );
+
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned lie must fire");
+        assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
+        assert_eq!(events[0].path, dir.join(ROOT_FILE_NAME));
+
+        vfs.crash().await.expect("simulate process loss");
+        drop(db);
+        assert_reopened_vertex_matches_oracle(cx, &dir).await;
+    });
 }
 
 /// **THE TIME-TRAVEL DIFFERENTIAL (fgdb-90jx): at EVERY epoch frontier, the

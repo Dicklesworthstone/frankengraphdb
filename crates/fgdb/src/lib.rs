@@ -75,18 +75,20 @@
 //! `manifest.root` can select a durable Strata checkpoint and reopen its
 //! immutable objects directly. Content identity proves that those objects are
 //! authentic, but not that they belong to this database's Chronicle history.
-//! [`Database::open`] therefore reconstructs the checkpoint's temporal graph
-//! projection from Chronicle through the checkpoint sequence and compares the
-//! two before accepting the slot; only the suffix is then applied to the
-//! selected checkpoint.
+//! Each V2 manifest record therefore carries Chronicle's marker-chain
+//! commitment at the root's publication sequence. [`Database::open`] compares
+//! that commitment with its independently recovered marker chain before
+//! accepting the slot; only the suffix is then applied to the selected
+//! checkpoint. A well-formed checkpoint transplanted from another history is
+//! refused even when its namespace keys and immutable objects are resolvable.
 //!
 //! This is the correctness path required by doctrine 5 and FG-INV-18: derived
-//! structures are never more authoritative than the commit stream. Its cost is
-//! stated rather than hidden: **open still performs an O(history) prefix fold
-//! to authenticate the checkpoint.** A true cost-fast open requires a durable,
-//! independently authenticated binding from the checkpoint to its exact
-//! Chronicle prefix. Until that contract exists, this implementation makes no
-//! end-to-end fast-open claim.
+//! structures are never more authoritative than the commit stream. Checkpoint
+//! authentication is one chain lookup and comparison; open still recovers and
+//! verifies Chronicle's marker chain, reopens the checkpoint objects, and
+//! folds any suffix after the checkpoint. This is a cost-fast checkpoint path,
+//! not a claim that total open cost is independent of history or checkpoint
+//! size.
 //!
 //! Writes publish incrementally through tier D; a forced full rebuild remains
 //! available as the equivalence oracle for the checkpoint-selected path.
@@ -110,6 +112,7 @@
 
 #![forbid(unsafe_code)]
 
+use asupersync::fs::{UnixVfs, Vfs};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
 use fgdb_chronicle::identity::IdentifiedObject;
@@ -984,14 +987,14 @@ fn chain_commitment_at(chain: &fgdb_chronicle::MarkerChain, at: CommitSeq) -> Op
 }
 
 #[derive(Debug)]
-pub struct Database {
-    coordinator: CommitCoordinator,
+pub struct Database<V: Vfs = UnixVfs> {
+    coordinator: CommitCoordinator<V>,
     store: BlockStore,
     /// The ONE mutable object in the directory (doctrine 5): the dual-slot
     /// root file whose selected slot names the current manifest (fgdb-ge6a,
     /// PLAIN opener ruling). Published after every manifest, reconciled at
     /// every open.
-    slot_store: RootStore,
+    slot_store: RootStore<V>,
     /// The generation the NEXT slot publication will carry; monotone.
     slot_generation: u64,
     keys: DatabaseKeys,
@@ -1016,9 +1019,14 @@ pub struct Database {
     /// a fresh process re-earns every proof from disk via the receipts'
     /// fallback path on its first publication.
     receipts: PublishReceipts,
+    /// The durable I/O authority retained so same-handle recovery reopens
+    /// through the SAME injected filesystem rather than silently escaping to
+    /// `UnixVfs`. Strata's `BlockStore` does not yet accept a VFS; callers of
+    /// `open_with_vfs` must not infer that its object files are faulted too.
+    vfs: V,
 }
 
-impl Database {
+impl Database<UnixVfs> {
     /// Create a database in `path`, which must be absent or an empty directory.
     pub async fn create(
         cx: &CommitCx,
@@ -1049,7 +1057,7 @@ impl Database {
             }
             Err(error) => return Err(OpenError::Io(error)),
         }
-        Self::bind(cx, path, keys).await
+        Self::bind_with_vfs(cx, UnixVfs::new(), path, keys, false).await
     }
 
     /// Open the database in `path`.
@@ -1084,7 +1092,7 @@ impl Database {
                 missing: CAPSULE_DIR,
             });
         }
-        Self::bind(cx, path, keys).await
+        Self::bind_with_vfs(cx, UnixVfs::new(), path, keys, false).await
     }
 
     /// Open the commit stream and the block store, then rebuild the fold.
@@ -1094,8 +1102,8 @@ impl Database {
     /// The forced-rebuild face for checkpoint equivalence: identical to
     /// [`Database::open`] except that the manifest-selected checkpoint is
     /// bypassed and the whole stream is folded into a fresh root. Ordinary
-    /// open also folds the checkpoint prefix today, but uses that fold only
-    /// to authenticate the selected root before replaying its suffix.
+    /// open verifies the selected root's marker-chain binding and replays only
+    /// its suffix; this face remains the independent full-fold oracle.
     #[doc(hidden)]
     pub async fn open_rebuilding(
         cx: &CommitCx,
@@ -1109,7 +1117,49 @@ impl Database {
                 missing: CAPSULE_DIR,
             });
         }
-        Self::bind_with(cx, path, keys, true).await
+        Self::bind_with_vfs(cx, UnixVfs::new(), path, keys, true).await
+    }
+}
+
+impl<V: Vfs + Clone> Database<V> {
+    /// Open the integrated database while interposing `vfs` on Chronicle and
+    /// `manifest.root` I/O.
+    ///
+    /// This is the lab-runtime seam for faults at the two-fsync authority
+    /// protocol and the derived root-slot publication that follows it. The
+    /// current Tier-D `BlockStore` still uses its own Unix filesystem path, so
+    /// this method deliberately makes no claim about faulting Strata objects.
+    /// Production callers use [`Database::open`], which supplies [`UnixVfs`].
+    #[doc(hidden)]
+    pub async fn open_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<Self, OpenError> {
+        let path = path.as_ref();
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(OpenError::NotADirectory {
+                    path: path.to_path_buf(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(OpenError::NotADatabase {
+                    path: path.to_path_buf(),
+                    missing: "the directory itself",
+                });
+            }
+            Err(error) => return Err(OpenError::Io(error)),
+        }
+        if !path.join(CAPSULE_DIR).is_dir() {
+            return Err(OpenError::NotADatabase {
+                path: path.to_path_buf(),
+                missing: CAPSULE_DIR,
+            });
+        }
+        Self::bind_with_vfs(cx, vfs, path, keys, false).await
     }
 
     /// The derived element-version heads, exposed for the fast-open
@@ -1127,28 +1177,25 @@ impl Database {
         Ok(&self.snapshot.versions)
     }
 
-    async fn bind(cx: &CommitCx, path: &Path, keys: DatabaseKeys) -> Result<Self, OpenError> {
-        Self::bind_with(cx, path, keys, false).await
-    }
-
-    async fn bind_with(
+    async fn bind_with_vfs(
         cx: &CommitCx,
+        vfs: V,
         path: &Path,
         keys: DatabaseKeys,
         force_rebuild: bool,
     ) -> Result<Self, OpenError> {
-        let coordinator = CommitCoordinator::open(cx, path, keys.capsule_keys()).await?;
+        let coordinator =
+            CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
         let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
         // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
         // resolvable manifest. Before accepting it, bind verifies the selected
-        // partition's temporal graph projection against Chronicle's complete
-        // prefix; reopen_from_verified_checkpoint then reopens that partition
-        // and folds only the suffix. A missing slot falls back to a full rebuild (and the
-        // reconciliation below creates it), while a present slot that is
-        // foreign, malformed, or unaccountable refuses rather than being
-        // silently rebuilt over. Prefix verification is currently O(history),
-        // so this is not yet an end-to-end cost-fast open.
-        let probe = RootStore::new(path);
+        // partition's V2 marker-chain commitment against Chronicle's recovered
+        // chain; reopen_from_verified_checkpoint then reopens that partition
+        // and folds only the suffix. A missing slot falls back to a full
+        // rebuild (and the reconciliation below creates it), while a present
+        // slot that is foreign, malformed, or unaccountable refuses rather
+        // than being silently rebuilt over.
+        let probe = RootStore::with_vfs(vfs.clone(), path);
         let (snapshot, writer) = if force_rebuild {
             rebuild(cx, &coordinator, &store, &keys).await?
         } else {
@@ -1220,7 +1267,7 @@ impl Database {
         //   - naming a RESOLVABLE older manifest: the crash window between a
         //     commit's manifest and its slot — heal forward;
         //   - anything else: not this database's lawful slot; refuse.
-        let slot_store = RootStore::new(path);
+        let slot_store = RootStore::with_vfs(vfs.clone(), path);
         let manifest_len = manifest_bytes_len(&snapshot)?;
         let slot_generation = match slot_store.recover(cx).await {
             Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1300,6 +1347,7 @@ impl Database {
             // through the same checks, so an open session starts from proven
             // state without a second trust-bearing constructor (fgdb-gieu).
             receipts: PublishReceipts::new(),
+            vfs,
         })
     }
 
@@ -1331,8 +1379,9 @@ impl Database {
             | DatabaseState::NeedsAuthoritativeRecovery(_) => {
                 let path = self.path().to_path_buf();
                 let keys = self.keys;
+                let vfs = self.vfs.clone();
                 drop(self);
-                Self::open(cx, path, keys).await
+                Self::open_with_vfs(cx, vfs, path, keys).await
             }
         }
     }
@@ -2884,9 +2933,9 @@ fn derive_versions_and_ordinal(
 /// one comparison, no prefix fold — so this path is O(partition + suffix).
 /// WHAT the checkpoint contains is pinned by the equivalence law against
 /// [`rebuild`] on generated histories, including the element-version heads.
-async fn reopen_from_verified_checkpoint(
+async fn reopen_from_verified_checkpoint<V: Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator,
+    coordinator: &CommitCoordinator<V>,
     store: &BlockStore,
     keys: &DatabaseKeys,
     root_id: PartitionRootVersion,
@@ -3012,9 +3061,9 @@ async fn reopen_from_verified_checkpoint(
     ))
 }
 
-async fn rebuild(
+async fn rebuild<V: Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator,
+    coordinator: &CommitCoordinator<V>,
     store: &BlockStore,
     keys: &DatabaseKeys,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
@@ -3046,43 +3095,17 @@ async fn rebuild(
 }
 
 /// Fold every committed template with `commit_seq > after` into the writer,
-/// versions map, and birth-ordinal allocator — the one stream fold, shared by
-/// the from-scratch rebuild (`after = 0`), checkpoint authentication, and the
-/// selected checkpoint's suffix replay past `published_at` (fgdb-ge6a).
-async fn fold_stream(
+/// versions map, and birth-ordinal allocator — the one stream fold shared by
+/// the from-scratch rebuild (`after = 0`) and the selected checkpoint's suffix
+/// replay past `published_at` (fgdb-ge6a).
+async fn fold_stream<V: Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator,
+    coordinator: &CommitCoordinator<V>,
     keys: &DatabaseKeys,
     writer: &mut BlockWriter,
     versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
     next_birth_ordinal: &mut u64,
     after: CommitSeq,
-) -> Result<CommitSeq, RebuildError> {
-    fold_stream_through(
-        cx,
-        coordinator,
-        keys,
-        writer,
-        versions,
-        next_birth_ordinal,
-        after,
-        None,
-    )
-    .await
-}
-
-/// The bounded form used to authenticate a checkpoint against one exact
-/// Chronicle prefix. `None` is the ordinary full-tail fold.
-#[allow(clippy::too_many_arguments)]
-async fn fold_stream_through(
-    cx: &CommitCx,
-    coordinator: &CommitCoordinator,
-    keys: &DatabaseKeys,
-    writer: &mut BlockWriter,
-    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
-    next_birth_ordinal: &mut u64,
-    after: CommitSeq,
-    through: Option<CommitSeq>,
 ) -> Result<CommitSeq, RebuildError> {
     let mut frontier = after;
     let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
@@ -3091,9 +3114,6 @@ async fn fold_stream_through(
         let commit_seq = CommitSeq(entry.marker.commit_seq);
         if commit_seq.0 <= after.0 {
             continue;
-        }
-        if through.is_some_and(|limit| commit_seq.0 > limit.0) {
-            break;
         }
         frontier = commit_seq;
         let EffectSource::Local {

@@ -11,7 +11,8 @@
 //! **THE MANIFEST DOES NOT DESCRIBE PARTITION CONTENTS.** The root already
 //! carries its full block and patch reference lists; duplicating any of that
 //! here would create a second authority that could disagree with the first.
-//! One record is one coordinate and one 32-byte identity, nothing else.
+//! One record is one coordinate, one 32-byte root identity, and the 32-byte
+//! Chronicle chain commitment that proves which history published that root.
 //!
 //! **THIS SLICE IS A FLAT LIST, AND SAYS SO.** The ge6a analysis names the
 //! growth hazard honestly: rewriting one object per publish is O(partitions),
