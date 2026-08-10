@@ -72,8 +72,8 @@ fn the_incremental_snapshot_reopens_to_the_same_root() {
     for b in 0..COMMITS {
         commit_one(&runtime, &commit, &mut db, b);
     }
-    let incremental_root = db.partition_root();
-    let incremental_frontier = db.frontier();
+    let incremental_root = db.partition_root().expect("healthy root");
+    let incremental_frontier = db.frontier().expect("healthy frontier");
     let incremental_neighbours = db.neighbours(VId(1), KNOWS).expect("reads");
     drop(db);
 
@@ -81,13 +81,16 @@ fn the_incremental_snapshot_reopens_to_the_same_root() {
         .block_on(Database::open(&commit, &dir, keys()))
         .expect("reopens");
     assert_eq!(
-        reopened.partition_root(),
+        reopened.partition_root().expect("healthy reopened root"),
         incremental_root,
         "reopen's full rebuild derived a DIFFERENT partition root than the \
          incrementally maintained snapshot: the live path and the recovery \
          path disagree about the same commit stream"
     );
-    assert_eq!(reopened.frontier(), incremental_frontier);
+    assert_eq!(
+        reopened.frontier().expect("healthy reopened frontier"),
+        incremental_frontier
+    );
     assert_eq!(
         reopened.neighbours(VId(1), KNOWS).expect("reads"),
         incremental_neighbours,
@@ -110,7 +113,7 @@ fn a_database_missing_the_last_commit_reopens_to_a_different_root() {
     for b in 0..COMMITS {
         commit_one(&runtime, &commit, &mut full, b);
     }
-    let full_root = full.partition_root();
+    let full_root = full.partition_root().expect("healthy full root");
     drop(full);
 
     let short_dir = scratch("control-short");
@@ -120,7 +123,7 @@ fn a_database_missing_the_last_commit_reopens_to_a_different_root() {
     for b in 0..COMMITS - 1 {
         commit_one(&runtime, &commit, &mut short, b);
     }
-    let short_root = short.partition_root();
+    let short_root = short.partition_root().expect("healthy short root");
     drop(short);
 
     assert_ne!(

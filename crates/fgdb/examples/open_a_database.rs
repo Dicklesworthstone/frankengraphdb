@@ -78,7 +78,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let seq = db.write(cx, batch).await?;
 
         let before = db.neighbours(VId(1), KNOWS)?;
-        let root_before = db.partition_root();
+        let root_before = db.partition_root()?;
         println!("  committed at seq {seq:?}");
         println!("  neighbours(1) before drop: {before:?}");
 
@@ -94,7 +94,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(before, after, "the reopened database must agree");
         assert_eq!(
             root_before,
-            db.partition_root(),
+            db.partition_root()?,
             "the rebuild is deterministic, so the republished root must match"
         );
         assert_eq!(
