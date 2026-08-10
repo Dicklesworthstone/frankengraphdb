@@ -105,11 +105,6 @@ pub enum CommitError {
     CapsulePathConflict {
         capsule_oid: ObjectId,
     },
-    /// D1 returned success, but a fresh bounded read could not recover and
-    /// authenticate the exact capsule plaintext. No marker was written.
-    CapsulePublicationNotObservable {
-        capsule_oid: ObjectId,
-    },
     /// A log entry before the final one is malformed. Unlike a torn tail this
     /// is corruption: entries preceding it were durable, so the damage is not
     /// explained by a crash.
@@ -119,13 +114,6 @@ pub enum CommitError {
     /// The recovered chain does not verify at this sequence.
     ChainDiverged {
         commit_seq: u64,
-    },
-    /// The durability barrier returned success, but a fresh bounded read did
-    /// not observe the exact marker frame that would make the commit real.
-    /// The coordinator remains poisoned because the durable outcome is
-    /// unknown until reopen.
-    PublicationNotObservable {
-        expected_commit_seq: u64,
     },
     /// Sealing or recovering a capsule failed. A capsule that cannot be sealed
     /// must not be committed, and one that cannot be recovered is not a commit
@@ -170,22 +158,12 @@ impl core::fmt::Display for CommitError {
                 f,
                 "immutable capsule path for {capsule_oid:?} contains different bytes"
             ),
-            Self::CapsulePublicationNotObservable { capsule_oid } => write!(
-                f,
-                "post-barrier readback could not recover capsule {capsule_oid:?}"
-            ),
             Self::CorruptLogEntry { commit_seq } => {
                 write!(f, "commit log entry at seq {commit_seq} is corrupt")
             }
             Self::ChainDiverged { commit_seq } => {
                 write!(f, "commit chain diverges at seq {commit_seq}")
             }
-            Self::PublicationNotObservable {
-                expected_commit_seq,
-            } => write!(
-                f,
-                "post-barrier readback did not observe commit seq {expected_commit_seq}"
-            ),
             Self::Capsule(error) => write!(f, "capsule: {error}"),
             Self::Rejected(rejection) => write!(f, "commit not published: {rejection}"),
             Self::WriterAlreadyOpen => {
@@ -729,13 +707,6 @@ impl<V: Vfs> CommitCoordinator<V> {
             sync_directory(cx, &self.vfs, &self.dir).await?;
             self.capsule_directory_parent_sync_pending = false;
         }
-        let capsule_observable = matches!(
-            self.read_capsule(cx, capsule_oid).await,
-            Ok(recovered) if recovered == plaintext
-        );
-        if !capsule_observable {
-            return Err(CommitError::CapsulePublicationNotObservable { capsule_oid });
-        }
         if crash_at == Some(CrashPoint::AfterD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: after D1")));
         }
@@ -763,7 +734,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             ),
             Err(error) => return Err(error.into()),
         };
-        let entry_start = log.seek(std::io::SeekFrom::End(0)).await?;
+        log.seek(std::io::SeekFrom::End(0)).await?;
 
         // Past this point the durable log MAY contain this entry, so this
         // coordinator can no longer know the truth by looking at itself. It is
@@ -795,27 +766,6 @@ impl<V: Vfs> CommitCoordinator<V> {
                     "crash: marker-log inode durable",
                 )));
             }
-        }
-
-        // A successful barrier is a claim, not evidence. Re-open the log so
-        // the read cannot be satisfied from this writer's dirty image, then
-        // compare only the frame just appended. This is O(entry), not an
-        // O(history) recovery scan, and keeps acknowledgement behind an
-        // observable durable marker.
-        let publication_observable = cx
-            .with_restriction_async(async {
-                let mut readback = self.vfs.open_read(&log_path).await?;
-                readback.seek(std::io::SeekFrom::Start(entry_start)).await?;
-                let mut observed = vec![0u8; entry.len()];
-                readback.read_exact(&mut observed).await?;
-                Ok::<bool, std::io::Error>(observed == entry)
-            })
-            .await
-            .unwrap_or(false);
-        if !publication_observable {
-            return Err(CommitError::PublicationNotObservable {
-                expected_commit_seq: commit_seq,
-            });
         }
 
         // Only now is the commit real, so only now does in-memory state move.

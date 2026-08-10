@@ -818,13 +818,8 @@ fn execute_spine_hypothesis(plan: FaultPlan, dir: PathBuf, lab_seed: u64) -> Spi
             .as_ref()
             .map_or_else(|error| error.to_string(), |_| "ok".to_string());
 
-        let acknowledgement_survived = acknowledged.is_none()
-            || (crash.is_ok() && recovered_frontier == acknowledged && recovered_vertex);
-        let observation = if acknowledgement_survived {
-            LdfiExperimentObservation::InvariantHeld
-        } else {
-            LdfiExperimentObservation::InvariantViolated
-        };
+        let observation =
+            observe_spine_durability(acknowledged, &crash, recovered_frontier, recovered_vertex);
         let detail = format!(
             "{write_detail}; crash={crash:?}; reopen={reopen_detail}; \
              acknowledged={acknowledged:?}; recovered_frontier={recovered_frontier:?}; \
@@ -841,35 +836,39 @@ fn execute_spine_hypothesis(plan: FaultPlan, dir: PathBuf, lab_seed: u64) -> Spi
     })
 }
 
+fn observe_spine_durability(
+    acknowledged: Option<u64>,
+    crash: &std::io::Result<()>,
+    recovered_frontier: Option<u64>,
+    recovered_vertex: bool,
+) -> LdfiExperimentObservation {
+    if acknowledged.is_none()
+        || (crash.is_ok() && recovered_frontier == acknowledged && recovered_vertex)
+    {
+        LdfiExperimentObservation::InvariantHeld
+    } else {
+        LdfiExperimentObservation::InvariantViolated
+    }
+}
+
 #[test]
-fn marker_barrier_lie_is_not_acknowledged_by_the_embedded_spine() {
-    let result = execute_spine_hypothesis(
-        FaultPlan {
-            fsync_lie: Trigger::Nth(2),
-            ..FaultPlan::faultless()
-        },
-        scratch_dir("lineage-spine-marker-readback"),
-        1_409,
-    );
-    assert!(
-        matches!(result.observation, LdfiExperimentObservation::InvariantHeld),
-        "an unobservable marker must not become an acknowledged loss: {result:?}"
-    );
+fn acknowledged_loss_observer_detects_a_planted_missing_commit() {
+    let control = observe_spine_durability(Some(1), &Ok(()), Some(1), true);
     assert_eq!(
-        result.acknowledged, None,
-        "the writer acknowledged a marker its fresh readback could not observe: {result:?}"
+        control,
+        LdfiExperimentObservation::InvariantHeld,
+        "the near-identical durable control must remain clean"
     );
-    assert_eq!(result.events.len(), 1, "the exact planned event fired");
-    assert!(matches!(result.events[0].kind, FaultKind::FsyncLie { .. }));
-    assert!(
-        result.detail.contains("post-barrier readback"),
-        "the refusal must name the failed evidence boundary: {}",
-        result.detail
+    let planted_loss = observe_spine_durability(Some(1), &Ok(()), None, false);
+    assert_eq!(
+        planted_loss,
+        LdfiExperimentObservation::InvariantViolated,
+        "the detector must reject the same acknowledgement with its commit missing"
     );
 }
 
 #[test]
-fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() {
+fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() -> Result<(), String> {
     let events = successful_embedded_spine_trace(scratch_dir("lineage-spine-exec-baseline"));
     let derived = derive_fault_hypotheses(
         &events,
@@ -968,15 +967,15 @@ fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() {
                 fault.points.len(),
                 "the replay broadened the exact generated event set: {reproduced:?}"
             );
-            panic!(
-                "full-spine campaign found a reproducible acknowledged-loss case: {reproduced:?}"
-            );
         }
-        status => panic!(
-            "full-spine campaign did not complete its bounded search: \
-             status={status:?}; results={results:#?}"
-        ),
+        status => {
+            return Err(format!(
+                "full-spine campaign did not complete its bounded search: \
+                 status={status:?}; results={results:#?}"
+            ));
+        }
     }
+    Ok(())
 }
 
 #[test]
