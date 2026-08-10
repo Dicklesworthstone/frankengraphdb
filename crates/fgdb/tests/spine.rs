@@ -884,11 +884,16 @@ fn post_d2_publication_failure_blocks_the_stale_handle_and_reopen_recovers() {
             return;
         };
         assert_eq!(write_recovery, recovery);
-        drop(db);
-
-        let mut reopened = Database::open(cx, &dir, keys())
+        let mut reopened = db
+            .recover_authoritatively(cx)
             .await
-            .expect("authoritative reopen recovers the durable second commit");
+            .expect("the positive recovery path rebuilds the durable second commit");
+        assert!(matches!(
+            reopened.state(),
+            fgdb::DatabaseState::Healthy {
+                published_frontier: CommitSeq(2)
+            }
+        ));
         assert!(reopened.vertex(VId(1)).expect("reads").is_some());
         assert!(reopened.vertex(VId(2)).expect("reads").is_some());
         assert!(reopened.vertex(VId(3)).expect("reads").is_none());
@@ -955,11 +960,10 @@ fn an_unknown_commit_outcome_fences_reads_and_retries_until_reopen() {
                 published_frontier: CommitSeq(1)
             })
         ));
-        drop(db);
-
-        let mut reopened = Database::open(cx, &dir, keys())
+        let mut reopened = db
+            .recover_authoritatively(cx)
             .await
-            .expect("reopen decides the marker outcome");
+            .expect("authoritative recovery decides the marker outcome");
         assert!(matches!(
             reopened.state(),
             fgdb::DatabaseState::Healthy { .. }
@@ -972,6 +976,40 @@ fn an_unknown_commit_outcome_fences_reads_and_retries_until_reopen() {
             .await
             .expect("a fresh authoritative handle accepts writes");
         assert!(reopened.vertex(VId(3)).expect("reads").is_some());
+    });
+}
+
+/// Recovery is safe to call without first inspecting the diagnostic state.
+/// A healthy handle must be returned directly: trying to open a replacement
+/// before releasing its live coordinator would contend with its own writer
+/// lease, while dropping and rebuilding would turn an idempotent operation
+/// into unnecessary recovery I/O.
+#[test]
+fn authoritative_recovery_is_identity_for_a_healthy_handle() {
+    let dir = scratch("healthy-authoritative-recovery");
+    under_lab(1098, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        db.write(cx, first).await.expect("first commit publishes");
+
+        let mut db = db
+            .recover_authoritatively(cx)
+            .await
+            .expect("a healthy handle is already authoritative");
+        assert!(matches!(
+            db.state(),
+            fgdb::DatabaseState::Healthy {
+                published_frontier: CommitSeq(1)
+            }
+        ));
+        assert!(db.vertex(VId(1)).expect("reads").is_some());
+
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(2), vec![], vec![]);
+        assert_eq!(db.write(cx, second).await.expect("still writable").0, 2);
     });
 }
 
@@ -1809,6 +1847,60 @@ fn checkpoint_selected_open_is_indistinguishable_from_the_stream_fold() {
             scans_after_selected,
             "a write through the checkpoint-selected session is the same write"
         );
+    });
+}
+
+/// **CHECKPOINT AUTHENTICATION IS READ-ONLY OVER DERIVED OBJECTS.** Opening a
+/// healthy database must authenticate Chronicle membership and decode the
+/// selected Strata checkpoint without republishing the replay used for that
+/// comparison. Besides wasting an inode+directory fsync for every immutable
+/// object, republishing would require write access to objects whose content is
+/// already final.
+///
+/// This is deliberately not a read-only-database claim: the coordinator and
+/// root slot remain writable, and a later commit would correctly fail once it
+/// needed to publish a new Strata object. It pins only the sharper law that
+/// checkpoint selection itself does not write the objects it is verifying.
+#[test]
+fn checkpoint_authentication_does_not_republish_immutable_objects() {
+    let dir = scratch("checkpoint-read-only-objects");
+    under_lab(1099, move |cx| async move {
+        let cx = &cx;
+        {
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(1), vec![], vec![]);
+            batch.create_vertex(VId(2), vec![], vec![]);
+            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+            db.write(cx, batch).await.expect("commits");
+        }
+
+        let object_dir = dir.join(fgdb_strata::store::BLOCK_DIR);
+        let mut protected = 0usize;
+        for entry in std::fs::read_dir(&object_dir).expect("lists derived objects") {
+            let entry = entry.expect("reads directory entry");
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let metadata = entry.metadata().expect("reads object metadata");
+            if !metadata.is_file() {
+                continue;
+            }
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(entry.path(), permissions)
+                .expect("makes the immutable object read-only");
+            protected += 1;
+        }
+        assert!(
+            protected > 0,
+            "the fixture must protect real Strata objects"
+        );
+
+        let db = Database::open(cx, &dir, keys())
+            .await
+            .expect("checkpoint authentication only reads immutable objects");
+        assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(2)]);
     });
 }
 

@@ -1277,6 +1277,33 @@ impl Database {
         self.state
     }
 
+    /// Consume this handle and return one rebuilt from the authoritative
+    /// durable stream when recovery is required.
+    ///
+    /// A post-D2 publication failure leaves the retained writer and snapshot
+    /// deliberately fenced, while an interrupted D2 leaves the coordinator
+    /// unable to decide whether its marker committed. Both cases need the
+    /// ordinary open path: it re-reads Chronicle, authenticates or repairs the
+    /// published root, and constructs a fresh derived snapshot. Consuming
+    /// `self` is load-bearing because dropping its coordinator releases the
+    /// exclusive writer lease before [`Database::open`] acquires a new one.
+    ///
+    /// A healthy handle is returned unchanged. Recovery failure consumes the
+    /// old handle and returns the exact [`OpenError`] from authoritative open;
+    /// it never falls back to the fenced snapshot or claims rollback.
+    pub async fn recover_authoritatively(self, cx: &CommitCx) -> Result<Self, OpenError> {
+        match self.state {
+            DatabaseState::Healthy { .. } => Ok(self),
+            DatabaseState::CommitOutcomeUnknown { .. }
+            | DatabaseState::NeedsAuthoritativeRecovery(_) => {
+                let path = self.path().to_path_buf();
+                let keys = self.keys;
+                drop(self);
+                Self::open(cx, path, keys).await
+            }
+        }
+    }
+
     fn ensure_writable(&self) -> Result<(), WriteError> {
         match self.state {
             DatabaseState::Healthy { .. } => Ok(()),
@@ -2833,16 +2860,20 @@ fn checkpoint_projection(
     CheckpointProjection { vertices, edges }
 }
 
-/// Reconstruct the graph at exactly `through` from Chronicle. This pays the
-/// prefix fold until the durable checkpoint contract carries an authenticated
-/// logical-prefix commitment; correctness outranks the shortcut.
-async fn reconstruct_checkpoint_snapshot(
+/// Reconstruct the graph projection at exactly `through` from Chronicle.
+///
+/// This still pays the complete prefix fold until the durable checkpoint
+/// contract carries an authenticated logical-prefix commitment. It does NOT
+/// publish that temporary fold: checkpoint authentication needs a semantic
+/// comparison, not a second durable derived generation. Publishing here made
+/// every open rewrite and fsync the whole prefix merely to throw the resulting
+/// snapshot away before reopening the already-selected checkpoint.
+async fn reconstruct_checkpoint_projection(
     cx: &CommitCx,
     coordinator: &CommitCoordinator,
-    store: &BlockStore,
     keys: &DatabaseKeys,
     through: CommitSeq,
-) -> Result<Option<Snapshot>, RebuildError> {
+) -> Result<Option<CheckpointProjection>, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut next_birth_ordinal = 0u64;
     let mut versions = std::collections::BTreeMap::new();
@@ -2860,16 +2891,52 @@ async fn reconstruct_checkpoint_snapshot(
     if frontier != through {
         return Ok(None);
     }
-    let (snapshot, _) = publish_and_snapshot(
-        cx,
-        store,
-        keys,
-        writer,
-        versions,
-        frontier,
-        next_birth_ordinal,
-    )?;
-    Ok(Some(snapshot))
+
+    // Seal and decode the replayed bytes in memory. The candidate checkpoint
+    // below is independently reopened through BlockStore, which authenticates
+    // its durable object identities. Rewriting these deterministic replay
+    // bytes to that same store would add I/O, not evidence about membership in
+    // Chronicle's history.
+    let (_root, blocks, patches) =
+        writer
+            .publish(keys.block_keys(), frontier)
+            .map_err(|error| RebuildError::Fold {
+                commit_seq: frontier.0,
+                error,
+            })?;
+    let mut decoded_blocks = Vec::with_capacity(blocks.len());
+    let mut decoded_props = Vec::with_capacity(blocks.len());
+    for block in &blocks {
+        let (entries, hosted) = fgdb_strata::decode_block_with_properties(&block.bytes)
+            .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+        let props = match hosted {
+            Some((_, locators)) => {
+                let patch = block.property_patch.as_ref().expect(
+                    "a replayed block declaring hosted properties was sealed beside its patch",
+                );
+                let rows = fgdb_strata::edge_props::decode_property_patch(&patch.bytes).map_err(
+                    |error| RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error)),
+                )?;
+                Some(BlockProps { locators, rows })
+            }
+            None => None,
+        };
+        decoded_blocks.push(entries);
+        decoded_props.push(props);
+    }
+    let decoded_patches = patches
+        .iter()
+        .map(|patch| {
+            fgdb_strata::vertex::decode_patch(&patch.bytes)
+                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(checkpoint_projection(
+        &decoded_blocks,
+        &decoded_props,
+        &decoded_patches,
+    )))
 }
 
 /// Prove that a slot-selected checkpoint is the same temporal graph projection
@@ -2886,11 +2953,11 @@ async fn checkpoint_matches_stream(
     let (root, blocks, block_props, patches) = store.reopen(cx, root_id)?;
     let candidate = checkpoint_projection(&blocks, &block_props, &patches);
     let Some(rebuilt) =
-        reconstruct_checkpoint_snapshot(cx, coordinator, store, keys, root.published_at).await?
+        reconstruct_checkpoint_projection(cx, coordinator, keys, root.published_at).await?
     else {
         return Ok(false);
     };
-    Ok(candidate == checkpoint_projection(&rebuilt.blocks, &rebuilt.block_props, &rebuilt.patches))
+    Ok(candidate == rebuilt)
 }
 
 /// Post-verification checkpoint reopen (fgdb-ge6a): resolve the slot's
