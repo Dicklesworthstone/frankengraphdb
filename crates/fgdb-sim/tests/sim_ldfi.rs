@@ -170,11 +170,26 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
 // are faultable — and a row may only say so because these tests inject there.
 // ---------------------------------------------------------------------------
 
+use asupersync::fs::{OpenOptions, Vfs, VfsFile};
+use asupersync::io::AsyncWrite;
+use asupersync::lab::ldfi::{
+    HittingSetBudget, LdfiExperimentBudget, LdfiExperimentObservation, LdfiExperimentStatus,
+};
 use asupersync::lab::run_async_under_lab;
+use asupersync::trace::{TraceData, TraceEvent};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, RootSlot};
 use fgdb_chronicle::store::{ContinuityAuthority, ContinuityHead, RootStore, StoreError};
-use fgdb_sim::vfs::{FaultKind, FaultPlan, FaultVfs, Trigger};
+use fgdb_delta_types::RelationId;
+use fgdb_sim::artifact::{FailureKind, Replay, Scenario};
+use fgdb_sim::ldfi::{InjectableFaultClass, TraceLdfiError, derive_fault_hypotheses};
+use fgdb_sim::shrink::shrink;
+use fgdb_sim::vfs::{FAULT_POINT_TRACE_PREFIX, FaultKind, FaultPlan, FaultVfs, Trigger};
+use fgdb_types::VId;
 use fgdb_types::context::{CommitCx, PurposeContexts};
+use fgdb_types::ids::DatabaseSecurityNamespaceId;
+use std::future::poll_fn;
+use std::pin::Pin;
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-sim-ldfi-{}-{name}", std::process::id()));
@@ -524,5 +539,257 @@ fn a_stale_forked_or_absent_continuity_head_refuses_before_the_slot_write() {
             .await
             .expect("the matching head admits the same slot");
         assert_eq!(evidence.slot_generation, 2);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The executable lineage adapter (fgdb-verif-sim-q97e).
+// ---------------------------------------------------------------------------
+
+const DURABLE_APPEND_OUTCOME: &str = "fgdb.sim.outcome/v1:durable-append-survived";
+const SPINE_OUTCOME: &str = "fgdb.sim.outcome/v1:embedded-spine-read-after-write";
+
+fn ldfi_keys() -> DatabaseKeys {
+    DatabaseKeys {
+        k_oid: [0x31; 32],
+        namespace: DatabaseSecurityNamespaceId([0x32; 32]),
+        dek: [0x33; 32],
+    }
+}
+
+fn successful_durable_append_trace(dir: PathBuf) -> Vec<TraceEvent> {
+    let (events, report) = run_async_under_lab(1_401, move |root| async move {
+        let trace = root.trace_buffer().expect("lab root has a trace buffer");
+        let vfs = FaultVfs::unix(FaultPlan::faultless());
+        let path = dir.join("append.log");
+        let mut expected = Vec::new();
+        for sector in 0u8..4 {
+            expected.extend(std::iter::repeat_n(sector + 1, 512));
+        }
+        let mut file = vfs
+            .open(
+                &path,
+                &OpenOptions::new().write(true).create(true).truncate(true),
+            )
+            .await
+            .expect("baseline opens");
+        let mut written = 0usize;
+        while written < expected.len() {
+            let count =
+                poll_fn(|task_cx| Pin::new(&mut file).poll_write(task_cx, &expected[written..]))
+                    .await
+                    .expect("baseline writes");
+            assert!(count > 0, "baseline write must make progress");
+            written += count;
+        }
+        file.sync_all().await.expect("baseline syncs honestly");
+        vfs.crash().await.expect("baseline crashes cleanly");
+        assert_eq!(
+            vfs.read(&path)
+                .await
+                .expect("baseline reopens durable bytes"),
+            expected,
+            "the successful trace must actually establish its outcome"
+        );
+        root.trace(DURABLE_APPEND_OUTCOME);
+        trace.snapshot()
+    });
+    assert!(report.lab_test_passed(), "baseline lab report: {report:?}");
+    events
+}
+
+#[test]
+fn successful_embedded_spine_trace_reaches_the_upstream_ldfi_search() {
+    let dir = scratch_dir("lineage-spine");
+    let (events, report) = run_async_under_lab(1_400, move |root| async move {
+        let trace = root.trace_buffer().expect("lab root has a trace buffer");
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        drop(
+            Database::create(&cx, &dir, ldfi_keys())
+                .await
+                .expect("spine genesis"),
+        );
+
+        let vfs = FaultVfs::unix(FaultPlan::faultless());
+        let mut database = Database::open_with_vfs(&cx, vfs, &dir, ldfi_keys())
+            .await
+            .expect("spine opens through the traced VFS");
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(1), vec![], vec![]);
+        database.write(&cx, batch).await.expect("spine commits");
+        assert!(
+            database
+                .vertex(VId(1))
+                .expect("spine remains readable")
+                .is_some(),
+            "the outcome marker must follow a real graph read"
+        );
+        root.trace(SPINE_OUTCOME);
+        trace.snapshot()
+    });
+    assert!(report.lab_test_passed(), "spine lab report: {report:?}");
+
+    let derived = derive_fault_hypotheses(
+        &events,
+        SPINE_OUTCOME,
+        HittingSetBudget {
+            max_depth: 2,
+            max_hypotheses: 256,
+        },
+    )
+    .expect("the real spine trace is consumable by asupersync LDFI");
+    assert_eq!(derived.source_event_count, events.len());
+    assert!(
+        derived.fault_point_count > 0,
+        "no VFS seam reached the trace"
+    );
+    assert_eq!(derived.outcome_count, 1);
+    assert!(
+        !derived.hypotheses.is_empty(),
+        "successful graph state had no derived fault hypothesis: {derived:?}; markers={:?}",
+        events
+            .iter()
+            .filter(|event| matches!(&event.data, TraceData::Message(message) if message.starts_with(FAULT_POINT_TRACE_PREFIX) || message == SPINE_OUTCOME))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        derived
+            .hypotheses
+            .iter()
+            .all(|hypothesis| hypothesis.to_plan(7, 100).is_ok()),
+        "the representative spine's minimal hypotheses must map exactly"
+    );
+
+    // Negative mutation: a versioned marker with ordinal zero is not ignored.
+    // Ignoring it would silently remove one fault from the successful lineage.
+    let mut malformed = events;
+    let marker = malformed
+        .iter_mut()
+        .find(|event| {
+            matches!(
+                &event.data,
+                TraceData::Message(message) if message.starts_with(FAULT_POINT_TRACE_PREFIX)
+            )
+        })
+        .expect("the positive control found a marker");
+    marker.data = TraceData::Message(format!("{FAULT_POINT_TRACE_PREFIX}fsync-lie:0"));
+    assert!(matches!(
+        derive_fault_hypotheses(&malformed, SPINE_OUTCOME, HittingSetBudget::default()),
+        Err(TraceLdfiError::MalformedFaultPoint { .. })
+    ));
+}
+
+#[test]
+fn trace_derived_fault_is_executed_and_shrunk_without_blind_enumeration() {
+    let events = successful_durable_append_trace(scratch_dir("lineage-append-baseline"));
+    let derived = derive_fault_hypotheses(
+        &events,
+        DURABLE_APPEND_OUTCOME,
+        HittingSetBudget {
+            max_depth: 2,
+            max_hypotheses: 64,
+        },
+    )
+    .expect("successful append trace derives hypotheses");
+    assert!(
+        derived.search.exhausted,
+        "the tiny trace search must exhaust"
+    );
+
+    let mut experiment_ordinal = 0usize;
+    let report = derived.run_experiments(
+        LdfiExperimentBudget {
+            max_experiments: 64,
+        },
+        |hypothesis| {
+            experiment_ordinal += 1;
+            let replay = Replay {
+                scenario: Scenario::DurableAppend,
+                plan: hypothesis
+                    .to_plan(0x1df1_0000 + experiment_ordinal as u64, 100)
+                    .expect("this one-sync corpus maps exactly"),
+            };
+            let outcome = replay.run(&scratch_dir(&format!(
+                "lineage-append-experiment-{experiment_ordinal}"
+            )));
+            if outcome.failure.is_some() {
+                LdfiExperimentObservation::InvariantViolated
+            } else {
+                LdfiExperimentObservation::InvariantHeld
+            }
+        },
+    );
+    assert!(
+        matches!(report.status, LdfiExperimentStatus::FoundViolation { .. }),
+        "the trace-derived fsync lie must be found: {:?}",
+        report.status
+    );
+    let LdfiExperimentStatus::FoundViolation { hypothesis: found } = &report.status else {
+        return;
+    };
+    assert!(report.experiments_run < derived.fault_point_count);
+
+    let fault = derived
+        .hypotheses
+        .iter()
+        .find(|hypothesis| &hypothesis.events == found)
+        .expect("reported event set came from the derived hypotheses");
+    assert_eq!(fault.points.len(), 1, "the found hypothesis is minimal");
+    assert_eq!(fault.points[0].class, InjectableFaultClass::FsyncLie);
+    let replay = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: fault
+            .to_plan(0x1df1_ffff, 100)
+            .expect("found hypothesis maps exactly"),
+    };
+    let shrunk = shrink(replay, &scratch_dir("lineage-append-shrink"))
+        .expect("the trace-derived failure reproduces for the shrinker");
+    assert_eq!(shrunk.failure.kind, FailureKind::AcknowledgedBytesLost);
+    assert_eq!(
+        shrunk.replay.plan.fsync_lie,
+        Trigger::At(1),
+        "shrinking must retain the one event that caused the failure"
+    );
+}
+
+#[test]
+fn an_exact_ldfi_ordinal_fires_once_not_periodically() {
+    let dir = scratch_dir("lineage-exact-ordinal");
+    under_lab(1_402, move |_cx| async move {
+        let path = dir.join("exact.log");
+        let expected = vec![0xa5; 2_048];
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::At(1),
+            ..FaultPlan::faultless()
+        });
+        let mut file = vfs
+            .open(
+                &path,
+                &OpenOptions::new().write(true).create(true).truncate(true),
+            )
+            .await
+            .expect("exact-ordinal fixture opens");
+        let count = poll_fn(|task_cx| Pin::new(&mut file).poll_write(task_cx, &expected))
+            .await
+            .expect("fixture writes");
+        assert_eq!(count, expected.len());
+
+        file.sync_all().await.expect("first sync lies");
+        assert_eq!(vfs.events().len(), 1, "the exact first boundary fired");
+        file.sync_all()
+            .await
+            .expect("second eligible sync is honest");
+        assert_eq!(
+            vfs.events().len(),
+            1,
+            "At(1) must not repeat at a later eligible boundary"
+        );
+        vfs.crash().await.expect("fixture crashes");
+        assert_eq!(
+            vfs.read(&path).await.expect("durable bytes reopen"),
+            expected,
+            "the honest second sync must persist what the one-shot lie left dirty"
+        );
     });
 }

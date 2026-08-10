@@ -62,6 +62,18 @@ fn a_failing_replay_shrinks_to_fewer_accused_fault_classes() {
         "the reproducer still accuses every class: {:?}",
         shrunk.replay.plan
     );
+    assert!(
+        [
+            shrunk.replay.plan.fsync_lie,
+            shrunk.replay.plan.torn_write,
+            shrunk.replay.plan.bit_flip,
+        ]
+        .into_iter()
+        .filter(|trigger| *trigger != Trigger::Never)
+        .all(|trigger| trigger == Trigger::At(1)),
+        "every remaining fault must fire once, not periodically: {:?}",
+        shrunk.replay.plan
+    );
 }
 
 #[test]
@@ -195,7 +207,7 @@ fn an_already_minimal_reproducer_reports_no_steps_but_still_tried() {
         scenario: Scenario::DurableAppend,
         plan: FaultPlan {
             seed: 0x1774_0000_0000_0004,
-            fsync_lie: Trigger::Nth(1),
+            fsync_lie: Trigger::At(1),
             ..FaultPlan::faultless()
         },
     };
@@ -211,6 +223,29 @@ fn an_already_minimal_reproducer_reports_no_steps_but_still_tried() {
         "no candidate was even tried; empty steps would then mean nothing"
     );
     assert_eq!(shrunk.replay.plan, minimal.plan);
+}
+
+#[test]
+fn nth_one_is_periodic_and_therefore_not_a_minimal_reproducer() {
+    let dir = scratch_dir("periodic-is-not-once");
+    let periodic = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            seed: 0x1774_0000_0000_0005,
+            fsync_lie: Trigger::Nth(1),
+            ..FaultPlan::faultless()
+        },
+    };
+    let shrunk = shrink(periodic, &dir).expect("the periodic lie fails, so it shrinks");
+    assert_eq!(shrunk.replay.plan.fsync_lie, Trigger::At(1));
+    assert!(
+        shrunk
+            .steps
+            .iter()
+            .any(|step| step.what == "weakened the fsync lie to fire once"),
+        "the shrinker did not record the behavioral reduction: {:?}",
+        shrunk.steps
+    );
 }
 
 // ---------------------------------------------------------------------------

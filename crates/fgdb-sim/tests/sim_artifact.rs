@@ -253,6 +253,24 @@ fn the_replay_command_round_trips_to_the_value_that_replays() {
 }
 
 #[test]
+fn an_exact_one_shot_trigger_round_trips_without_becoming_periodic() {
+    let replay = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            seed: 0x1774_0000_0000_0006,
+            fsync_lie: Trigger::At(3),
+            ..FaultPlan::faultless()
+        },
+    };
+    // This is the same private replay descriptor parser covered above, not JWT
+    // authentication or claim validation.
+    // ubs:ignore
+    let decoded = Replay::decode(&replay.encode()).expect("exact trigger decodes");
+    assert_eq!(decoded, replay);
+    assert_eq!(decoded.plan.fsync_lie, Trigger::At(3));
+}
+
+#[test]
 fn replaying_an_artifact_reproduces_the_identical_fault_log() {
     // ONE directory for both runs. A FaultEvent names the file it acted on, so
     // replaying into a different scratch path would differ in `path` alone and

@@ -29,9 +29,10 @@
 //! 1. **fault classes** — a plan naming three classes leaves a reader asking
 //!    which one did it. Removing a class is the largest single reduction, so
 //!    classes are dropped first, one at a time, greedily.
-//! 2. **trigger strength** — `Always` fires on every eligible operation;
-//!    `Nth(k)` fires on one in `k`. A reproducer that needs the fault only
-//!    once is sharper than one that needs it everywhere.
+//! 2. **trigger strength** — `Always` fires on every eligible operation and
+//!    `Nth(k)` fires periodically. Both can be narrowed to `At(k)`, which fires
+//!    only at one exact eligible boundary. A reproducer that needs the fault
+//!    once is sharper than one that needs it repeatedly.
 //! 3. **space budget** — dropped when the failure does not need it.
 //!
 //! Each step is accepted only if the reduced plan still fails the same way, so
@@ -145,63 +146,73 @@ fn candidates(plan: FaultPlan) -> Vec<(&'static str, FaultPlan)> {
         ));
     }
 
-    // 3. Weaken a surviving trigger from Always to a single firing.
-    if plan.fsync_lie == Trigger::Always {
+    // 3. Weaken a surviving repeated trigger to one exact firing. `Nth(1)` is
+    // behaviorally the same as `Always`, so treating it as "once" would record
+    // a cosmetic reduction while leaving every later boundary faulted.
+    if let Some(trigger) = weaken_to_single_firing(plan.fsync_lie) {
         out.push((
             "weakened the fsync lie to fire once",
             FaultPlan {
-                fsync_lie: Trigger::Nth(1),
+                fsync_lie: trigger,
                 ..plan
             },
         ));
     }
-    if plan.torn_write == Trigger::Always {
+    if let Some(trigger) = weaken_to_single_firing(plan.torn_write) {
         out.push((
             "weakened the torn write to fire once",
             FaultPlan {
-                torn_write: Trigger::Nth(1),
+                torn_write: trigger,
                 ..plan
             },
         ));
     }
-    if plan.bit_flip == Trigger::Always {
+    if let Some(trigger) = weaken_to_single_firing(plan.bit_flip) {
         out.push((
             "weakened the bit flip to fire once",
             FaultPlan {
-                bit_flip: Trigger::Nth(1),
+                bit_flip: trigger,
                 ..plan
             },
         ));
     }
-    if plan.dirent_lie == Trigger::Always {
+    if let Some(trigger) = weaken_to_single_firing(plan.dirent_lie) {
         out.push((
             "weakened the dirent lie to fire once",
             FaultPlan {
-                dirent_lie: Trigger::Nth(1),
+                dirent_lie: trigger,
                 ..plan
             },
         ));
     }
-    if plan.dirent_loss == Trigger::Always {
+    if let Some(trigger) = weaken_to_single_firing(plan.dirent_loss) {
         out.push((
             "weakened the dirent loss to fire once",
             FaultPlan {
-                dirent_loss: Trigger::Nth(1),
+                dirent_loss: trigger,
                 ..plan
             },
         ));
     }
-    if plan.latency == Trigger::Always {
+    if let Some(trigger) = weaken_to_single_firing(plan.latency) {
         out.push((
             "weakened the latency to fire once",
             FaultPlan {
-                latency: Trigger::Nth(1),
+                latency: trigger,
                 ..plan
             },
         ));
     }
 
     out
+}
+
+fn weaken_to_single_firing(trigger: Trigger) -> Option<Trigger> {
+    match trigger {
+        Trigger::Always => Some(Trigger::At(1)),
+        Trigger::Nth(n) if n != 0 => Some(Trigger::At(n)),
+        Trigger::Never | Trigger::Nth(_) | Trigger::At(_) | Trigger::PerMille(_) => None,
+    }
 }
 
 /// Minimises `replay` to a 1-minimal reproducer of the *same* failure kind.

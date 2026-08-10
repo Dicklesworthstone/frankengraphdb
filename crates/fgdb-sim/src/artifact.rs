@@ -440,6 +440,7 @@ fn encode_trigger(trigger: Trigger) -> String {
         Trigger::Never => "never".to_string(),
         Trigger::Always => "always".to_string(),
         Trigger::Nth(n) => format!("nth{n}"),
+        Trigger::At(n) => format!("at{n}"),
         Trigger::PerMille(p) => format!("pm{p}"),
     }
 }
@@ -456,6 +457,12 @@ fn decode_trigger(text: &str) -> Result<Trigger, String> {
             .parse()
             .map(Trigger::Nth)
             .map_err(|_| format!("bad Nth trigger {text:?}"));
+    }
+    if let Some(rest) = text.strip_prefix("at") {
+        return rest
+            .parse()
+            .map(Trigger::At)
+            .map_err(|_| format!("bad At trigger {text:?}"));
     }
     if let Some(rest) = text.strip_prefix("pm") {
         return rest
@@ -580,15 +587,18 @@ impl Replay {
     ///
     /// Deterministic: the fault plan's seed drives every injection, so two
     /// calls with equal `Replay`s produce equal [`RunOutcome::events`].
+    /// Latency plans use this runtime's clock-bearing `Cx`, so an encoded replay
+    /// containing `latency != Never` is executable rather than panicking in the
+    /// clockless VFS constructor.
     #[must_use]
     pub fn run(&self, dir: &Path) -> RunOutcome {
-        let vfs = FaultVfs::unix(self.plan);
-        let scenario = self.scenario;
         let runtime = RuntimeBuilder::new()
             .build()
-            .expect("the lab runtime builds");
+            .expect("the replay runtime builds");
         let root = runtime.request_cx_with_budget(Budget::INFINITE);
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
+        let vfs = FaultVfs::unix_with_clock(self.plan, root);
+        let scenario = self.scenario;
         let failure = runtime.block_on(async {
             match scenario {
                 Scenario::DurableAppend => durable_append(&vfs, dir, true).await,

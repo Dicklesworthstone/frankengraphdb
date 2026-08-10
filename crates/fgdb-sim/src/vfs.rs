@@ -171,6 +171,15 @@ use std::task::{Context, Poll};
 /// strictly easier failure to survive and therefore a weaker test.
 pub const DEFAULT_SECTOR_BYTES: u64 = 512;
 
+/// Prefix for successful-run trace events that identify a faultable VFS
+/// boundary. [`crate::ldfi`] consumes these events and translates the traced
+/// class/ordinal pair back into an exact [`FaultPlan`].
+///
+/// This is deliberately versioned: the text is captured in asupersync replay
+/// traces, so changing its grammar without changing the version would make an
+/// old successful run target a different fault.
+pub const FAULT_POINT_TRACE_PREFIX: &str = "fgdb.sim.fault-point/v1:";
+
 /// ENOSPC. Named rather than spelled inline so the returned error is the one a
 /// caller's `raw_os_error()` match would see from the real kernel.
 const ENOSPC: i32 = 28;
@@ -194,6 +203,12 @@ pub enum Trigger {
     Always,
     /// Fires on every `n`-th eligible operation. `Nth(0)` never fires.
     Nth(u32),
+    /// Fires only on the `n`-th eligible operation. `At(0)` never fires.
+    ///
+    /// Unlike [`Trigger::Nth`], this is not periodic. LDFI uses it to execute
+    /// the exact event set from a minimal hypothesis without also faulting
+    /// later multiples of the same ordinal.
+    At(u32),
     /// Fires with probability `per_mille`/1000, drawn from the plan's seeded
     /// stream. Deterministic for a fixed seed and operation sequence.
     PerMille(u32),
@@ -379,6 +394,35 @@ enum Class {
     Latency = 5,
 }
 
+impl Class {
+    const fn trace_name(self) -> &'static str {
+        match self {
+            Self::FsyncLie => "fsync-lie",
+            Self::TornWrite => "torn-write",
+            Self::BitFlip => "bit-flip",
+            Self::DirentLie => "dirent-sync-lie",
+            Self::DirentLoss => "dirent-loss",
+            Self::Latency => "latency",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EligibilityDecision {
+    ordinal: u64,
+    fires: bool,
+}
+
+fn trace_fault_point(class: Class, ordinal: u64) {
+    let Some(cx) = Cx::current() else {
+        return;
+    };
+    cx.trace(&format!(
+        "{FAULT_POINT_TRACE_PREFIX}{}:{ordinal}",
+        class.trace_name()
+    ));
+}
+
 /// One namespace operation applied to the backing store whose durability is
 /// still owed to one or two parent-directory syncs.
 struct NamespaceOp {
@@ -458,11 +502,11 @@ impl LabState {
 
     /// Advances `class`'s eligible-operation counter and reports whether it
     /// fires. Call this only when the fault could actually be applied.
-    fn fires(&mut self, class: Class) -> bool {
+    fn decide(&mut self, class: Class) -> EligibilityDecision {
         let index = class as usize;
         self.eligible[index] += 1;
         let count = self.eligible[index];
-        match self.trigger(class) {
+        let fires = match self.trigger(class) {
             Trigger::Never => false,
             Trigger::Always => true,
             // Kept explicit rather than folded into the arm below. Under `%`
@@ -474,7 +518,12 @@ impl LabState {
             // `nth_zero_never_fires` in tests/lab_vfs.rs witnesses it.
             Trigger::Nth(0) => false,
             Trigger::Nth(n) => count.is_multiple_of(u64::from(n)),
+            Trigger::At(n) => count == u64::from(n),
             Trigger::PerMille(p) => self.next_u64() % 1000 < u64::from(p),
+        };
+        EligibilityDecision {
+            ordinal: count,
+            fires,
         }
     }
 
@@ -710,24 +759,33 @@ impl<V: Vfs> FaultVfs<V> {
     /// That is harness breakage, not a simulated fault, and swallowing it
     /// would hand later assertions a namespace neither durable nor volatile.
     pub async fn crash(&self) -> io::Result<()> {
-        let lost = {
+        let decided = {
             let mut lab = self.lab.lock();
             lab.generation += 1;
             let pending = std::mem::take(&mut lab.namespace);
-            let mut lost = Vec::new();
-            for op in pending {
-                if lab.fires(Class::DirentLoss) {
-                    lab.record(
-                        op.kind.vanished_path(),
-                        FaultKind::DirentLoss {
-                            op: op.kind.op_name(),
-                        },
-                    );
-                    lost.push(op);
-                }
-            }
-            lost
+            pending
+                .into_iter()
+                .map(|op| {
+                    let decision = lab.decide(Class::DirentLoss);
+                    if decision.fires {
+                        lab.record(
+                            op.kind.vanished_path(),
+                            FaultKind::DirentLoss {
+                                op: op.kind.op_name(),
+                            },
+                        );
+                    }
+                    (op, decision)
+                })
+                .collect::<Vec<_>>()
         };
+        let mut lost = Vec::new();
+        for (op, decision) in decided {
+            trace_fault_point(Class::DirentLoss, decision.ordinal);
+            if decision.fires {
+                lost.push(op);
+            }
+        }
         for op in lost.into_iter().rev() {
             match op.kind {
                 NamespaceKind::Created { path } => {
@@ -875,17 +933,15 @@ impl<V: Vfs> FaultFile<V> {
     /// event is recorded only after the timer completes, so it reports a
     /// delay that was awaited, never one that was merely intended.
     async fn maybe_delay(&self) -> io::Result<()> {
-        let micros = {
+        let (decision, micros) = {
             let mut lab = self.lab.lock();
-            if lab.fires(Class::Latency) {
-                Some(lab.plan.latency_micros)
-            } else {
-                None
-            }
+            let decision = lab.decide(Class::Latency);
+            (decision, lab.plan.latency_micros)
         };
-        let Some(micros) = micros else {
+        trace_fault_point(Class::Latency, decision.ordinal);
+        if !decision.fires {
             return Ok(());
-        };
+        }
         let Some(clock) = self.lab.clock.as_ref() else {
             // Unreachable by construction — the clockless constructors
             // refuse a latency-enabled plan — but if it ever becomes
@@ -949,14 +1005,19 @@ impl<V: Vfs> FaultFile<V> {
         }
         self.maybe_delay().await?;
 
-        {
+        let decision = {
             let mut lab = self.lab.lock();
-            if lab.fires(Class::DirentLie) {
+            let decision = lab.decide(Class::DirentLie);
+            if decision.fires {
                 lab.record(&self.path, FaultKind::DirentSyncLie { pending_ops });
-                // Return success having settled nothing: the operations stay
-                // pending, exactly as an fsync lie leaves sectors dirty.
-                return Ok(());
             }
+            decision
+        };
+        trace_fault_point(Class::DirentLie, decision.ordinal);
+        if decision.fires {
+            // Return success having settled nothing: the operations stay
+            // pending, exactly as an fsync lie leaves sectors dirty.
+            return Ok(());
         }
 
         // Honest: every pending operation stops owing this directory, and an
@@ -1002,19 +1063,24 @@ impl<V: Vfs> FaultFile<V> {
 
         // --- the fsync lie ---------------------------------------------------
         let unflushed: u64 = pending.iter().map(|(_, _, b)| b.len() as u64).sum();
-        {
+        let decision = {
             let mut lab = self.lab.lock();
-            if lab.fires(Class::FsyncLie) {
+            let decision = lab.decide(Class::FsyncLie);
+            if decision.fires {
                 lab.record(
                     &self.path,
                     FaultKind::FsyncLie {
                         unflushed_bytes: unflushed,
                     },
                 );
-                // Return success having written nothing, and leave the bytes
-                // dirty exactly as a real write-back cache would.
-                return Ok(());
             }
+            decision
+        };
+        trace_fault_point(Class::FsyncLie, decision.ordinal);
+        if decision.fires {
+            // Return success having written nothing, and leave the bytes
+            // dirty exactly as a real write-back cache would.
+            return Ok(());
         }
 
         // --- the torn write --------------------------------------------------
@@ -1023,17 +1089,25 @@ impl<V: Vfs> FaultFile<V> {
         // whole point is a hole with valid bytes on both sides.
         let mut torn = None;
         if pending.len() >= 3 {
-            let mut lab = self.lab.lock();
-            if lab.fires(Class::TornWrite) {
-                let interior = pending.len() - 2;
-                let choice = 1 + usize::try_from(lab.next_u64() % interior as u64).unwrap_or(0);
-                let (_, start, bytes) = &pending[choice];
-                let kind = FaultKind::TornWrite {
-                    start: *start,
-                    end: *start + bytes.len() as u64,
-                };
-                lab.record(&self.path, kind);
-                torn = Some(choice);
+            let (decision, choice) = {
+                let mut lab = self.lab.lock();
+                let decision = lab.decide(Class::TornWrite);
+                let choice = decision.fires.then(|| {
+                    let interior = pending.len() - 2;
+                    let choice = 1 + usize::try_from(lab.next_u64() % interior as u64).unwrap_or(0);
+                    let (_, start, bytes) = &pending[choice];
+                    let kind = FaultKind::TornWrite {
+                        start: *start,
+                        end: *start + bytes.len() as u64,
+                    };
+                    lab.record(&self.path, kind);
+                    choice
+                });
+                (decision, choice)
+            };
+            trace_fault_point(Class::TornWrite, decision.ordinal);
+            if decision.fires {
+                torn = choice;
             }
         }
         if let Some(choice) = torn {
@@ -1071,17 +1145,26 @@ impl<V: Vfs> FaultFile<V> {
         // --- the bit flip ----------------------------------------------------
         // After the write landed, so the damage is to what is now on disk.
         let mut flip: Option<(u64, u8, u8)> = None;
-        {
-            let mut lab = self.lab.lock();
-            if !writes.is_empty() && lab.fires(Class::BitFlip) {
-                let which = usize::try_from(lab.next_u64() % writes.len() as u64).unwrap_or(0);
-                let (start, bytes) = &writes[which];
-                let byte_index = usize::try_from(lab.next_u64() % bytes.len() as u64).unwrap_or(0);
-                let bit = u8::try_from(lab.next_u64() % 8).unwrap_or(0);
-                let offset = start + byte_index as u64;
-                let damaged = bytes[byte_index] ^ (1u8 << bit);
-                lab.record(&self.path, FaultKind::BitFlip { offset, bit });
-                flip = Some((offset, damaged, bit));
+        if !writes.is_empty() {
+            let (decision, selected) = {
+                let mut lab = self.lab.lock();
+                let decision = lab.decide(Class::BitFlip);
+                let selected = decision.fires.then(|| {
+                    let which = usize::try_from(lab.next_u64() % writes.len() as u64).unwrap_or(0);
+                    let (start, bytes) = &writes[which];
+                    let byte_index =
+                        usize::try_from(lab.next_u64() % bytes.len() as u64).unwrap_or(0);
+                    let bit = u8::try_from(lab.next_u64() % 8).unwrap_or(0);
+                    let offset = start + byte_index as u64;
+                    let damaged = bytes[byte_index] ^ (1u8 << bit);
+                    lab.record(&self.path, FaultKind::BitFlip { offset, bit });
+                    (offset, damaged, bit)
+                });
+                (decision, selected)
+            };
+            trace_fault_point(Class::BitFlip, decision.ordinal);
+            if decision.fires {
+                flip = selected;
             }
         }
         if let Some((offset, damaged, _)) = flip {
