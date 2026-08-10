@@ -469,15 +469,8 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
                 .write_with_publication_failure(cx, second, stage)
                 .await
                 .expect_err("the named post-D2 stage must fail");
-            let (recovery, source) = match error {
-                WriteError::CommittedNeedsRecovery { recovery, source } => (recovery, source),
-                other => {
-                    assert!(
-                        false,
-                        "{stage:?}: injected failure returned the wrong error: {other:?}"
-                    );
-                    return;
-                }
+            let WriteError::CommittedNeedsRecovery { recovery, source } = error else {
+                unreachable!("{stage:?}: injected failure returned the wrong error: {error:?}");
             };
             assert_eq!(recovery.durable_frontier.0, 2, "{stage:?}");
             assert_eq!(recovery.published_frontier.0, 1, "{stage:?}");
@@ -524,11 +517,7 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
                 .await
                 .expect_err("a fenced handle must refuse maintenance");
             let RebuildError::HandleNotHealthy(found) = compact_error else {
-                assert!(
-                    false,
-                    "{stage:?}: maintenance returned the wrong fence: {compact_error:?}"
-                );
-                return;
+                unreachable!("{stage:?}: maintenance returned the wrong fence: {compact_error:?}");
             };
             assert_eq!(found, DatabaseState::NeedsAuthoritativeRecovery(recovery));
             let mut third = WriteBatch::new(KNOWS);

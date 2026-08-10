@@ -150,12 +150,17 @@ active_logical_object_kinds! {
     CommitCapsule = 0x000a => "CommitCapsule",
     PreparedCommitRecord = 0x000b => "PreparedCommitRecord",
     DurableCapabilityValidationEvidence = 0x028f => "DurableCapabilityValidationEvidence",
+    DeltaBlockVersion = 0x04d4 => "DeltaBlockVersion",
     DurableCapabilityHeader = 0x0550 => "DurableCapabilityHeader",
     ExactDurableCapabilityKindBody = 0x0551 => "ExactDurableCapabilityKindBody",
     CanonicalDurableCapabilityBytes = 0x0552 => "CanonicalDurableCapabilityBytes",
     DurableCapabilityMacInput = 0x0553 => "DurableCapabilityMacInput",
     DurableCapabilityValidationActionScope = 0x0554 => "DurableCapabilityValidationActionScope",
     DurableCapabilityValidatorSemanticsRegistry = 0x0555 => "DurableCapabilityValidatorSemanticsRegistry",
+    DeltaPartitionRoot = 0x057e => "DeltaPartitionRoot",
+    VertexRowPatch = 0x057f => "VertexRowPatch",
+    EdgePropertyPatch = 0x0580 => "EdgePropertyPatch",
+    PartitionManifest = 0x0581 => "PartitionManifest",
 }
 
 /// Implemented by every durable logical object type that references can

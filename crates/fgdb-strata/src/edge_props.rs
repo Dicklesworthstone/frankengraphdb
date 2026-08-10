@@ -35,7 +35,7 @@ pub const PROPERTY_PATCH_FORMAT_V1: u16 = 1;
 /// Durable object kind for a block-hosted edge property patch — §5.1
 /// logical-identity header, with the same interim-numbering caveat as
 /// [`crate::DELTA_BLOCK_OBJECT_KIND`].
-pub const PROPERTY_PATCH_OBJECT_KIND: u16 = 0x0303;
+pub const PROPERTY_PATCH_OBJECT_KIND: u16 = 0x0580;
 
 /// The most rows one patch can hold: the block's u8 locator addresses rows
 /// `1..=255` (0 is "no properties"), so this is a FORMAT ceiling shared with

@@ -166,7 +166,7 @@ pub const BLOCK_LOGICAL_DIGEST_DOMAIN: &[u8] = b"fgdb.strata.block-logical-diges
 /// separate from the block payload framing: a future durable object with the
 /// same bytes must not share a logical object identity merely because its
 /// payload happens to begin with `FGSB`.
-pub const DELTA_BLOCK_OBJECT_KIND: u16 = 0x0301;
+pub const DELTA_BLOCK_OBJECT_KIND: u16 = 0x04d4;
 
 /// The V3 framing ID for the §6.2 identity-column scalar codec.  The scalar
 /// codec deliberately has no durable envelope; this caller owns its ID,

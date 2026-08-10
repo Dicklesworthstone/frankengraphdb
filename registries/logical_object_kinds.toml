@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 62
+registry_epoch = 63
 
 [[kind]]
 object_kind = 0x0001
@@ -4086,6 +4086,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/delivered_baseline_payload/"
 
 [[kind]]
+object_kind = 0x04d4
+name = "DeltaBlockVersion"
+status = "active"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/delta_block_version/"
+
+[[kind]]
 object_kind = 0x04d5
 name = "DeltaDeliveryEnvelope"
 status = "reserved"
@@ -5002,3 +5011,39 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/audit_freeze_field/"
+
+[[kind]]
+object_kind = 0x057e
+name = "DeltaPartitionRoot"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 134217728
+golden_corpus = "corpus/logical/delta_partition_root/"
+
+[[kind]]
+object_kind = 0x057f
+name = "VertexRowPatch"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/vertex_row_patch/"
+
+[[kind]]
+object_kind = 0x0580
+name = "EdgePropertyPatch"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/edge_property_patch/"
+
+[[kind]]
+object_kind = 0x0581
+name = "PartitionManifest"
+status = "active"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 134217728
+golden_corpus = "corpus/logical/partition_manifest/"

@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3786
-projection_fallback_count = 141
-target_source_assignment_sha256 = "918dbfd2e6ef90703567d4983a50d408a7807c476ebcb21541b5963931f2c64e"
+target_count = 3791
+projection_fallback_count = 145
+target_source_assignment_sha256 = "9c9ce3bb55b6c3d6bf478a8c3d9094f215081d954c1696af15ab6d04ee449e59"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 62
+registry_epoch = 63
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -42944,7 +42944,7 @@ symbol = "DeltaBlockVersion"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04d4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a11:reservation:delta-delivery-envelope"
@@ -112907,6 +112907,61 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/audit_freeze_field/"
 
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:vertex-row-patch"
+object_kind = 0x057f
+name = "VertexRowPatch"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/vertex_row_patch/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:edge-property-patch"
+object_kind = 0x0580
+name = "EdgePropertyPatch"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/edge_property_patch/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:delta-block-version"
+object_kind = 0x04d4
+name = "DeltaBlockVersion"
+status = "active"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/delta_block_version/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:delta-partition-root"
+object_kind = 0x057e
+name = "DeltaPartitionRoot"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 134217728
+golden_corpus = "corpus/logical/delta_partition_root/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:partition-manifest"
+object_kind = 0x0581
+name = "PartitionManifest"
+status = "active"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 134217728
+golden_corpus = "corpus/logical/partition_manifest/"
+
 [[target]]
 row_id = "a10:target:logical-kind-audit-freeze-field"
 target_row_id = "a10:logical-kind:audit-freeze-field"
@@ -115391,4 +115446,44 @@ target_row_id = "a01:field:remote-retention-release-ack-certificate-one-digest-s
 slice_id = "a01"
 source_key = "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-delta-block-version"
+target_row_id = "a09:logical-kind:delta-block-version"
+slice_id = "a09"
+source_key = "reference|DeltaBlockVersion"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-delta-partition-root"
+target_row_id = "a09:logical-kind:delta-partition-root"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|DeltaPartitionRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-vertex-row-patch"
+target_row_id = "a09:logical-kind:vertex-row-patch"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|VertexRowPatch"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-edge-property-patch"
+target_row_id = "a09:logical-kind:edge-property-patch"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|EdgePropertyPatch"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-partition-manifest"
+target_row_id = "a09:logical-kind:partition-manifest"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|PartitionManifest"
+target_kind = "logical-kind"
 definition_status = "declared"

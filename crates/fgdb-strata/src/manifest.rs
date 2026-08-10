@@ -31,7 +31,7 @@ pub const MANIFEST_FORMAT_V1: u16 = 1;
 /// blocks (0x0301), vertex patches (0x0302), and edge property patches
 /// (0x0303) for the reason each of those is distinct: equal payload bytes
 /// must never alias a different kind's identity.
-pub const MANIFEST_OBJECT_KIND: u16 = 0x0304;
+pub const MANIFEST_OBJECT_KIND: u16 = 0x0581;
 
 /// The largest number of records this build will read from one manifest.
 pub const MAX_MANIFEST_RECORDS: u32 = 1 << 20;

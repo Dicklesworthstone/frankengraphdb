@@ -53,7 +53,7 @@ pub const VERTEX_PATCH_FORMAT_V2: u16 = 2;
 /// reason as [`crate::DELTA_BLOCK_OBJECT_KIND`], and carrying the same
 /// interim-numbering caveat: these kinds are renumbered when `fgdb-ge6a`
 /// registers the Strata formats against the live reservation table.
-pub const VERTEX_PATCH_OBJECT_KIND: u16 = 0x0302;
+pub const VERTEX_PATCH_OBJECT_KIND: u16 = 0x057f;
 
 /// More rows than this build will materialize from one patch — the same
 /// role as `MAX_BLOCK_ENTRIES`: a format ceiling, not a seal policy.

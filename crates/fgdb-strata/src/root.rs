@@ -665,9 +665,19 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
     Ok(root)
 }
 
-/// The content identity of an encoded root — same derivation as a block's.
+/// Durable object kind for a Tier-D partition root — registered as
+/// `DeltaPartitionRoot` (fgdb-ge6a). Until registration the root was the one
+/// object whose §5.1 identity used an empty header, distinct from blocks by
+/// emptiness alone; the registered kind makes the separation explicit.
+pub const ROOT_OBJECT_KIND: u16 = 0x057e;
+
+/// The content identity of an encoded root — same derivation as a block's,
+/// under the root's own registered kind.
 pub fn root_id(k_oid: &[u8; 32], namespace: DatabaseSecurityNamespaceId, bytes: &[u8]) -> ObjectId {
-    ObjectId(fgdb_crypto::logical_object_id(k_oid, &namespace.0, &[], bytes).0)
+    ObjectId(
+        fgdb_crypto::logical_object_id(k_oid, &namespace.0, &ROOT_OBJECT_KIND.to_le_bytes(), bytes)
+            .0,
+    )
 }
 
 /// Decode a root that must be the one named by `expected`.
