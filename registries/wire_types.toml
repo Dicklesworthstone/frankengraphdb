@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 46
+registry_epoch = 47
 
 [[type]]
 wire_type_id = 0x0001
@@ -5969,3 +5969,57 @@ status = "reserved"
 encoding_context = "generated tag-refined discriminant whose validator admits only the PromotedAwaitingReopen arm (arm_tag 0x0003) of the MetaRestorePhase union; a precondition carries the refined union's u8 tag and never the arm payload (a20:2601)"
 allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x056b
+name = "id128"
+kind = "record"
+status = "active"
+encoding_context = "raw 128-bit never-recycled identity (VId/EId/GraphId/BranchId, §6.2); an identity value, not a digest-of-something"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16
+
+[[type]]
+wire_type_id = 0x056c
+name = "DescriptorKey"
+kind = "record"
+status = "active"
+encoding_context = "block descriptor hoisted to the header (§6.2 / fgdb-by2l): src id128 + relation u64 + direction u8; every entry in the block shares it"
+allowed_containing_schemas = ["DeltaBlockVersion"]
+max_size_bytes = 25
+
+[[type]]
+wire_type_id = 0x056d
+name = "SortedIdentityColumn"
+kind = "record"
+status = "active"
+encoding_context = "w3-identity-encoding column frame (fgdb-codec::identity): codec header + shared-prefix + fixed/FOR/delta-FOR slot suffixes, <=16 B per entry, order-preserving"
+allowed_containing_schemas = ["DeltaBlockVersion"]
+max_size_bytes = 4107
+
+[[type]]
+wire_type_id = 0x056e
+name = "VisibilitySpan"
+kind = "record"
+status = "active"
+encoding_context = "run-length visibility interval: first_row u32 + last_row u32 + created_at u64 + retired_at u64 (0 = live); the §6.2 visibility_intervals[] element"
+allowed_containing_schemas = ["DeltaBlockVersion"]
+max_size_bytes = 24
+
+[[type]]
+wire_type_id = 0x056f
+name = "PropertyEntry"
+kind = "record"
+status = "active"
+encoding_context = "one property: key u64 + u32 length + canonical-scalar payload under the registered CanonicalScalarProfile"
+allowed_containing_schemas = ["VertexRowPatch"]
+max_size_bytes = 16384
+
+[[type]]
+wire_type_id = 0x0570
+name = "PropertyEntryList"
+kind = "record"
+status = "active"
+encoding_context = "positional property list: u32 count + PropertyEntry entries; resolved from the hosting block's per-entry locator column (fgdb-2t7q 3B)"
+allowed_containing_schemas = ["EdgePropertyPatch"]
+max_size_bytes = 16384

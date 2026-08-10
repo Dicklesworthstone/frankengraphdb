@@ -3447,7 +3447,12 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // 604 -> 610 / 430 -> 436 (fgdb-a20-restore-promotion-ivsp): the
         // TerminalAuditGate closure names its six Spec-family consumers in
         // both generated artifacts.
-        (610, 436),
+        // 610 -> 615 (fgdb-ge6a): the five Tier-D record wire types each name
+        // their one exact host (DescriptorKey/SortedIdentityColumn/
+        // VisibilitySpan -> DeltaBlockVersion, PropertyEntry -> VertexRowPatch,
+        // PropertyEntryList -> EdgePropertyPatch); id128 is wildcard and adds
+        // no citation.
+        (615, 436),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -11720,17 +11725,26 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TxnAllocationBindingRoot"
         )
     };
-    // ge6a's Tier-D reachability cohort: PartitionManifest, DeltaPartitionRoot,
-    // and DeltaBlockVersion each had ZERO field rows before the fgdb-ge6a
-    // reachability landing, so the whole schema is a post-erratum addition and
-    // the historical witness reconstructs without it. Filtered separately from
-    // post_erratum_a09_field so that cohort's three-schema membership note stays
-    // a true accounting. ACCOUNTING: exactly 5 transcript lines — root (1),
-    // blocks + vertex_patches (2), property_patch_refs + predecessor (2).
+    // ge6a's Tier-D field cohort: all five strata format schemas had ZERO
+    // field rows before the fgdb-ge6a landings, so the whole schema is a
+    // post-erratum addition and the historical witness reconstructs without
+    // it. Filtered separately from post_erratum_a09_field so that cohort's
+    // three-schema membership note stays a true accounting. ACCOUNTING:
+    // exactly 25 transcript lines — the 5 reachability rows (increment 2:
+    // manifest root, root blocks + vertex_patches, block property_patch_refs
+    // + predecessor) plus the 20 full-table rows (increment 3: block
+    // format/partition_id/descriptor_key/sorted_entries/visibility_intervals/
+    // canonical_logical_digest, root graph/branch/partition/published_at,
+    // manifest graph/branch/partition, vertex patch vid/birth_ordinal/
+    // created_at/retired_at/labels/props, edge patch rows).
     let post_erratum_ge6a_reachability_field = |schema: &str| {
         matches!(
             schema,
-            "PartitionManifest" | "DeltaPartitionRoot" | "DeltaBlockVersion"
+            "PartitionManifest"
+                | "DeltaPartitionRoot"
+                | "DeltaBlockVersion"
+                | "VertexRowPatch"
+                | "EdgePropertyPatch"
         )
     };
     // A16's four exact AuthorityBoundHeader<Role> fields use the already
@@ -12205,7 +12219,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // post_erratum_ge6a_reachability_field (whole-schema cohort: all three
         // hosts had zero field rows before this landing). The current field
         // count carries them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 859,
+        // 859 -> 879 (fgdb-ge6a increment 3): the twenty full-table rows across
+        // the five strata format schemas, all claimed by the same whole-schema
+        // cohort filter (extended to VertexRowPatch and EdgePropertyPatch,
+        // which also had zero rows before ge6a). The current field count
+        // carries them and the frozen reconstruction remains 225.
+        pre_erratum.fields.len() + 879,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

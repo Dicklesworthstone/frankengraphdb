@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 81
+registry_epoch = 82
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -2717,6 +2717,76 @@ transcript_recipe = "BLAKE3(\"fgdb:delivered-zset:v1\" || canonical(format,outpu
 
 [[field]]
 containing_schema = "DeltaBlockVersion"
+field_tag = 0x0001
+stable_name = "format"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "format version, additive-minor/breaking-major from day one (§16.6); lives/dies with the block"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0002
+stable_name = "partition_id"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "the partition this block belongs to; lives/dies with the block"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0003
+stable_name = "descriptor_key"
+exact_wire_type = "DescriptorKey"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "source-grouped block descriptor shared by every entry; lives/dies with the block"
+version_status = "active"
+max_size_bytes = 25
+
+[[field]]
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0005
+stable_name = "sorted_entries"
+exact_wire_type = "SortedIdentityColumn"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "the (dst, eid) identity columns under the normative (dst, eid, created_at) ordering; the block content itself, lives/dies with the block"
+version_status = "active"
+max_size_bytes = 4107
+
+[[field]]
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0006
+stable_name = "visibility_intervals"
+exact_wire_type = "VisibilitySpan"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "run-length-coalesced entry visibility; lives/dies with the block"
+version_status = "active"
+max_size_bytes = 24
+
+[[field]]
+containing_schema = "DeltaBlockVersion"
 field_tag = 0x0007
 stable_name = "property_patch_refs"
 exact_wire_type = "StrongRef"
@@ -2744,6 +2814,22 @@ retention_and_cut_rule = "lineage comparison anchor over the family's prior bloc
 version_status = "active"
 max_size_bytes = 33
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "DeltaBlockVersion"
+field_tag = 0x0009
+stable_name = "canonical_logical_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the block's logical statements (fgdb.strata.block-logical-digest.v1, fgdb-da6b): codec-independent, comparison only, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.block-logical-digest.v1 over entry count then per-entry (src, relation, dst, eid, created_at, retirement presence+seq, property row as key + length-prefixed canonical scalar), little-endian, in entry order (block_logical_digest, fgdb-da6b)"
 
 [[field]]
 containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
@@ -2819,6 +2905,62 @@ version_status = "reserved"
 max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "BLAKE3(canonical every DeltaDeliveryEnvelope field except internal_delivery_digest); commits the full authority-bound header, service epoch, role, payload contract, and Atomic|Coalesced provenance (a11:1934)"
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this root binds; lives/dies with the root"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this root binds; lives/dies with the root"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0003
+stable_name = "partition"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this root binds; lives/dies with the root"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0004
+stable_name = "published_at"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "the commit sequence at which this root became the partition's state; lives/dies with the root"
+version_status = "active"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "DeltaPartitionRoot"
@@ -3115,6 +3257,20 @@ bd_schema_major = 1
 bd_included_field_tags = []
 bd_excluded_field_tags = [21]
 recipe_pin = "fnv1a64:128f0e499b005f1f"
+
+[[field]]
+containing_schema = "EdgePropertyPatch"
+field_tag = 0x0001
+stable_name = "rows"
+exact_wire_type = "PropertyEntryList"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "positional rows indexed by the hosting block's locator column (fgdb-2t7q 3B); lives/dies with the patch"
+version_status = "active"
+max_size_bytes = 16384
 
 [[field]]
 containing_schema = "ExportLeaf<T>"
@@ -7875,6 +8031,48 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the TopologyState this ParticipantRoutingDerivationProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "PartitionManifest"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "per-record coordinate key; one record per live (graph, branch, partition), canonical order, one head per coordinate"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "PartitionManifest"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "per-record coordinate key; one record per live (graph, branch, partition), canonical order, one head per coordinate"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "PartitionManifest"
+field_tag = 0x0003
+stable_name = "partition"
+exact_wire_type = "u64"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "per-record coordinate key; one record per live (graph, branch, partition), canonical order, one head per coordinate"
+version_status = "active"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "PartitionManifest"
@@ -15910,6 +16108,90 @@ role_predicate = "true"
 retention_and_cut_rule = "inline nonretaining consumer applied identity retained with the validated anchor; no independent reachability edge (a04:1586)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "VertexRowPatch"
+field_tag = 0x0001
+stable_name = "vid"
+exact_wire_type = "id128"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "per-row logical vertex identity; (vid, created_at) chains with per-vid contiguity; lives/dies with the patch"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "VertexRowPatch"
+field_tag = 0x0002
+stable_name = "birth_ordinal"
+exact_wire_type = "u64"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "per-row birth ordinal; lives/dies with the patch"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "VertexRowPatch"
+field_tag = 0x0003
+stable_name = "created_at"
+exact_wire_type = "u64"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "per-row visibility open bound (CommitSeq); lives/dies with the patch"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "VertexRowPatch"
+field_tag = 0x0004
+stable_name = "retired_at"
+exact_wire_type = "u64"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "per-row visibility close bound; 0 is the live sentinel, no valid retirement is sequence 0; lives/dies with the patch"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "VertexRowPatch"
+field_tag = 0x0005
+stable_name = "labels"
+exact_wire_type = "u64"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strictly ascending label memberships at creation (LabelId); lives/dies with the patch"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "VertexRowPatch"
+field_tag = 0x0006
+stable_name = "props"
+exact_wire_type = "PropertyEntry"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strictly ascending by key; values canonical scalars under CanonicalScalarProfile; lives/dies with the patch"
+version_status = "active"
+max_size_bytes = 16384
 
 [[field]]
 containing_schema = "WitnessPolicy"
