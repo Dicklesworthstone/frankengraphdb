@@ -842,6 +842,33 @@ fn execute_spine_hypothesis(plan: FaultPlan, dir: PathBuf, lab_seed: u64) -> Spi
 }
 
 #[test]
+fn marker_barrier_lie_is_not_acknowledged_by_the_embedded_spine() {
+    let result = execute_spine_hypothesis(
+        FaultPlan {
+            fsync_lie: Trigger::Nth(2),
+            ..FaultPlan::faultless()
+        },
+        scratch_dir("lineage-spine-marker-readback"),
+        1_409,
+    );
+    assert!(
+        matches!(result.observation, LdfiExperimentObservation::InvariantHeld),
+        "an unobservable marker must not become an acknowledged loss: {result:?}"
+    );
+    assert_eq!(
+        result.acknowledged, None,
+        "the writer acknowledged a marker its fresh readback could not observe: {result:?}"
+    );
+    assert_eq!(result.events.len(), 1, "the exact planned event fired");
+    assert!(matches!(result.events[0].kind, FaultKind::FsyncLie { .. }));
+    assert!(
+        result.detail.contains("post-barrier readback"),
+        "the refusal must name the failed evidence boundary: {}",
+        result.detail
+    );
+}
+
+#[test]
 fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() {
     let events = successful_embedded_spine_trace(scratch_dir("lineage-spine-exec-baseline"));
     let derived = derive_fault_hypotheses(
@@ -903,49 +930,53 @@ fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() {
             observation
         },
     );
-    assert!(
-        matches!(report.status, LdfiExperimentStatus::FoundViolation { .. }),
-        "the full Database workload found no acknowledged-loss counterexample; \
-         results={results:#?}; status={:?}",
-        report.status
-    );
-    let LdfiExperimentStatus::FoundViolation { hypothesis: found } = &report.status else {
-        return;
-    };
-    let fault = derived
-        .hypotheses
-        .iter()
-        .find(|hypothesis| &hypothesis.events == found)
-        .expect("the reported event set came from the derived spine hypotheses");
-    let reproduced = execute_spine_hypothesis(
-        fault
-            .to_plan(0x1df2_ffff, 100)
-            .expect("the found spine hypothesis maps exactly"),
-        scratch_dir("lineage-spine-exec-replay"),
-        1_999,
-    );
-    assert!(
-        matches!(
-            reproduced.observation,
-            LdfiExperimentObservation::InvariantViolated
+    match &report.status {
+        LdfiExperimentStatus::RefutedUpToDepth { max_depth } => {
+            assert_eq!(
+                *max_depth, 2,
+                "the clean verdict must cover the requested depth"
+            );
+        }
+        LdfiExperimentStatus::FoundViolation { hypothesis: found } => {
+            let fault = derived
+                .hypotheses
+                .iter()
+                .find(|hypothesis| &hypothesis.events == found)
+                .expect("the reported event set came from the derived spine hypotheses");
+            let reproduced = execute_spine_hypothesis(
+                fault
+                    .to_plan(0x1df2_ffff, 100)
+                    .expect("the found spine hypothesis maps exactly"),
+                scratch_dir("lineage-spine-exec-replay"),
+                1_999,
+            );
+            assert!(
+                matches!(
+                    reproduced.observation,
+                    LdfiExperimentObservation::InvariantViolated
+                ),
+                "the reported full-spine violation did not reproduce: {reproduced:?}"
+            );
+            assert_eq!(
+                reproduced.acknowledged,
+                Some(1),
+                "only an acknowledged write may count as this safety violation: {}",
+                reproduced.detail
+            );
+            assert_eq!(
+                reproduced.events.len(),
+                fault.points.len(),
+                "the replay broadened the exact generated event set: {reproduced:?}"
+            );
+            panic!(
+                "full-spine campaign found a reproducible acknowledged-loss case: {reproduced:?}"
+            );
+        }
+        status => panic!(
+            "full-spine campaign did not complete its bounded search: \
+             status={status:?}; results={results:#?}"
         ),
-        "the reported full-spine violation did not reproduce: {reproduced:?}"
-    );
-    assert_eq!(
-        reproduced.acknowledged,
-        Some(1),
-        "only an acknowledged write may count as this safety violation: {}",
-        reproduced.detail
-    );
-    assert!(
-        reproduced.recovered_frontier != reproduced.acknowledged || !reproduced.recovered_vertex,
-        "the alleged lost acknowledgement actually recovered: {reproduced:?}"
-    );
-    assert_eq!(
-        reproduced.events.len(),
-        fault.points.len(),
-        "the replay broadened the exact generated fault set: {reproduced:?}"
-    );
+    }
 }
 
 #[test]
