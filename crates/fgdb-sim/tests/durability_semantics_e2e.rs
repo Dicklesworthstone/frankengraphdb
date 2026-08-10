@@ -840,11 +840,11 @@ fn input_order_does_not_change_a_capsules_identity() {
 //
 //   CrashPoint arm                      fault expression here
 //   ---------------------------------   -----------------------------------
-//   AfterD1 (orphan, not committed)     fsync lie at D2, then crash()
+//   AfterD1 (orphan, not committed)     refused fsync lie at D2, then crash()
 //   AfterMarkerBeforeD2 loss arm        ENOSPC at D2, then crash()
 //   clean restart                       faultless plan, then crash()
-//   (inexpressible by CrashPoint)       fsync lie at D1: ack'd commit whose
-//                                       capsule never landed — fails closed
+//   (inexpressible by CrashPoint)       fsync lie at D1: bounded readback
+//                                       refuses before marker publication
 //   (inexpressible by CrashPoint)       interior tear inside D2's flush
 //   (inexpressible by CrashPoint)       bit rot in a durable capsule, healed
 //
@@ -936,14 +936,11 @@ fn a_faultless_fault_model_is_byte_transparent_through_the_real_commit_path() {
     });
 }
 
-/// An fsync lie at D2: the writer is TOLD the marker is durable, acknowledges
-/// the commit, and the bytes never landed. `CrashPoint` cannot say this — its
-/// crashes always surface as errors, so the ack and the truth never diverge.
-/// After the crash, recovery must name the exact state the AfterD1 arm names:
-/// two commits, an orphan capsule, the sequence free — the acknowledged commit
-/// is gone, and the protocol's job is that its absence is CLEAN.
+/// An fsync lie at D2 must be caught by the bounded marker readback before the
+/// commit is acknowledged. After process loss, recovery names the same state
+/// as the AfterD1 arm: two commits, an orphan capsule, and sequence 3 free.
 #[test]
-fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
+fn a_d2_fsync_lie_is_refused_before_acknowledgement() {
     let dir = scratch_dir("vfs-d2-lie");
     under_lab(71, move |cx| async move {
         let cx = &cx;
@@ -953,7 +950,23 @@ fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
             ..FaultPlan::faultless()
         });
         let mut coordinator = open_faulted(cx, &vfs, &dir).await;
-        three_commits_through(&mut coordinator, cx).await; // commit 3 ACKS Ok
+        let capsules = three_commits();
+        for capsule in &capsules[..2] {
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("prefix commit");
+        }
+        let refused = commit_capsule(&mut coordinator, cx, &capsules[2], vec![]).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::PublicationNotObservable {
+                    expected_commit_seq: 3
+                })
+            ),
+            "an unobservable D2 marker must refuse typed; got {refused:?}"
+        );
+        assert!(coordinator.is_poisoned(), "D2 leaves the outcome unknown");
         drop(coordinator);
 
         let events = vfs.events();
@@ -973,7 +986,7 @@ fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
         assert_eq!(
             reopened.chain().len(),
             2,
-            "the acknowledged third commit never reached the platter"
+            "the refused third commit never reached the durable chain"
         );
         assert_eq!(reopened.chain().verify(), Ok(()));
         assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(3)));
@@ -992,14 +1005,11 @@ fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
     });
 }
 
-/// An fsync lie at D1: the marker becomes durable while the capsule it names
-/// never landed. This inverts the marker-is-the-commit rule's usual failure
-/// direction — the commit IS in the chain, and what is missing is the bytes it
-/// promised were durable first. Recovery must fail CLOSED at read, naming the
-/// sequence, never serve a two-commit graph as if the third were absent, and
-/// never a three-commit graph over a hole.
+/// An fsync lie at D1 must be caught by the bounded capsule readback before a
+/// marker can name missing bytes. Recovery therefore sees the two-commit
+/// prefix and the third capsule path only as uncommitted residue.
 #[test]
-fn a_d1_fsync_lie_makes_the_committed_marker_fail_closed_at_read() {
+fn a_d1_fsync_lie_is_refused_before_the_marker() {
     let dir = scratch_dir("vfs-d1-lie");
     under_lab(72, move |cx| async move {
         let cx = &cx;
@@ -1009,10 +1019,25 @@ fn a_d1_fsync_lie_makes_the_committed_marker_fail_closed_at_read() {
             ..FaultPlan::faultless()
         });
         let mut coordinator = open_faulted(cx, &vfs, &dir).await;
-        three_commits_through(&mut coordinator, cx).await; // commit 3 ACKS Ok
+        let capsules = three_commits();
+        for capsule in &capsules[..2] {
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("prefix commit");
+        }
+        let refused = commit_capsule(&mut coordinator, cx, &capsules[2], vec![]).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::CapsulePublicationNotObservable { capsule_oid })
+                    if capsule_oid == capsules[2].object_id
+            ),
+            "an unobservable D1 capsule must refuse typed; got {refused:?}"
+        );
+        assert!(!coordinator.is_poisoned(), "no marker write was attempted");
         drop(coordinator);
 
-        let third = three_commits()[2].clone();
+        let third = capsules[2].clone();
         let events = vfs.events();
         assert_eq!(events.len(), 1, "exactly the planned lie fired: {events:?}");
         assert_eq!(
@@ -1025,18 +1050,16 @@ fn a_d1_fsync_lie_makes_the_committed_marker_fail_closed_at_read() {
         let reopened = open_faulted(cx, &vfs, &dir).await;
         assert_eq!(
             reopened.chain().len(),
-            3,
-            "D2 was honest, so the marker IS durable and IS the commit"
+            2,
+            "D1 refusal must prevent the third marker from being written"
         );
-        // The capsule path exists (creation reached the backing store) with
-        // none of its bytes (the sync lied). Presence is not durability.
-        assert!(reopened.capsule_exists(cx, third.object_id).await);
-        let result = materialize(cx, &reopened).await;
-        assert!(
-            matches!(&result, Err(ReplayError::Commit(CommitError::Capsule(_)))),
-            "a committed marker over never-landed capsule bytes must fail \
-             closed at read, not materialize around the hole; got {result:?}"
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(3)));
+        assert_eq!(
+            reopened.orphan_capsules(cx).await.expect("scan"),
+            vec![third.object_id],
+            "the uncommitted capsule residue is explicitly orphaned"
         );
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 2);
     });
 }
 
@@ -1166,10 +1189,9 @@ fn enospc_at_either_barrier_refuses_typed_and_recovery_resumes() {
 
 /// An interior sector torn out of D2's flush: sectors landed on BOTH sides of
 /// a hole. `tear_log_tail_for_test` can only truncate a suffix, so the
-/// torn-tail rule's "missing bytes at the end versus wrong bytes in the
-/// middle" discrimination had never faced this shape inside the REAL commit
-/// path. It is corruption, not a tail: recovery must fail closed naming the
-/// sequence, and must leave the damaged bytes in place as evidence.
+/// bounded readback refuses before acknowledgement. The damaged durable bytes
+/// remain corruption, not a tail: recovery must fail closed naming the
+/// sequence and preserve the bytes as evidence.
 #[test]
 fn an_interior_tear_inside_the_d2_flush_is_corruption_not_a_tail() {
     let dir = scratch_dir("vfs-interior-tear");
@@ -1184,7 +1206,22 @@ fn an_interior_tear_inside_the_d2_flush_is_corruption_not_a_tail() {
             ..FaultPlan::faultless()
         });
         let mut coordinator = open_faulted(cx, &vfs, &dir).await;
-        three_commits_through(&mut coordinator, cx).await; // the tear is silent
+        let capsules = three_commits();
+        for capsule in &capsules[..2] {
+            commit_capsule(&mut coordinator, cx, capsule, vec![])
+                .await
+                .expect("prefix commit");
+        }
+        let refused = commit_capsule(&mut coordinator, cx, &capsules[2], vec![]).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::PublicationNotObservable {
+                    expected_commit_seq: 3
+                })
+            ),
+            "a torn D2 frame must be refused by readback; got {refused:?}"
+        );
         drop(coordinator);
 
         let log_path = dir.join(fgdb_chronicle::commit::COMMIT_LOG_NAME);

@@ -105,6 +105,11 @@ pub enum CommitError {
     CapsulePathConflict {
         capsule_oid: ObjectId,
     },
+    /// D1 returned success, but a fresh bounded read could not recover and
+    /// authenticate the exact capsule plaintext. No marker was written.
+    CapsulePublicationNotObservable {
+        capsule_oid: ObjectId,
+    },
     /// A log entry before the final one is malformed. Unlike a torn tail this
     /// is corruption: entries preceding it were durable, so the damage is not
     /// explained by a crash.
@@ -164,6 +169,10 @@ impl core::fmt::Display for CommitError {
             Self::CapsulePathConflict { capsule_oid } => write!(
                 f,
                 "immutable capsule path for {capsule_oid:?} contains different bytes"
+            ),
+            Self::CapsulePublicationNotObservable { capsule_oid } => write!(
+                f,
+                "post-barrier readback could not recover capsule {capsule_oid:?}"
             ),
             Self::CorruptLogEntry { commit_seq } => {
                 write!(f, "commit log entry at seq {commit_seq} is corrupt")
@@ -719,6 +728,13 @@ impl<V: Vfs> CommitCoordinator<V> {
             }
             sync_directory(cx, &self.vfs, &self.dir).await?;
             self.capsule_directory_parent_sync_pending = false;
+        }
+        let capsule_observable = matches!(
+            self.read_capsule(cx, capsule_oid).await,
+            Ok(recovered) if recovered == plaintext
+        );
+        if !capsule_observable {
+            return Err(CommitError::CapsulePublicationNotObservable { capsule_oid });
         }
         if crash_at == Some(CrashPoint::AfterD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: after D1")));
