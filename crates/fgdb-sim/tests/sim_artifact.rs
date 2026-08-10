@@ -20,8 +20,12 @@
 //! The control is `an_artifact_is_emitted_only_for_a_failing_run`. Without it
 //! an emitter that emitted unconditionally would pass everything above.
 
-use fgdb_sim::artifact::{ARTIFACT_REPLAY_ENV, Absence, CONTRACT_FIELDS, Field, Replay, Scenario};
+use fgdb::{DerivedPublicationStage, RecoveryRequired};
+use fgdb_sim::artifact::{
+    ARTIFACT_REPLAY_ENV, Absence, CONTRACT_FIELDS, FailureKind, Field, Replay, Scenario,
+};
 use fgdb_sim::vfs::{FaultPlan, Trigger};
+use fgdb_types::CommitSeq;
 use std::path::PathBuf;
 
 /// Plan line 1138 — the artifact contract sentence. 1-based, as cited.
@@ -72,6 +76,48 @@ fn failing_replay() -> Replay {
         plan: lying_plan(),
     }
 }
+
+/// An expectation table independent of `Scenario::{index,id,recovery_stage}`.
+/// The production mapping and this test would have to drift together for a
+/// replay command to name one boundary while injecting another and stay green.
+const POST_D2_SCENARIOS: [(Scenario, DerivedPublicationStage); 9] = [
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::FoldCommittedTemplate),
+        DerivedPublicationStage::FoldCommittedTemplate,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::SealPartition),
+        DerivedPublicationStage::SealPartition,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::PublishEdgeBlocks),
+        DerivedPublicationStage::PublishEdgeBlocks,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::PublishVertexPatches),
+        DerivedPublicationStage::PublishVertexPatches,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::PublishPartitionRoot),
+        DerivedPublicationStage::PublishPartitionRoot,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::PublishManifest),
+        DerivedPublicationStage::PublishManifest,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::PublishRootSlot),
+        DerivedPublicationStage::PublishRootSlot,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::RefreshEdgeSnapshot),
+        DerivedPublicationStage::RefreshEdgeSnapshot,
+    ),
+    (
+        Scenario::PostD2Recovery(DerivedPublicationStage::RefreshVertexSnapshot),
+        DerivedPublicationStage::RefreshVertexSnapshot,
+    ),
+];
 
 // ---------------------------------------------------------------------------
 // "require every applicable field"
@@ -249,6 +295,110 @@ fn replaying_an_artifact_reproduces_the_identical_fault_log() {
         !first.events.is_empty(),
         "a run that injected nothing cannot witness replay"
     );
+}
+
+/// The recovery state machine and the replay artifact machinery used to be
+/// two finished islands. This is their public-surface join: every post-D2
+/// boundary emits exact frontiers and a command that reconstructs the same
+/// typed failure in a fresh database, after independently proving the durable
+/// commit is neither missing nor duplicated.
+#[test]
+fn every_post_d2_recovery_failure_is_structured_and_executable() {
+    for (ordinal, (scenario, stage)) in POST_D2_SCENARIOS.into_iter().enumerate() {
+        assert_eq!(
+            scenario.recovery_stage(),
+            Some(stage),
+            "{scenario:?}: the stable replay id maps to the wrong stage"
+        );
+        let replay = Replay {
+            scenario,
+            plan: FaultPlan::faultless(),
+        };
+        let first = replay.run(&scratch_dir(&format!("post-d2-first-{ordinal}")));
+        assert_eq!(
+            first.events,
+            Vec::new(),
+            "{stage:?}: the structured stage injection must not masquerade as a VFS fault"
+        );
+        let failure = first
+            .failure
+            .as_ref()
+            .expect("the injected post-D2 boundary emits a failure");
+        assert_eq!(
+            failure.kind,
+            FailureKind::CommittedNeedsRecovery,
+            "{stage:?}"
+        );
+        let expected_recovery = RecoveryRequired {
+            durable_frontier: CommitSeq(1),
+            published_frontier: CommitSeq(0),
+            failed_stage: stage,
+        };
+        assert_eq!(failure.recovery, Some(expected_recovery), "{stage:?}");
+
+        let artifact = first
+            .artifact
+            .as_ref()
+            .expect("a post-D2 failure emits a structured artifact");
+        assert_eq!(artifact.unaccounted_fields(), Vec::<&str>::new());
+        assert_eq!(artifact.unregistered_fields(), Vec::<&str>::new());
+        assert_eq!(
+            present_value(artifact.field("role").expect("role is total")),
+            Some("commit"),
+            "{stage:?}"
+        );
+        assert_eq!(
+            present_value(
+                artifact
+                    .field("commit_position")
+                    .expect("commit_position is total")
+            ),
+            Some("1"),
+            "{stage:?}"
+        );
+        assert_eq!(
+            present_value(
+                artifact
+                    .field("visible_position")
+                    .expect("visible_position is total")
+            ),
+            Some("0"),
+            "{stage:?}"
+        );
+        let schedule = present_value(artifact.field("schedule").expect("schedule is total"))
+            .expect("a named post-D2 injection is a present schedule");
+        assert!(
+            schedule.contains(&format!("{stage:?}")),
+            "the schedule names another boundary: {schedule}"
+        );
+        assert_eq!(
+            present_value(artifact.field("crashpoint").expect("crashpoint is total")),
+            Some(scenario.id()),
+            "{stage:?}"
+        );
+
+        let command = present_value(
+            artifact
+                .field("replay_command")
+                .expect("replay_command is total"),
+        )
+        .expect("a failure has a replay command");
+        let encoded = command
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix(&format!("{ARTIFACT_REPLAY_ENV}=")))
+            .expect("the command carries the descriptor consumed by replay_from_env");
+        assert_eq!(encoded, replay.encode(), "{stage:?}");
+
+        // A different directory models the fresh process named by the command.
+        // The failure value contains no scratch path, so exact equality proves
+        // the replay is about the durable state transition, not one inode. The
+        // descriptor decoder and external command consumer are pinned by the
+        // adjacent generic contract tests and the ignored environment-driven
+        // consumer respectively.
+        let second = replay.run(&scratch_dir(&format!("post-d2-second-{ordinal}")));
+        assert_eq!(second.failure, first.failure, "{stage:?}");
+        assert_eq!(second.events, first.events, "{stage:?}");
+    }
 }
 
 /// The consumer that makes the emitted command more than a string.

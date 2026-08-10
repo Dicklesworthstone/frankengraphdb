@@ -56,7 +56,17 @@
 use crate::vfs::{FaultEvent, FaultPlan, FaultVfs, Trigger};
 use asupersync::fs::{OpenOptions, Vfs, VfsFile};
 use asupersync::io::AsyncWrite;
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::{Budget, runtime::RuntimeBuilder};
+use fgdb::{
+    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, DatabaseState, DerivedPublicationStage, ReadError,
+    RebuildError, RecoveryRequired, WriteBatch, WriteError,
+};
+use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
+use fgdb_chronicle::commit::CommitCoordinator;
+use fgdb_delta_types::RelationId;
+use fgdb_types::context::{CommitCx, PurposeContexts};
+use fgdb_types::ids::DatabaseSecurityNamespaceId;
+use fgdb_types::{BranchId, CommitSeq, GraphId, VId};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::future::poll_fn;
@@ -170,6 +180,12 @@ pub enum Scenario {
     /// passes. Exists to prove the artifact emitter is driven by the failure
     /// and not by the fault.
     LostAppend,
+    /// One real integrated database commit stopped at the named derived-
+    /// publication stage after Chronicle D2. The run verifies the stale
+    /// handle is fenced and that a fresh engine open and independent reference
+    /// replay both recover the durable commit before emitting the structured
+    /// recovery failure.
+    PostD2Recovery(DerivedPublicationStage),
 }
 
 impl Scenario {
@@ -189,7 +205,7 @@ impl Scenario {
     /// ruled out by the replay contract — see [`SCENARIOS`]. A const table
     /// plus a compile error is what remains, and it is not a lesser option:
     /// the compile error fires earlier than any registration call would.
-    pub const COUNT: usize = 2;
+    pub const COUNT: usize = 11;
 
     /// A dense index per variant, `0..COUNT`.
     ///
@@ -200,6 +216,19 @@ impl Scenario {
         match self {
             Self::DurableAppend => 0,
             Self::LostAppend => 1,
+            Self::PostD2Recovery(stage) => {
+                2 + match stage {
+                    DerivedPublicationStage::FoldCommittedTemplate => 0,
+                    DerivedPublicationStage::SealPartition => 1,
+                    DerivedPublicationStage::PublishEdgeBlocks => 2,
+                    DerivedPublicationStage::PublishVertexPatches => 3,
+                    DerivedPublicationStage::PublishPartitionRoot => 4,
+                    DerivedPublicationStage::PublishManifest => 5,
+                    DerivedPublicationStage::PublishRootSlot => 6,
+                    DerivedPublicationStage::RefreshEdgeSnapshot => 7,
+                    DerivedPublicationStage::RefreshVertexSnapshot => 8,
+                }
+            }
         }
     }
 
@@ -213,6 +242,27 @@ impl Scenario {
         match self {
             Self::DurableAppend => "durable-append",
             Self::LostAppend => "lost-append",
+            Self::PostD2Recovery(stage) => match stage {
+                DerivedPublicationStage::FoldCommittedTemplate => "post-d2-fold-committed-template",
+                DerivedPublicationStage::SealPartition => "post-d2-seal-partition",
+                DerivedPublicationStage::PublishEdgeBlocks => "post-d2-publish-edge-blocks",
+                DerivedPublicationStage::PublishVertexPatches => "post-d2-publish-vertex-patches",
+                DerivedPublicationStage::PublishPartitionRoot => "post-d2-publish-partition-root",
+                DerivedPublicationStage::PublishManifest => "post-d2-publish-manifest",
+                DerivedPublicationStage::PublishRootSlot => "post-d2-publish-root-slot",
+                DerivedPublicationStage::RefreshEdgeSnapshot => "post-d2-refresh-edge-snapshot",
+                DerivedPublicationStage::RefreshVertexSnapshot => "post-d2-refresh-vertex-snapshot",
+            },
+        }
+    }
+
+    /// The injected derived-publication stage, when this is an integrated
+    /// database recovery replay rather than a direct VFS scenario.
+    #[must_use]
+    pub const fn recovery_stage(self) -> Option<DerivedPublicationStage> {
+        match self {
+            Self::PostD2Recovery(stage) => Some(stage),
+            Self::DurableAppend | Self::LostAppend => None,
         }
     }
 
@@ -258,6 +308,9 @@ pub struct ScenarioEntry {
 /// resolution a property of the binary rather than of its startup path.
 ///
 /// Indexed by [`Scenario::index`]; `scenario_registry_is_complete` pins that.
+const POST_D2_EXPECTATION: &str =
+    "derived publication completes and the live handle advances to the durable frontier";
+
 pub static SCENARIOS: [ScenarioEntry; Scenario::COUNT] = [
     ScenarioEntry {
         id: "durable-append",
@@ -270,6 +323,60 @@ pub static SCENARIOS: [ScenarioEntry; Scenario::COUNT] = [
         scenario: Scenario::LostAppend,
         asserts: "nothing survives the crash",
         state_model: "single-writer four-sector append, one flush, one crash",
+    },
+    ScenarioEntry {
+        id: "post-d2-fold-committed-template",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::FoldCommittedTemplate),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at FoldCommittedTemplate, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-seal-partition",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::SealPartition),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at SealPartition, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-publish-edge-blocks",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::PublishEdgeBlocks),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at PublishEdgeBlocks, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-publish-vertex-patches",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::PublishVertexPatches),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at PublishVertexPatches, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-publish-partition-root",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::PublishPartitionRoot),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at PublishPartitionRoot, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-publish-manifest",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::PublishManifest),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at PublishManifest, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-publish-root-slot",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::PublishRootSlot),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at PublishRootSlot, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-refresh-edge-snapshot",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::RefreshEdgeSnapshot),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at RefreshEdgeSnapshot, one reopen",
+    },
+    ScenarioEntry {
+        id: "post-d2-refresh-vertex-snapshot",
+        scenario: Scenario::PostD2Recovery(DerivedPublicationStage::RefreshVertexSnapshot),
+        asserts: POST_D2_EXPECTATION,
+        state_model: "one committed vertex, failure at RefreshVertexSnapshot, one reopen",
     },
 ];
 
@@ -480,10 +587,15 @@ impl Replay {
         let runtime = RuntimeBuilder::new()
             .build()
             .expect("the lab runtime builds");
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
         let failure = runtime.block_on(async {
             match scenario {
                 Scenario::DurableAppend => durable_append(&vfs, dir, true).await,
                 Scenario::LostAppend => durable_append(&vfs, dir, false).await,
+                Scenario::PostD2Recovery(stage) => {
+                    post_d2_recovery(&commit_cx, &vfs, dir, stage).await
+                }
             }
         });
         let events = vfs.events();
@@ -517,6 +629,14 @@ pub enum FailureKind {
     SyncRefused,
     /// An open, write, or read failed outright.
     IoFailed,
+    /// Chronicle reached D2 and a named derived-publication stage failed. The
+    /// artifact carries the typed recovery evidence after verifying the stale
+    /// handle fence and authoritative replay.
+    CommittedNeedsRecovery,
+    /// The recovery scenario did not produce, fence, or replay the exact state
+    /// its contract requires. This is a harness-observed protocol regression,
+    /// not the expected structured post-D2 failure.
+    RecoveryProtocolDrift,
 }
 
 /// A failure: its kind, which decides sameness, and its prose, which does not.
@@ -526,6 +646,9 @@ pub struct Failure {
     pub kind: FailureKind,
     /// Human-facing detail. Never load-bearing for a comparison.
     pub detail: String,
+    /// Exact integrated recovery evidence when Chronicle reached D2. Direct
+    /// VFS scenarios have no database frontier and therefore carry `None`.
+    pub recovery: Option<RecoveryRequired>,
 }
 
 impl Failure {
@@ -533,6 +656,19 @@ impl Failure {
         Self {
             kind,
             detail: detail.into(),
+            recovery: None,
+        }
+    }
+
+    fn committed_needs_recovery(recovery: RecoveryRequired) -> Self {
+        Self {
+            kind: FailureKind::CommittedNeedsRecovery,
+            detail: format!(
+                "committed through {:?}; durable_frontier={}; prior_published_frontier={}; \
+                 stale handle fenced; engine reopen and independent reference replay agreed",
+                recovery.failed_stage, recovery.durable_frontier.0, recovery.published_frontier.0,
+            ),
+            recovery: Some(recovery),
         }
     }
 }
@@ -553,6 +689,172 @@ pub struct RunOutcome {
     /// Emitted **iff** `failure` is `Some` — line 1138 binds the artifact to a
     /// *failing* run, so a passing run producing one would be a false record.
     pub artifact: Option<FailureArtifact>,
+}
+
+const RECOVERY_GRAPH: GraphId = GraphId(1);
+const RECOVERY_BRANCH: BranchId = BranchId(1);
+const RECOVERY_RELATION: RelationId = RelationId(1);
+const RECOVERY_K_OID: [u8; 32] = [0x5a; 32];
+const RECOVERY_NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
+const RECOVERY_DEK: [u8; 32] = [0x3c; 32];
+
+fn recovery_keys() -> DatabaseKeys {
+    DatabaseKeys {
+        k_oid: RECOVERY_K_OID,
+        namespace: RECOVERY_NAMESPACE,
+        dek: RECOVERY_DEK,
+    }
+}
+
+fn recovery_capsule_keys() -> CapsuleKeys {
+    CapsuleKeys {
+        k_oid: RECOVERY_K_OID,
+        namespace: RECOVERY_NAMESPACE,
+        dek: RECOVERY_DEK,
+        object_kind: CAPSULE_OBJECT_KIND,
+        profile: CapsuleProfile::balanced(),
+    }
+}
+
+fn recovery_batch(vid: VId) -> WriteBatch {
+    let mut batch = WriteBatch::new(RECOVERY_RELATION);
+    batch.create_vertex(vid, vec![], vec![]);
+    batch
+}
+
+fn recovery_drift(detail: impl Into<String>) -> Failure {
+    Failure::new(FailureKind::RecoveryProtocolDrift, detail)
+}
+
+/// Drive the real composition-layer database through one post-D2 failure,
+/// then prove the emitted evidence names a genuinely recoverable commit.
+///
+/// This is deliberately not a second recovery implementation. It calls the
+/// public fault-matrix surface, observes the same typed state callers see,
+/// drops every engine handle, and asks the ordinary opener plus the independent
+/// reference replay what the Chronicle bytes mean.
+async fn post_d2_recovery(
+    cx: &CommitCx,
+    vfs: &FaultVfs,
+    dir: &Path,
+    stage: DerivedPublicationStage,
+) -> Result<(), Failure> {
+    drop(
+        Database::create(cx, dir, recovery_keys())
+            .await
+            .map_err(|error| recovery_drift(format!("genesis create failed: {error}")))?,
+    );
+    let mut database = Database::open_with_vfs(cx, vfs.clone(), dir, recovery_keys())
+        .await
+        .map_err(|error| recovery_drift(format!("faultable open failed: {error}")))?;
+
+    let error = database
+        .write_with_publication_failure(cx, recovery_batch(VId(1)), stage)
+        .await
+        .map(|seq| {
+            recovery_drift(format!(
+                "{stage:?} returned success at {seq:?} instead of a post-D2 recovery error"
+            ))
+        })
+        .unwrap_or_else(|error| match error {
+            WriteError::CommittedNeedsRecovery { recovery, source }
+                if recovery.durable_frontier == CommitSeq(1)
+                    && recovery.published_frontier == CommitSeq(0)
+                    && recovery.failed_stage == stage
+                    && matches!(
+                        *source,
+                        RebuildError::InjectedPublicationFailure(found) if found == stage
+                    ) =>
+            {
+                Failure::committed_needs_recovery(recovery)
+            }
+            other => recovery_drift(format!(
+                "{stage:?} returned the wrong typed recovery outcome: {other:?}"
+            )),
+        });
+    if error.kind != FailureKind::CommittedNeedsRecovery {
+        return Err(error);
+    }
+    let Some(recovery) = error.recovery else {
+        return Err(recovery_drift(format!(
+            "{stage:?}: CommittedNeedsRecovery omitted its recovery evidence"
+        )));
+    };
+
+    let observed_state = database.state();
+    if !matches!(
+        observed_state,
+        DatabaseState::NeedsAuthoritativeRecovery(found) if found == recovery
+    ) {
+        return Err(recovery_drift(format!(
+            "{stage:?}: handle state {:?} did not retain {recovery:?}",
+            observed_state
+        )));
+    }
+    if !matches!(
+        database.vertex(VId(1)),
+        Err(ReadError::RecoveryRequired(found)) if found == recovery
+    ) {
+        return Err(recovery_drift(format!(
+            "{stage:?}: a state-bearing read escaped the recovery fence"
+        )));
+    }
+    if !matches!(
+        database.write(cx, recovery_batch(VId(2))).await,
+        Err(WriteError::RecoveryRequired(found)) if found == recovery
+    ) {
+        return Err(recovery_drift(format!(
+            "{stage:?}: a second write escaped the recovery fence"
+        )));
+    }
+    drop(database);
+
+    let reopened = Database::open(cx, dir, recovery_keys())
+        .await
+        .map_err(|open_error| {
+            recovery_drift(format!(
+                "{stage:?}: authoritative engine reopen failed: {open_error}"
+            ))
+        })?;
+    let engine_vertices = reopened.vertices().map_err(|read_error| {
+        recovery_drift(format!(
+            "{stage:?}: reopened engine could not read: {read_error}"
+        ))
+    })?;
+    let exactly_durable_vertex =
+        matches!(engine_vertices.as_slice(), [vertex] if vertex.vid == VId(1));
+    if !matches!(reopened.frontier(), Ok(CommitSeq(1))) || !exactly_durable_vertex {
+        return Err(recovery_drift(format!(
+            "{stage:?}: reopened engine did not expose exactly the durable vertex"
+        )));
+    }
+    drop(reopened);
+
+    let coordinator = CommitCoordinator::open(cx, dir, recovery_capsule_keys())
+        .await
+        .map_err(|commit_error| {
+            recovery_drift(format!(
+                "{stage:?}: independent Chronicle open failed: {commit_error}"
+            ))
+        })?;
+    let replayed = crate::replay(cx, &coordinator)
+        .await
+        .map_err(|replay_error| {
+            recovery_drift(format!(
+                "{stage:?}: independent reference replay failed: {replay_error}"
+            ))
+        })?;
+    let graph = replayed
+        .database
+        .graph(RECOVERY_GRAPH, RECOVERY_BRANCH)
+        .ok_or_else(|| recovery_drift(format!("{stage:?}: reference graph is absent")))?;
+    if graph.vertex_count() != 1 || graph.vertex(VId(1)).is_none() {
+        return Err(recovery_drift(format!(
+            "{stage:?}: reference replay did not include the durable vertex exactly once"
+        )));
+    }
+
+    Err(error)
 }
 
 /// Writes four sectors through one handle, syncs, crashes, and checks the
@@ -662,11 +964,17 @@ impl FailureArtifact {
         };
 
         set("seed", Field::Present(format!("{:#x}", replay.plan.seed)));
-        // The lab VFS's "schedule" is its injected-fault sequence: the ordered
-        // decisions that made this run differ from a faultless one.
+        // The lab VFS's schedule is its injected-fault sequence. Integrated
+        // post-D2 scenarios add the named publication boundary even under a
+        // faultless VFS: that boundary is the deterministic decision that made
+        // the run stop, and omitting it would leave a recovery artifact with an
+        // unexplained empty schedule.
         let mut schedule = String::new();
         for event in events {
             let _ = write!(schedule, "[{} {:?}]", event.seq, event.kind);
+        }
+        if let Some(recovery) = failure.recovery {
+            let _ = write!(schedule, "[post-d2 {:?}]", recovery.failed_stage);
         }
         set(
             "schedule",
@@ -685,9 +993,13 @@ impl FailureArtifact {
 
         set(
             "role",
-            Field::Absent(Absence::NotApplicable {
-                because: "the lab VFS is role-agnostic; it sits below the role split",
-            }),
+            if failure.recovery.is_some() {
+                Field::Present("commit".to_string())
+            } else {
+                Field::Absent(Absence::NotApplicable {
+                    because: "the lab VFS is role-agnostic; it sits below the role split",
+                })
+            },
         );
         set(
             "group",
@@ -703,21 +1015,41 @@ impl FailureArtifact {
             not_yet("service visibility", "fgdb-verif-sim-q97e"),
         );
 
-        for position in [
-            "logical_position",
-            "commit_position",
-            "raft_position",
-            "applied_position",
-            "visible_position",
-            "audit_visible_position",
-        ] {
+        if let Some(recovery) = failure.recovery {
+            let durable = recovery.durable_frontier.0.to_string();
+            set("logical_position", Field::Present(durable.clone()));
+            set("commit_position", Field::Present(durable.clone()));
+            // The scenario does not emit until ordinary engine open and the
+            // independent oracle have both applied this exact durable prefix.
+            set("applied_position", Field::Present(durable));
+            // The prior snapshot frontier is the visibility claim the fenced
+            // handle was forbidden to keep serving as current.
             set(
-                position,
-                not_yet(
-                    "the commit/Raft position vector; this scenario drives the VFS directly, below Chronicle",
-                    "fgdb-1xtp",
-                ),
+                "visible_position",
+                Field::Present(recovery.published_frontier.0.to_string()),
             );
+            set("raft_position", not_yet("Raft replication", "fgdb-1xtp"));
+            set(
+                "audit_visible_position",
+                not_yet("audit visibility", "fgdb-verif-sim-q97e"),
+            );
+        } else {
+            for position in [
+                "logical_position",
+                "commit_position",
+                "raft_position",
+                "applied_position",
+                "visible_position",
+                "audit_visible_position",
+            ] {
+                set(
+                    position,
+                    not_yet(
+                        "the commit/Raft position vector; this scenario drives the VFS directly, below Chronicle",
+                        "fgdb-1xtp",
+                    ),
+                );
+            }
         }
         for identifier in [
             "attempt_identifier",
@@ -747,10 +1079,7 @@ impl FailureArtifact {
 
         set(
             "expected",
-            Field::Present(match replay.scenario {
-                Scenario::DurableAppend => "every acknowledged byte survives the crash".to_string(),
-                Scenario::LostAppend => "nothing survives the crash".to_string(),
-            }),
+            Field::Present(replay.scenario.entry().asserts.to_string()),
         );
         // The kind leads, because that is what decides whether two runs
         // failed the same way; the prose follows it.
