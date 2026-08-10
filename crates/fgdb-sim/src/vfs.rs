@@ -158,7 +158,7 @@ use asupersync::Cx;
 use asupersync::cx::cap;
 use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, UnixVfs, Vfs, VfsFile};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::poll_fn;
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -427,6 +427,7 @@ struct LabState {
     rng: u64,
     eligible: [u64; 6],
     events: Vec<FaultEvent>,
+    latency_waiters: BTreeMap<PathBuf, u64>,
     namespace: Vec<NamespaceOp>,
     flushed_bytes: u64,
     generation: u64,
@@ -525,6 +526,7 @@ impl Lab {
                 rng: plan.seed,
                 eligible: [0; 6],
                 events: Vec::new(),
+                latency_waiters: BTreeMap::new(),
                 namespace: Vec::new(),
                 flushed_bytes: 0,
                 generation: 0,
@@ -540,6 +542,42 @@ impl Lab {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// One sync currently suspended inside an injected latency interval.
+///
+/// Cancellation is represented by dropping the delayed future, so the guard
+/// removes its path on every exit without manufacturing a completed-latency
+/// event for a delay that was never fully awaited.
+struct PendingLatency {
+    lab: Arc<Lab>,
+    path: PathBuf,
+}
+
+impl PendingLatency {
+    fn new(lab: Arc<Lab>, path: PathBuf) -> Self {
+        *lab.lock().latency_waiters.entry(path.clone()).or_default() += 1;
+        Self { lab, path }
+    }
+}
+
+impl Drop for PendingLatency {
+    fn drop(&mut self) {
+        let mut lab = self.lab.lock();
+        let remove = if let Some(waiters) = lab.latency_waiters.get_mut(&self.path) {
+            if *waiters == 1 {
+                true
+            } else {
+                *waiters -= 1;
+                false
+            }
+        } else {
+            false
+        };
+        if remove {
+            lab.latency_waiters.remove(&self.path);
+        }
     }
 }
 
@@ -631,6 +669,19 @@ impl<V: Vfs> FaultVfs<V> {
     #[must_use]
     pub fn events(&self) -> Vec<FaultEvent> {
         self.lab.lock().events.clone()
+    }
+
+    /// Paths whose sync futures are currently suspended in an injected delay.
+    ///
+    /// This is the cancellation observation point: a caller can wait until a
+    /// named durability boundary is genuinely pending, drop that future, and
+    /// then prove both that the waiter disappeared and that no completed-delay
+    /// event was fabricated. Counts are collapsed because cancellation tests
+    /// select a boundary by path, while concurrent waits for the same inode are
+    /// an implementation detail of the workload.
+    #[must_use]
+    pub fn pending_latency_paths(&self) -> Vec<PathBuf> {
+        self.lab.lock().latency_waiters.keys().cloned().collect()
     }
 
     /// Bytes that have actually reached the backing store.
@@ -861,6 +912,7 @@ impl<V: Vfs> FaultFile<V> {
                 .as_nanos()
                 .saturating_add(micros.saturating_mul(1_000)),
         );
+        let pending_latency = PendingLatency::new(Arc::clone(&self.lab), self.path.to_path_buf());
         let mut registered: Option<asupersync::time::TimerHandle> = None;
         poll_fn(|task_cx| {
             if clock.now().as_nanos() >= deadline.as_nanos() {
@@ -872,6 +924,7 @@ impl<V: Vfs> FaultFile<V> {
             Poll::Pending
         })
         .await;
+        drop(pending_latency);
         self.lab
             .lock()
             .record(&self.path, FaultKind::Latency { micros });

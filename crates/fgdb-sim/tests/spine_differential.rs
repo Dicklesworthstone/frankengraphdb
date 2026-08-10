@@ -43,7 +43,9 @@ use fgdb_sim::{
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
+use std::task::Poll;
 
 const GRAPH: GraphId = GraphId(1);
 const BRANCH: BranchId = BranchId(1);
@@ -86,6 +88,25 @@ where
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         test(contexts.commit()).await
+    });
+    assert!(
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+    );
+    output
+}
+
+fn under_lab_with_root<T, Fut>(
+    seed: u64,
+    test: impl FnOnce(asupersync::Cx, CommitCx) -> Fut + Send + 'static,
+) -> T
+where
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (output, report) = run_async_under_lab(seed, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        test(root, contexts.commit()).await
     });
     assert!(
         report.lab_test_passed(),
@@ -822,6 +843,106 @@ fn root_slot_fsync_lie_is_detected_fenced_and_recovered_from_chronicle() {
         assert_eq!(events.len(), 1, "exactly the planned lie must fire");
         assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
         assert_eq!(events[0].path, dir.join(ROOT_FILE_NAME));
+
+        vfs.crash().await.expect("simulate process loss");
+        drop(db);
+        assert_reopened_vertex_matches_oracle(cx, &dir).await;
+    });
+}
+
+/// Dropping an async write is the cancellation boundary callers actually own.
+/// This drives the ordinary write until the root-slot fsync is observably
+/// suspended, drops that future, and then proves the borrowed `Database` was
+/// already fenced before the await. Chronicle D2 must survive the simulated
+/// process loss and ordinary reopen must recover it exactly once.
+#[test]
+fn root_slot_cancellation_leaves_the_borrowed_handle_fenced_and_recoverable() {
+    let dir = scratch("database-vfs-root-slot-cancel");
+    under_lab_with_root(1_212, move |root, cx| async move {
+        let cx = &cx;
+        create_genesis(cx, &dir).await;
+
+        // Four Chronicle durability boundaries precede derived publication
+        // for this reopened database; the root-slot barrier is fifth. The
+        // pending-path observation below independently pins that ordinal to
+        // manifest.root before the write future is dropped, so protocol drift
+        // cannot silently cancel a different operation.
+        let vfs = FaultVfs::unix_with_clock(
+            FaultPlan {
+                latency: Trigger::Nth(5),
+                latency_micros: 60_000_000,
+                ..FaultPlan::faultless()
+            },
+            root,
+        );
+        let mut db = Database::open_with_vfs(cx, vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("faultable database opens");
+
+        let mut write = Box::pin(db.write(cx, vfs_fault_batch()));
+        let pending = poll_fn(|task_cx| {
+            if let Poll::Ready(result) = write.as_mut().poll(task_cx) {
+                return Poll::Ready(Err(format!(
+                    "write completed before cancellation reached root publication: {result:?}"
+                )));
+            }
+            let pending = vfs.pending_latency_paths();
+            if pending.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(pending))
+            }
+        })
+        .await
+        .expect("the write must suspend at an injected durability boundary");
+        assert_eq!(
+            pending,
+            vec![dir.join(ROOT_FILE_NAME)],
+            "cancellation must target the post-D2 root-slot sync"
+        );
+
+        // This is the cancellation itself. It releases the exclusive mutable
+        // borrow and must leave `db` in the recovery state installed before
+        // RootStore's await.
+        drop(write);
+        assert!(
+            vfs.pending_latency_paths().is_empty(),
+            "dropping the write must retire its pending latency waiter"
+        );
+        assert_eq!(
+            vfs.events(),
+            Vec::new(),
+            "a cancelled delay must not be reported as fully awaited"
+        );
+
+        let state = db.state();
+        assert!(
+            matches!(state, DatabaseState::NeedsAuthoritativeRecovery(_)),
+            "cancelled post-D2 handle remained callable: {state:?}"
+        );
+        let DatabaseState::NeedsAuthoritativeRecovery(recovery) = state else {
+            return;
+        };
+        assert_eq!(recovery.durable_frontier.0, 1);
+        assert_eq!(recovery.published_frontier.0, 0);
+        assert_eq!(
+            recovery.failed_stage,
+            DerivedPublicationStage::PublishRootSlot
+        );
+        assert_recovery_fence(
+            DerivedPublicationStage::PublishRootSlot,
+            recovery,
+            db.frontier(),
+        );
+        let refused = db.write(cx, vfs_fault_batch()).await;
+        assert!(
+            matches!(refused, Err(WriteError::RecoveryRequired(_))),
+            "fenced database accepted another write: {refused:?}"
+        );
+        let Err(WriteError::RecoveryRequired(found)) = refused else {
+            return;
+        };
+        assert_eq!(found, recovery);
 
         vfs.crash().await.expect("simulate process loss");
         drop(db);
