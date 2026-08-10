@@ -29,8 +29,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, DatabaseState, DerivedPublicationStage, ReadError,
-    RebuildError, WriteBatch, WriteError,
+    BlockStoreCrashPoint, CAPSULE_OBJECT_KIND, Database, DatabaseKeys, DatabaseState,
+    DerivedPublicationStage, ReadError, RebuildError, WriteBatch, WriteError,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
@@ -40,6 +40,7 @@ use fgdb_sim::{
     replay,
     vfs::{FaultKind, FaultPlan, FaultVfs, Trigger},
 };
+use fgdb_strata::store::StoreError as BlockStoreError;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
@@ -133,6 +134,14 @@ fn vfs_fault_batch() -> WriteBatch {
         vec![LabelId(3)],
         vec![(PropertyKeyId(7), CanonicalScalar::Int(1))],
     );
+    batch
+}
+
+fn block_store_fault_batch() -> WriteBatch {
+    let mut batch = WriteBatch::new(KNOWS);
+    batch.create_vertex(VId(1), vec![LabelId(3)], vec![]);
+    batch.create_vertex(VId(2), vec![], vec![]);
+    batch.add_edge(EId(1), VId(1), VId(2), vec![]);
     batch
 }
 
@@ -947,6 +956,115 @@ fn root_slot_cancellation_leaves_the_borrowed_handle_fenced_and_recoverable() {
         vfs.crash().await.expect("simulate process loss");
         drop(db);
         assert_reopened_vertex_matches_oracle(cx, &dir).await;
+    });
+}
+
+/// Strata's production publisher already models the two instants around
+/// canonical-name publication. This proves the integrated database does not
+/// erase that seam: D2 remains authoritative, the borrowed handle is fenced at
+/// `PublishEdgeBlocks`, and reopen repairs both sides of the rename boundary.
+#[test]
+fn strata_block_publication_crashes_fence_and_recover_the_integrated_spine() {
+    let scenarios = [
+        (
+            "staging-durable",
+            BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication,
+            "complete staging inode before canonical publication",
+        ),
+        (
+            "canonical-inode-durable",
+            BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync,
+            "strata block inode durable before directory entry",
+        ),
+    ];
+
+    under_lab(1_213, move |cx| async move {
+        let cx = &cx;
+        for (name, crash_at, expected_source) in scenarios {
+            let dir = scratch(&format!("database-strata-{name}"));
+            create_genesis(cx, &dir).await;
+            let mut db = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("database opens");
+
+            let error = db
+                .write_with_block_store_crash(cx, block_store_fault_batch(), crash_at)
+                .await
+                .expect_err("the real Strata publication must stop at its crash point");
+            let committed = match &error {
+                WriteError::CommittedNeedsRecovery { recovery, source } => {
+                    Some((*recovery, source.as_ref()))
+                }
+                _ => None,
+            };
+            assert!(
+                committed.is_some(),
+                "{name}: Strata crash returned the wrong error: {error:?}"
+            );
+            let Some((recovery, source)) = committed else {
+                continue;
+            };
+            assert_eq!(recovery.durable_frontier.0, 1, "{name}");
+            assert_eq!(recovery.published_frontier.0, 0, "{name}");
+            assert_eq!(
+                recovery.failed_stage,
+                DerivedPublicationStage::PublishEdgeBlocks,
+                "{name}"
+            );
+            let RebuildError::Store(BlockStoreError::Io(io_error)) = source else {
+                assert!(
+                    matches!(source, RebuildError::Store(BlockStoreError::Io(_))),
+                    "{name}: crash lost its typed Strata source: {source:?}"
+                );
+                continue;
+            };
+            assert!(
+                io_error.to_string().contains(expected_source),
+                "{name}: wrong Strata crash instant: {io_error}"
+            );
+            assert_eq!(
+                db.state(),
+                DatabaseState::NeedsAuthoritativeRecovery(recovery),
+                "{name}"
+            );
+            assert_recovery_fence(
+                DerivedPublicationStage::PublishEdgeBlocks,
+                recovery,
+                db.neighbours(VId(1), KNOWS),
+            );
+            let refused = db.write(cx, block_store_fault_batch()).await;
+            assert!(
+                matches!(refused, Err(WriteError::RecoveryRequired(_))),
+                "{name}: fenced handle accepted a second write: {refused:?}"
+            );
+            let Err(WriteError::RecoveryRequired(found)) = refused else {
+                continue;
+            };
+            assert_eq!(found, recovery, "{name}");
+            drop(db);
+
+            let engine = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("authoritative reopen repairs Strata publication");
+            assert_eq!(engine.frontier().expect("healthy frontier").0, 1, "{name}");
+            let engine_neighbours = engine.neighbours(VId(1), KNOWS).expect("healthy read");
+            let engine_vertices = engine.vertices().expect("healthy read");
+            let engine_edges = engine.edges().expect("healthy read");
+            drop(engine);
+
+            let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+                .await
+                .expect("oracle opens the durable stream");
+            let replayed = replay(cx, &coordinator).await.expect("stream replays");
+            let graph = replayed
+                .database
+                .graph(GRAPH, BRANCH)
+                .expect("oracle materialized the coordinate");
+            assert_eq!(engine_neighbours, graph.neighbours(VId(1), KNOWS), "{name}");
+            assert_eq!(engine_vertices.len(), graph.vertex_count(), "{name}");
+            assert_eq!(engine_edges.len(), graph.edge_count(), "{name}");
+            assert_eq!(engine_neighbours, vec![VId(2)], "{name}");
+        }
     });
 }
 

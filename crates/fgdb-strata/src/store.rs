@@ -1224,6 +1224,25 @@ impl BlockStore {
         patch_bytes: Option<&[u8]>,
         receipts: &mut PublishReceipts,
     ) -> Result<DeltaBlockVersion, StoreError> {
+        self.put_verified_with_crash(cx, bytes, patch_bytes, receipts, None)
+    }
+
+    /// The exact receipt-earning production path with one optional block-store
+    /// crash instant. The integrated database crash matrix uses this rather
+    /// than bypassing receipt admission or maintaining a test-only publisher.
+    ///
+    /// A crash point is reached only when this call takes the durable block
+    /// path. If `receipts` already proves the identity, no filesystem operation
+    /// occurs and therefore no filesystem crash instant exists to inject.
+    #[doc(hidden)]
+    pub fn put_verified_with_crash(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+        patch_bytes: Option<&[u8]>,
+        receipts: &mut PublishReceipts,
+        crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<DeltaBlockVersion, StoreError> {
         let id = block_id(&self.k_oid, self.namespace, bytes);
         if receipts.spans.contains_key(&id) {
             return Ok(DeltaBlockVersion(id));
@@ -1233,7 +1252,7 @@ impl BlockStore {
         if let Some(patch_bytes) = patch_bytes {
             self.put_edge_property_patch(cx, patch_bytes)?;
         }
-        let stored = self.put(cx, bytes)?;
+        let stored = self.put_with_crash(cx, bytes, crash_at)?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
         let (entries, declared_patch) =
             crate::decode_block_with_properties(bytes).map_err(StoreError::Malformed)?;

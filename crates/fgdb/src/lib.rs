@@ -134,7 +134,7 @@ use fgdb_strata::root::{
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::vertex::{merge_all_vertices, merge_vertex};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
-use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
+use fgdb_strata::{AdjacencyEntry, DeltaBlockVersion, PartitionRootVersion};
 
 pub use fgdb_strata::edge_props::EdgePropertyRow;
 pub use fgdb_strata::vertex::VertexRow;
@@ -148,6 +148,7 @@ use std::path::{Path, PathBuf};
 /// from Chronicle directly would make the spine's own signature unusable without
 /// a second dependency.
 pub use fgdb_chronicle::commit::CrashPoint;
+pub use fgdb_strata::store::BlockStoreCrashPoint;
 
 /// Object kind for a committed effect capsule.
 ///
@@ -1446,7 +1447,7 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &CommitCx,
         batch: WriteBatch,
     ) -> Result<CommitSeq, WriteError> {
-        self.write_with_faults(cx, batch, None, None).await
+        self.write_with_faults(cx, batch, None, None, None).await
     }
 
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
@@ -1467,7 +1468,8 @@ impl<V: Vfs + Clone> Database<V> {
         batch: WriteBatch,
         crash_at: Option<CrashPoint>,
     ) -> Result<CommitSeq, WriteError> {
-        self.write_with_faults(cx, batch, crash_at, None).await
+        self.write_with_faults(cx, batch, crash_at, None, None)
+            .await
     }
 
     /// Commit through Chronicle D2, then stop at one exact derived-publication
@@ -1484,7 +1486,26 @@ impl<V: Vfs + Clone> Database<V> {
         batch: WriteBatch,
         fail_at: DerivedPublicationStage,
     ) -> Result<CommitSeq, WriteError> {
-        self.write_with_faults(cx, batch, None, Some(fail_at)).await
+        self.write_with_faults(cx, batch, None, Some(fail_at), None)
+            .await
+    }
+
+    /// Commit through Chronicle D2, then drive the first newly published
+    /// Strata block through one real block-store crash instant.
+    ///
+    /// The ordinary receipt-earning publisher remains in the path: this is the
+    /// integrated §15 crash matrix seam, not a test-only storage substitute.
+    /// A batch that emits no new edge block cannot reach a block publication
+    /// crash point and therefore completes normally; matrix callers must assert
+    /// the expected committed-needs-recovery result.
+    pub async fn write_with_block_store_crash(
+        &mut self,
+        cx: &CommitCx,
+        batch: WriteBatch,
+        crash_at: BlockStoreCrashPoint,
+    ) -> Result<CommitSeq, WriteError> {
+        self.write_with_faults(cx, batch, None, None, Some(crash_at))
+            .await
     }
 
     async fn write_with_faults(
@@ -1493,6 +1514,7 @@ impl<V: Vfs + Clone> Database<V> {
         batch: WriteBatch,
         crash_at: Option<CrashPoint>,
         publication_failure: Option<DerivedPublicationStage>,
+        mut block_store_crash_at: Option<BlockStoreCrashPoint>,
     ) -> Result<CommitSeq, WriteError> {
         self.ensure_writable()?;
         if batch.is_empty() {
@@ -1973,8 +1995,13 @@ impl<V: Vfs + Clone> Database<V> {
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishEdgeBlocks);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         for block in &blocks {
+            let crash_at = if self.receipts.holds(DeltaBlockVersion(block.block_id)) {
+                None
+            } else {
+                block_store_crash_at.take()
+            };
             self.store
-                .put_verified(
+                .put_verified_with_crash(
                     cx,
                     &block.bytes,
                     block
@@ -1982,6 +2009,7 @@ impl<V: Vfs + Clone> Database<V> {
                         .as_ref()
                         .map(|patch| patch.bytes.as_slice()),
                     &mut self.receipts,
+                    crash_at,
                 )
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
                     recovery,
