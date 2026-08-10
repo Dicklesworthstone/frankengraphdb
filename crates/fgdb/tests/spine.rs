@@ -2085,3 +2085,79 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
         );
     });
 }
+
+/// **THE FUTURE-FRONTIER ARM OF THE CHAIN BINDING (fgdb-90hw).** A database
+/// restored from a backup holds a SHORTER Chronicle than the slot another
+/// incarnation kept advancing — every object the newer slot names can be
+/// present and content-authentic (objects are additive), the coordinate
+/// checks all pass, and only the binding notices that the recovered chain has
+/// no commitment AT the claimed publication. The transplant law above covers
+/// the foreign-history arm and the slot-heal laws cover lagging-but-ours;
+/// this is the third arm, and without it a restore could silently serve a
+/// future it never committed.
+#[test]
+fn a_slot_ahead_of_its_own_recovered_chain_is_refused() {
+    let long = scratch("future-long");
+    let backup = scratch("future-backup");
+    under_lab(103, move |cx| async move {
+        let cx = &cx;
+
+        fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+            std::fs::create_dir_all(to).expect("creates destination");
+            for entry in std::fs::read_dir(from).expect("reads source") {
+                let entry = entry.expect("dir entry");
+                let target = to.join(entry.file_name());
+                if entry.file_type().expect("file type").is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), &target).expect("copies file");
+                }
+            }
+        }
+
+        // One committed sequence, then the backup is taken.
+        {
+            let mut db = Database::create(cx, &long, keys()).await.expect("creates");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(1), vec![], vec![]);
+            db.write(cx, batch).await.expect("commits seq 1");
+        }
+        copy_tree(&long, &backup);
+
+        // The original incarnation keeps living: two more commits advance the
+        // chain, the partition, and the slot.
+        {
+            let mut db = Database::open(cx, &long, keys()).await.expect("reopens");
+            for seq in 2..=3u128 {
+                let mut batch = WriteBatch::new(KNOWS);
+                batch.create_vertex(VId(seq), vec![], vec![]);
+                db.write(cx, batch).await.expect("commits");
+            }
+        }
+
+        // The hostile shape: the newer slot AND the newer objects reach the
+        // backup (objects are content-addressed and additive, so everything
+        // the slot names resolves), but the backup's Chronicle still ends at
+        // sequence 1. Nothing here is corrupt; it is a future the backup's
+        // own history never committed.
+        copy_tree(
+            &long.join(fgdb_strata::store::BLOCK_DIR),
+            &backup.join(fgdb_strata::store::BLOCK_DIR),
+        );
+        std::fs::copy(long.join("manifest.root"), backup.join("manifest.root"))
+            .expect("transplants the newer slot");
+
+        assert!(
+            matches!(
+                Database::open(cx, &backup, keys()).await,
+                Err(fgdb::OpenError::SlotDisagreesWithStream { .. })
+            ),
+            "a slot claiming a publication past the recovered chain must refuse"
+        );
+
+        // Control: the original directory, whose chain reaches the slot's
+        // claim, still opens and answers through sequence 3.
+        let db = Database::open(cx, &long, keys()).await.expect("reopens");
+        assert_eq!(db.frontier().expect("healthy frontier").0, 3);
+    });
+}
