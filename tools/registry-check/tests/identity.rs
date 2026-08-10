@@ -3456,7 +3456,10 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // WeakAuthorityAppliedIdentity closure names RestoreShardOperationalAck
         // as a consumer in both generated artifacts (the applied-identity
         // ruling).
-        (616, 437),
+        // 616 -> 617 (fgdb-a20-restore-promotion-ivsp): the receipt's
+        // tag-refined posture discriminant names its one exact host; the two
+        // shared record mints are wildcard and add no citation.
+        (617, 437),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -11122,6 +11125,23 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "RestoreShardOperationalAck",
                     "source_access_close_applied_identity"
                 )
+                // fgdb-a20-restore-promotion-ivsp: the four rulable
+                // ServiceCatalogPromotionReservationReceipt fields — the
+                // shared DigestAndCasVersion / DatabaseAndSecurityIdentity
+                // record mints and the tag-refined posture discriminant.
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "target_database_and_security_identity"
+                )
+                | ("ServiceCatalogPromotionReservationReceipt", "target_posture")
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "expected_target_row_predecessor_digest_and_version"
+                )
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "reserved_target_row_digest_and_version"
+                )
                 | (
                     "LocalRestoreServiceCompletionSpec",
                     "expected_restore_registry_state"
@@ -12254,7 +12274,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // RestoreShardOperationalAck applied-identity fields, claimed by
         // post_erratum_a20_field and enumerated there. The current field count
         // carries them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 883,
+        // 883 -> 887 (fgdb-a20-restore-promotion-ivsp): the four rulable
+        // ServiceCatalogPromotionReservationReceipt fields, claimed by
+        // post_erratum_a20_field and enumerated there. The current field
+        // count carries them and the frozen reconstruction remains 225.
+        pre_erratum.fields.len() + 887,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

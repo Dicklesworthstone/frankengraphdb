@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3826
-projection_fallback_count = 178
-target_source_assignment_sha256 = "1373521cb367abe419519fc89312fbdb22eb31f7a7f7383c542cd77060fb3376"
+target_count = 3833
+projection_fallback_count = 181
+target_source_assignment_sha256 = "930332958fac35aea6ebea8555d0621cbbaa70c16e309d4cd085302513562084"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -113085,20 +113085,6 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
-[[union]]
-slice_id = "a20"
-row_id = "a20:union:service-catalog-promotion-reservation-receipt-target-posture-7cbbcb9bf23f92c4"
-union_name = "ServiceCatalogPromotionReservationReceiptTargetPosture"
-containing_schema = "ServiceCatalogPromotionReservationReceipt"
-union_path = "ServiceCatalogPromotionReservationReceipt.target_posture"
-field_tag = 0x0004
-tag_wire_type = "u8"
-encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 1
-
 [[union_arm]]
 slice_id = "a18"
 row_id = "a18:union-arm:meta-restore-phase-active-hidden-87b4a8fcf1e59e0b"
@@ -113218,34 +113204,6 @@ payload_sha256 = "86c9aed8b7f831b123423f1d1908a8447df54cd30f7801b52205c854fe6e5d
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
-
-[[union_arm]]
-slice_id = "a20"
-row_id = "a20:union-arm:service-catalog-promotion-reservation-receipt-target-posture-local-e14a4968d904a380"
-union_name = "ServiceCatalogPromotionReservationReceiptTargetPosture"
-containing_schema = "ServiceCatalogPromotionReservationReceipt"
-union_path = "ServiceCatalogPromotionReservationReceipt.target_posture"
-arm_tag = 0x0001
-source_arm_name = "Local"
-stable_name = "Local"
-payload_kind = "unit"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 1
-
-[[union_arm]]
-slice_id = "a20"
-row_id = "a20:union-arm:service-catalog-promotion-reservation-receipt-target-posture-sharded-f631119c63bc52ec"
-union_name = "ServiceCatalogPromotionReservationReceiptTargetPosture"
-containing_schema = "ServiceCatalogPromotionReservationReceipt"
-union_path = "ServiceCatalogPromotionReservationReceipt.target_posture"
-arm_tag = 0x0002
-source_arm_name = "Sharded"
-stable_name = "Sharded"
-payload_kind = "unit"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 1
 
 [[target]]
 row_id = "a18:target:wire-type-meta-restore-phase"
@@ -114424,6 +114382,17 @@ status = "reserved"
 encoding_context = "portable target identity pair: database_id (16B, RootSlot vocabulary) + database_security_namespace_id (32B); one shared width for every *_database_and_security_identity member"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 48
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:service-catalog-promotion-reservation-receipt-target-posture"
+wire_type_id = 0x0573
+name = "ServiceCatalogPromotionReservationReceiptTargetPosture"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant over the RestoreServicePromotionManifestTargetPosture union admitting both arms (Local 0x0001 | Sharded 0x0002); the reservation receipt carries the union's u8 tag and never an arm payload (a20:2575, a20:2581)"
+allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
+max_size_bytes = 1
 
 [[target]]
 row_id = "a20:target:wire-type-promoted-awaiting-reopen-meta-restore-phase"
@@ -116383,7 +116352,7 @@ exact_wire_type = "DatabaseAndSecurityIdentity"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 50
+construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "portable identity pair of the hidden promotion target; comparison input for every later catalog operation on the same target, retained and cut with the receipt (a20:2581)"
 version_status = "reserved"
@@ -116407,9 +116376,9 @@ exact_wire_type = "ServiceCatalogPromotionReservationReceiptTargetPosture"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 50
+construction_order = 24
 role_predicate = "true"
-retention_and_cut_rule = "closed Local|Sharded posture discriminant, per-anchor generated like the manifest's (a20:2575 profile discrimination); retained and cut with the receipt (a20:2581)"
+retention_and_cut_rule = "generated tag-refined discriminant over the manifest posture union admitting BOTH arms (Local 0x0001 | Sharded 0x0002): the receipt restates the posture of exactly the manifest flow it certifies as the union's u8 tag, never an arm payload; retained and cut with the receipt (a20:2575, a20:2581)"
 version_status = "reserved"
 max_size_bytes = 1
 
@@ -116431,7 +116400,7 @@ exact_wire_type = "DigestAndCasVersion"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 50
+construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "the exact-predecessor CAS precondition the row head must match for the reservation to have been lawful; comparison only, retained and cut with the receipt (a20:2581)"
 version_status = "reserved"
@@ -116455,7 +116424,7 @@ exact_wire_type = "DigestAndCasVersion"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 50
+construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "the reserved row head this receipt certifies was installed; comparison input for AlreadyReservedEquivalent and descendant admission, retained and cut with the receipt (a20:2581)"
 version_status = "reserved"
@@ -116467,4 +116436,28 @@ target_row_id = "a20:field:service-catalog-promotion-reservation-receipt-reserve
 slice_id = "a20"
 source_key = "field|ServiceCatalogPromotionReservationReceipt|ServiceCatalogPromotionReservationReceipt.reserved_target_row_digest_and_version|reserved_target_row_digest_and_version"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-digest-and-cas-version"
+target_row_id = "a20:wire-type:digest-and-cas-version"
+slice_id = "a20"
+source_key = "projection|wire_types|DigestAndCasVersion"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-database-and-security-identity"
+target_row_id = "a20:wire-type:database-and-security-identity"
+slice_id = "a20"
+source_key = "projection|wire_types|DatabaseAndSecurityIdentity"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-service-catalog-promotion-reservation-receipt-target-posture"
+target_row_id = "a20:wire-type:service-catalog-promotion-reservation-receipt-target-posture"
+slice_id = "a20"
+source_key = "projection|wire_types|ServiceCatalogPromotionReservationReceiptTargetPosture"
+target_kind = "wire-type"
 definition_status = "declared"

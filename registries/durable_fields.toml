@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 85
+registry_epoch = 86
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -14213,6 +14213,34 @@ max_size_bytes = 32
 
 [[field]]
 containing_schema = "ServiceCatalogPromotionReservationReceipt"
+field_tag = 0x0003
+stable_name = "target_database_and_security_identity"
+exact_wire_type = "DatabaseAndSecurityIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "portable identity pair of the hidden promotion target; comparison input for every later catalog operation on the same target, retained and cut with the receipt (a20:2581)"
+version_status = "reserved"
+max_size_bytes = 48
+
+[[field]]
+containing_schema = "ServiceCatalogPromotionReservationReceipt"
+field_tag = 0x0004
+stable_name = "target_posture"
+exact_wire_type = "ServiceCatalogPromotionReservationReceiptTargetPosture"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "generated tag-refined discriminant over the manifest posture union admitting BOTH arms (Local 0x0001 | Sharded 0x0002): the receipt restates the posture of exactly the manifest flow it certifies as the union's u8 tag, never an arm payload; retained and cut with the receipt (a20:2575, a20:2581)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "ServiceCatalogPromotionReservationReceipt"
 field_tag = 0x0005
 stable_name = "target_incarnation"
 exact_wire_type = "u64"
@@ -14256,6 +14284,20 @@ digest_class = "target"
 
 [[field]]
 containing_schema = "ServiceCatalogPromotionReservationReceipt"
+field_tag = 0x0008
+stable_name = "expected_target_row_predecessor_digest_and_version"
+exact_wire_type = "DigestAndCasVersion"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "the exact-predecessor CAS precondition the row head must match for the reservation to have been lawful; comparison only, retained and cut with the receipt (a20:2581)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ServiceCatalogPromotionReservationReceipt"
 field_tag = 0x0009
 stable_name = "reservation_id"
 exact_wire_type = "id256"
@@ -14282,6 +14324,20 @@ retention_and_cut_rule = "digest over the reservation row content the CAS instal
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
+
+[[field]]
+containing_schema = "ServiceCatalogPromotionReservationReceipt"
+field_tag = 0x000b
+stable_name = "reserved_target_row_digest_and_version"
+exact_wire_type = "DigestAndCasVersion"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "the reserved row head this receipt certifies was installed; comparison input for AlreadyReservedEquivalent and descendant admission, retained and cut with the receipt (a20:2581)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ServiceCatalogPromotionReservationReceipt"

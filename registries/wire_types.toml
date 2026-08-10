@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 47
+registry_epoch = 48
 
 [[type]]
 wire_type_id = 0x0001
@@ -6023,3 +6023,30 @@ status = "active"
 encoding_context = "positional property list: u32 count + PropertyEntry entries; resolved from the hosting block's per-entry locator column (fgdb-2t7q 3B)"
 allowed_containing_schemas = ["EdgePropertyPatch"]
 max_size_bytes = 16384
+
+[[type]]
+wire_type_id = 0x0571
+name = "DigestAndCasVersion"
+kind = "record"
+status = "reserved"
+encoding_context = "the pervasive CAS-row composite: digest256 of the row/head bytes + u64 CAS version; one shared width for every *_digest_and_version member (a20:2581 vocabulary)"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0572
+name = "DatabaseAndSecurityIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "portable target identity pair: database_id (16B, RootSlot vocabulary) + database_security_namespace_id (32B); one shared width for every *_database_and_security_identity member"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 48
+
+[[type]]
+wire_type_id = 0x0573
+name = "ServiceCatalogPromotionReservationReceiptTargetPosture"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant over the RestoreServicePromotionManifestTargetPosture union admitting both arms (Local 0x0001 | Sharded 0x0002); the reservation receipt carries the union's u8 tag and never an arm payload (a20:2575, a20:2581)"
+allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
+max_size_bytes = 1

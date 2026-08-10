@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3826;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3833;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "12006ef0d09b0fab0ac43e3cd162ffe347e2f0814b3c28c41d5634c9ca3f5d3f";
-pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 178;
+    "f08915cf91dc3916cff8ffc701bdfd5c9b9bae617f92d7c1f8a2db696a281703";
+pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 181;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "1373521cb367abe419519fc89312fbdb22eb31f7a7f7383c542cd77060fb3376";
+    "930332958fac35aea6ebea8555d0621cbbaa70c16e309d4cd085302513562084";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15876,10 +15876,11 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            16,
-            "the coverage law must still evaluate a20's 16 uncovered keys after \
-             fgdb-a20-restore-promotion-ivsp lands the two RestoreShardOperationalAck \
-             applied-identity fields under the WeakAuthorityAppliedIdentity ruling"
+            12,
+            "the coverage law must still evaluate a20's 12 uncovered keys after \
+             fgdb-a20-restore-promotion-ivsp lands the four rulable ServiceCatalogPromotionReservationReceipt \
+             fields (state and external_request_binding stay blocked on their \
+             unlanded union family and unclassified EARB symbol)"
         );
 
         // CONFORMANT CONTROL: certify the universe and only the universe code
@@ -15893,7 +15894,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            16,
+            12,
             "certification must not change what the coverage law finds"
         );
     }
