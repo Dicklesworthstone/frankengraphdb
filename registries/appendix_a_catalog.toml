@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3833
+target_count = 3835
 projection_fallback_count = 181
-target_source_assignment_sha256 = "930332958fac35aea6ebea8555d0621cbbaa70c16e309d4cd085302513562084"
+target_source_assignment_sha256 = "aece611ffdbe84b892f958d04192841e637046f4c84826f700f615f2afd76f36"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 48
+registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 86
+registry_epoch = 87
 
 [[logical_kind]]
 slice_id = "a03"
@@ -51833,8 +51833,8 @@ slice_id = "a15"
 symbol = "ExternalActionRequestBinding"
 generic_signature = ""
 source_key = "top|ExternalActionRequestBinding"
-source_kind = "ambiguous"
-identity_class = "unclassified"
+source_kind = "confirmed"
+identity_class = "wire"
 source_locations = ["a15:2091", "a19:2473"]
 
 [[top_level_candidate]]
@@ -114394,6 +114394,17 @@ encoding_context = "generated tag-refined discriminant over the RestoreServicePr
 allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
 max_size_bytes = 1
 
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:external-action-request-binding"
+wire_type_id = 0x0574
+name = "ExternalActionRequestBinding"
+kind = "record"
+status = "reserved"
+encoding_context = "the portable reference-free prefix every external request, status result, refusal, and terminal receipt byte-matches (a15:306): 18 members from database/namespace/incarnation through schema major/minor; constructed only after the registered source gate is durable; providers sign or MAC the complete binding"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 1024
+
 [[target]]
 row_id = "a20:target:wire-type-promoted-awaiting-reopen-meta-restore-phase"
 target_row_id = "a20:wire-type:promoted-awaiting-reopen-meta-restore-phase"
@@ -116460,4 +116471,36 @@ target_row_id = "a20:wire-type:service-catalog-promotion-reservation-receipt-tar
 slice_id = "a20"
 source_key = "projection|wire_types|ServiceCatalogPromotionReservationReceiptTargetPosture"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-external-action-request-binding"
+target_row_id = "a15:wire-type:external-action-request-binding"
+slice_id = "a15"
+source_key = "top|ExternalActionRequestBinding"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:service-catalog-promotion-reservation-receipt-external-request-binding"
+containing_schema = "ServiceCatalogPromotionReservationReceipt"
+field_tag = 0x0001
+stable_name = "external_request_binding"
+exact_wire_type = "ExternalActionRequestBinding"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "the portable reference-free request prefix this receipt answers (a15:306); the external CAS keys idempotency by it and every later status byte-matches it; retained and cut with the receipt (a20:2581)"
+version_status = "reserved"
+max_size_bytes = 1024
+
+[[target]]
+row_id = "a20:target:field-service-catalog-promotion-reservation-receipt-external-request-binding"
+target_row_id = "a20:field:service-catalog-promotion-reservation-receipt-external-request-binding"
+slice_id = "a20"
+source_key = "field|ServiceCatalogPromotionReservationReceipt|ServiceCatalogPromotionReservationReceipt.external_request_binding|external_request_binding"
+target_kind = "field"
 definition_status = "declared"

@@ -11142,6 +11142,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "ServiceCatalogPromotionReservationReceipt",
                     "reserved_target_row_digest_and_version"
                 )
+                // fgdb-a20-restore-promotion-ivsp: external_request_binding,
+                // unblocked by classifying the a15 ExternalActionRequestBinding
+                // candidate (wire, the portable reference-free prefix, a15:306).
+                | (
+                    "ServiceCatalogPromotionReservationReceipt",
+                    "external_request_binding"
+                )
                 | (
                     "LocalRestoreServiceCompletionSpec",
                     "expected_restore_registry_state"
@@ -12278,7 +12285,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // ServiceCatalogPromotionReservationReceipt fields, claimed by
         // post_erratum_a20_field and enumerated there. The current field
         // count carries them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 887,
+        // 887 -> 888 (fgdb-a20-restore-promotion-ivsp): the receipt's
+        // external_request_binding, claimed by post_erratum_a20_field.
+        pre_erratum.fields.len() + 888,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

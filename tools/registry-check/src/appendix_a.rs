@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3833;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3835;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "f08915cf91dc3916cff8ffc701bdfd5c9b9bae617f92d7c1f8a2db696a281703";
+    "2a6e4b7da835f45c8b5c0cf47659ea96299874d495792e8575d6b3e07ad9b4ed";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 181;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "930332958fac35aea6ebea8555d0621cbbaa70c16e309d4cd085302513562084";
+    "aece611ffdbe84b892f958d04192841e637046f4c84826f700f615f2afd76f36";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15876,8 +15876,8 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            12,
-            "the coverage law must still evaluate a20's 12 uncovered keys after \
+            11,
+            "the coverage law must still evaluate a20's 11 uncovered keys after \
              fgdb-a20-restore-promotion-ivsp lands the four rulable ServiceCatalogPromotionReservationReceipt \
              fields (state and external_request_binding stay blocked on their \
              unlanded union family and unclassified EARB symbol)"
@@ -15894,7 +15894,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            12,
+            11,
             "certification must not change what the coverage law finds"
         );
     }
