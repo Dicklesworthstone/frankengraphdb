@@ -484,6 +484,9 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
                 DatabaseState::NeedsAuthoritativeRecovery(recovery)
             );
 
+            assert_recovery_fence(stage, recovery, db.frontier());
+            assert_recovery_fence(stage, recovery, db.manifest());
+            assert_recovery_fence(stage, recovery, db.partition_root());
             assert_recovery_fence(stage, recovery, db.neighbours(VId(1), KNOWS));
             assert_recovery_fence(
                 stage,
@@ -858,6 +861,25 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     db = Database::open(cx, &dir, engine_keys())
                         .await
                         .expect("a mid-history reopen rebuilds and continues");
+                    // The v3 head witness (GoldBarn, thread fgdb-l96k): the
+                    // checkpoint-derived element-version heads must equal the
+                    // full fold's on every generated shape — graph answers
+                    // cannot see a head that chained through the wrong
+                    // statements, so the maps are compared directly.
+                    let derived = db.element_versions().expect("reads").clone();
+                    drop(db);
+                    let control = Database::open_rebuilding(cx, &dir, engine_keys())
+                        .await
+                        .expect("the rebuild control reopens");
+                    assert_eq!(
+                        control.element_versions().expect("reads"),
+                        &derived,
+                        "seed {seed}: checkpoint-derived v3 heads diverged from the fold's"
+                    );
+                    drop(control);
+                    db = Database::open(cx, &dir, engine_keys())
+                        .await
+                        .expect("the checkpoint-selected session resumes");
                 }
                 if round == 6 {
                     // Consolidate mid-history: every epoch comparison below
@@ -999,7 +1021,33 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     )
                 })
                 .collect();
+            // The POST-COMPACTION head witness: the loop compacted at round 6,
+            // so the checkpoint-selected open below lands on the compacted
+            // generation — the one place statement collapse could hand the
+            // derivation a shorter chain than the fold's. The round-4 witness
+            // above never sees a compacted partition.
+            let retained = db.element_versions().expect("reads").clone();
             drop(db);
+            let reopened = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("reopens on the compacted generation");
+            assert_eq!(
+                reopened.element_versions().expect("reads"),
+                &retained,
+                "seed {seed}: post-compaction checkpoint-derived v3 heads \
+                 diverged from the retained session's"
+            );
+            drop(reopened);
+            let control = Database::open_rebuilding(cx, &dir, engine_keys())
+                .await
+                .expect("the rebuild control reopens");
+            assert_eq!(
+                control.element_versions().expect("reads"),
+                &retained,
+                "seed {seed}: the full fold's v3 heads diverged from the \
+                 retained session's"
+            );
+            drop(control);
 
             // ORACLE SIDE: one prefix replay per epoch, over nothing but the
             // bytes; counts close the universe in both directions.

@@ -1096,6 +1096,21 @@ impl Database {
         Self::bind_with(cx, path, keys, true).await
     }
 
+    /// The derived element-version heads, exposed for the fast-open
+    /// equivalence law only. The v3 head is one hash per LIVE element over its
+    /// statement chain; the graph-answer comparisons cannot see a head that
+    /// chained through the wrong statements (an updated element's answers come
+    /// from its final row alone), so the law compares this map directly —
+    /// without it, checkpoint-derived heads could drift from the fold's and
+    /// every gate would stay green (GoldBarn's review, thread fgdb-l96k).
+    #[doc(hidden)]
+    pub fn element_versions(
+        &self,
+    ) -> Result<&std::collections::BTreeMap<ElementId, ObjectId>, ReadError> {
+        self.ensure_readable()?;
+        Ok(&self.snapshot.versions)
+    }
+
     async fn bind(cx: &CommitCx, path: &Path, keys: DatabaseKeys) -> Result<Self, OpenError> {
         Self::bind_with(cx, path, keys, false).await
     }
@@ -2251,13 +2266,16 @@ impl Database {
         Ok(())
     }
 
-    /// The sequence the retained partition has caught up to.
+    /// The sequence the healthy derived partition has caught up to.
     ///
-    /// This remains available as failure diagnostics: when [`Database::state`]
-    /// is not `Healthy`, it is explicitly the stale side of the reported
-    /// stale/current split and must not be read as Chronicle's head.
-    pub fn frontier(&self) -> CommitSeq {
-        self.snapshot.frontier
+    /// A fenced handle must not expose its retained frontier as though it were
+    /// current: after D2, Chronicle may already be ahead of this snapshot.
+    /// The stale/current split remains available in [`Database::state`] and
+    /// [`RecoveryRequired`], while this state-bearing read follows the same
+    /// typed recovery fence as graph reads.
+    pub fn frontier(&self) -> Result<CommitSeq, ReadError> {
+        self.ensure_readable()?;
+        Ok(self.snapshot.frontier)
     }
 
     /// Consolidate the partition's durable history: fewer blocks, the SAME
@@ -2434,20 +2452,24 @@ impl Database {
         Ok(())
     }
 
-    /// The identity of the retained partition manifest (fgdb-63w2) — what a
-    /// root slot will carry, republished beside every root under the same
-    /// determinism law as [`Database::partition_root`].
-    pub fn manifest(&self) -> ManifestVersion {
-        self.snapshot.manifest
+    /// The identity of the healthy partition manifest (fgdb-63w2) — what a
+    /// root slot carries, republished beside every root under the same
+    /// determinism law as [`Database::partition_root`]. A fenced handle
+    /// returns the same typed recovery error as graph reads.
+    pub fn manifest(&self) -> Result<ManifestVersion, ReadError> {
+        self.ensure_readable()?;
+        Ok(self.snapshot.manifest)
     }
 
-    /// The identity of the retained partition root.
+    /// The identity of the healthy partition root.
     ///
     /// Exposed because the rebuild is deterministic and content-addressed, so
     /// "reopening the same stream publishes the same root" is a law a caller can
-    /// assert rather than a property the crate merely claims.
-    pub fn partition_root(&self) -> PartitionRootVersion {
-        self.snapshot.root
+    /// assert rather than a property the crate merely claims. A fenced handle
+    /// cannot expose the stale retained identity as current.
+    pub fn partition_root(&self) -> Result<PartitionRootVersion, ReadError> {
+        self.ensure_readable()?;
+        Ok(self.snapshot.root)
     }
 
     pub fn path(&self) -> &Path {

@@ -117,8 +117,8 @@ fn open_write_read_drop_reopen_returns_the_same_graph() {
 
             (
                 db.neighbours(VId(1), KNOWS).expect("reads"),
-                db.frontier(),
-                db.partition_root(),
+                db.frontier().expect("healthy frontier"),
+                db.partition_root().expect("healthy root"),
             )
             // `db` is dropped here: the coordinator, the store, the writer's
             // fold and the decoded blocks all go out of scope together.
@@ -137,9 +137,13 @@ fn open_write_read_drop_reopen_returns_the_same_graph() {
             before,
             "the reopened database must answer what the original did"
         );
-        assert_eq!(db.frontier(), frontier, "and at the same frontier");
         assert_eq!(
-            db.partition_root(),
+            db.frontier().expect("healthy reopened frontier"),
+            frontier,
+            "and at the same frontier"
+        );
+        assert_eq!(
+            db.partition_root().expect("healthy reopened root"),
             root,
             "and the rebuild is deterministic, so it republishes the same root"
         );
@@ -262,7 +266,7 @@ fn deletes_take_effect_cascade_and_survive_a_reopen() {
             );
 
             // Deleting the absent is a typed refusal, before anything durable.
-            let frontier = db.frontier();
+            let frontier = db.frontier().expect("healthy frontier");
             let mut again = WriteBatch::new(KNOWS);
             again.delete_vertex(VId(1));
             assert!(matches!(
@@ -275,7 +279,11 @@ fn deletes_take_effect_cascade_and_survive_a_reopen() {
                 db.write(cx, ghost).await,
                 Err(WriteError::UnknownEdge { eid: EId(10) })
             ));
-            assert_eq!(db.frontier(), frontier, "refusals consumed no sequence");
+            assert_eq!(
+                db.frontier().expect("healthy frontier after refusal"),
+                frontier,
+                "refusals consumed no sequence"
+            );
         }
 
         // NOTHING crosses this line except `dir` and `keys()`.
@@ -371,14 +379,18 @@ fn label_and_property_updates_are_readable_and_survive_a_reopen() {
             assert_eq!(row.labels, vec![LabelId(5)]);
 
             // Updating the absent is a typed refusal, before anything durable.
-            let frontier = db.frontier();
+            let frontier = db.frontier().expect("healthy frontier");
             let mut ghost = WriteBatch::new(KNOWS);
             ghost.set_vertex_property(VId(99), key, Some(CanonicalScalar::Int(3)));
             assert!(matches!(
                 db.write(cx, ghost).await,
                 Err(WriteError::UnknownVertex { vid: VId(99) })
             ));
-            assert_eq!(db.frontier(), frontier, "the refusal consumed no sequence");
+            assert_eq!(
+                db.frontier().expect("healthy frontier after refusal"),
+                frontier,
+                "the refusal consumed no sequence"
+            );
         }
 
         // NOTHING crosses this line except `dir` and `keys()`.
@@ -541,11 +553,11 @@ fn repeated_reopens_publish_the_same_root() {
 
         let first = {
             let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-            db.partition_root()
+            db.partition_root().expect("healthy root")
         };
         let second = {
             let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-            db.partition_root()
+            db.partition_root().expect("healthy root")
         };
         assert_eq!(
             first, second,
@@ -557,7 +569,7 @@ fn repeated_reopens_publish_the_same_root() {
             let db = Database::create(cx, &empty_dir, keys())
                 .await
                 .expect("creates");
-            db.partition_root()
+            db.partition_root().expect("healthy empty root")
         };
         assert_ne!(
             first, empty,
@@ -651,7 +663,7 @@ fn an_empty_batch_is_refused() {
             "an empty batch must be refused: {refusal:?}"
         );
         assert_eq!(
-            db.frontier(),
+            db.frontier().expect("healthy frontier"),
             fgdb_types::CommitSeq(0),
             "and it must not have consumed a sequence"
         );
@@ -951,6 +963,24 @@ fn an_unknown_commit_outcome_fences_reads_and_retries_until_reopen() {
                 published_frontier: CommitSeq(1)
             })
         ));
+        assert!(matches!(
+            db.frontier(),
+            Err(fgdb::ReadError::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(1)
+            })
+        ));
+        assert!(matches!(
+            db.manifest(),
+            Err(fgdb::ReadError::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(1)
+            })
+        ));
+        assert!(matches!(
+            db.partition_root(),
+            Err(fgdb::ReadError::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(1)
+            })
+        ));
 
         let mut retry = WriteBatch::new(KNOWS);
         retry.create_vertex(VId(3), vec![], vec![]);
@@ -1070,7 +1100,10 @@ fn a_created_but_unwritten_database_reopens_empty() {
         }
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert!(db.neighbours(VId(1), KNOWS).expect("reads").is_empty());
-        assert_eq!(db.frontier(), fgdb_types::CommitSeq(0));
+        assert_eq!(
+            db.frontier().expect("healthy fresh frontier"),
+            fgdb_types::CommitSeq(0)
+        );
     });
 }
 
@@ -1109,7 +1142,7 @@ fn reads_answer_as_of_any_committed_sequence() {
         // NOTHING crosses this line except `dir`, `keys()`, the recorded
         // sequences, and the expected values — history is read back durable.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(db.frontier(), s5);
+        assert_eq!(db.frontier().expect("healthy reopened frontier"), s5);
 
         // Neighbours flip at every boundary.
         let hood = |as_of| db.neighbours_at(VId(1), KNOWS, as_of).expect("reads");
@@ -1278,23 +1311,26 @@ fn every_publish_leaves_a_resolvable_manifest() {
             batch.create_vertex(VId(2), vec![], vec![]);
             batch.add_edge(EId(10), VId(1), VId(2), vec![]);
             db.write(cx, batch).await.expect("commits");
-            let manifest_first = db.manifest();
+            let manifest_first = db.manifest().expect("healthy first manifest");
             let mut second = WriteBatch::new(KNOWS);
             second.delete_edge(EId(10));
             db.write(cx, second).await.expect("commits");
             assert_ne!(
-                db.manifest(),
+                db.manifest().expect("healthy second manifest"),
                 manifest_first,
                 "a new root means a new manifest — the binding is per publish"
             );
-            (db.manifest(), db.partition_root())
+            (
+                db.manifest().expect("healthy manifest"),
+                db.partition_root().expect("healthy root"),
+            )
         };
 
         // NOTHING crosses this line except `dir`, `keys()`, and the two
         // identities a root slot would durably hold.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
-            db.manifest(),
+            db.manifest().expect("healthy reopened manifest"),
             manifest_after_writes,
             "the rebuild re-derives the same manifest identity"
         );
@@ -1499,7 +1535,7 @@ fn order_sensitive_batches_refuse_before_anything_is_durable() {
         // NOTHING refused above became durable: the reopened database sits at
         // exactly the two acknowledged commits.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(db.frontier(), s2);
+        assert_eq!(db.frontier().expect("healthy reopened frontier"), s2);
         assert!(db.vertex_at(VId(1), s1).expect("reads").is_some());
     });
 }
@@ -1574,11 +1610,14 @@ fn the_root_slot_names_the_current_manifest_and_open_reconciles_it() {
             let mut first = WriteBatch::new(KNOWS);
             first.create_vertex(VId(1), vec![], vec![]);
             db.write(cx, first).await.expect("commits");
-            let manifest_first = db.manifest();
+            let manifest_first = db.manifest().expect("healthy first manifest");
             let mut second = WriteBatch::new(KNOWS);
             second.create_vertex(VId(2), vec![], vec![]);
             db.write(cx, second).await.expect("commits");
-            (manifest_first, db.manifest())
+            (
+                manifest_first,
+                db.manifest().expect("healthy second manifest"),
+            )
         };
 
         // The slot is durably CURRENT with nothing held in memory: a fresh
@@ -1592,7 +1631,10 @@ fn the_root_slot_names_the_current_manifest_and_open_reconciles_it() {
         // Reopen continues the generation — no spurious heal.
         {
             let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-            assert_eq!(db.manifest(), manifest_second);
+            assert_eq!(
+                db.manifest().expect("healthy reopened manifest"),
+                manifest_second
+            );
         }
         let after_reopen = slot_store.current(cx).await.expect("still selects");
         assert_eq!(
@@ -1613,7 +1655,10 @@ fn the_root_slot_names_the_current_manifest_and_open_reconciles_it() {
             let db = Database::open(cx, &dir, keys())
                 .await
                 .expect("heals and opens");
-            assert_eq!(db.manifest(), manifest_second);
+            assert_eq!(
+                db.manifest().expect("healthy healed manifest"),
+                manifest_second
+            );
         }
         let healed = slot_store.current(cx).await.expect("selects");
         assert_eq!(healed.root_manifest_oid, manifest_second.0.0);
@@ -1667,7 +1712,10 @@ fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
             let mut batch = WriteBatch::new(KNOWS);
             batch.create_vertex(VId(1), vec![], vec![]);
             db.write(cx, batch).await.expect("commits primary history");
-            (db.manifest(), db.partition_root())
+            (
+                db.manifest().expect("healthy primary manifest"),
+                db.partition_root().expect("healthy primary root"),
+            )
         };
         let (divergent_manifest, divergent_root) = {
             let mut db = Database::create(cx, &divergent, keys())
@@ -1678,7 +1726,10 @@ fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
             db.write(cx, batch)
                 .await
                 .expect("commits divergent history");
-            (db.manifest(), db.partition_root())
+            (
+                db.manifest().expect("healthy divergent manifest"),
+                db.partition_root().expect("healthy divergent root"),
+            )
         };
         assert_ne!(primary_manifest, divergent_manifest);
         assert_ne!(primary_root, divergent_root);
@@ -1789,11 +1840,12 @@ fn checkpoint_selected_open_is_indistinguishable_from_the_stream_fold() {
             .await
             .expect("checkpoint-selected open succeeds");
         let selected_state = (
-            selected.partition_root(),
-            selected.manifest(),
-            selected.frontier(),
+            selected.partition_root().expect("healthy selected root"),
+            selected.manifest().expect("healthy selected manifest"),
+            selected.frontier().expect("healthy selected frontier"),
             selected.vertices().expect("reads"),
             selected.edges().expect("reads"),
+            selected.element_versions().expect("reads").clone(),
         );
         drop(selected);
         let slow = Database::open_rebuilding(cx, &dir, keys())
@@ -1801,14 +1853,19 @@ fn checkpoint_selected_open_is_indistinguishable_from_the_stream_fold() {
             .expect("rebuild opens");
         assert_eq!(
             (
-                slow.partition_root(),
-                slow.manifest(),
-                slow.frontier(),
+                slow.partition_root().expect("healthy rebuilt root"),
+                slow.manifest().expect("healthy rebuilt manifest"),
+                slow.frontier().expect("healthy rebuilt frontier"),
                 slow.vertices().expect("reads"),
                 slow.edges().expect("reads"),
+                slow.element_versions().expect("reads").clone(),
             ),
             selected_state,
-            "the two open paths must be indistinguishable"
+            "the two open paths must be indistinguishable — including the v3 \
+             element-version heads, which the graph answers cannot witness \
+             (an updated element answers from its final row alone, so a head \
+             that chained through the wrong statements stays invisible to \
+             every scan comparison)"
         );
         drop(slow);
 
@@ -1825,10 +1882,11 @@ fn checkpoint_selected_open_is_indistinguishable_from_the_stream_fold() {
             .write(cx, batch)
             .await
             .expect("commits after checkpoint-selected open");
-        let root_after_selected = selected.partition_root();
+        let root_after_selected = selected.partition_root().expect("healthy selected root");
         let scans_after_selected = (
             selected.vertices().expect("reads"),
             selected.edges().expect("reads"),
+            selected.element_versions().expect("reads").clone(),
         );
         drop(selected);
 
@@ -1838,14 +1896,19 @@ fn checkpoint_selected_open_is_indistinguishable_from_the_stream_fold() {
         let slow = Database::open_rebuilding(cx, &dir, keys())
             .await
             .expect("rebuild reopens");
-        assert_eq!(slow.partition_root(), root_after_selected);
+        assert_eq!(
+            slow.partition_root().expect("healthy rebuilt root"),
+            root_after_selected
+        );
         assert_eq!(
             (
                 slow.vertices().expect("reads"),
                 slow.edges().expect("reads"),
+                slow.element_versions().expect("reads").clone(),
             ),
             scans_after_selected,
-            "a write through the checkpoint-selected session is the same write"
+            "a write through the checkpoint-selected session is the same write \
+             — and its statement chains landed on the same v3 heads"
         );
     });
 }
@@ -1940,7 +2003,7 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
         third.set_vertex_property(VId(2), key, Some(CanonicalScalar::Int(4)));
         epochs.push(db.write(cx, third).await.expect("commits"));
 
-        let blocks_before = db.partition_root();
+        let blocks_before = db.partition_root().expect("healthy pre-compact root");
         let answers = |db: &Database, epochs: &[CommitSeq]| {
             epochs
                 .iter()
@@ -1956,11 +2019,11 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
         };
         let before = answers(&db, &epochs);
 
-        let patches_before = db.partition_root();
+        let patches_before = db.partition_root().expect("healthy pre-compact root");
         let _ = patches_before;
         db.compact(cx).await.expect("compacts");
         assert_ne!(
-            db.partition_root(),
+            db.partition_root().expect("healthy compacted root"),
             blocks_before,
             "consolidation published a replacement generation"
         );
@@ -1970,7 +2033,7 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
             let store =
                 fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
             store
-                .get_root(cx, db.partition_root())
+                .get_root(cx, db.partition_root().expect("healthy compacted root"))
                 .expect("the compacted root resolves")
         };
         assert_eq!(
@@ -1983,14 +2046,20 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
             before,
             "consolidation must not move ANY answer at ANY sequence"
         );
-        let compacted_root = db.partition_root();
-        let compacted_manifest = db.manifest();
+        let compacted_root = db.partition_root().expect("healthy compacted root");
+        let compacted_manifest = db.manifest().expect("healthy compacted manifest");
         drop(db);
 
         // SURVIVAL: the fast reopen lands on the compacted generation.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(db.partition_root(), compacted_root);
-        assert_eq!(db.manifest(), compacted_manifest);
+        assert_eq!(
+            db.partition_root().expect("healthy reopened root"),
+            compacted_root
+        );
+        assert_eq!(
+            db.manifest().expect("healthy reopened manifest"),
+            compacted_manifest
+        );
         assert_eq!(answers(&db, &epochs), before);
         // And a write on top of the compacted generation composes.
         let mut db = db;
