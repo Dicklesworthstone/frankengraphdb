@@ -548,6 +548,25 @@ impl<V: Vfs> CommitCoordinator<V> {
         Ok(())
     }
 
+    /// Reinforce one completed logical barrier against one transient sync lie.
+    ///
+    /// A same-media readback cannot certify durability: the kernel may satisfy
+    /// it from the same dirty cache whose flush just lied. Repeating the sync
+    /// on the still-open handle is different. If the first successful call was
+    /// a transient no-op, the dirty bytes remain attached to this handle and a
+    /// later honest call persists them before publication advances. The lab
+    /// VFS models exactly that write-back behavior.
+    ///
+    /// This is deliberately a bounded hardening, not a claim that software can
+    /// prove truthful hardware. The registered filesystem profile still owns
+    /// the base guarantee that a successful flush is durable; this extra call
+    /// prevents one transient successful no-op from becoming an acknowledged
+    /// loss. D1 and D2 remain the protocol's two *logical* barriers.
+    async fn reinforce_barrier(cx: &CommitCx, file: &V::File) -> Result<(), CommitError> {
+        sync_file(cx, file).await?;
+        Ok(())
+    }
+
     /// Tear `bytes` off the end of the commit log, modelling a crash that left
     /// an un-fsynced entry only partly written.
     ///
@@ -707,6 +726,9 @@ impl<V: Vfs> CommitCoordinator<V> {
             sync_directory(cx, &self.vfs, &self.dir).await?;
             self.capsule_directory_parent_sync_pending = false;
         }
+        // `sync_created_entry` performed D1's primary file sync. Keep the
+        // handle live for one reinforcement before any marker may name it.
+        Self::reinforce_barrier(cx, &capsule_file).await?;
         if crash_at == Some(CrashPoint::AfterD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: after D1")));
         }
@@ -767,6 +789,10 @@ impl<V: Vfs> CommitCoordinator<V> {
                 )));
             }
         }
+        // The branch above performed D2's primary file sync. A commit is not
+        // acknowledged until one reinforcement has had the opportunity to
+        // persist bytes a transient successful no-op left dirty.
+        Self::reinforce_barrier(cx, &log).await?;
 
         // Only now is the commit real, so only now does in-memory state move.
         self.chain.adopt(chained)?;

@@ -868,6 +868,37 @@ fn acknowledged_loss_observer_detects_a_planted_missing_commit() {
 }
 
 #[test]
+fn one_shot_marker_sync_lie_is_reinforced_before_the_spine_acknowledges() {
+    let result = execute_spine_hypothesis(
+        FaultPlan {
+            // Eligible file syncs are D1 then D2. The D2 primary call lies;
+            // its same-handle reinforcement is the next honest eligible call.
+            fsync_lie: Trigger::At(2),
+            ..FaultPlan::faultless()
+        },
+        scratch_dir("lineage-spine-marker-reinforcement"),
+        1_409,
+    );
+    assert!(
+        matches!(result.observation, LdfiExperimentObservation::InvariantHeld),
+        "one transient marker-sync lie became an acknowledged loss: {result:?}"
+    );
+    assert_eq!(result.acknowledged, Some(1));
+    assert_eq!(result.recovered_frontier, Some(1));
+    assert!(result.recovered_vertex);
+    assert_eq!(result.events.len(), 1, "the exact planned lie fired");
+    assert!(matches!(result.events[0].kind, FaultKind::FsyncLie { .. }));
+    assert_eq!(
+        result.events[0]
+            .path
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some(fgdb_chronicle::commit::COMMIT_LOG_NAME),
+        "the injected boundary must be Chronicle D2"
+    );
+}
+
+#[test]
 fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() -> Result<(), String> {
     let events = successful_embedded_spine_trace(scratch_dir("lineage-spine-exec-baseline"));
     let derived = derive_fault_hypotheses(

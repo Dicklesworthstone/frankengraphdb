@@ -840,11 +840,10 @@ fn input_order_does_not_change_a_capsules_identity() {
 //
 //   CrashPoint arm                      fault expression here
 //   ---------------------------------   -----------------------------------
-//   AfterD1 (orphan, not committed)     fsync lie at D2, then crash()
 //   AfterMarkerBeforeD2 loss arm        ENOSPC at D2, then crash()
 //   clean restart                       faultless plan, then crash()
-//   (inexpressible by CrashPoint)       fsync lie at D1: ack'd commit whose
-//                                       capsule never landed — fails closed
+//   (inexpressible by CrashPoint)       one transient fsync lie at D1 or D2:
+//                                       reinforced before publication advances
 //   (inexpressible by CrashPoint)       interior tear inside D2's flush
 //   (inexpressible by CrashPoint)       bit rot in a durable capsule, healed
 //
@@ -855,11 +854,14 @@ fn input_order_does_not_change_a_capsules_identity() {
 // reachable this way and mutation-proven at least as strong — the bead's own
 // instruction.
 //
-// Per-commit trigger arithmetic every plan below relies on: a commit performs
-// exactly TWO trigger-eligible syncs — D1 (the capsule file) and D2 (the
-// commit log). Directory syncs carry no dirty sectors and consume no counts.
-// Each test asserts the injected event's PATH, so a drift in this arithmetic
-// fails loudly instead of silently faulting the wrong barrier.
+// Per-commit trigger arithmetic every plan below relies on: a faultless commit
+// performs exactly TWO trigger-eligible syncs — D1 (the capsule file) and D2
+// (the commit log). Each logical barrier has one reinforcement call, but the
+// FaultVfs makes a clean-file sync ineligible. When the primary sync lies, its
+// dirty bytes make the reinforcement eligible and the one-shot trigger does
+// not fire again. Directory syncs carry no dirty sectors and consume no file-
+// sync counts. Each test asserts the injected event's PATH, so drift fails
+// loudly instead of silently faulting the wrong barrier.
 // ---------------------------------------------------------------------------
 
 fn capsule_disk_path(dir: &Path, oid: &ObjectId) -> PathBuf {
@@ -936,14 +938,14 @@ fn a_faultless_fault_model_is_byte_transparent_through_the_real_commit_path() {
     });
 }
 
-/// An fsync lie at D2: the writer is TOLD the marker is durable, acknowledges
-/// the commit, and the bytes never landed. `CrashPoint` cannot say this — its
-/// crashes always surface as errors, so the ack and the truth never diverge.
-/// After the crash, recovery must name the exact state the AfterD1 arm names:
-/// two commits, an orphan capsule, the sequence free — the acknowledged commit
-/// is gone, and the protocol's job is that its absence is CLEAN.
+/// One transient fsync lie at D2 is absorbed before acknowledgement.
+///
+/// The primary sync returns success without writing, leaving the marker dirty;
+/// the reinforcement sync on the same handle is honest and persists it. This
+/// is not same-cache readback and not a claim about an indefinitely lying
+/// device: it pins the exact one-fault guarantee the protocol implements.
 #[test]
-fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
+fn a_one_shot_d2_fsync_lie_is_reinforced_before_acknowledgement() {
     let dir = scratch_dir("vfs-d2-lie");
     under_lab(71, move |cx| async move {
         let cx = &cx;
@@ -972,34 +974,30 @@ fn a_d2_fsync_lie_loses_the_acknowledged_commit_to_a_state_recovery_can_name() {
         let reopened = open_faulted(cx, &vfs, &dir).await;
         assert_eq!(
             reopened.chain().len(),
-            2,
-            "the acknowledged third commit never reached the platter"
+            3,
+            "the reinforced marker is durable"
         );
         assert_eq!(reopened.chain().verify(), Ok(()));
-        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(3)));
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(4)));
         assert_eq!(
             reopened.discarded_tail_bytes(),
             0,
-            "the lie left the log clean — nothing was written, so nothing tears"
+            "the honest reinforcement persisted the complete frame"
         );
-        let third = three_commits()[2].clone();
         assert_eq!(
             reopened.orphan_capsules(cx).await.expect("scan"),
-            vec![third.object_id],
-            "D1 was honest, so the capsule survives as an orphan"
+            Vec::<ObjectId>::new(),
+            "every durable capsule is named by its recovered marker"
         );
-        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 2);
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 3);
     });
 }
 
-/// An fsync lie at D1: the marker becomes durable while the capsule it names
-/// never landed. This inverts the marker-is-the-commit rule's usual failure
-/// direction — the commit IS in the chain, and what is missing is the bytes it
-/// promised were durable first. Recovery must fail CLOSED at read, naming the
-/// sequence, never serve a two-commit graph as if the third were absent, and
-/// never a three-commit graph over a hole.
+/// One transient fsync lie at D1 is absorbed before a marker can name the
+/// capsule. The reinforcement sees the still-dirty container and persists it;
+/// D2 then publishes a marker over bytes recovery can actually open.
 #[test]
-fn a_d1_fsync_lie_makes_the_committed_marker_fail_closed_at_read() {
+fn a_one_shot_d1_fsync_lie_is_reinforced_before_marker_publication() {
     let dir = scratch_dir("vfs-d1-lie");
     under_lab(72, move |cx| async move {
         let cx = &cx;
@@ -1026,17 +1024,10 @@ fn a_d1_fsync_lie_makes_the_committed_marker_fail_closed_at_read() {
         assert_eq!(
             reopened.chain().len(),
             3,
-            "D2 was honest, so the marker IS durable and IS the commit"
+            "D1 reinforcement lets D2 publish the complete third commit"
         );
-        // The capsule path exists (creation reached the backing store) with
-        // none of its bytes (the sync lied). Presence is not durability.
         assert!(reopened.capsule_exists(cx, third.object_id).await);
-        let result = materialize(cx, &reopened).await;
-        assert!(
-            matches!(&result, Err(ReplayError::Commit(CommitError::Capsule(_)))),
-            "a committed marker over never-landed capsule bytes must fail \
-             closed at read, not materialize around the hole; got {result:?}"
-        );
+        expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 3);
     });
 }
 
