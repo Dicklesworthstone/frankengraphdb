@@ -347,6 +347,14 @@ coverage_of() {
     *.sh|*.bash)                         echo "bash -n + shellcheck (next step)" ;;
     Cargo.toml|*/Cargo.toml)             echo "registry-check all (workspace topology)" ;;
     Cargo.lock)                          echo "cargo check --all-targets" ;;
+    deny.toml)
+      if live_gate_inventory "$CHECKER_INDEX" 2>/dev/null \
+          | grep -Fx $'script\tscripts/dependency_policy_e2e.sh' >/dev/null; then
+        echo "dependency_policy_e2e (resolved dependency advisory, license, and source policy)"
+      else
+        echo ""
+      fi
+      ;;
     rust-toolchain.toml)                 echo "topology-check" ;;
     registries/threat_model.toml)        echo "threat-check" ;;
     registries/workspace_topology.toml)  echo "topology-check" ;;

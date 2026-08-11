@@ -683,6 +683,15 @@ artifact = "scripts/g0_tree_stability_e2e.sh"
 status = "live"
 unit = "artifact"
 
+# --- Locked dependency vulnerability, license, and source policy. ---
+
+[[checker]]
+symbol = "dependency_policy_e2e"
+kind = "script"
+artifact = "scripts/dependency_policy_e2e.sh"
+status = "live"
+unit = "artifact"
+
 # =============================================================================
 # script_disposition — the FILE -> ROW direction (fgdb-orphan-w1-e2e-gates-
 # unregistered-unrun-vuq8).

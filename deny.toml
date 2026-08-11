@@ -1,0 +1,73 @@
+# Dependency policy for the complete workspace graph.  This file deliberately
+# does not choose versions: Cargo.toml and Cargo.lock remain the authorities for
+# exact foundation revisions and transitive resolution.
+
+[graph]
+all-features = true
+
+[licenses]
+include-dev = true
+unused-allowed-license = "deny"
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+exceptions = [
+  { crate = "asupersync", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "fnx-classes", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "fnx-generators", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "fnx-runtime", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "franken-decision", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "franken-evidence", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "franken-kernel", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+]
+
+# The pinned franken_networkx revision declares license-file rather than a
+# machine-readable SPDX expression. Bind the interpretation to the exact bytes
+# of that revision's license so a license-text change fails closed.
+[[licenses.clarify]]
+crate = "fnx-classes"
+expression = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+license-files = [{ path = "../../LICENSE", hash = 0x3e2e0c66 }]
+
+[[licenses.clarify]]
+crate = "fnx-generators"
+expression = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+license-files = [{ path = "../../LICENSE", hash = 0x3e2e0c66 }]
+
+[[licenses.clarify]]
+crate = "fnx-runtime"
+expression = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+license-files = [{ path = "../../LICENSE", hash = 0x3e2e0c66 }]
+
+[licenses.private]
+# Every workspace package is publish=false. Their distribution policy belongs
+# to the product-release workstream; this gate judges third-party inputs.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+# cargo-deny calls version-less path dependencies and exact-rev git
+# dependencies wildcards. The source policy below separately requires rev pins
+# and permits only the two foundation repositories.
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "rev"
+unused-allowed-source = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  "https://github.com/Dicklesworthstone/asupersync",
+  "https://github.com/Dicklesworthstone/franken_networkx",
+]
