@@ -121,10 +121,16 @@ fn assert_recovery_fence<T>(
     recovery: fgdb::RecoveryRequired,
     result: Result<T, ReadError>,
 ) {
-    assert!(
-        matches!(result, Err(ReadError::RecoveryRequired(found)) if found == recovery),
-        "{stage:?}: every state-bearing read must carry the same recovery evidence"
-    );
+    match result {
+        Err(ReadError::RecoveryRequired(found)) => assert_eq!(
+            found, recovery,
+            "{stage:?}: every state-bearing read must carry the same recovery evidence"
+        ),
+        unexpected => assert!(
+            matches!(&unexpected, Err(ReadError::RecoveryRequired(_))),
+            "{stage:?}: every state-bearing read must carry recovery evidence"
+        ),
+    }
 }
 
 fn vfs_fault_batch() -> WriteBatch {
@@ -558,16 +564,29 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
                 .write_with_publication_failure(cx, second, stage)
                 .await
                 .expect_err("the named post-D2 stage must fail");
-            let WriteError::CommittedNeedsRecovery { recovery, source } = error else {
-                unreachable!("{stage:?}: injected failure returned the wrong error: {error:?}");
+            let (recovery, source) = match error {
+                WriteError::CommittedNeedsRecovery { recovery, source } => (recovery, source),
+                unexpected => {
+                    assert!(
+                        matches!(&unexpected, WriteError::CommittedNeedsRecovery { .. }),
+                        "{stage:?}: injected failure returned the wrong error: {unexpected:?}"
+                    );
+                    return;
+                }
             };
             assert_eq!(recovery.durable_frontier.0, 2, "{stage:?}");
             assert_eq!(recovery.published_frontier.0, 1, "{stage:?}");
             assert_eq!(recovery.failed_stage, stage);
-            assert!(
-                matches!(*source, RebuildError::InjectedPublicationFailure(found) if found == stage),
-                "{stage:?}: the source must identify the injection boundary"
-            );
+            match *source {
+                RebuildError::InjectedPublicationFailure(found) => assert_eq!(
+                    found, stage,
+                    "{stage:?}: the source must identify the injection boundary"
+                ),
+                unexpected => assert!(
+                    matches!(&unexpected, RebuildError::InjectedPublicationFailure(_)),
+                    "{stage:?}: the source must identify the injection boundary"
+                ),
+            }
             assert_eq!(
                 db.state(),
                 DatabaseState::NeedsAuthoritativeRecovery(recovery)
@@ -608,16 +627,26 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
                 .compact(cx)
                 .await
                 .expect_err("a fenced handle must refuse maintenance");
-            let RebuildError::HandleNotHealthy(found) = compact_error else {
-                unreachable!("{stage:?}: maintenance returned the wrong fence: {compact_error:?}");
+            let found = match compact_error {
+                RebuildError::HandleNotHealthy(found) => found,
+                unexpected => {
+                    assert!(
+                        matches!(&unexpected, RebuildError::HandleNotHealthy(_)),
+                        "{stage:?}: maintenance returned the wrong fence: {unexpected:?}"
+                    );
+                    return;
+                }
             };
             assert_eq!(found, DatabaseState::NeedsAuthoritativeRecovery(recovery));
             let mut third = WriteBatch::new(KNOWS);
             third.create_vertex(VId(4), vec![], vec![]);
-            assert!(matches!(
-                db.write(cx, third).await,
-                Err(WriteError::RecoveryRequired(found)) if found == recovery
-            ));
+            match db.write(cx, third).await {
+                Err(WriteError::RecoveryRequired(found)) => assert_eq!(found, recovery),
+                unexpected => assert!(
+                    matches!(&unexpected, Err(WriteError::RecoveryRequired(_))),
+                    "{stage:?}: fenced writer returned the wrong outcome: {unexpected:?}"
+                ),
+            }
             drop(db);
 
             // ENGINE SIDE: only the directory and keys cross the reopen.
@@ -769,10 +798,13 @@ fn root_slot_enospc_fences_the_database_and_reopen_matches_the_oracle() {
             recovery,
             db.vertex(VId(1)),
         );
-        assert!(matches!(
-            db.write(cx, vfs_fault_batch()).await,
-            Err(WriteError::RecoveryRequired(found)) if found == recovery
-        ));
+        match db.write(cx, vfs_fault_batch()).await {
+            Err(WriteError::RecoveryRequired(found)) => assert_eq!(found, recovery),
+            unexpected => assert!(
+                matches!(&unexpected, Err(WriteError::RecoveryRequired(_))),
+                "fenced writer returned the wrong outcome: {unexpected:?}"
+            ),
+        }
 
         let events = faulted_vfs.events();
         assert_eq!(events.len(), 1, "exactly the planned fault must fire");
