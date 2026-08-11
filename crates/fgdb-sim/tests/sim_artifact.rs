@@ -22,7 +22,8 @@
 
 use fgdb::{DerivedPublicationStage, RecoveryRequired};
 use fgdb_sim::artifact::{
-    ARTIFACT_REPLAY_ENV, Absence, CONTRACT_FIELDS, FailureKind, Field, Replay, Scenario,
+    ARTIFACT_REPLAY_ENV, Absence, CONTRACT_FIELDS, CommitDurabilityObservation, FailureKind, Field,
+    Replay, Scenario,
 };
 use fgdb_sim::vfs::{FaultPlan, Trigger};
 use fgdb_types::CommitSeq;
@@ -74,6 +75,19 @@ fn failing_replay() -> Replay {
     Replay {
         scenario: Scenario::DurableAppend,
         plan: lying_plan(),
+    }
+}
+
+fn planted_spine_loss() -> Replay {
+    Replay {
+        scenario: Scenario::PlantedSpineLoss,
+        plan: FaultPlan {
+            seed: 0x1774_0000_0000_0007,
+            // Deliberately removable input so the shrinker has real work to
+            // do without depending on a product durability bug.
+            space_budget: Some(u64::MAX),
+            ..FaultPlan::faultless()
+        },
     }
 }
 
@@ -417,6 +431,102 @@ fn every_post_d2_recovery_failure_is_structured_and_executable() {
         assert_eq!(second.failure, first.failure, "{stage:?}");
         assert_eq!(second.events, first.events, "{stage:?}");
     }
+}
+
+/// The campaign's planted oracle mutation uses the real embedded API rather
+/// than the direct append fixture. It proves that an acknowledged loss crosses
+/// the existing artifact boundary with typed frontier evidence without
+/// requiring the product to remain buggy.
+#[test]
+fn an_acknowledged_spine_loss_is_structured_and_replayable() {
+    let replay = planted_spine_loss();
+    let first = replay.run(&scratch_dir("spine-loss-first"));
+    let failure = first
+        .failure
+        .as_ref()
+        .expect("the persistent planted lie loses the acknowledged commit");
+    assert_eq!(failure.kind, FailureKind::AcknowledgedCommitLost);
+    assert_eq!(
+        failure.durability,
+        Some(CommitDurabilityObservation {
+            acknowledged: CommitSeq(1),
+            crash_succeeded: true,
+            reopen_succeeded: true,
+            recovered_frontier: None,
+            recovered_vertex: false,
+            planted: true,
+        })
+    );
+    let artifact = first
+        .artifact
+        .as_ref()
+        .expect("an acknowledged commit loss emits an artifact");
+    assert_eq!(artifact.unaccounted_fields(), Vec::<&str>::new());
+    assert_eq!(
+        present_value(
+            artifact
+                .field("commit_position")
+                .expect("commit position is total")
+        ),
+        Some("1")
+    );
+    assert!(
+        matches!(
+            artifact
+                .field("visible_position")
+                .expect("visible position is total"),
+            Field::Absent(Absence::NotApplicable { .. })
+        ),
+        "the planted missing frontier must not be rendered as a real position"
+    );
+
+    let second = replay.run(&scratch_dir("spine-loss-second"));
+    assert_eq!(second.failure, first.failure);
+    assert_eq!(
+        second.events, first.events,
+        "fresh-directory replay must retain the relative schedule"
+    );
+    assert!(
+        first.events.is_empty(),
+        "the planted oracle mutation must not masquerade as an injected VFS fault"
+    );
+}
+
+#[test]
+fn a_persistent_sync_lie_refuses_cleanly_before_acknowledgement() {
+    let outcome = Replay {
+        scenario: Scenario::SpineDurability,
+        plan: FaultPlan {
+            fsync_lie: Trigger::Always,
+            ..FaultPlan::faultless()
+        },
+    }
+    .run(&scratch_dir("spine-persistent-lie"));
+    assert!(
+        outcome.failure.is_none(),
+        "a pre-acknowledgement refusal became a durability violation: {outcome:?}"
+    );
+    assert!(outcome.artifact.is_none());
+    assert!(
+        !outcome.events.is_empty(),
+        "the clean outcome is only meaningful if the planted lie fired"
+    );
+}
+
+#[test]
+fn the_faultless_spine_emits_no_failure_artifact() {
+    let outcome = Replay {
+        scenario: Scenario::SpineDurability,
+        plan: FaultPlan::faultless(),
+    }
+    .run(&scratch_dir("spine-control"));
+    assert!(
+        outcome.failure.is_none(),
+        "faultless embedded commit did not survive: {:?}",
+        outcome.failure
+    );
+    assert!(outcome.artifact.is_none());
+    assert!(outcome.events.is_empty());
 }
 
 /// The consumer that makes the emitted command more than a string.

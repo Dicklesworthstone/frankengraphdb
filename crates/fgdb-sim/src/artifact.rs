@@ -180,6 +180,14 @@ pub enum Scenario {
     /// passes. Exists to prove the artifact emitter is driven by the failure
     /// and not by the fault.
     LostAppend,
+    /// One real embedded-database commit, process loss, and ordinary reopen.
+    /// A pre-acknowledgement refusal is clean; an acknowledged commit whose
+    /// frontier or vertex is absent after reopen is a durability failure.
+    SpineDurability,
+    /// The same real embedded workload as [`Scenario::SpineDurability`], then
+    /// an explicit mutation of its recovered observation to a missing commit.
+    /// This is the detector-liveness control; real campaigns never use it.
+    PlantedSpineLoss,
     /// One real integrated database commit stopped at the named derived-
     /// publication stage after Chronicle D2. The run verifies the stale
     /// handle is fenced and that a fresh engine open and independent reference
@@ -205,7 +213,7 @@ impl Scenario {
     /// ruled out by the replay contract — see [`SCENARIOS`]. A const table
     /// plus a compile error is what remains, and it is not a lesser option:
     /// the compile error fires earlier than any registration call would.
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 13;
 
     /// A dense index per variant, `0..COUNT`.
     ///
@@ -216,8 +224,10 @@ impl Scenario {
         match self {
             Self::DurableAppend => 0,
             Self::LostAppend => 1,
+            Self::SpineDurability => 2,
+            Self::PlantedSpineLoss => 3,
             Self::PostD2Recovery(stage) => {
-                2 + match stage {
+                4 + match stage {
                     DerivedPublicationStage::FoldCommittedTemplate => 0,
                     DerivedPublicationStage::SealPartition => 1,
                     DerivedPublicationStage::PublishEdgeBlocks => 2,
@@ -242,6 +252,8 @@ impl Scenario {
         match self {
             Self::DurableAppend => "durable-append",
             Self::LostAppend => "lost-append",
+            Self::SpineDurability => "spine-durability",
+            Self::PlantedSpineLoss => "planted-spine-loss",
             Self::PostD2Recovery(stage) => match stage {
                 DerivedPublicationStage::FoldCommittedTemplate => "post-d2-fold-committed-template",
                 DerivedPublicationStage::SealPartition => "post-d2-seal-partition",
@@ -262,7 +274,10 @@ impl Scenario {
     pub const fn recovery_stage(self) -> Option<DerivedPublicationStage> {
         match self {
             Self::PostD2Recovery(stage) => Some(stage),
-            Self::DurableAppend | Self::LostAppend => None,
+            Self::DurableAppend
+            | Self::LostAppend
+            | Self::SpineDurability
+            | Self::PlantedSpineLoss => None,
         }
     }
 
@@ -323,6 +338,18 @@ pub static SCENARIOS: [ScenarioEntry; Scenario::COUNT] = [
         scenario: Scenario::LostAppend,
         asserts: "nothing survives the crash",
         state_model: "single-writer four-sector append, one flush, one crash",
+    },
+    ScenarioEntry {
+        id: "spine-durability",
+        scenario: Scenario::SpineDurability,
+        asserts: "every acknowledged database commit survives process loss and ordinary reopen",
+        state_model: "one embedded database, one vertex commit, one crash, one reopen",
+    },
+    ScenarioEntry {
+        id: "planted-spine-loss",
+        scenario: Scenario::PlantedSpineLoss,
+        asserts: "the durability detector rejects an explicitly planted missing acknowledged commit",
+        state_model: "one embedded database, one vertex commit, one crash, one reopen, one oracle mutation",
     },
     ScenarioEntry {
         id: "post-d2-fold-committed-template",
@@ -603,12 +630,22 @@ impl Replay {
             match scenario {
                 Scenario::DurableAppend => durable_append(&vfs, dir, true).await,
                 Scenario::LostAppend => durable_append(&vfs, dir, false).await,
+                Scenario::SpineDurability => spine_durability(&commit_cx, &vfs, dir, false).await,
+                Scenario::PlantedSpineLoss => spine_durability(&commit_cx, &vfs, dir, true).await,
                 Scenario::PostD2Recovery(stage) => {
                     post_d2_recovery(&commit_cx, &vfs, dir, stage).await
                 }
             }
         });
-        let events = vfs.events();
+        // An artifact is replayed in a fresh directory. Preserve the durable
+        // object path within that directory, but do not make a caller's
+        // scratch prefix part of the supposedly reproducible schedule.
+        let mut events = vfs.events();
+        for event in &mut events {
+            if let Ok(relative) = event.path.strip_prefix(dir) {
+                event.path = relative.to_path_buf();
+            }
+        }
         let artifact = failure
             .as_ref()
             .err()
@@ -647,6 +684,27 @@ pub enum FailureKind {
     /// its contract requires. This is a harness-observed protocol regression,
     /// not the expected structured post-D2 failure.
     RecoveryProtocolDrift,
+    /// The embedded API acknowledged a commit that ordinary reopen could not
+    /// recover with both its frontier and its state intact.
+    AcknowledgedCommitLost,
+}
+
+/// Structured observation attached to an acknowledged embedded commit that
+/// did not survive the crash/reopen boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitDurabilityObservation {
+    /// The commit sequence returned to the caller.
+    pub acknowledged: CommitSeq,
+    /// Whether the simulated process-loss rollback itself completed.
+    pub crash_succeeded: bool,
+    /// Whether the ordinary production opener recovered a database.
+    pub reopen_succeeded: bool,
+    /// The frontier the ordinary opener recovered, when readable.
+    pub recovered_frontier: Option<CommitSeq>,
+    /// Whether the committed vertex was visible after reopen.
+    pub recovered_vertex: bool,
+    /// True only for the explicit detector-liveness mutation scenario.
+    pub planted: bool,
 }
 
 /// A failure: its kind, which decides sameness, and its prose, which does not.
@@ -659,6 +717,9 @@ pub struct Failure {
     /// Exact integrated recovery evidence when Chronicle reached D2. Direct
     /// VFS scenarios have no database frontier and therefore carry `None`.
     pub recovery: Option<RecoveryRequired>,
+    /// Exact integrated durability evidence for an acknowledged commit loss.
+    /// Other scenarios carry `None`.
+    pub durability: Option<CommitDurabilityObservation>,
 }
 
 impl Failure {
@@ -667,6 +728,7 @@ impl Failure {
             kind,
             detail: detail.into(),
             recovery: None,
+            durability: None,
         }
     }
 
@@ -679,6 +741,25 @@ impl Failure {
                 recovery.failed_stage, recovery.durable_frontier.0, recovery.published_frontier.0,
             ),
             recovery: Some(recovery),
+            durability: None,
+        }
+    }
+
+    fn acknowledged_commit_lost(observation: CommitDurabilityObservation) -> Self {
+        Self {
+            kind: FailureKind::AcknowledgedCommitLost,
+            detail: format!(
+                "acknowledged={}; crash_succeeded={}; reopen_succeeded={}; \
+                 recovered_frontier={:?}; recovered_vertex={}; planted={}",
+                observation.acknowledged.0,
+                observation.crash_succeeded,
+                observation.reopen_succeeded,
+                observation.recovered_frontier.map(|seq| seq.0),
+                observation.recovered_vertex,
+                observation.planted,
+            ),
+            recovery: None,
+            durability: Some(observation),
         }
     }
 }
@@ -734,6 +815,64 @@ fn recovery_batch(vid: VId) -> WriteBatch {
 
 fn recovery_drift(detail: impl Into<String>) -> Failure {
     Failure::new(FailureKind::RecoveryProtocolDrift, detail)
+}
+
+/// Drive the real embedded composition through one commit, simulated process
+/// loss, and an ordinary production reopen. Refusals before acknowledgement
+/// are clean outcomes: only a promise already returned to the caller can be
+/// falsified by this scenario.
+async fn spine_durability(
+    cx: &CommitCx,
+    vfs: &FaultVfs,
+    dir: &Path,
+    plant_loss: bool,
+) -> Result<(), Failure> {
+    drop(
+        Database::create(cx, dir, recovery_keys())
+            .await
+            .map_err(|error| recovery_drift(format!("genesis create failed: {error}")))?,
+    );
+    let Ok(mut database) = Database::open_with_vfs(cx, vfs.clone(), dir, recovery_keys()).await
+    else {
+        return Ok(());
+    };
+
+    let Ok(acknowledged) = database.write(cx, recovery_batch(VId(1))).await else {
+        return Ok(());
+    };
+    let crash_succeeded = vfs.crash().await.is_ok();
+    drop(database);
+
+    let reopened = Database::open(cx, dir, recovery_keys()).await;
+    let reopen_succeeded = reopened.is_ok();
+    let mut recovered_frontier = reopened
+        .as_ref()
+        .ok()
+        .and_then(|database| database.frontier().ok());
+    let mut recovered_vertex = reopened
+        .as_ref()
+        .ok()
+        .and_then(|database| database.vertex(VId(1)).ok())
+        .flatten()
+        .is_some();
+    if plant_loss {
+        recovered_frontier = None;
+        recovered_vertex = false;
+    }
+    let observation = CommitDurabilityObservation {
+        acknowledged,
+        crash_succeeded,
+        reopen_succeeded,
+        recovered_frontier,
+        recovered_vertex,
+        planted: plant_loss,
+    };
+
+    if crash_succeeded && recovered_frontier == Some(acknowledged) && recovered_vertex {
+        Ok(())
+    } else {
+        Err(Failure::acknowledged_commit_lost(observation))
+    }
 }
 
 /// Drive the real composition-layer database through one post-D2 failure,
@@ -1003,7 +1142,7 @@ impl FailureArtifact {
 
         set(
             "role",
-            if failure.recovery.is_some() {
+            if failure.recovery.is_some() || failure.durability.is_some() {
                 Field::Present("commit".to_string())
             } else {
                 Field::Absent(Absence::NotApplicable {
@@ -1039,6 +1178,28 @@ impl FailureArtifact {
                 Field::Present(recovery.published_frontier.0.to_string()),
             );
             set("raft_position", not_yet("Raft replication", "fgdb-1xtp"));
+            set(
+                "audit_visible_position",
+                not_yet("audit visibility", "fgdb-verif-sim-q97e"),
+            );
+        } else if let Some(durability) = failure.durability {
+            let acknowledged = durability.acknowledged.0.to_string();
+            set("logical_position", Field::Present(acknowledged.clone()));
+            set("commit_position", Field::Present(acknowledged));
+            set("raft_position", not_yet("Raft replication", "fgdb-1xtp"));
+            for position in ["applied_position", "visible_position"] {
+                set(
+                    position,
+                    durability.recovered_frontier.map_or_else(
+                        || {
+                            Field::Absent(Absence::NotApplicable {
+                                because: "ordinary reopen recovered no readable frontier",
+                            })
+                        },
+                        |frontier| Field::Present(frontier.0.to_string()),
+                    ),
+                );
+            }
             set(
                 "audit_visible_position",
                 not_yet("audit visibility", "fgdb-verif-sim-q97e"),

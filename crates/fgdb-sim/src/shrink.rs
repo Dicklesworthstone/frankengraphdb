@@ -41,9 +41,16 @@
 //! weaker than "globally minimal" — which delta debugging does not promise
 //! either. Stated rather than implied.
 
-use crate::artifact::{Failure, Replay};
+use crate::artifact::{Failure, Replay, RunOutcome};
 use crate::vfs::{FaultEvent, FaultPlan, Trigger};
 use std::path::Path;
+
+fn isolated_run(replay: Replay, root: &Path, ordinal: &mut usize) -> std::io::Result<RunOutcome> {
+    let dir = root.join(format!("shrink-attempt-{ordinal:04}"));
+    *ordinal += 1;
+    std::fs::create_dir_all(&dir)?;
+    Ok(replay.run(&dir))
+}
 
 /// One accepted reduction, in the order it was applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,15 +224,23 @@ fn weaken_to_single_firing(trigger: Trigger) -> Option<Trigger> {
 
 /// Minimises `replay` to a 1-minimal reproducer of the *same* failure kind.
 ///
-/// Returns `None` when `replay` does not fail at all — there is nothing to
+/// Returns `Ok(None)` when `replay` does not fail at all — there is nothing to
 /// shrink, and returning a "minimal" reproducer of a passing run would be a
 /// fabricated report.
 ///
 /// Every scenario run is deterministic ([`Replay::run`]), so this search is
 /// reproducible: the same input yields the same `Shrunk`.
-#[must_use]
-pub fn shrink(replay: Replay, dir: &Path) -> Option<Shrunk> {
-    let original = replay.run(dir).failure?;
+///
+/// # Errors
+///
+/// Returns the filesystem error when an isolated attempt directory cannot be
+/// created. A workspace failure is not reported as either a passing replay or
+/// a minimal reproducer.
+pub fn shrink(replay: Replay, dir: &Path) -> std::io::Result<Option<Shrunk>> {
+    let mut ordinal = 0usize;
+    let Some(original) = isolated_run(replay, dir, &mut ordinal)?.failure else {
+        return Ok(None);
+    };
     let target = original.kind;
 
     let mut best = replay;
@@ -240,7 +255,7 @@ pub fn shrink(replay: Replay, dir: &Path) -> Option<Shrunk> {
     'descent: loop {
         for (what, plan) in candidates(best.plan) {
             let candidate = Replay { plan, ..best };
-            match candidate.run(dir).failure {
+            match isolated_run(candidate, dir, &mut ordinal)?.failure {
                 // THE LAW: same kind, or it is a different bug and the
                 // reduction is rejected however much smaller it looks.
                 Some(next) if next.kind == target => {
@@ -259,12 +274,12 @@ pub fn shrink(replay: Replay, dir: &Path) -> Option<Shrunk> {
         failure.kind, target,
         "shrink returned a different failure kind than it was given"
     );
-    Some(Shrunk {
+    Ok(Some(Shrunk {
         replay: best,
         failure,
         steps,
         rejected,
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------

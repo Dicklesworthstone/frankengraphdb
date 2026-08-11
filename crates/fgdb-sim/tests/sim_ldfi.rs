@@ -973,13 +973,11 @@ fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() -> Re
                 .iter()
                 .find(|hypothesis| &hypothesis.events == found)
                 .expect("the reported event set came from the derived spine hypotheses");
-            let reproduced = execute_spine_hypothesis(
-                fault
-                    .to_plan(0x1df2_ffff, 100)
-                    .expect("the found spine hypothesis maps exactly"),
-                scratch_dir("lineage-spine-exec-replay"),
-                1_999,
-            );
+            let plan = fault
+                .to_plan(0x1df2_ffff, 100)
+                .expect("the found spine hypothesis maps exactly");
+            let reproduced =
+                execute_spine_hypothesis(plan, scratch_dir("lineage-spine-exec-replay"), 1_999);
             assert!(
                 matches!(
                     reproduced.observation,
@@ -998,6 +996,39 @@ fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() -> Re
                 fault.points.len(),
                 "the replay broadened the exact generated event set: {reproduced:?}"
             );
+
+            // Cross the existing artifact + shrink boundary with the exact
+            // generated plan. The campaign remains repair-neutral: a clean
+            // exhausted campaign is green, while a violation is useful only
+            // if it leaves a standalone reproducer rather than requiring the
+            // product to stay buggy.
+            let replay = Replay {
+                scenario: Scenario::SpineDurability,
+                plan,
+            };
+            let artifact_run = replay.run(&scratch_dir("lineage-spine-artifact"));
+            assert_eq!(
+                artifact_run.failure.as_ref().map(|failure| failure.kind),
+                Some(FailureKind::AcknowledgedCommitLost),
+                "the generated violation did not cross the structured replay boundary: \
+                 {artifact_run:?}"
+            );
+            assert!(
+                artifact_run.artifact.is_some(),
+                "the generated violation reproduced without emitting its artifact"
+            );
+            let shrunk = shrink(replay, &scratch_dir("lineage-spine-shrink"))
+                .map_err(|error| format!("could not create isolated shrink attempt: {error}"))?
+                .expect("the generated violation reproduced for the shrinker");
+            let minimal = shrunk
+                .replay
+                .run(&scratch_dir("lineage-spine-shrunk-replay"));
+            assert_eq!(
+                minimal.failure.as_ref().map(|failure| failure.kind),
+                Some(FailureKind::AcknowledgedCommitLost),
+                "the shrunk full-spine artifact did not reproduce: {minimal:?}"
+            );
+            assert!(minimal.artifact.is_some());
         }
         status => {
             return Err(format!(
@@ -1073,6 +1104,7 @@ fn trace_derived_fault_is_executed_and_shrunk_without_blind_enumeration() {
             .expect("found hypothesis maps exactly"),
     };
     let shrunk = shrink(replay, &scratch_dir("lineage-append-shrink"))
+        .expect("isolated shrink attempts are created")
         .expect("the trace-derived failure reproduces for the shrinker");
     assert_eq!(shrunk.failure.kind, FailureKind::AcknowledgedBytesLost);
     assert_eq!(

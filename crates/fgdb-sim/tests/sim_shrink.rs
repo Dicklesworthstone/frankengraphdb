@@ -40,6 +40,7 @@ fn overspecified_replay() -> Replay {
 #[test]
 fn a_failing_replay_shrinks_to_fewer_accused_fault_classes() {
     let shrunk = shrink(overspecified_replay(), &scratch_dir("classes"))
+        .expect("isolated shrink attempts are created")
         .expect("the overspecified replay fails, so it shrinks");
 
     assert!(
@@ -83,7 +84,9 @@ fn the_shrunk_reproducer_still_fails_the_same_way() {
         .run(&dir)
         .failure
         .expect("the input must fail");
-    let shrunk = shrink(overspecified_replay(), &dir).expect("it shrinks");
+    let shrunk = shrink(overspecified_replay(), &dir)
+        .expect("isolated shrink attempts are created")
+        .expect("it shrinks");
 
     assert_eq!(
         shrunk.failure.kind, original.kind,
@@ -163,7 +166,9 @@ fn a_reduction_that_changes_the_failure_kind_is_rejected() {
 
     // The law itself: a smaller, still-red candidate that fails DIFFERENTLY
     // must be refused.
-    let shrunk = shrink(replay, &dir).expect("it shrinks");
+    let shrunk = shrink(replay, &dir)
+        .expect("isolated shrink attempts are created")
+        .expect("it shrinks");
     assert_eq!(
         shrunk.failure.kind,
         FailureKind::AcknowledgedBytesLost,
@@ -194,7 +199,9 @@ fn a_passing_replay_does_not_shrink() {
         "premise: the faultless durable append must pass"
     );
     assert!(
-        shrink(passing, &scratch_dir("control")).is_none(),
+        shrink(passing, &scratch_dir("control"))
+            .expect("isolated shrink attempts are created")
+            .is_none(),
         "a passing run produced a 'minimal reproducer', which would be fabricated"
     );
 }
@@ -211,7 +218,9 @@ fn an_already_minimal_reproducer_reports_no_steps_but_still_tried() {
             ..FaultPlan::faultless()
         },
     };
-    let shrunk = shrink(minimal, &dir).expect("it fails, so it shrinks");
+    let shrunk = shrink(minimal, &dir)
+        .expect("isolated shrink attempts are created")
+        .expect("it fails, so it shrinks");
     assert!(
         shrunk.steps.is_empty(),
         "an already-minimal plan was reduced further: {:?}",
@@ -236,7 +245,9 @@ fn nth_one_is_periodic_and_therefore_not_a_minimal_reproducer() {
             ..FaultPlan::faultless()
         },
     };
-    let shrunk = shrink(periodic, &dir).expect("the periodic lie fails, so it shrinks");
+    let shrunk = shrink(periodic, &dir)
+        .expect("isolated shrink attempts are created")
+        .expect("the periodic lie fails, so it shrinks");
     assert_eq!(shrunk.replay.plan.fsync_lie, Trigger::At(1));
     assert!(
         shrunk
@@ -246,6 +257,38 @@ fn nth_one_is_periodic_and_therefore_not_a_minimal_reproducer() {
         "the shrinker did not record the behavioral reduction: {:?}",
         shrunk.steps
     );
+}
+
+#[test]
+fn an_integrated_spine_loss_shrinks_in_isolated_databases() {
+    let replay = Replay {
+        scenario: Scenario::PlantedSpineLoss,
+        plan: FaultPlan {
+            seed: 0x1774_0000_0000_0008,
+            space_budget: Some(u64::MAX),
+            ..FaultPlan::faultless()
+        },
+    };
+    let shrunk = shrink(replay, &scratch_dir("spine-isolated"))
+        .expect("isolated database attempts are created")
+        .expect("the planted acknowledged loss reproduces");
+    assert_eq!(shrunk.failure.kind, FailureKind::AcknowledgedCommitLost);
+    assert!(
+        shrunk
+            .steps
+            .iter()
+            .any(|step| step.what == "dropped the space budget"),
+        "the integrated shrink did not remove the irrelevant budget: {:?}",
+        shrunk.steps
+    );
+
+    let rerun = shrunk.replay.run(&scratch_dir("spine-isolated-rerun"));
+    assert_eq!(
+        rerun.failure.as_ref().map(|failure| failure.kind),
+        Some(FailureKind::AcknowledgedCommitLost),
+        "the isolated result is not a standalone reproducer: {rerun:?}"
+    );
+    assert!(rerun.artifact.is_some());
 }
 
 // ---------------------------------------------------------------------------
