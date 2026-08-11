@@ -13,7 +13,12 @@
 //!   owner is a permanent silent zero.
 
 use fgdb_sim::ldfi::{
-    Reachability, TARGETS, coverage_statement, reachable_count, unreachable_count,
+    ActivationRejection, BASE_HARNESS_OWNER, CampaignEntrypoint, EXPECTED_TARGET_IDS, G1_GATE,
+    G3_GATE, G3_PHASE_OWNER, GENESIS_GATE, LOCAL_TORTURE_OWNER, LdfiTarget, Reachability,
+    RegistryValidationError, TARGETS, TargetMetadataError, TargetRowState, W12_GATE,
+    W12_PHASE_OWNER, campaign_entrypoint, coverage_statement, expected_phase_boundary,
+    reachable_count, registry_jsonl, unreachable_count, validate_activation,
+    validate_registry_rows, validate_target_metadata,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -62,12 +67,23 @@ fn every_row_quotes_a_phrase_that_appears_in_the_plan_line() {
 
 #[test]
 fn ids_are_unique() {
+    let ordered_ids: Vec<&str> = TARGETS.iter().map(|target| target.id).collect();
+    assert_eq!(
+        ordered_ids, EXPECTED_TARGET_IDS,
+        "the live table must preserve the complete normative target inventory in plan order"
+    );
     let ids: BTreeSet<&str> = TARGETS.iter().map(|target| target.id).collect();
     assert_eq!(
         ids.len(),
         TARGETS.len(),
         "duplicate LDFI target id inflates the denominator"
     );
+    for target_id in EXPECTED_TARGET_IDS {
+        assert!(
+            expected_phase_boundary(target_id).is_some(),
+            "normative target {target_id:?} has no production phase mapping"
+        );
+    }
 }
 
 #[test]
@@ -83,12 +99,313 @@ fn unreachable_targets_name_an_owning_bead() {
     }
 }
 
+#[test]
+fn every_row_has_closed_phase_owner_gate_state_and_evidence_metadata() {
+    for target in TARGETS {
+        assert_eq!(
+            validate_target_metadata(target),
+            Ok(()),
+            "target {:?} has invalid metadata",
+            target.id
+        );
+
+        let expected = expected_phase_boundary(target.id)
+            .expect("every normative target id has one production phase mapping");
+        assert_eq!(
+            (target.phase_owner_bead, target.first_required_gate),
+            expected,
+            "target {:?} is attributed to the wrong phase",
+            target.id
+        );
+        if target.row_state == TargetRowState::Live {
+            assert_eq!(
+                expected,
+                (BASE_HARNESS_OWNER, GENESIS_GATE),
+                "only q97e's current fixture witnesses are live in the base harness"
+            );
+        }
+    }
+}
+
+#[test]
+fn phase_authority_ids_are_pinned_to_the_tracker_contract() {
+    assert_eq!(BASE_HARNESS_OWNER, "fgdb-verif-sim-q97e");
+    assert_eq!(GENESIS_GATE, "fgdb-gate-genesis-lce");
+    assert_eq!(LOCAL_TORTURE_OWNER, "fgdb-verif-torture-ddcl");
+    assert_eq!(G1_GATE, "fgdb-gate-g1-6vc");
+    assert_eq!(G3_PHASE_OWNER, "fgdb-g3-protocol-ha-torture-jni4");
+    assert_eq!(G3_GATE, "fgdb-gate-g3-30m");
+    assert_eq!(W12_PHASE_OWNER, "fgdb-w12-formal-torture-ejx0");
+    assert_eq!(W12_GATE, "fgdb-gate-w12-w2y");
+}
+
+#[test]
+fn fake_cross_phase_and_duplicate_targets_fail_the_registry_closed() {
+    let template = *TARGETS
+        .iter()
+        .find(|target| target.id == "d1-file-sync")
+        .expect("the fixed target list contains d1-file-sync");
+    let fake_owner = LdfiTarget {
+        phase_owner_bead: "fgdb-made-up-owner",
+        ..template
+    };
+    assert_eq!(
+        validate_target_metadata(&fake_owner),
+        Err(TargetMetadataError::PhaseBoundaryMismatch)
+    );
+    assert_eq!(
+        validate_registry_rows(&[fake_owner]),
+        Err(RegistryValidationError::InvalidRow {
+            target_id: "d1-file-sync",
+            error: TargetMetadataError::PhaseBoundaryMismatch,
+        })
+    );
+
+    let fake_gate = LdfiTarget {
+        first_required_gate: "fgdb-gate-invented",
+        ..template
+    };
+    assert_eq!(
+        validate_target_metadata(&fake_gate),
+        Err(TargetMetadataError::PhaseBoundaryMismatch)
+    );
+
+    let invented_target = LdfiTarget {
+        id: "invented-target",
+        ..template
+    };
+    assert_eq!(
+        validate_target_metadata(&invented_target),
+        Err(TargetMetadataError::UnknownTargetId)
+    );
+
+    for (target_id, wrong_owner, wrong_gate) in [
+        ("checkpoint-install", G3_PHASE_OWNER, G3_GATE),
+        ("attempt-generation", G3_PHASE_OWNER, G3_GATE),
+        ("raft", W12_PHASE_OWNER, W12_GATE),
+        ("local-to-w12-seal", BASE_HARNESS_OWNER, GENESIS_GATE),
+    ] {
+        let mut reattributed = *TARGETS
+            .iter()
+            .find(|target| target.id == target_id)
+            .expect("the cross-phase negative names a normative target");
+        reattributed.phase_owner_bead = wrong_owner;
+        reattributed.first_required_gate = wrong_gate;
+        if let Reachability::NotYetBuilt { bead } = &mut reattributed.reachability {
+            *bead = wrong_owner;
+        }
+        assert_eq!(
+            validate_target_metadata(&reattributed),
+            Err(TargetMetadataError::PhaseBoundaryMismatch),
+            "known target {target_id:?} accepted a different registered phase"
+        );
+    }
+
+    assert_eq!(
+        validate_registry_rows(&[template, template]),
+        Err(RegistryValidationError::DuplicateTargetId {
+            target_id: "d1-file-sync",
+        })
+    );
+
+    let without_ticket_claim: Vec<LdfiTarget> = TARGETS
+        .iter()
+        .copied()
+        .filter(|target| target.id != "ticket-claim")
+        .collect();
+    assert_eq!(
+        validate_registry_rows(&without_ticket_claim),
+        Err(RegistryValidationError::TargetInventoryLength {
+            expected: EXPECTED_TARGET_IDS.len(),
+            actual: EXPECTED_TARGET_IDS.len() - 1,
+        }),
+        "removing a pending row must not shrink the normative denominator"
+    );
+}
+
+#[test]
+fn activation_before_the_owning_implementation_lands_is_rejected() {
+    let mut exercised = 0;
+    for target in TARGETS
+        .iter()
+        .filter(|target| target.row_state == TargetRowState::Pending)
+    {
+        exercised += 1;
+        assert_eq!(
+            validate_activation(
+                target.id,
+                target.phase_owner_bead,
+                target.first_required_gate,
+                Some("plausible-but-unregistered-evidence"),
+            ),
+            Err(ActivationRejection::ImplementationDisabled),
+            "pending target {:?} activated before its implementation",
+            target.id
+        );
+    }
+    assert!(exercised > 0, "the premature-activation law was vacuous");
+}
+
+#[test]
+fn every_live_row_activates_only_with_its_exact_owner_gate_and_evidence() {
+    let mut exercised = 0;
+    for target in TARGETS
+        .iter()
+        .filter(|target| target.row_state == TargetRowState::Live)
+    {
+        exercised += 1;
+        let evidence = target
+            .coverage_evidence_ref
+            .expect("metadata validation requires live evidence");
+        assert_eq!(
+            validate_activation(
+                target.id,
+                target.phase_owner_bead,
+                target.first_required_gate,
+                Some(evidence),
+            ),
+            Ok(target)
+        );
+        assert_eq!(
+            validate_activation(
+                target.id,
+                G3_PHASE_OWNER,
+                target.first_required_gate,
+                Some(evidence),
+            ),
+            Err(ActivationRejection::WrongPhaseOwner)
+        );
+        assert_eq!(
+            validate_activation(
+                target.id,
+                target.phase_owner_bead,
+                target.first_required_gate,
+                Some("different-evidence"),
+            ),
+            Err(ActivationRejection::EvidenceMismatch)
+        );
+    }
+    assert!(exercised > 0, "the live-activation law was vacuous");
+}
+
+#[test]
+fn every_live_evidence_reference_resolves_to_one_exact_test() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crates/<crate> has a repo root");
+    for target in TARGETS
+        .iter()
+        .filter(|target| target.row_state == TargetRowState::Live)
+    {
+        let reference = target
+            .coverage_evidence_ref
+            .expect("metadata validation requires live evidence");
+        let (path, selector) = reference.rsplit_once("::").unwrap_or(("", ""));
+        assert!(
+            !path.is_empty() && !selector.is_empty(),
+            "target {:?} has a non-resolvable evidence reference {reference:?}",
+            target.id
+        );
+        let source = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+        let function = format!("fn {selector}(");
+        assert_eq!(
+            source.matches(&function).count(),
+            1,
+            "target {:?} evidence {reference:?} must resolve to one exact test function",
+            target.id
+        );
+        let function_offset = source.find(&function).unwrap_or(source.len());
+        let prefix = source.get(..function_offset).unwrap_or_default();
+        assert_eq!(
+            prefix.lines().rev().find(|line| !line.trim().is_empty()),
+            Some("#[test]"),
+            "target {:?} evidence {reference:?} is not a #[test] function",
+            target.id
+        );
+    }
+}
+
+#[test]
+fn local_g3_and_w12_entrypoints_are_delegated_not_covered_by_the_base_harness() {
+    assert_eq!(
+        campaign_entrypoint("checkpoint-install"),
+        Ok(CampaignEntrypoint::Delegated {
+            phase_owner_bead: LOCAL_TORTURE_OWNER,
+            first_required_gate: G1_GATE,
+            row_state: TargetRowState::Pending,
+        })
+    );
+    assert_eq!(
+        campaign_entrypoint("raft"),
+        Ok(CampaignEntrypoint::Delegated {
+            phase_owner_bead: G3_PHASE_OWNER,
+            first_required_gate: G3_GATE,
+            row_state: TargetRowState::Pending,
+        })
+    );
+    assert_eq!(
+        campaign_entrypoint("local-to-w12-seal"),
+        Ok(CampaignEntrypoint::Delegated {
+            phase_owner_bead: W12_PHASE_OWNER,
+            first_required_gate: W12_GATE,
+            row_state: TargetRowState::Pending,
+        })
+    );
+
+    let covered =
+        campaign_entrypoint("d1-file-sync").expect("the current D1 witness has a base entrypoint");
+    assert!(
+        matches!(covered, CampaignEntrypoint::Covered { .. }),
+        "the positive control must prove the router can report real coverage"
+    );
+}
+
+#[test]
+fn jsonl_emits_every_phase_boundary_field_for_every_declared_target() {
+    let jsonl = registry_jsonl().expect("the complete registry validates before export");
+    let lines: Vec<&str> = jsonl.lines().collect();
+    assert_eq!(lines.len(), TARGETS.len());
+
+    let keys = [
+        "event_version",
+        "target_id",
+        "phase_owner_bead",
+        "first_required_gate",
+        "implementation_enabled",
+        "row_state",
+        "coverage_evidence_ref",
+    ];
+    for (line, target) in lines.into_iter().zip(TARGETS) {
+        assert!(line.starts_with('{') && line.ends_with('}'));
+        for key in keys {
+            assert_eq!(
+                line.matches(&format!("\"{key}\":")).count(),
+                1,
+                "target {:?} does not emit exactly one {key:?}: {line}",
+                target.id
+            );
+        }
+        assert!(
+            line.contains(&format!("\"target_id\":\"{}\"", target.id)),
+            "JSONL target order drifted from the registry: {line}"
+        );
+        match target.coverage_evidence_ref {
+            Some(evidence) => assert!(line.contains(evidence)),
+            None => assert!(line.contains("\"coverage_evidence_ref\":null")),
+        }
+    }
+}
+
 /// THE TEST THE REGISTRY EXISTS FOR. Coverage is reported against the plan's
 /// denominator, and the gap is a number rather than an omission.
 #[test]
 fn the_coverage_gap_is_reported_not_hidden() {
+    let reachable = reachable_count().expect("the complete registry validates before counting");
+    let unreachable = unreachable_count().expect("the complete registry validates before counting");
     assert_eq!(
-        reachable_count() + unreachable_count(),
+        reachable + unreachable,
         TARGETS.len(),
         "the counts do not partition the table; coverage arithmetic would be wrong"
     );
@@ -97,22 +414,22 @@ fn the_coverage_gap_is_reported_not_hidden() {
     // non-vacuity control: with no reachable targets the registry would be
     // aspirational, and with none unreachable it would be lying.
     assert!(
-        reachable_count() > 0,
-        "no target is reachable; the lab VFS faults D1/D2 writes and syncs today"
+        reachable > 0,
+        "no target is reachable; the lab VFS faults D1/D2 syncs today"
     );
     assert!(
-        unreachable_count() > 0,
+        unreachable > 0,
         "every declared target is reachable, which at this HEAD would mean the \
          denominator was quietly redefined to what we built"
     );
 
-    let statement = coverage_statement();
+    let statement = coverage_statement().expect("the complete registry validates before reporting");
     assert!(
         statement.contains(&TARGETS.len().to_string()),
         "the coverage statement must name the plan's denominator: {statement}"
     );
     assert!(
-        statement.contains(&unreachable_count().to_string()),
+        statement.contains(&unreachable.to_string()),
         "the coverage statement must name the gap: {statement}"
     );
 }
@@ -124,9 +441,9 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
     // there. The allowlist is exact on purpose: flipping a row to reachable
     // must arrive together with its witness, or this test names the overclaim.
     //
-    //   d1/d2 file writes and syncs — witnessed by the FaultVfs section of
-    //     `durability_semantics_e2e.rs` (fsync lies, interior tear, ENOSPC,
-    //     bit flip, all through the real commit path);
+    //   d1/d2 file syncs — witnessed by the FaultVfs section of
+    //     `durability_semantics_e2e.rs`; file writes remain pending because
+    //     `poll_write` has no injection point yet;
     //   dual-root ordered + physical boundaries — witnessed below in this
     //     file (`a_lying_publish_sync_*`, `enospc_refuses_the_publish_*`);
     //   directory-sync — witnessed by the dirent-durability section of
@@ -137,9 +454,7 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
     //     this file (fgdb-1dgm: `damaged_publish_bytes_mint_no_certificate_*`,
     //     `a_stale_forked_or_absent_continuity_head_*`).
     let witnessed: BTreeSet<&str> = [
-        "d1-file-write",
         "d1-file-sync",
-        "d2-file-write",
         "d2-file-sync",
         "directory-sync",
         "dual-root-ordered-boundary",
@@ -151,7 +466,7 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
     .collect();
     let reachable: BTreeSet<&str> = TARGETS
         .iter()
-        .filter(|target| target.reachability.is_reachable())
+        .filter(|target| target.row_state == TargetRowState::Live)
         .map(|target| target.id)
         .collect();
     assert_eq!(
@@ -1041,7 +1356,7 @@ fn trace_derived_faults_execute_against_the_same_embedded_spine_workload() -> Re
 }
 
 #[test]
-fn trace_derived_fault_is_executed_and_shrunk_without_blind_enumeration() {
+fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
     let events = successful_durable_append_trace(scratch_dir("lineage-append-baseline"));
     let derived = derive_fault_hypotheses(
         &events,
@@ -1103,6 +1418,16 @@ fn trace_derived_fault_is_executed_and_shrunk_without_blind_enumeration() {
             .to_plan(0x1df1_ffff, 100)
             .expect("found hypothesis maps exactly"),
     };
+    let reproduced = replay.run(&scratch_dir("lineage-append-artifact"));
+    assert_eq!(
+        reproduced.failure.as_ref().map(|failure| failure.kind),
+        Some(FailureKind::AcknowledgedBytesLost),
+        "the planted trace-derived fault did not reproduce"
+    );
+    assert!(
+        reproduced.artifact.is_some(),
+        "the reproduced fault skipped the structured artifact boundary"
+    );
     let shrunk = shrink(replay, &scratch_dir("lineage-append-shrink"))
         .expect("isolated shrink attempts are created")
         .expect("the trace-derived failure reproduces for the shrinker");
@@ -1111,6 +1436,17 @@ fn trace_derived_fault_is_executed_and_shrunk_without_blind_enumeration() {
         shrunk.replay.plan.fsync_lie,
         Trigger::At(1),
         "shrinking must retain the one event that caused the failure"
+    );
+    let minimal = shrunk
+        .replay
+        .run(&scratch_dir("lineage-append-shrunk-artifact"));
+    assert_eq!(
+        minimal.failure.as_ref().map(|failure| failure.kind),
+        Some(FailureKind::AcknowledgedBytesLost)
+    );
+    assert!(
+        minimal.artifact.is_some(),
+        "the minimal reproducer skipped the structured artifact boundary"
     );
 }
 

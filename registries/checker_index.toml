@@ -240,6 +240,27 @@ status = "live"
 unit = "artifact"
 
 [[checker]]
+symbol = "cargo-test:lab-runtime-integration"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/sim_dual_run.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "cargo-test:simulation-forensics-integration"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/sim_ldfi.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
+symbol = "cargo-test:replay-completeness"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/sim_completeness.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
 symbol = "e2e:g0_architecture_decisions"
 kind = "script"
 artifact = "scripts/g0_architecture_decisions_e2e.sh"

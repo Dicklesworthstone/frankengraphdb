@@ -7963,8 +7963,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:lab-runtime-integration"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:lab-runtime-integration"
+package = "fgdb-sim"
+target = "sim_dual_run"
+selector = "two_lab_runs_at_one_seed_are_byte_identical_across_seeds"
+command_argv = ["cargo", "test", "-p", "fgdb-sim", "--test", "sim_dual_run", "two_lab_runs_at_one_seed_are_byte_identical_across_seeds", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:proof-lane-resolution"
@@ -8028,8 +8033,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:simulation-forensics-integration"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:simulation-forensics-integration"
+package = "fgdb-sim"
+target = "sim_ldfi"
+selector = "trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault"
+command_argv = ["cargo", "test", "-p", "fgdb-sim", "--test", "sim_ldfi", "trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:optimizer-certificate-integration"
@@ -8428,8 +8438,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:replay-completeness"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:replay-completeness"
+package = "fgdb-sim"
+target = "sim_completeness"
+selector = "all_four_replay_completeness_grades_are_reached_by_executable_fixtures"
+command_argv = ["cargo", "test", "-p", "fgdb-sim", "--test", "sim_completeness", "all_four_replay_completeness_grades_are_reached_by_executable_fixtures", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:privacy-accounting"

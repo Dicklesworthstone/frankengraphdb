@@ -201,3 +201,73 @@ fn exactly_one_grade_claims_byte_identity() {
         .count();
     assert_eq!(claiming, 1, "exactly one grade may claim byte identity");
 }
+
+/// Aggregate entrypoint for the governed replay-completeness claim. Each arm
+/// is produced by the real grader from an executable fixture; merely listing
+/// the enum variants would not prove that the grading policy can reach them.
+#[test]
+fn all_four_replay_completeness_grades_are_reached_by_executable_fixtures() {
+    let dir = scratch_dir("all-four-grades");
+    let replay = lying_replay();
+    let recorded_run = replay.run(&dir);
+    assert!(!recorded_run.events.is_empty());
+
+    let complete = Recording {
+        events: recorded_run.events.clone(),
+        failure: recorded_run.failure.clone(),
+        withheld_classes: Vec::new(),
+    };
+    let faithful = replay.run(&dir);
+    let replayable = grade(&complete, &faithful);
+
+    let divergent = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            seed: 0x1774_0000_0000_0022,
+            torn_write: Trigger::Always,
+            ..FaultPlan::faultless()
+        },
+    }
+    .run(&dir);
+    let structural = grade(&complete, &divergent);
+
+    let withheld = Recording {
+        events: recorded_run.events,
+        failure: recorded_run.failure,
+        withheld_classes: vec!["crypto-entropy".to_string()],
+    };
+    let verifiable = grade(&withheld, &faithful);
+
+    let withheld_everything = Recording {
+        events: withheld.events,
+        failure: withheld.failure,
+        withheld_classes: vec!["crypto-entropy".to_string(), "fsync-lie".to_string()],
+    };
+    let faultless = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan::faultless(),
+    }
+    .run(&dir);
+    let audit_only = grade(&withheld_everything, &faultless);
+
+    assert_eq!(replayable, ReplayCompleteness::Replayable);
+    assert!(matches!(
+        structural,
+        ReplayCompleteness::StructuralReplay { .. }
+    ));
+    assert_eq!(
+        verifiable,
+        ReplayCompleteness::VerifiableIfArtifactsSupplied {
+            missing_classes: vec!["crypto-entropy".to_string()],
+        }
+    );
+    assert!(matches!(audit_only, ReplayCompleteness::AuditOnly { .. }));
+    assert_eq!(
+        [&replayable, &structural, &verifiable, &audit_only]
+            .into_iter()
+            .filter(|grade| grade.claims_byte_identity())
+            .count(),
+        1,
+        "only the executable Replayable fixture may claim byte identity"
+    );
+}
