@@ -851,6 +851,7 @@ impl<'bytes> ZoneMapDecoder<'bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_accuracy_fixtures::{FixtureSource, named_graph_fixtures, node_degrees};
 
     fn profile() -> ZoneMapProfile {
         ZoneMapProfile {
@@ -1201,5 +1202,109 @@ mod tests {
             Err(ZoneMapError::MissingObservation)
         );
         assert_eq!(zone, before);
+    }
+
+    #[test]
+    fn named_fnx_degree_zone_maps_are_exact_and_partition_merge_equivalent() {
+        for fixture in named_graph_fixtures() {
+            assert_eq!(fixture.source, FixtureSource::FnxGenerators);
+            let degrees = node_degrees(&fixture);
+            let degree_bytes = degrees
+                .iter()
+                .map(|degree| degree.to_be_bytes())
+                .collect::<Vec<_>>();
+            let fixture_profile = ZoneMapProfile {
+                max_value_bytes: size_of::<u64>(),
+                max_observations: u64::try_from(degrees.len()).expect("fixture size fits u64"),
+            };
+            let build = |values: &[[u8; 8]]| {
+                let mut zone = ByteZoneMap::new(fixture_profile);
+                for value in values {
+                    zone.try_observe(value)
+                        .expect("named fixture fits its exact ceiling");
+                }
+                zone
+            };
+
+            let whole = build(&degree_bytes);
+            let even = degree_bytes.iter().step_by(2).copied().collect::<Vec<_>>();
+            let odd = degree_bytes
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .copied()
+                .collect::<Vec<_>>();
+            let mut partitioned = build(&even);
+            partitioned
+                .try_merge(&build(&odd))
+                .expect("partitioned named fixture fits the whole ceiling");
+            assert_eq!(
+                partitioned
+                    .try_to_canonical_bytes()
+                    .expect("partitioned state is canonical"),
+                whole
+                    .try_to_canonical_bytes()
+                    .expect("whole state is canonical"),
+                "{} partition merge must equal whole accumulation",
+                fixture.name
+            );
+
+            let expected = match fixture.name {
+                "fnx_path_graph_n1024" => Some((1_u64, 2_u64)),
+                "fnx_star_graph_spokes1023" => Some((1_u64, 1_023_u64)),
+                "fnx_cycle_graph_n1024" => Some((2_u64, 2_u64)),
+                "fnx_complete_bipartite_graph_48_64" => Some((48_u64, 64_u64)),
+                _ => None,
+            };
+            assert!(
+                expected.is_some(),
+                "unregistered named graph fixture {}",
+                fixture.name
+            );
+            let (minimum, maximum) = expected.unwrap_or_default();
+            assert_eq!(whole.minimum(), Some(minimum.to_be_bytes().as_slice()));
+            assert_eq!(whole.maximum(), Some(maximum.to_be_bytes().as_slice()));
+            assert_eq!(whole.len(), fixture_profile.max_observations);
+
+            let removed_index = degrees.len() / 2;
+            let removed_bytes = degree_bytes[removed_index];
+            let mut retained_bytes = degree_bytes.clone();
+            retained_bytes.remove(removed_index);
+            let rebuilt = build(&retained_bytes);
+            let mut removed = whole.clone();
+            if minimum == maximum {
+                removed
+                    .try_remove(&removed_bytes)
+                    .expect("singleton-extrema delete is exact");
+                assert_eq!(
+                    removed
+                        .try_to_canonical_bytes()
+                        .expect("deleted state is canonical"),
+                    rebuilt
+                        .try_to_canonical_bytes()
+                        .expect("rebuilt state is canonical"),
+                    "{} exact delete must equal rebuilding the retained population",
+                    fixture.name
+                );
+            } else {
+                let before = removed
+                    .try_to_canonical_bytes()
+                    .expect("pre-delete state is canonical");
+                assert!(matches!(
+                    removed.try_remove(&removed_bytes),
+                    Err(ZoneMapError::RebuildRequired { .. })
+                        | Err(ZoneMapError::InteriorMembershipUnproven { .. })
+                ));
+                assert_eq!(
+                    removed
+                        .try_to_canonical_bytes()
+                        .expect("refused delete preserves canonical state"),
+                    before,
+                    "{} rebuild request must not mutate the summary",
+                    fixture.name
+                );
+                assert_eq!(rebuilt.len(), fixture_profile.max_observations - 1);
+            }
+        }
     }
 }

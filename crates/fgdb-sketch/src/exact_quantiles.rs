@@ -609,6 +609,7 @@ impl<'bytes> ExactQuantileDecoder<'bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_accuracy_fixtures::{FixtureSource, named_graph_fixtures, node_degrees};
 
     fn summary(values: &[u64]) -> ExactQuantileSketch {
         let mut sketch = ExactQuantileSketch::new(100);
@@ -912,5 +913,82 @@ mod tests {
             })
         );
         assert_eq!(bounded, before);
+    }
+
+    #[test]
+    fn named_fnx_degree_quantiles_are_exact_and_partition_merge_equivalent() {
+        for fixture in named_graph_fixtures() {
+            assert_eq!(fixture.source, FixtureSource::FnxGenerators);
+            let degrees = node_degrees(&fixture);
+            let ceiling = degrees.len();
+            let build = |values: &[u64]| {
+                let mut sketch = ExactQuantileSketch::new(ceiling);
+                for &degree in values {
+                    sketch
+                        .try_observe(degree)
+                        .expect("named fixture fits its exact ceiling");
+                }
+                sketch
+            };
+
+            let whole = build(&degrees);
+            let even = degrees.iter().step_by(2).copied().collect::<Vec<_>>();
+            let odd = degrees
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .copied()
+                .collect::<Vec<_>>();
+            let mut partitioned = build(&even);
+            partitioned
+                .try_merge(&build(&odd))
+                .expect("partitioned named fixture fits the whole ceiling");
+            assert_eq!(
+                partitioned
+                    .try_to_canonical_bytes()
+                    .expect("partitioned state is canonical"),
+                whole
+                    .try_to_canonical_bytes()
+                    .expect("whole state is canonical"),
+                "{} partition merge must equal whole accumulation",
+                fixture.name
+            );
+
+            let expected = match fixture.name {
+                "fnx_path_graph_n1024" => Some((1_u64, 2_u64, 2_u64)),
+                "fnx_star_graph_spokes1023" => Some((1_u64, 1_u64, 1_023_u64)),
+                "fnx_cycle_graph_n1024" => Some((2_u64, 2_u64, 2_u64)),
+                "fnx_complete_bipartite_graph_48_64" => Some((48_u64, 48_u64, 64_u64)),
+                _ => None,
+            };
+            assert!(
+                expected.is_some(),
+                "unregistered named graph fixture {}",
+                fixture.name
+            );
+            let (minimum, median, maximum) = expected.unwrap_or_default();
+            assert_eq!(whole.quantile(0, 1), Ok(Some(minimum)), "{}", fixture.name);
+            assert_eq!(whole.quantile(1, 2), Ok(Some(median)), "{}", fixture.name);
+            assert_eq!(whole.quantile(1, 1), Ok(Some(maximum)), "{}", fixture.name);
+
+            let removed_index = degrees.len() / 2;
+            let removed_degree = degrees[removed_index];
+            let mut removed = whole.clone();
+            removed
+                .try_remove(removed_degree)
+                .expect("the independently derived degree is present");
+            let mut retained = degrees.clone();
+            retained.remove(removed_index);
+            assert_eq!(
+                removed
+                    .try_to_canonical_bytes()
+                    .expect("deleted state is canonical"),
+                build(&retained)
+                    .try_to_canonical_bytes()
+                    .expect("rebuilt state is canonical"),
+                "{} exact delete must equal rebuilding the retained population",
+                fixture.name
+            );
+        }
     }
 }

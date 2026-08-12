@@ -486,6 +486,7 @@ impl<'bytes> DegreeHistogramDecoder<'bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_accuracy_fixtures::{FixtureSource, named_graph_fixtures, node_degrees};
 
     #[test]
     fn every_power_boundary_maps_to_its_canonical_interval() {
@@ -745,5 +746,80 @@ mod tests {
             })
         );
         assert_eq!(histogram, before);
+    }
+
+    #[test]
+    fn named_fnx_degree_histograms_are_exact_and_partition_merge_equivalent() {
+        for fixture in named_graph_fixtures() {
+            assert_eq!(fixture.source, FixtureSource::FnxGenerators);
+            let degrees = node_degrees(&fixture);
+            let ceiling = u64::try_from(degrees.len()).expect("fixture size fits u64");
+            let build = |values: &[u64]| {
+                let mut histogram = DegreeHistogram::new(ceiling);
+                for &degree in values {
+                    histogram
+                        .try_observe(degree)
+                        .expect("named fixture fits its exact ceiling");
+                }
+                histogram
+            };
+
+            let whole = build(&degrees);
+            let even = degrees.iter().step_by(2).copied().collect::<Vec<_>>();
+            let odd = degrees
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .copied()
+                .collect::<Vec<_>>();
+            let mut partitioned = build(&even);
+            partitioned
+                .try_merge(&build(&odd))
+                .expect("partitioned named fixture fits the whole ceiling");
+            assert_eq!(
+                partitioned.to_canonical_bytes(),
+                whole.to_canonical_bytes(),
+                "{} partition merge must equal whole accumulation",
+                fixture.name
+            );
+
+            let expected_nonzero = match fixture.name {
+                "fnx_path_graph_n1024" => vec![(1_usize, 2_u64), (2, 1_022)],
+                "fnx_star_graph_spokes1023" => vec![(1_usize, 1_023_u64), (10, 1)],
+                "fnx_cycle_graph_n1024" => vec![(2_usize, 1_024_u64)],
+                "fnx_complete_bipartite_graph_48_64" => {
+                    vec![(6_usize, 64_u64), (7, 48)]
+                }
+                _ => Vec::new(),
+            };
+            assert!(
+                !expected_nonzero.is_empty(),
+                "unregistered named graph fixture {}",
+                fixture.name
+            );
+            let actual_nonzero = whole
+                .canonical_counts()
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|&(_, count)| count != 0)
+                .collect::<Vec<_>>();
+            assert_eq!(actual_nonzero, expected_nonzero, "{}", fixture.name);
+            assert_eq!(whole.len(), ceiling);
+
+            let removed_degree = degrees[degrees.len() / 2];
+            let mut removed = whole.clone();
+            removed
+                .try_remove(removed_degree)
+                .expect("the independently derived degree is present");
+            let mut retained = degrees.clone();
+            retained.remove(degrees.len() / 2);
+            assert_eq!(
+                removed.to_canonical_bytes(),
+                build(&retained).to_canonical_bytes(),
+                "{} exact delete must equal rebuilding the retained population",
+                fixture.name
+            );
+        }
     }
 }

@@ -101,6 +101,40 @@ pub(crate) mod graph_accuracy_fixtures {
         bytes
     }
 
+    /// Independently derives the undirected degree population represented by
+    /// one generated fixture.
+    pub(crate) fn node_degrees(fixture: &GraphFixture) -> Vec<u64> {
+        let mut degrees = vec![0_u64; fixture.node_count];
+        for &(left, right) in &fixture.edges {
+            let left = usize::try_from(left).expect("fnx node index fits usize");
+            let right = usize::try_from(right).expect("fnx node index fits usize");
+            assert_ne!(left, right, "named fixtures must not contain self-loops");
+            let left_degree = degrees
+                .get_mut(left)
+                .expect("fnx left endpoint is inside the declared node set");
+            *left_degree = left_degree.checked_add(1).expect("fixture degree fits u64");
+            let right_degree = degrees
+                .get_mut(right)
+                .expect("fnx right endpoint is inside the declared node set");
+            *right_degree = right_degree
+                .checked_add(1)
+                .expect("fixture degree fits u64");
+        }
+
+        let degree_sum = degrees.iter().copied().try_fold(0_u64, u64::checked_add);
+        let endpoint_count = u64::try_from(fixture.edges.len())
+            .expect("fixture edge count fits u64")
+            .checked_mul(2)
+            .expect("fixture endpoint count fits u64");
+        assert_eq!(
+            degree_sum,
+            Some(endpoint_count),
+            "undirected degree sum must equal twice the edge count for {}",
+            fixture.name
+        );
+        degrees
+    }
+
     #[test]
     fn named_graph_fixtures_have_frozen_nonempty_distinct_edges() {
         let fixtures = named_graph_fixtures();
