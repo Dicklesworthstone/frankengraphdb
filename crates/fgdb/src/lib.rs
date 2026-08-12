@@ -383,16 +383,6 @@ pub enum WriteError {
     IdentitySpent {
         elem: ElementId,
     },
-    /// The batch composed operations on one element whose meaning depends on
-    /// submission order (fgdb-kokz): an update and a delete of one element,
-    /// or two touches of one exact field. The durable template's row order is
-    /// CANONICAL BYTE ORDER, not submission order, so committing this batch
-    /// would produce bytes that replay in a different order than the caller
-    /// meant — and the fold/replay refusal would then arrive AFTER the
-    /// irreversible commit. Split the batch.
-    OrderSensitiveBatch {
-        elem: ElementId,
-    },
     Canonical(CanonicalError),
     /// Chronicle failed before the marker could have become durable. Unlike
     /// [`WriteError::CommitOutcomeUnknown`], retrying after correcting the
@@ -571,13 +561,6 @@ impl core::fmt::Display for WriteError {
                 write!(
                     f,
                     "{elem:?} was spent by earlier history and can never be re-created"
-                )
-            }
-            Self::OrderSensitiveBatch { elem } => {
-                write!(
-                    f,
-                    "{elem:?} is composed order-sensitively in one batch; durable row order \
-                     is canonical, not submission order — split the batch"
                 )
             }
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
