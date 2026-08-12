@@ -787,7 +787,6 @@ impl Transaction {
             }
         }
 
-        let effects = self.effects.len();
         // The snapshot's schema binding is part of its identity (plan:205/213):
         // these effects were evaluated under the binding captured at begin, so
         // the commit may stamp ONLY that binding. A Schema/Constraint move
@@ -834,6 +833,13 @@ impl Transaction {
             // the surviving first commit establishes the initial epoch.
             None => SchemaEpoch(0),
         };
+        // Fold evaluation-order workspace effects into target-disjoint
+        // rows *before* the template byte-sorts them. The snapshot graph is
+        // the durable before-image `apply_template` will see; the workspace
+        // is the after-image. Diffing them is NetEffectNormalForm's live
+        // subset (fgdb-w5-effects-normal-form-819 / fgdb-p6tm).
+        let basis = db.read(&self.snapshot).map_err(TxnError::Snapshot)?;
+        let normal = crate::normal::normalize(&basis, &self.workspace, &self.effects);
         let template = LogicalDeltaTemplate::build(
             intent_semantics,
             [0u8; 32],
@@ -843,7 +849,7 @@ impl Transaction {
                 relation,
                 schema_epoch,
                 schema_transition: None,
-                rows: self.effects,
+                rows: normal.rows,
             }],
         )
         .map_err(TxnError::Canonical)?;
@@ -852,7 +858,7 @@ impl Transaction {
 
         Ok(TxnOutcome::WriteCommitted {
             commit_seq,
-            effects,
+            effects: template.row_count(),
             statement_failures: self.statement_failures,
         })
     }

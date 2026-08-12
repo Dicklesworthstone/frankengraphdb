@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 pub mod intents;
+pub mod normal;
 pub mod ssi;
 pub mod txn;
 
@@ -737,6 +738,33 @@ impl ReferenceGraph {
 
     pub fn edge(&self, eid: EId) -> Option<&Edge> {
         self.edges.get(&eid)
+    }
+
+    /// Live vertices in canonical id order. Used by net-effect finalization
+    /// (and tests) to diff two graphs without exposing the map.
+    pub fn iter_vertices(&self) -> impl Iterator<Item = (VId, &Vertex)> {
+        self.vertices.iter().map(|(id, vertex)| (*id, vertex))
+    }
+
+    /// Live edges in canonical id order.
+    pub fn iter_edges(&self) -> impl Iterator<Item = (EId, &Edge)> {
+        self.edges.iter().map(|(id, edge)| (*id, edge))
+    }
+
+    pub fn iter_counters(&self) -> impl Iterator<Item = ((ElementId, PropertyKeyId), i128)> + '_ {
+        self.counters.iter().map(|(k, v)| (*k, *v))
+    }
+
+    pub fn iter_escrow(&self) -> impl Iterator<Item = (EscrowDomainId, i128)> + '_ {
+        self.escrow.iter().map(|(k, v)| (*k, *v))
+    }
+
+    pub fn iter_sketches(&self) -> impl Iterator<Item = (ObjectId, [u8; 32])> + '_ {
+        self.sketches.iter().map(|(k, v)| (*k, *v))
+    }
+
+    pub fn sketch_digest(&self, profile: ObjectId) -> Option<[u8; 32]> {
+        self.sketches.get(&profile).copied()
     }
 
     /// Exact current system-time version identity of an element.

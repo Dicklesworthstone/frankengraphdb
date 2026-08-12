@@ -1801,3 +1801,74 @@ fn two_disjoint_transactions_commit_under_one_unchanged_binding() {
     assert_eq!(prop_of(&db, MAIN, 3), Some(30));
     assert_eq!(prop_of(&db, MAIN, 4), Some(40));
 }
+
+// ---------------------------------------------------------------------------
+// NetEffectNormalForm at commit (fgdb-p6tm / fgdb-w5-effects-normal-form-819)
+// ---------------------------------------------------------------------------
+
+/// The exact p6tm probe: evaluation emits `{before:5,after:3}` then
+/// `{before:3,after:7}`; byte-sort puts the second row first; apply refuses
+/// `PropertyBeforeMismatch`. After the fold the template carries one row
+/// `{before:5,after:7}` and the commit succeeds.
+#[test]
+fn decreasing_then_increasing_property_chain_commits() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 5)]);
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.execute(&[set(1, 3), set(1, 7)]).expect("executes");
+    let (_, effects, _) = commit_ok(&mut db, txn, 2);
+    assert_eq!(effects, 1, "the chain folds to one committed property row");
+    assert_eq!(prop_of(&db, MAIN, 1), Some(7));
+}
+
+/// Same class as p6tm: create, mutate, delete in one transaction must not
+/// leave a create/property/delete triple for the sorter to scramble.
+#[test]
+fn create_set_delete_in_one_transaction_cancels() {
+    let mut db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.execute(&[create(9, 1), set(9, 4), delete_vertex(9)])
+        .expect("executes");
+    let (_, effects, _) = commit_ok(&mut db, txn, 2);
+    assert_eq!(effects, 0, "create+set+delete is a net no-op");
+    assert_eq!(prop_of(&db, MAIN, 9), None);
+    assert!(
+        db.graph(GRAPH, MAIN)
+            .expect("coordinate")
+            .vertex(VId(9))
+            .is_none()
+    );
+}
+
+/// A property write then a delete of an *existing* vertex must commit as a
+/// single delete against the basis version, not a property+delete pair the
+/// sorter would apply delete-first.
+#[test]
+fn property_then_delete_of_existing_vertex_commits() {
+    let mut db = seeded();
+    assert_eq!(prop_of(&db, MAIN, 1), Some(0));
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.execute(&[set(1, 3), delete_vertex(1)])
+        .expect("executes");
+    let (_, effects, _) = commit_ok(&mut db, txn, 2);
+    assert_eq!(effects, 1, "only the delete survives");
+    assert!(
+        db.graph(GRAPH, MAIN)
+            .expect("coordinate")
+            .vertex(VId(1))
+            .is_none()
+    );
+    assert_eq!(prop_of(&db, MAIN, 2), Some(0), "untouched sibling remains");
+}
+
+/// Create plus a later property fold into one create whose payload is the
+/// workspace after-image.
+#[test]
+fn create_then_set_commits_as_one_create() {
+    let mut db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    txn.execute(&[create(9, 1), set(9, 8)]).expect("executes");
+    let (_, effects, _) = commit_ok(&mut db, txn, 2);
+    assert_eq!(effects, 1);
+    assert_eq!(prop_of(&db, MAIN, 9), Some(8));
+}
