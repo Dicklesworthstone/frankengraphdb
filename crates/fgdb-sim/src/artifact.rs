@@ -33,30 +33,32 @@
 //!
 //! So the artifact's replay is a [`Replay`] — a value that **actually re-runs
 //! the failure** through [`Replay::run`] — and `replay_command` is *derived
-//! from it* by [`Replay::encode`]. The contract test asserts three things
+//! from it* by [`Replay::encode`]. The contract test asserts four things
 //! together, and it is the conjunction that closes the hole:
 //!
 //! 1. the encoded string decodes back to an equal [`Replay`] (the string cannot
 //!    drift from the value);
 //! 2. running that decoded value reproduces a **byte-identical fault event
 //!    log** and the same failure (the value genuinely replays);
-//! 3. a scenario that does not fail emits **no artifact at all** (the control —
-//!    without it, an emitter that always emitted would pass 1 and 2).
+//! 3. the rendered command's exact environment assignments and frozen consumer
+//!    selector are executed through the already-built test executable in a
+//!    fresh subprocess, where the consumer reproduces the failure successfully
+//!    (the check does not make correctness depend on a nested Cargo rebuild);
+//! 4. a scenario that does not fail emits **no artifact at all** (the control —
+//!    without it, an emitter that always emitted would pass 1 through 3).
 //!
-//! # What is honestly not covered yet
-//!
-//! `Replay::encode` produces the arguments of a replay, and
-//! [`ARTIFACT_REPLAY_ENV`] is the variable a runner reads them from. Executing
-//! it as a *subprocess* — the literal reading of "execute the replay command" —
-//! is not done here; the contract test executes the replay **in process**.
-//! That is strictly stronger than the placebo (there is a consumer, and it
-//! reproduces the failure) and strictly weaker than the plan's sentence. Stated
-//! rather than blurred.
+//! This module currently discharges that command contract for built-in
+//! [`Replay`] scenarios. [`ScenarioCatalog`] gives later owners a deterministic
+//! in-process compile-time registration seam and binds their identity/state
+//! model to the returned evidence, but it cannot synthesize a fresh-process
+//! command or decoder for an arbitrary downstream function pointer. Those
+//! owners must provide and test that executable boundary themselves.
 
 use crate::vfs::{FaultEvent, FaultPlan, FaultVfs, Trigger};
 use asupersync::fs::{OpenOptions, Vfs, VfsFile};
 use asupersync::io::AsyncWrite;
-use asupersync::{Budget, runtime::RuntimeBuilder};
+use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::{Budget, Cx};
 use fgdb::{
     CAPSULE_OBJECT_KIND, Database, DatabaseKeys, DatabaseState, DerivedPublicationStage, ReadError,
     RebuildError, RecoveryRequired, WriteBatch, WriteError,
@@ -70,13 +72,19 @@ use fgdb_types::{BranchId, CommitSeq, GraphId, VId};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::future::poll_fn;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 /// The environment variable a replay runner reads. Named here so the emitter
 /// and the consumer cannot disagree about it — the exact disagreement that
 /// makes fgdb-4bxh's upstream replay command inert.
 pub const ARTIFACT_REPLAY_ENV: &str = "FGDB_SIM_REPLAY";
+
+/// Expected canonical failure/event digest consumed by the fresh-process
+/// replay entrypoint. The emitted command sets this beside
+/// [`ARTIFACT_REPLAY_ENV`], so a child that reaches a different failure cannot
+/// report success merely because it failed somehow.
+pub const ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV: &str = "FGDB_SIM_EXPECTED_REPLAY_DIGEST";
 
 /// Plan line 1138's field list, one entry per name, in the order the line
 /// spells them. Closed on purpose: [`FailureArtifact`] is a total map over
@@ -165,11 +173,10 @@ impl Field {
 
 /// The scenarios this harness can replay.
 ///
-/// A closed enum rather than a dynamic registry: a replay must be executable
-/// from a decoded string in a *fresh process*, and a registry populated at
-/// runtime cannot promise that the id in an artifact still resolves. When the
-/// campaign registry (fgdb-verif-sim-q97e) lands, it owns the general case;
-/// this is the part that has to work now.
+/// A closed enum for the base crate's fresh-process replay commands. A runtime
+/// registry cannot promise that an artifact ID resolves in a new process;
+/// downstream owners use [`ScenarioCatalog`] for deterministic in-process
+/// registration and provide their own executable decoder when filing commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scenario {
     /// Write four sectors through one handle, sync, crash, and require every
@@ -311,16 +318,163 @@ pub struct ScenarioEntry {
     pub state_model: &'static str,
 }
 
+/// Compile-time registration row for a scenario supplied by this crate or a
+/// later campaign owner.
+///
+/// Function pointers keep in-process registration deterministic: a binary
+/// assembles an immutable catalog explicitly, with no constructor side effects
+/// or process-global plugin order. This catalog does not itself encode those
+/// pointers into a fresh-process replay command.
+#[derive(Clone, Copy)]
+pub struct ScenarioRegistration {
+    pub id: &'static str,
+    pub asserts: &'static str,
+    pub state_model: &'static str,
+    pub execute: fn(FaultPlan, &Path) -> RunOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScenarioRegistrationError {
+    InvalidId,
+    EmptyAssertion,
+    EmptyStateModel,
+    DuplicateId,
+    UnknownId,
+    ExecutionEvidenceMutated,
+    PlanMismatch,
+}
+
+/// Validated immutable view over registrations selected by one binary.
+pub struct ScenarioCatalog<'a> {
+    rows: &'a [ScenarioRegistration],
+}
+
+/// One catalog execution with the registered identity and state-model contract
+/// bound to its sealed outcome. This prevents a downstream scenario from
+/// silently inheriting the built-in replay's name in campaign logs.
+pub struct RegisteredRunOutcome<'a> {
+    registration: &'a ScenarioRegistration,
+    outcome: RunOutcome,
+    evidence_digest: String,
+}
+
+impl RegisteredRunOutcome<'_> {
+    #[must_use]
+    pub const fn id(&self) -> &'static str {
+        self.registration.id
+    }
+
+    #[must_use]
+    pub const fn assertion(&self) -> &'static str {
+        self.registration.asserts
+    }
+
+    #[must_use]
+    pub const fn state_model(&self) -> &'static str {
+        self.registration.state_model
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &RunOutcome {
+        &self.outcome
+    }
+
+    /// Digest over the catalog identity/state model plus the callback's sealed
+    /// execution. Later-owner artifact emitters can pin this in their own
+    /// fresh-process command without editing the base scenario enum.
+    #[must_use]
+    pub fn evidence_digest(&self) -> &str {
+        &self.evidence_digest
+    }
+
+    #[must_use]
+    pub fn log_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "registered-sim-run id={} assertion={:?} state_model={:?} evidence_digest={}",
+            self.id(),
+            self.assertion(),
+            self.state_model(),
+            self.evidence_digest,
+        )];
+        lines.extend(self.outcome.receipt.log_lines());
+        lines
+    }
+}
+
+impl<'a> ScenarioCatalog<'a> {
+    /// Validate identifiers and exact-set uniqueness for unambiguous catalog
+    /// resolution within the assembled binary.
+    pub fn try_new(rows: &'a [ScenarioRegistration]) -> Result<Self, ScenarioRegistrationError> {
+        let mut ids = std::collections::BTreeSet::new();
+        for row in rows {
+            let valid_id = !row.id.is_empty()
+                && row.id.len() <= 128
+                && row.id.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_alphanumeric()
+                        || (index > 0 && matches!(byte, b'.' | b'_' | b':' | b'/' | b'-'))
+                });
+            if !valid_id {
+                return Err(ScenarioRegistrationError::InvalidId);
+            }
+            if row.asserts.trim().is_empty() {
+                return Err(ScenarioRegistrationError::EmptyAssertion);
+            }
+            if row.state_model.trim().is_empty() {
+                return Err(ScenarioRegistrationError::EmptyStateModel);
+            }
+            if !ids.insert(row.id) {
+                return Err(ScenarioRegistrationError::DuplicateId);
+            }
+            if SCENARIOS.iter().any(|builtin| builtin.id == row.id) {
+                return Err(ScenarioRegistrationError::DuplicateId);
+            }
+        }
+        Ok(Self { rows })
+    }
+
+    #[must_use]
+    pub fn resolve(&self, id: &str) -> Option<&ScenarioRegistration> {
+        self.rows.iter().find(|row| row.id == id)
+    }
+
+    /// Resolve and execute through the row's registered function pointer.
+    pub fn execute(
+        &'a self,
+        id: &str,
+        plan: FaultPlan,
+        dir: &Path,
+    ) -> Result<RegisteredRunOutcome<'a>, ScenarioRegistrationError> {
+        let row = self
+            .resolve(id)
+            .ok_or(ScenarioRegistrationError::UnknownId)?;
+        let outcome = (row.execute)(plan, dir);
+        if outcome.replay().plan != plan {
+            return Err(ScenarioRegistrationError::PlanMismatch);
+        }
+        let run_digest = outcome
+            .replay_completeness_digest()
+            .ok_or(ScenarioRegistrationError::ExecutionEvidenceMutated)?;
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(b"fgdb.sim.registered-run.v1");
+        hasher.update(row.id.as_bytes());
+        hasher.update(row.asserts.as_bytes());
+        hasher.update(row.state_model.as_bytes());
+        hasher.update(run_digest.as_bytes());
+        Ok(RegisteredRunOutcome {
+            registration: row,
+            outcome,
+            evidence_digest: hasher.finalize().to_hex(),
+        })
+    }
+}
+
 /// The scenario registry.
 ///
-/// **Why a const table and not a registration API.** A replay must resolve its
-/// scenario id in a *fresh process* — that is the whole point of
-/// [`Replay::encode`] producing a string a human can paste. A registry
-/// populated at runtime cannot promise that: whether an id resolves would
-/// depend on which registration calls that particular binary happened to make
-/// before the lookup, so the same artifact would replay in one process and
-/// fail in another. Every entry being a compile-time constant makes
-/// resolution a property of the binary rather than of its startup path.
+/// Built-in artifact descriptors remain a const table because the base replay
+/// command must resolve without any application assembly. Later campaign
+/// crates use [`ScenarioRegistration`] and [`ScenarioCatalog`] to assemble
+/// their own compile-time catalogs without editing this enum or relying on a
+/// process-global dynamic registry.
 ///
 /// Indexed by [`Scenario::index`]; `scenario_registry_is_complete` pins that.
 const POST_D2_EXPECTATION: &str =
@@ -661,12 +815,14 @@ impl Replay {
         })
     }
 
-    /// The human-facing command, whose arguments are exactly [`Replay::encode`].
+    /// The human-facing command, carrying the replay plus the exact failure
+    /// and event-log digest the fresh process must reproduce.
     #[must_use]
-    pub fn command(&self) -> String {
+    pub fn command_for(&self, failure: &Failure, events: &[FaultEvent]) -> String {
         format!(
-            "{ARTIFACT_REPLAY_ENV}={} cargo test -p fgdb-sim --test sim_artifact -- --ignored replay_from_env",
-            self.encode()
+            "{ARTIFACT_REPLAY_ENV}={} {ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV}={} cargo test -p fgdb-sim --test sim_artifact -- --ignored replay_from_env",
+            self.encode(),
+            replay_evidence_digest(failure, events)
         )
     }
 
@@ -679,30 +835,57 @@ impl Replay {
     /// clockless VFS constructor.
     #[must_use]
     pub fn run(&self, dir: &Path) -> RunOutcome {
-        let runtime = RuntimeBuilder::new()
-            .build()
-            .expect("the replay runtime builds");
-        let root = runtime.request_cx_with_budget(Budget::INFINITE);
-        let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let vfs = FaultVfs::unix_with_clock(self.plan, root);
+        let replay = *self;
         let scenario = self.scenario;
-        let failure = runtime.block_on(async {
-            match scenario {
-                Scenario::DurableAppend => durable_append(&vfs, dir, true).await,
-                Scenario::LostAppend => durable_append(&vfs, dir, false).await,
-                Scenario::SpineDurability => spine_durability(&commit_cx, &vfs, dir, false).await,
-                Scenario::PlantedSpineLoss => spine_durability(&commit_cx, &vfs, dir, true).await,
-                Scenario::PostD2Recovery(stage) => {
-                    post_d2_recovery(&commit_cx, &vfs, dir, stage).await
-                }
-            }
-        });
+        let dir = dir.to_path_buf();
+        let event_root = dir.clone();
+        let mut lab_config = LabConfig::new(self.plan.seed);
+        lab_config.auto_advance_time = true;
+        let mut lab = LabRuntime::new(lab_config);
+        let root_region = lab.state.create_root_region(Budget::INFINITE);
+        let (task, mut handle) = lab
+            .state
+            .create_task(root_region, Budget::INFINITE, async move {
+                let root = Cx::current().expect("lab replay task installs its Cx");
+                let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
+                let vfs = FaultVfs::unix_with_clock(replay.plan, root);
+                let failure = match scenario {
+                    Scenario::DurableAppend => durable_append(&vfs, &dir, true).await,
+                    Scenario::LostAppend => durable_append(&vfs, &dir, false).await,
+                    Scenario::SpineDurability => {
+                        spine_durability(&commit_cx, &vfs, &dir, false).await
+                    }
+                    Scenario::PlantedSpineLoss => {
+                        spine_durability(&commit_cx, &vfs, &dir, true).await
+                    }
+                    Scenario::PostD2Recovery(stage) => {
+                        post_d2_recovery(&commit_cx, &vfs, &dir, stage).await
+                    }
+                };
+                (failure, vfs.events())
+            })
+            .expect("create replay task");
+        lab.scheduler.lock().schedule(task, 0);
+        let _ = lab.run_with_auto_advance();
+        let report = lab.report();
+        let (failure, mut events) = handle
+            .try_join()
+            .expect("replay task join remains valid")
+            .expect("replay task completed under the bounded lab run");
+        assert!(
+            report.quiescent,
+            "replay did not reach lab quiescence: {report:?}"
+        );
+        assert!(
+            report.invariant_violations.is_empty(),
+            "replay violated lab runtime invariants: {:?}",
+            report.invariant_violations
+        );
         // An artifact is replayed in a fresh directory. Preserve the durable
         // object path within that directory, but do not make a caller's
         // scratch prefix part of the supposedly reproducible schedule.
-        let mut events = vfs.events();
         for event in &mut events {
-            if let Ok(relative) = event.path.strip_prefix(dir) {
+            if let Ok(relative) = event.path.strip_prefix(&event_root) {
                 event.path = relative.to_path_buf();
             }
         }
@@ -710,10 +893,28 @@ impl Replay {
             .as_ref()
             .err()
             .map(|failure| FailureArtifact::for_failure(*self, failure, &events));
+        let failure = failure.err();
+        let receipt = RunReceipt::new(
+            *self,
+            report.now_nanos,
+            &events,
+            artifact.is_some(),
+            failure.as_ref().map(|_| event_root),
+        );
+        let execution_root_digest = canonical_run_digest(
+            &receipt,
+            report.now_nanos,
+            failure.as_ref(),
+            &events,
+            artifact.as_ref(),
+        );
         RunOutcome {
-            failure: failure.err(),
+            failure,
             events,
             artifact,
+            virtual_clock_epoch_nanos: report.now_nanos,
+            receipt,
+            execution_root_digest,
         }
     }
 }
@@ -833,8 +1034,141 @@ impl std::fmt::Display for Failure {
     }
 }
 
+/// Canonical same-binary digest for a replay's typed failure and normalized
+/// fault-event log.
+///
+/// The descriptor already binds scenario, seed, and plan. This digest binds
+/// the child process to the exact remaining outcome evidence rather than the
+/// much weaker predicate "some failure occurred".
+#[must_use]
+pub fn replay_evidence_digest(failure: &Failure, events: &[FaultEvent]) -> String {
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(b"fgdb.sim.replay.evidence.v1");
+    hasher.update(format!("{failure:?}").as_bytes());
+    for event in events {
+        hasher.update(format!("{event:?}").as_bytes());
+    }
+    hasher.finalize().to_hex()
+}
+
+/// Immutable receipt emitted at the execution root for every replay.
+///
+/// A passing run has no final reproducer and asserts no failure-artifact
+/// fields; a failing unshrunk run names its exact run directory and reports
+/// zero shrink iterations. [`crate::campaign::FalsificationCampaignRecord`]
+/// supersedes that path/count only after an actual shrink has been filed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunReceipt {
+    replay: Replay,
+    scenario_id: &'static str,
+    seed: u64,
+    virtual_clock_epoch_nanos: u64,
+    injected_faults: Vec<FaultEvent>,
+    artifact_fields_asserted: Vec<&'static str>,
+    shrink_iterations: usize,
+    final_reproducer_path: Option<PathBuf>,
+}
+
+impl RunReceipt {
+    fn new(
+        replay: Replay,
+        virtual_clock_epoch_nanos: u64,
+        injected_faults: &[FaultEvent],
+        artifact_emitted: bool,
+        final_reproducer_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            replay,
+            scenario_id: replay.scenario.id(),
+            seed: replay.plan.seed,
+            virtual_clock_epoch_nanos,
+            injected_faults: injected_faults.to_vec(),
+            artifact_fields_asserted: if artifact_emitted {
+                CONTRACT_FIELDS.to_vec()
+            } else {
+                Vec::new()
+            },
+            shrink_iterations: 0,
+            final_reproducer_path,
+        }
+    }
+
+    #[must_use]
+    pub const fn scenario_id(&self) -> &'static str {
+        self.scenario_id
+    }
+
+    /// Exact scenario, seed, and fault/workload plan installed at the
+    /// execution root. This is deliberately not caller-supplied at grading
+    /// time, so an unrelated replay cannot be spliced onto a real outcome.
+    #[must_use]
+    pub const fn replay(&self) -> Replay {
+        self.replay
+    }
+
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    #[must_use]
+    pub const fn virtual_clock_epoch_nanos(&self) -> u64 {
+        self.virtual_clock_epoch_nanos
+    }
+
+    #[must_use]
+    pub fn injected_faults(&self) -> &[FaultEvent] {
+        &self.injected_faults
+    }
+
+    #[must_use]
+    pub fn artifact_fields_asserted(&self) -> &[&'static str] {
+        &self.artifact_fields_asserted
+    }
+
+    #[must_use]
+    pub const fn shrink_iterations(&self) -> usize {
+        self.shrink_iterations
+    }
+
+    #[must_use]
+    pub fn final_reproducer_path(&self) -> Option<&Path> {
+        self.final_reproducer_path.as_deref()
+    }
+
+    /// Complete reconstructable log for this one execution.
+    #[must_use]
+    pub fn log_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "sim-run scenario_id={} seed={:#x} virtual_clock_epoch_nanos={}",
+            self.scenario_id, self.seed, self.virtual_clock_epoch_nanos
+        )];
+        for event in &self.injected_faults {
+            lines.push(format!(
+                "sim-run injected_fault seq={} class={} path={} detail={:?}",
+                event.seq,
+                event.kind.class(),
+                event.path.display(),
+                event.kind,
+            ));
+        }
+        lines.push(format!(
+            "sim-run artifact_fields_asserted={}",
+            self.artifact_fields_asserted.join(",")
+        ));
+        lines.push(format!(
+            "sim-run shrink_iterations={} final_reproducer_path={}",
+            self.shrink_iterations,
+            self.final_reproducer_path
+                .as_deref()
+                .map_or_else(|| "none".to_string(), |path| path.display().to_string())
+        ));
+        lines
+    }
+}
+
 /// What one scenario run produced.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RunOutcome {
     /// `Some` when the scenario's expectation did not hold.
     pub failure: Option<Failure>,
@@ -843,6 +1177,79 @@ pub struct RunOutcome {
     /// Emitted **iff** `failure` is `Some` — line 1138 binds the artifact to a
     /// *failing* run, so a passing run producing one would be a false record.
     pub artifact: Option<FailureArtifact>,
+    /// Lab virtual-clock epoch when the replay reached its terminal report.
+    pub virtual_clock_epoch_nanos: u64,
+    /// Immutable structured facts logged for this execution.
+    pub receipt: RunReceipt,
+    /// Seal over the execution-root facts. Public evidence fields remain
+    /// inspectable for existing oracle callers, but any post-run mutation is
+    /// detected before recording or grading.
+    execution_root_digest: String,
+}
+
+impl RunOutcome {
+    /// Replay identity captured by the execution root.
+    #[must_use]
+    pub const fn replay(&self) -> Replay {
+        self.receipt.replay()
+    }
+
+    /// Whether the inspectable fields still match the immutable execution
+    /// seal produced by [`Replay::run`].
+    #[must_use]
+    pub fn execution_root_is_valid(&self) -> bool {
+        self.execution_root_digest
+            == canonical_run_digest(
+                &self.receipt,
+                self.virtual_clock_epoch_nanos,
+                self.failure.as_ref(),
+                &self.events,
+                self.artifact.as_ref(),
+            )
+    }
+
+    /// Canonical digest of every currently replayable run-level fact.
+    ///
+    /// This binds replay completeness to scenario/seed/plan, exact typed
+    /// failure detail, normalized fault events, virtual epoch, and the total
+    /// structured-artifact map. Comparing only fault classes and a coarse
+    /// failure kind would let semantically different executions claim byte
+    /// identity.
+    #[must_use]
+    pub fn replay_completeness_digest(&self) -> Option<String> {
+        if !self.execution_root_is_valid() {
+            return None;
+        }
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(b"fgdb.sim.replay.completeness.v1");
+        hasher.update(self.receipt.replay.encode().as_bytes());
+        hasher.update(&self.virtual_clock_epoch_nanos.to_le_bytes());
+        hasher.update(format!("{:?}", self.failure).as_bytes());
+        for event in &self.events {
+            hasher.update(format!("{event:?}").as_bytes());
+        }
+        hasher.update(format!("{:?}", self.artifact).as_bytes());
+        Some(hasher.finalize().to_hex())
+    }
+}
+
+fn canonical_run_digest(
+    receipt: &RunReceipt,
+    virtual_clock_epoch_nanos: u64,
+    failure: Option<&Failure>,
+    events: &[FaultEvent],
+    artifact: Option<&FailureArtifact>,
+) -> String {
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(b"fgdb.sim.execution-root.v1");
+    hasher.update(format!("{receipt:?}").as_bytes());
+    hasher.update(&virtual_clock_epoch_nanos.to_le_bytes());
+    hasher.update(format!("{failure:?}").as_bytes());
+    for event in events {
+        hasher.update(format!("{event:?}").as_bytes());
+    }
+    hasher.update(format!("{artifact:?}").as_bytes());
+    hasher.finalize().to_hex()
 }
 
 const RECOVERY_GRAPH: GraphId = GraphId(1);
@@ -1158,11 +1565,16 @@ async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Res
 pub struct FailureArtifact {
     fields: BTreeMap<&'static str, Field>,
     replay: Replay,
+    failure_kind: FailureKind,
 }
 
 /// The absence every field owes to a subsystem that does not exist yet.
 fn not_yet(subsystem: &'static str, bead: &'static str) -> Field {
     Field::Absent(Absence::NotYetBuilt { subsystem, bead })
+}
+
+fn not_applicable(because: &'static str) -> Field {
+    Field::Absent(Absence::NotApplicable { because })
 }
 
 impl FailureArtifact {
@@ -1225,11 +1637,17 @@ impl FailureArtifact {
             }),
         );
         set("configuration", Field::Present(replay.encode()));
-        set("topology", not_yet("W12 topology", "fgdb-verif-sim-q97e"));
-        set("incarnation", not_yet("restore incarnations", "fgdb-1xtp"));
+        set(
+            "topology",
+            not_applicable("single-process fixture has no cluster topology"),
+        );
+        set(
+            "incarnation",
+            not_applicable("this fixture does not execute restore incarnation changes"),
+        );
         set(
             "service_visibility_epoch",
-            not_yet("service visibility", "fgdb-verif-sim-q97e"),
+            not_applicable("embedded fixture has no server service-visibility transition"),
         );
 
         if let Some(recovery) = failure.recovery {
@@ -1245,16 +1663,22 @@ impl FailureArtifact {
                 "visible_position",
                 Field::Present(recovery.published_frontier.0.to_string()),
             );
-            set("raft_position", not_yet("Raft replication", "fgdb-1xtp"));
+            set(
+                "raft_position",
+                not_applicable("single-member embedded fixture does not execute Raft"),
+            );
             set(
                 "audit_visible_position",
-                not_yet("audit visibility", "fgdb-verif-sim-q97e"),
+                not_applicable("fixture has no audit-visibility publication stage"),
             );
         } else if let Some(durability) = failure.durability {
             let acknowledged = durability.acknowledged.0.to_string();
             set("logical_position", Field::Present(acknowledged.clone()));
             set("commit_position", Field::Present(acknowledged));
-            set("raft_position", not_yet("Raft replication", "fgdb-1xtp"));
+            set(
+                "raft_position",
+                not_applicable("single-member embedded fixture does not execute Raft"),
+            );
             for position in ["applied_position", "visible_position"] {
                 set(
                     position,
@@ -1270,7 +1694,7 @@ impl FailureArtifact {
             }
             set(
                 "audit_visible_position",
-                not_yet("audit visibility", "fgdb-verif-sim-q97e"),
+                not_applicable("fixture has no audit-visibility publication stage"),
             );
         } else {
             for position in [
@@ -1283,9 +1707,8 @@ impl FailureArtifact {
             ] {
                 set(
                     position,
-                    not_yet(
-                        "the commit/Raft position vector; this scenario drives the VFS directly, below Chronicle",
-                        "fgdb-1xtp",
+                    not_applicable(
+                        "direct VFS scenario runs below Chronicle and has no commit/Raft position",
                     ),
                 );
             }
@@ -1302,18 +1725,35 @@ impl FailureArtifact {
         ] {
             set(
                 identifier,
-                not_yet("the transaction lifecycle", "fgdb-verif-sim-q97e"),
+                not_applicable(
+                    "this fixture does not execute a session transaction-lifecycle protocol",
+                ),
             );
         }
-        for identity in [
+        set(
             "object_identity",
+            if failure.recovery.is_some() || failure.durability.is_some() {
+                not_yet(
+                    "complete durable-object identity pipeline",
+                    "fgdb-w2-object-identity-t0f",
+                )
+            } else {
+                not_applicable("direct VFS scenario has no Chronicle object identity")
+            },
+        );
+        for identity in [
             "spec_identity",
             "result_identity",
             "certificate_identity",
             "grant_identity",
             "floor_identity",
         ] {
-            set(identity, not_yet("durable object identities", "fgdb-1xtp"));
+            set(
+                identity,
+                not_applicable(
+                    "this fixture does not execute the corresponding specification/result/grant surface",
+                ),
+            );
         }
 
         set(
@@ -1323,9 +1763,16 @@ impl FailureArtifact {
         // The kind leads, because that is what decides whether two runs
         // failed the same way; the prose follows it.
         set("actual", Field::Present(failure.to_string()));
-        set("replay_command", Field::Present(replay.command()));
+        set(
+            "replay_command",
+            Field::Present(replay.command_for(failure, events)),
+        );
 
-        Self { fields, replay }
+        Self {
+            fields,
+            replay,
+            failure_kind: failure.kind,
+        }
     }
 
     /// The field, if the name is one of [`CONTRACT_FIELDS`].
@@ -1338,6 +1785,17 @@ impl FailureArtifact {
     #[must_use]
     pub const fn replay(&self) -> Replay {
         self.replay
+    }
+
+    /// Typed failure class this artifact records.
+    ///
+    /// Campaign evidence uses this to prove a shrunk reproducer still accuses
+    /// the same defect as the artifact it is being filed for. Reading the
+    /// human `actual` field back into a type would make that law depend on
+    /// formatting.
+    #[must_use]
+    pub const fn failure_kind(&self) -> FailureKind {
+        self.failure_kind
     }
 
     /// Contract-field names the artifact failed to account for.

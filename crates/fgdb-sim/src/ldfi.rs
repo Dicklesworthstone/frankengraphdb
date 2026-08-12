@@ -121,6 +121,14 @@ pub const G1_GATE: &str = "fgdb-gate-g1-6vc";
 pub const G3_GATE: &str = "fgdb-gate-g3-30m";
 pub const W12_GATE: &str = "fgdb-gate-w12-w2y";
 
+/// Exact owner universe whose tracker completion is coupled to this registry.
+pub const EXPECTED_LDFI_OWNER_BEADS: &[&str] = &[
+    BASE_HARNESS_OWNER,
+    LOCAL_TORTURE_OWNER,
+    G3_PHASE_OWNER,
+    W12_PHASE_OWNER,
+];
+
 const fn live(
     id: &'static str,
     source_phrase: &'static str,
@@ -631,6 +639,31 @@ pub enum RegistryValidationError {
     },
 }
 
+/// Tracker completion state supplied by the local CI adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LdfiOwnerCompletion {
+    /// Exact Bead id from [`EXPECTED_LDFI_OWNER_BEADS`].
+    pub owner_bead: &'static str,
+    /// Whether the tracked Bead is closed.
+    pub complete: bool,
+}
+
+/// Why the target registry and tracker owner state cannot coexist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LdfiOwnerCompletionError {
+    /// Target-row structure is invalid before tracker state is considered.
+    InvalidRegistry(RegistryValidationError),
+    /// The adapter omitted or invented an owner.
+    OwnerInventoryLength { expected: usize, actual: usize },
+    /// The owner at one exact inventory position is wrong.
+    OwnerInventoryId { index: usize },
+    /// A closed owner still has a pending or unevidenced target row.
+    CompletedOwnerMissingCampaign {
+        owner_bead: &'static str,
+        target_id: &'static str,
+    },
+}
+
 /// Validate every row and the target-id uniqueness law before reporting any
 /// portion of a registry.
 pub fn validate_registry_rows(rows: &[LdfiTarget]) -> Result<(), RegistryValidationError> {
@@ -658,6 +691,44 @@ pub fn validate_registry_rows(rows: &[LdfiTarget]) -> Result<(), RegistryValidat
                 index,
                 expected,
                 actual: target.id,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse tracker completion over pending or unevidenced LDFI rows.
+///
+/// The owner list is an exact inventory so callers cannot omit a closed owner.
+/// A future phase owner may remain open with explicit pending rows, but once
+/// it closes every row assigned to it must be live and carry executable
+/// evidence.
+pub fn validate_ldfi_owner_completion(
+    rows: &[LdfiTarget],
+    owners: &[LdfiOwnerCompletion],
+) -> Result<(), LdfiOwnerCompletionError> {
+    validate_registry_rows(rows).map_err(LdfiOwnerCompletionError::InvalidRegistry)?;
+    if owners.len() != EXPECTED_LDFI_OWNER_BEADS.len() {
+        return Err(LdfiOwnerCompletionError::OwnerInventoryLength {
+            expected: EXPECTED_LDFI_OWNER_BEADS.len(),
+            actual: owners.len(),
+        });
+    }
+    for (index, (owner, expected)) in owners.iter().zip(EXPECTED_LDFI_OWNER_BEADS).enumerate() {
+        if owner.owner_bead != *expected {
+            return Err(LdfiOwnerCompletionError::OwnerInventoryId { index });
+        }
+        if !owner.complete {
+            continue;
+        }
+        if let Some(target) = rows.iter().find(|target| {
+            target.phase_owner_bead == owner.owner_bead
+                && (target.row_state != TargetRowState::Live
+                    || target.coverage_evidence_ref.is_none_or(str::is_empty))
+        }) {
+            return Err(LdfiOwnerCompletionError::CompletedOwnerMissingCampaign {
+                owner_bead: owner.owner_bead,
+                target_id: target.id,
             });
         }
     }

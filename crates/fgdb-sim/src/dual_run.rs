@@ -40,7 +40,7 @@ use asupersync::Budget;
 use asupersync::lab::{
     CancellationRecord, DualRunHarness, DualRunResult, LabConfig, LabRuntime, LoserDrainRecord,
     NormalizedSemantics, ObligationBalanceRecord, RegionCloseRecord, ResourceSurfaceRecord,
-    TerminalOutcome,
+    TerminalOutcome, capture_obligation_balance, capture_region_close, normalize_lab_report,
 };
 use asupersync::runtime::RuntimeBuilder;
 
@@ -61,6 +61,20 @@ pub struct LabFixtureRun {
     pub virtual_elapsed_nanos: u64,
     /// Clock-free semantic projection.
     pub semantics: FixtureSemantics,
+    /// Region-close evidence observed from the lab runtime report.
+    pub region_close: RegionCloseRecord,
+    /// Obligation-leak evidence observed by the lab runtime oracles.
+    pub obligation_balance: ObligationBalanceRecord,
+}
+
+/// One completed live execution of the fixture.
+pub struct LiveFixtureRun {
+    /// Clock-free semantic projection.
+    pub semantics: FixtureSemantics,
+    /// Region-close evidence derived from joining both fixture futures.
+    pub region_close: RegionCloseRecord,
+    /// Explicit live-adapter counters for the fixture's zero-obligation scope.
+    pub obligation_balance: ObligationBalanceRecord,
 }
 
 /// Runs the fixture once under the lab runtime with auto-advancing virtual
@@ -80,11 +94,11 @@ pub fn run_fixture_under_lab(
     let mut lab = LabRuntime::new(lab_config);
     let root = lab.state.create_root_region(Budget::INFINITE);
     let (producer_fut, consumer_fut, trace) = fixture_futures(cfg, scratch_dir);
-    let (producer_task, _producer_handle) = lab
+    let (producer_task, mut producer_handle) = lab
         .state
         .create_task(root, Budget::INFINITE, producer_fut)
         .expect("create producer task");
-    let (consumer_task, _consumer_handle) = lab
+    let (consumer_task, mut consumer_handle) = lab
         .state
         .create_task(root, Budget::INFINITE, consumer_fut)
         .expect("create consumer task");
@@ -92,6 +106,14 @@ pub fn run_fixture_under_lab(
     lab.scheduler.lock().schedule(consumer_task, 0);
     let virtual_report = lab.run_with_auto_advance();
     let report = lab.report();
+    assert!(
+        matches!(producer_handle.try_join(), Ok(Some(()))),
+        "fixture producer did not complete successfully"
+    );
+    assert!(
+        matches!(consumer_handle.try_join(), Ok(Some(()))),
+        "fixture consumer did not complete successfully"
+    );
     assert!(
         report.quiescent,
         "fixture lab run did not reach quiescence: {report:?}"
@@ -101,12 +123,15 @@ pub fn run_fixture_under_lab(
         "fixture lab run violated invariants: {:?}",
         report.invariant_violations
     );
+    let (runtime_semantics, _capture_manifest) = normalize_lab_report(&report, SURFACE_SCOPE);
     LabFixtureRun {
         trace_bytes: trace.to_bytes(),
         trace_fingerprint: report.trace_fingerprint,
         schedule_hash: report.trace_certificate.schedule_hash,
         virtual_elapsed_nanos: virtual_report.virtual_elapsed_nanos,
         semantics: trace.semantics(),
+        region_close: runtime_semantics.region_close,
+        obligation_balance: runtime_semantics.obligation_balance,
     }
 }
 
@@ -115,7 +140,7 @@ pub fn run_fixture_under_lab(
 /// jointly inside one task — the live side's concurrency shape is allowed to
 /// differ from the lab's; only semantics must survive.
 #[must_use]
-pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> FixtureSemantics {
+pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> LiveFixtureRun {
     let runtime = RuntimeBuilder::current_thread()
         .build()
         .expect("live runtime builds");
@@ -123,7 +148,16 @@ pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> FixtureSeman
     runtime.block_on(async move {
         join2(producer_fut, consumer_fut).await;
     });
-    trace.semantics()
+    LiveFixtureRun {
+        semantics: trace.semantics(),
+        // Returning from `join2` is the live adapter's direct witness that
+        // both fixture children completed. The fixture creates no finalizers.
+        region_close: capture_region_close(true, true),
+        // This fixture creates no asupersync obligations. Keep the explicit
+        // counters here so a future obligation-producing fixture must change
+        // the witness rather than inheriting an unexplained constant.
+        obligation_balance: capture_obligation_balance(0, 0, 0),
+    }
 }
 
 /// Polls two independent futures to completion within one task. Local and
@@ -267,19 +301,28 @@ pub fn determinism_gate(
 /// The consumer digest rides `surface_result`; the counts ride exact-tolerance
 /// counters; `chain_intact` is a counter so a broken network leg is a compared
 /// value, not a silent assumption.
-fn to_normalized(semantics: &FixtureSemantics) -> NormalizedSemantics {
+fn to_normalized(
+    semantics: &FixtureSemantics,
+    region_close: RegionCloseRecord,
+    obligation_balance: ObligationBalanceRecord,
+) -> NormalizedSemantics {
     let mut terminal = TerminalOutcome::ok();
     terminal.surface_result = Some(semantics.final_digest_hex.clone());
     NormalizedSemantics {
         terminal_outcome: terminal,
         cancellation: CancellationRecord::none(),
         loser_drain: LoserDrainRecord::not_applicable(),
-        region_close: RegionCloseRecord::quiescent(),
-        obligation_balance: ObligationBalanceRecord::zero(),
+        region_close,
+        obligation_balance,
         resource_surface: ResourceSurfaceRecord::empty(SURFACE_SCOPE)
             .with_counter("records_produced", semantics.produced)
             .with_counter("records_consumed", semantics.consumed)
             .with_counter("durable_bytes", semantics.durable_bytes)
+            .with_counter("injected_faults", semantics.injected_faults)
+            .with_counter(
+                "network_backpressure_events",
+                semantics.network_backpressure_events,
+            )
             .with_counter("chain_intact", i64::from(semantics.chain_intact)),
     }
 }
@@ -318,19 +361,21 @@ pub fn dual_run_fixture(
     )
     .lab(move |config| {
         let run = run_fixture_under_lab(&lab_cfg, &lab_dir, config);
-        to_normalized(&run.semantics)
+        to_normalized(&run.semantics, run.region_close, run.obligation_balance)
     });
     if let Some(seed) = live_seed_override {
         harness = harness.live(move |_seed, _entropy| {
             let mut mutated = live_cfg.clone();
             mutated.seed = seed;
-            to_normalized(&run_fixture_live(&mutated, &live_dir))
+            let run = run_fixture_live(&mutated, &live_dir);
+            to_normalized(&run.semantics, run.region_close, run.obligation_balance)
         });
     } else {
         harness = harness.live(move |seed, _entropy| {
             let mut effective = live_cfg.clone();
             effective.seed = seed;
-            to_normalized(&run_fixture_live(&effective, &live_dir))
+            let run = run_fixture_live(&effective, &live_dir);
+            to_normalized(&run.semantics, run.region_close, run.obligation_balance)
         });
     }
     let result = harness.run();

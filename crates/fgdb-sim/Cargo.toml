@@ -23,6 +23,7 @@ workspace = true
 # composition is 13, verification is 14.
 fgdb = { path = "../fgdb" }
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "3b34c9b0a14c55eb814cf4aaeceeba3be0c0a72e", default-features = false }
+fgdb-calibrate = { path = "../fgdb-calibrate" }
 fgdb-chronicle = { path = "../fgdb-chronicle" }
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }

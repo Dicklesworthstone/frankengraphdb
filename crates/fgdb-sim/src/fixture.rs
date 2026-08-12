@@ -48,10 +48,16 @@ use asupersync::net::tcp::VirtualTcpStream;
 use asupersync::time::sleep;
 use fgdb_crypto::{Digest, Hasher};
 
-use crate::vfs::{FaultPlan, FaultVfs};
+use crate::vfs::{FaultEvent, FaultPlan, FaultVfs};
 
 /// Domain separator for the fixture's chain digests.
 const CHAIN_DOMAIN: &[u8] = b"fgdb.sim.fixture.chain.v1";
+
+/// Keep the exported fixture bounded: it is a deterministic verification
+/// workload, not a general allocation API. The upper bound is deliberately
+/// above the foundation virtual-TCP window so tests can force real partial
+/// writes/backpressure without making an accidental configuration an OOM.
+pub const MAX_FIXTURE_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 /// Process-global tick used by [`FixtureConfig::entropy_probe`]. Each fixture
 /// run that has the probe enabled consumes one tick, so two same-seed runs in
@@ -73,6 +79,12 @@ pub struct FixtureConfig {
     /// run is NOT deterministic. Exists so tests can prove the determinism
     /// gate fires; never enable it outside a control.
     pub entropy_probe: bool,
+    /// Deterministic lab-VFS chaos plan used by the producer's durable leg.
+    pub fault_plan: FaultPlan,
+    /// Bytes per record. Values above the virtual-TCP window exercise real
+    /// partial-write/backpressure behavior. Must be in
+    /// `1..=MAX_FIXTURE_PAYLOAD_BYTES`.
+    pub payload_bytes: usize,
 }
 
 impl FixtureConfig {
@@ -84,6 +96,11 @@ impl FixtureConfig {
             rounds: 6,
             tick: Duration::from_millis(2),
             entropy_probe: false,
+            fault_plan: FaultPlan {
+                seed,
+                ..FaultPlan::faultless()
+            },
+            payload_bytes: 24,
         }
     }
 }
@@ -143,6 +160,8 @@ struct TraceInner {
     producer_chain: Mutex<Option<Digest>>,
     consumer_chain: Mutex<Option<Digest>>,
     durable_bytes: AtomicU64,
+    network_backpressure_events: AtomicU64,
+    fault_events: Mutex<Vec<FaultEvent>>,
     seed: u64,
 }
 
@@ -159,6 +178,8 @@ impl TraceHandle {
             producer_chain: Mutex::new(None),
             consumer_chain: Mutex::new(None),
             durable_bytes: AtomicU64::new(0),
+            network_backpressure_events: AtomicU64::new(0),
+            fault_events: Mutex::new(Vec::new()),
             seed,
         }))
     }
@@ -187,13 +208,32 @@ impl TraceHandle {
         self.0.events.lock().expect("fixture trace lock").clone()
     }
 
+    fn record_faults(&self, root: &Path, mut events: Vec<FaultEvent>) {
+        for event in &mut events {
+            if let Ok(relative) = event.path.strip_prefix(root) {
+                event.path = relative.to_path_buf();
+            }
+        }
+        *self.0.fault_events.lock().expect("fixture fault log lock") = events;
+    }
+
+    /// Exact normalized fault-injection log from the durable fixture leg.
+    #[must_use]
+    pub fn fault_events(&self) -> Vec<FaultEvent> {
+        self.0
+            .fault_events
+            .lock()
+            .expect("fixture fault log lock")
+            .clone()
+    }
+
     /// Canonical byte serialization of the run: header, fixed-width events,
     /// then both final chain digests. Two same-seed lab runs must agree on
     /// every byte, timestamps included.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let events = self.snapshot();
-        let mut out = Vec::with_capacity(HEADER_SIZE + events.len() * EVENT_SIZE + 64);
+        let mut out = Vec::with_capacity(HEADER_SIZE + events.len() * EVENT_SIZE + 64 + 8);
         out.extend_from_slice(&1u32.to_le_bytes());
         out.extend_from_slice(&self.0.seed.to_le_bytes());
         out.extend_from_slice(
@@ -213,6 +253,19 @@ impl TraceHandle {
         let consumer = self.0.consumer_chain.lock().expect("consumer chain lock");
         out.extend_from_slice(&producer.as_ref().unwrap_or(&zero).0);
         out.extend_from_slice(&consumer.as_ref().unwrap_or(&zero).0);
+        let mut fault_hasher = Hasher::new();
+        fault_hasher.update(b"fgdb.sim.fixture.faults.v1");
+        for event in self.fault_events() {
+            fault_hasher.update(format!("{event:?}").as_bytes());
+        }
+        out.extend_from_slice(&fault_hasher.finalize().0);
+        out.extend_from_slice(
+            &self
+                .0
+                .network_backpressure_events
+                .load(Ordering::SeqCst)
+                .to_le_bytes(),
+        );
         out
     }
 
@@ -238,6 +291,9 @@ impl TraceHandle {
             produced,
             consumed,
             durable_bytes: self.0.durable_bytes.load(Ordering::SeqCst) as i64,
+            injected_faults: self.fault_events().len() as i64,
+            network_backpressure_events: self.0.network_backpressure_events.load(Ordering::SeqCst)
+                as i64,
         }
     }
 }
@@ -258,6 +314,11 @@ pub struct FixtureSemantics {
     pub consumed: i64,
     /// Bytes acknowledged durable through the lab VFS.
     pub durable_bytes: i64,
+    /// Deterministic VFS injections observed by this run.
+    pub injected_faults: i64,
+    /// Number of virtual-TCP writes that observed a full finite channel and
+    /// yielded `Pending` until the consumer drained it.
+    pub network_backpressure_events: i64,
 }
 
 /// First byte at which two serialized traces differ, with the event index it
@@ -296,10 +357,26 @@ fn split_mix_next(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-async fn write_all_net(stream: &mut VirtualTcpStream, bytes: &[u8]) -> io::Result<()> {
+async fn write_all_net(
+    stream: &mut VirtualTcpStream,
+    bytes: &[u8],
+    trace: &TraceHandle,
+) -> io::Result<()> {
     let mut written = 0usize;
     while written < bytes.len() {
-        let n = poll_fn(|cx| Pin::new(&mut *stream).poll_write(cx, &bytes[written..])).await?;
+        let n = poll_fn(
+            |cx| match Pin::new(&mut *stream).poll_write(cx, &bytes[written..]) {
+                Poll::Pending => {
+                    trace
+                        .0
+                        .network_backpressure_events
+                        .fetch_add(1, Ordering::SeqCst);
+                    Poll::Pending
+                }
+                ready => ready,
+            },
+        )
+        .await?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
@@ -359,39 +436,31 @@ async fn write_durable<V: Vfs>(vfs: &FaultVfs<V>, path: &Path, bytes: &[u8]) -> 
 
 /// The producer half: per round, sleep one tick, derive the payload, make it
 /// durable, frame it onto the network; then send the zero-length terminator.
-async fn producer(
-    cfg: FixtureConfig,
-    vfs: Arc<FaultVfs>,
-    dir: PathBuf,
-    mut net: VirtualTcpStream,
-    trace: TraceHandle,
-) {
+async fn producer(cfg: FixtureConfig, dir: PathBuf, mut net: VirtualTcpStream, trace: TraceHandle) {
     let cx = Cx::current().expect("fixture producer runs under a runtime");
+    let vfs = FaultVfs::unix_with_clock(cfg.fault_plan, cx.clone());
     let mut rng = cfg.seed;
     let mut chain = chain_seed(cfg.seed);
     for round in 0..cfg.rounds {
         sleep(cx.now_for_observability(), cfg.tick).await;
         trace.record(Component::Producer, EventKind::Slept, round, &chain);
 
-        let mut payload = [0u8; 24];
-        for (i, word) in payload.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        let mut payload = vec![0u8; cfg.payload_bytes];
+        for (i, chunk) in payload.chunks_mut(8).enumerate() {
             let mut value = split_mix_next(&mut rng);
             if cfg.entropy_probe && round == 0 && i == 0 {
                 value ^= ENTROPY_PROBE_TICKS
                     .fetch_add(1, Ordering::SeqCst)
                     .wrapping_add(1);
             }
-            word.copy_from_slice(&value.to_le_bytes());
+            let bytes = value.to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
         }
         chain = chain_fold(&chain, &payload);
 
-        write_durable(
-            vfs.as_ref(),
-            &dir.join(format!("record-{round:04}.bin")),
-            &payload,
-        )
-        .await
-        .expect("fixture durable write");
+        write_durable(&vfs, &dir.join(format!("record-{round:04}.bin")), &payload)
+            .await
+            .expect("fixture durable write");
         trace
             .0
             .durable_bytes
@@ -399,17 +468,18 @@ async fn producer(
         trace.record(Component::Producer, EventKind::Durable, round, &chain);
 
         let len = u32::try_from(payload.len()).expect("payload fits u32");
-        write_all_net(&mut net, &len.to_le_bytes())
+        write_all_net(&mut net, &len.to_le_bytes(), &trace)
             .await
             .expect("fixture frame header");
-        write_all_net(&mut net, &payload)
+        write_all_net(&mut net, &payload, &trace)
             .await
             .expect("fixture frame body");
         trace.record(Component::Producer, EventKind::Sent, round, &chain);
     }
-    write_all_net(&mut net, &0u32.to_le_bytes())
+    write_all_net(&mut net, &0u32.to_le_bytes(), &trace)
         .await
         .expect("fixture terminator");
+    trace.record_faults(&dir, vfs.events());
     *trace.0.producer_chain.lock().expect("producer chain lock") = Some(chain);
     trace.record(
         Component::Producer,
@@ -460,16 +530,19 @@ pub fn fixture_futures(
     impl std::future::Future<Output = ()> + Send + 'static,
     TraceHandle,
 ) {
+    assert!(
+        (1..=MAX_FIXTURE_PAYLOAD_BYTES).contains(&cfg.payload_bytes),
+        "fixture payload_bytes must be in 1..={MAX_FIXTURE_PAYLOAD_BYTES}, got {}",
+        cfg.payload_bytes
+    );
     std::fs::create_dir_all(scratch_dir).expect("fixture scratch dir");
     let trace = TraceHandle::new(cfg.seed);
     let (producer_end, consumer_end) = VirtualTcpStream::pair(
         SocketAddr::from(([127, 0, 0, 1], 9101)),
         SocketAddr::from(([127, 0, 0, 1], 9102)),
     );
-    let vfs = Arc::new(FaultVfs::unix(FaultPlan::faultless()));
     let producer_fut = producer(
         cfg.clone(),
-        vfs,
         scratch_dir.to_path_buf(),
         producer_end,
         trace.clone(),

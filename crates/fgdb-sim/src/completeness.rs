@@ -16,13 +16,15 @@
 //! Transcribing four variants is not the work — a grader that returns
 //! `Replayable` unconditionally satisfies the enum perfectly and is exactly
 //! the failure the sentence forbids. So [`grade`] can only reach
-//! [`ReplayCompleteness::Replayable`] when all three of these hold:
+//! [`ReplayCompleteness::Replayable`] when all of these hold:
 //!
 //! 1. nothing was withheld from the recording (redaction or policy),
-//! 2. the replayed fault log is **identical** to the recorded one — checked
+//! 2. the replay descriptor (scenario, seed, and complete fault plan) is exact,
+//! 3. the replayed fault log is **identical** to the recorded one — checked
 //!    with [`crate::shrink::diverge`], the same comparison the determinism
 //!    tests use, so the two cannot drift apart,
-//! 3. the replay reached the same failure (or the same success).
+//! 4. the run-level evidence digest agrees, binding the exact failure/success,
+//!    lab epoch, event log, and total structured artifact.
 //!
 //! Everything else grades **down**. The grades are ordered by how much they
 //! claim, and the ordering is the point: a bundle that cannot prove byte
@@ -31,7 +33,7 @@
 //! # What the grades mean here
 //!
 //! * `Replayable` — byte-identical, nothing withheld. The only grade that
-//!   claims byte identity, and the only one gated on all three conditions.
+//!   claims byte identity, and the only one gated on every condition above.
 //! * `StructuralReplay` — the run reproduced, but not byte-identically:
 //!   some fault classes came back and some did not. Both lists are reported
 //!   because "which ones" is the whole diagnostic value.
@@ -42,7 +44,7 @@
 //!   not re-executed. The floor, and the honest answer for a heavily redacted
 //!   customer bundle.
 
-use crate::artifact::{Failure, RunOutcome};
+use crate::artifact::{Replay, RunOutcome};
 use crate::shrink::diverge;
 use crate::vfs::FaultEvent;
 use std::collections::BTreeSet;
@@ -87,13 +89,41 @@ impl ReplayCompleteness {
 #[derive(Clone, Debug)]
 pub struct Recording {
     /// The fault log as recorded.
-    pub events: Vec<FaultEvent>,
-    /// The failure the recorded run reached, if any.
-    pub failure: Option<Failure>,
+    events: Vec<FaultEvent>,
+    /// Exact scenario, seed, and fault/workload plan.
+    replay: Replay,
+    /// Canonical digest of failure detail, events, epoch, and artifact fields.
+    evidence_digest: String,
     /// Classes the bundle deliberately does not carry — redacted, or never
     /// retained. Plan §15.1: crypto entropy is never recorded, so it is
     /// always a member of this set for any run that used it.
-    pub withheld_classes: Vec<String>,
+    withheld_classes: Vec<String>,
+}
+
+/// Why an execution cannot become a replay recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingError {
+    /// Inspectable outcome fields no longer match the execution-root seal.
+    ExecutionEvidenceMutated,
+}
+
+impl Recording {
+    /// Capture one run without allowing callers to splice an unrelated replay,
+    /// failure, or artifact into the recording.
+    pub fn from_run(
+        run: &RunOutcome,
+        withheld_classes: Vec<String>,
+    ) -> Result<Self, RecordingError> {
+        let evidence_digest = run
+            .replay_completeness_digest()
+            .ok_or(RecordingError::ExecutionEvidenceMutated)?;
+        Ok(Self {
+            events: run.events.clone(),
+            replay: run.replay(),
+            evidence_digest,
+            withheld_classes,
+        })
+    }
 }
 
 fn classes_of(events: &[FaultEvent]) -> BTreeSet<String> {
@@ -106,7 +136,7 @@ fn classes_of(events: &[FaultEvent]) -> BTreeSet<String> {
 /// Grades `replayed` against `recorded`.
 ///
 /// The grade is the strongest one the evidence supports and never stronger —
-/// see the module docs for the three conditions `Replayable` requires.
+/// see the module docs for the conditions `Replayable` requires.
 #[must_use]
 pub fn grade(recorded: &Recording, replayed: &RunOutcome) -> ReplayCompleteness {
     let recorded_classes = classes_of(&recorded.events);
@@ -118,6 +148,29 @@ pub fn grade(recorded: &Recording, replayed: &RunOutcome) -> ReplayCompleteness 
         sorted.dedup();
         sorted
     };
+
+    let replayed_digest = match replayed.replay_completeness_digest() {
+        Some(digest) => digest,
+        None => {
+            return ReplayCompleteness::AuditOnly {
+                missing_or_redacted_classes: vec!["execution-evidence-integrity".to_string()],
+            };
+        }
+    };
+    let replay_identity_agrees = recorded.replay == replayed.replay();
+
+    // Supplying withheld classes cannot repair a different scenario, seed,
+    // or fault/workload plan. Refuse the misleading "verifiable if supplied"
+    // grade before considering retained fault classes.
+    if !replay_identity_agrees && !withheld.is_empty() {
+        let mut missing = withheld;
+        missing.push("replay-identity-mismatch".to_string());
+        missing.sort();
+        missing.dedup();
+        return ReplayCompleteness::AuditOnly {
+            missing_or_redacted_classes: missing,
+        };
+    }
 
     // Nothing came back at all, and something was withheld: the bundle can be
     // read, not re-run.
@@ -137,11 +190,10 @@ pub fn grade(recorded: &Recording, replayed: &RunOutcome) -> ReplayCompleteness 
 
     // Nothing withheld. Byte identity is now the only remaining question, and
     // it is asked with the same comparison the determinism tests use.
-    let identical = diverge(&recorded.events, &replayed.events).is_none();
-    let same_outcome = recorded.failure.as_ref().map(|failure| failure.kind)
-        == replayed.failure.as_ref().map(|failure| failure.kind);
+    let identical_events = diverge(&recorded.events, &replayed.events).is_none();
+    let identical_evidence = replay_identity_agrees && recorded.evidence_digest == replayed_digest;
 
-    if identical && same_outcome {
+    if identical_events && identical_evidence {
         return ReplayCompleteness::Replayable;
     }
 

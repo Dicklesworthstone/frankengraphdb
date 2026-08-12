@@ -135,6 +135,13 @@ pub struct RedactionPolicy {
     retained: BTreeSet<RecordClass>,
 }
 
+/// One mediated-nondeterminism record before fail-closed redaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediatedRecord {
+    pub class: RecordClass,
+    pub payload: Vec<u8>,
+}
+
 impl RedactionPolicy {
     /// A policy that retains nothing. The only constructor, so there is no
     /// "retain everything" starting point to drift from.
@@ -194,5 +201,19 @@ impl RedactionPolicy {
             .collect();
         names.sort();
         names
+    }
+
+    /// Retain only explicitly admitted record bytes.
+    ///
+    /// Crypto entropy is filtered even under a caller-created record because
+    /// [`RedactionPolicy::retain`] cannot admit its class. This is the bundle
+    /// construction boundary, not merely a configuration predicate.
+    #[must_use]
+    pub fn filter_records(&self, records: &[MediatedRecord]) -> Vec<MediatedRecord> {
+        records
+            .iter()
+            .filter(|record| self.disposition(record.class) == Disposition::Retained)
+            .cloned()
+            .collect()
     }
 }

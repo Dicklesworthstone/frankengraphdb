@@ -581,6 +581,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fgdb",
+ "fgdb-calibrate",
  "fgdb-chronicle",
  "fgdb-crypto",
  "fgdb-delta-types",

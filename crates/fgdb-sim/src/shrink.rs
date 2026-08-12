@@ -6,6 +6,13 @@
 //! > exactly where a replay departed from its recording. Crashpacks arrive
 //! > pre-shrunk; the bug report writes itself."
 //!
+//! That quotation is the target-state contract. The current reusable filing
+//! pipeline minimizes a typed [`FaultPlan`] through [`shrink`]. The separate
+//! [`shrink_schedule_and_workload`] primitive proves typed two-axis reduction,
+//! but is not yet wired to the asupersync task-dispatch schedule or to every
+//! sim/live/integration/E2E failure path. Callers must not describe this module
+//! as universal pre-shrinking until that integration exists.
+//!
 //! # The one law, and why it is a type and not a string comparison
 //!
 //! A shrinker searches for a smaller input that "still fails". Taken literally
@@ -41,8 +48,9 @@
 //! weaker than "globally minimal" — which delta debugging does not promise
 //! either. Stated rather than implied.
 
-use crate::artifact::{Failure, Replay, RunOutcome};
+use crate::artifact::{Failure, FailureKind, Replay, RunOutcome};
 use crate::vfs::{FaultEvent, FaultPlan, Trigger};
+use fgdb_crypto::Hasher;
 use std::path::Path;
 
 fn isolated_run(replay: Replay, root: &Path, ordinal: &mut usize) -> std::io::Result<RunOutcome> {
@@ -64,6 +72,12 @@ pub struct ShrinkStep {
 /// The result of minimising a failing replay.
 #[derive(Clone, Debug)]
 pub struct Shrunk {
+    /// Exact replay whose failure initiated the shrink search.
+    pub original_replay: Replay,
+    /// Exact typed failure produced by the initiating replay.
+    pub original_failure: Failure,
+    /// Normalized fault-event log produced by the initiating replay.
+    pub original_events: Vec<FaultEvent>,
     /// The minimal replay that still fails the original way.
     pub replay: Replay,
     /// The failure it reproduces. Its [`crate::artifact::FailureKind`] equals the original's —
@@ -76,6 +90,52 @@ pub struct Shrunk {
     /// was reducible" from "nothing was attempted" — the difference between a
     /// minimal reproducer and a broken shrinker.
     pub rejected: usize,
+    /// Seal over the shrinker's complete returned provenance. Callers may
+    /// inspect the public evidence, but filing refuses it after mutation.
+    provenance_digest: String,
+}
+
+impl Shrunk {
+    /// Whether every inspectable provenance field still matches the result
+    /// emitted by [`shrink`].
+    #[must_use]
+    pub fn provenance_is_valid(&self) -> bool {
+        self.provenance_digest
+            == shrink_provenance_digest(
+                self.original_replay,
+                &self.original_failure,
+                &self.original_events,
+                self.replay,
+                &self.failure,
+                &self.steps,
+                self.rejected,
+            )
+    }
+}
+
+fn shrink_provenance_digest(
+    original_replay: Replay,
+    original_failure: &Failure,
+    original_events: &[FaultEvent],
+    replay: Replay,
+    failure: &Failure,
+    steps: &[ShrinkStep],
+    rejected: usize,
+) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(b"fgdb.sim.shrink.provenance.v1");
+    hasher.update(original_replay.encode().as_bytes());
+    hasher.update(format!("{original_failure:?}").as_bytes());
+    for event in original_events {
+        hasher.update(format!("{event:?}").as_bytes());
+    }
+    hasher.update(replay.encode().as_bytes());
+    hasher.update(format!("{failure:?}").as_bytes());
+    for step in steps {
+        hasher.update(format!("{step:?}").as_bytes());
+    }
+    hasher.update(&rejected.to_le_bytes());
+    hasher.finalize().to_hex()
 }
 
 /// Every candidate reduction of `plan`, strongest first.
@@ -256,13 +316,14 @@ fn weaken_to_single_firing(trigger: Trigger) -> Option<Trigger> {
 /// a minimal reproducer.
 pub fn shrink(replay: Replay, dir: &Path) -> std::io::Result<Option<Shrunk>> {
     let mut ordinal = 0usize;
-    let Some(original) = isolated_run(replay, dir, &mut ordinal)?.failure else {
+    let original_run = isolated_run(replay, dir, &mut ordinal)?;
+    let Some(original) = original_run.failure else {
         return Ok(None);
     };
     let target = original.kind;
 
     let mut best = replay;
-    let mut failure = original;
+    let mut failure = original.clone();
     let mut steps = Vec::new();
     let mut rejected = 0usize;
 
@@ -292,11 +353,24 @@ pub fn shrink(replay: Replay, dir: &Path) -> std::io::Result<Option<Shrunk>> {
         failure.kind, target,
         "shrink returned a different failure kind than it was given"
     );
+    let provenance_digest = shrink_provenance_digest(
+        replay,
+        &original,
+        &original_run.events,
+        best,
+        &failure,
+        &steps,
+        rejected,
+    );
     Ok(Some(Shrunk {
+        original_replay: replay,
+        original_failure: original,
+        original_events: original_run.events,
         replay: best,
         failure,
         steps,
         rejected,
+        provenance_digest,
     }))
 }
 
@@ -369,4 +443,156 @@ pub fn diverge(recorded: &[FaultEvent], replayed: &[FaultEvent]) -> Option<Diver
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchical schedule + workload minimization
+// ---------------------------------------------------------------------------
+
+/// Result of minimizing both the scheduled decisions and workload actions of
+/// a failing replay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HierarchicalShrunk<S, W> {
+    /// Minimal retained schedule under the supplied failure predicate.
+    pub schedule: Vec<S>,
+    /// Minimal retained workload under the supplied failure predicate.
+    pub workload: Vec<W>,
+    /// Candidate replays executed, including the initial premise check.
+    pub attempts: usize,
+    /// Reductions accepted across both axes.
+    pub accepted: usize,
+    /// Smaller candidates that stayed red but changed the typed failure.
+    pub rejected_different_failure: usize,
+}
+
+/// Typed verdict for one hierarchical replay candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShrinkTrial {
+    /// The candidate reproduced the exact target failure.
+    Reproduced,
+    /// The candidate no longer failed.
+    DidNotReproduce,
+    /// The candidate remained red, but it is a different bug.
+    DifferentFailure(FailureKind),
+}
+
+fn reduce_axis<S, W, F>(
+    schedule: &mut Vec<S>,
+    workload: &mut Vec<W>,
+    reduce_schedule: bool,
+    attempts: &mut usize,
+    accepted: &mut usize,
+    rejected_different_failure: &mut usize,
+    reproduces: &mut F,
+) -> bool
+where
+    S: Clone,
+    W: Clone,
+    F: FnMut(&[S], &[W]) -> ShrinkTrial,
+{
+    let mut changed = false;
+    let mut granularity = 2usize;
+    loop {
+        let length = if reduce_schedule {
+            schedule.len()
+        } else {
+            workload.len()
+        };
+        if length == 0 {
+            break;
+        }
+        let chunk = length.div_ceil(granularity);
+        let mut removed = false;
+        for start in (0..length).step_by(chunk) {
+            let end = (start + chunk).min(length);
+            let mut candidate_schedule = schedule.clone();
+            let mut candidate_workload = workload.clone();
+            if reduce_schedule {
+                candidate_schedule.drain(start..end);
+            } else {
+                candidate_workload.drain(start..end);
+            }
+            *attempts += 1;
+            match reproduces(&candidate_schedule, &candidate_workload) {
+                ShrinkTrial::Reproduced => {
+                    *schedule = candidate_schedule;
+                    *workload = candidate_workload;
+                    *accepted += 1;
+                    changed = true;
+                    removed = true;
+                    granularity = granularity.saturating_sub(1).max(2);
+                    break;
+                }
+                ShrinkTrial::DifferentFailure(_) => *rejected_different_failure += 1,
+                ShrinkTrial::DidNotReproduce => {}
+            }
+        }
+        if removed {
+            continue;
+        }
+        if granularity >= length {
+            break;
+        }
+        granularity = (granularity * 2).min(length);
+    }
+    changed
+}
+
+/// Delta-debug a failing replay across its schedule and workload axes.
+///
+/// The caller supplies a real typed replay verdict. `None` means the input
+/// itself did not reproduce the target failure, so no minimized artifact may
+/// be filed. A smaller input that fails differently is counted and rejected;
+/// it can never be mistaken for progress. The two axes are revisited until
+/// neither can shrink: reducing a workload can expose a schedule reduction
+/// and vice versa.
+#[must_use]
+pub fn shrink_schedule_and_workload<S, W, F>(
+    schedule: Vec<S>,
+    workload: Vec<W>,
+    mut reproduces: F,
+) -> Option<HierarchicalShrunk<S, W>>
+where
+    S: Clone,
+    W: Clone,
+    F: FnMut(&[S], &[W]) -> ShrinkTrial,
+{
+    let mut attempts = 1usize;
+    if reproduces(&schedule, &workload) != ShrinkTrial::Reproduced {
+        return None;
+    }
+    let mut schedule = schedule;
+    let mut workload = workload;
+    let mut accepted = 0usize;
+    let mut rejected_different_failure = 0usize;
+    loop {
+        let schedule_changed = reduce_axis(
+            &mut schedule,
+            &mut workload,
+            true,
+            &mut attempts,
+            &mut accepted,
+            &mut rejected_different_failure,
+            &mut reproduces,
+        );
+        let workload_changed = reduce_axis(
+            &mut schedule,
+            &mut workload,
+            false,
+            &mut attempts,
+            &mut accepted,
+            &mut rejected_different_failure,
+            &mut reproduces,
+        );
+        if !schedule_changed && !workload_changed {
+            break;
+        }
+    }
+    Some(HierarchicalShrunk {
+        schedule,
+        workload,
+        attempts,
+        accepted,
+        rejected_different_failure,
+    })
 }
