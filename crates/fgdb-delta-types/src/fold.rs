@@ -46,10 +46,7 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 for (key, value) in props {
                     net.props.insert(key, (None, Some(value)));
                 }
-                net.valid_time = match valid_time {
-                    None => None,
-                    Some(after) => Some((None, Some(after))),
-                };
+                net.valid_time = valid_time.map(|after| (None, Some(after)));
             }
             DeltaRow::DeleteVertex {
                 vid,
