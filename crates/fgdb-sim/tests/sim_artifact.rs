@@ -31,12 +31,11 @@ use fgdb_types::CommitSeq;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-fn replay_command_env<'a>(command: &'a str, name: &str) -> &'a str {
+fn replay_command_env<'a>(command: &'a str, name: &str) -> Option<&'a str> {
     let prefix = format!("{name}=");
     command
         .split_ascii_whitespace()
         .find_map(|word| word.strip_prefix(&prefix))
-        .unwrap_or_else(|| panic!("replay command does not assign {name}: {command}"))
 }
 
 fn execute_replay_consumer_in_fresh_process(command: &str, expected_digest: &str) -> Output {
@@ -45,7 +44,8 @@ fn execute_replay_consumer_in_fresh_process(command: &str, expected_digest: &str
             .ends_with("cargo test -p fgdb-sim --test sim_artifact -- --ignored replay_from_env"),
         "the human command no longer selects the registered replay consumer: {command}"
     );
-    let encoded = replay_command_env(command, ARTIFACT_REPLAY_ENV);
+    let encoded = replay_command_env(command, ARTIFACT_REPLAY_ENV)
+        .expect("the replay command assigns the encoded replay");
     let executable = std::env::current_exe().expect("current test executable is discoverable");
     Command::new("timeout")
         .arg("30s")
@@ -201,8 +201,18 @@ fn repo_root() -> PathBuf {
 }
 
 fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fgdb-sim-artifact-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    static NEXT_SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let process_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the system clock is after the Unix epoch")
+        .as_nanos();
+    let sequence = NEXT_SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "fgdb-sim-artifact-{}-{process_epoch}-{sequence}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).expect("scratch dir is fresh");
     dir
 }
 
@@ -446,7 +456,8 @@ fn the_emitted_replay_command_executes_as_a_subprocess() {
     )
     .expect("a failing artifact carries a replay command");
 
-    let expected = replay_command_env(command, ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV);
+    let expected = replay_command_env(command, ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV)
+        .expect("the replay command assigns the expected digest");
     let output = execute_replay_consumer_in_fresh_process(command, expected);
     assert!(
         output.status.success(),
