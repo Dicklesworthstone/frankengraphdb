@@ -90,10 +90,10 @@ use crate::{
 };
 
 /// Canonical record encoding version.
-pub const STATISTICAL_LOG_RECORD_VERSION: u16 = 4;
+pub const STATISTICAL_LOG_RECORD_VERSION: u16 = 5;
 
 /// Canonical bounded-log encoding version.
-pub const STATISTICAL_LOG_VERSION: u16 = 4;
+pub const STATISTICAL_LOG_VERSION: u16 = 5;
 
 /// Absolute record-count ceiling for one in-memory log.
 pub const MAX_STATISTICAL_LOG_RECORDS: usize = 1_048_576;
@@ -121,10 +121,10 @@ impl StatisticalLogDecodeLimits {
     }
 }
 
-const RECORD_MAGIC: [u8; 8] = *b"FGDBSLR4";
-const LOG_MAGIC: [u8; 8] = *b"FGDBSLL4";
-const MONITOR_IDENTITY_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:monitor-identity:v4";
-const EVIDENCE_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:evidence-body:v4";
+const RECORD_MAGIC: [u8; 8] = *b"FGDBSLR5";
+const LOG_MAGIC: [u8; 8] = *b"FGDBSLL5";
+const MONITOR_IDENTITY_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:monitor-identity:v5";
+const EVIDENCE_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:evidence-body:v5";
 const OPE_SUPPORT_EXCLUSIONS_DOMAIN: &[u8] =
     b"fgdb:statistical-log-record:ope-support-exclusions:v1";
 const RECORD_TAG: u8 = 1;
@@ -492,14 +492,16 @@ pub enum StatisticalStatistic {
     BocpdSrRegimeChange {
         /// Immutable model profile identity.
         profile_oid: ObjectId,
-        /// Registered raw-metric to binary projection identity.
-        binary_projection_oid: ObjectId,
+        /// Identity of the already-projected binary input contract.
+        binary_input_contract_oid: ObjectId,
         /// Digest of the complete canonical typed detector evidence.
         typed_evidence_digest: StatisticalEvidenceDigest,
         /// Exact fixed-point Shiryaev--Roberts statistic.
         sr_statistic: u128,
         /// Exact fixed-point Shiryaev--Roberts threshold.
         sr_threshold: u128,
+        /// Immutable saturating bound for the SR recurrence.
+        sr_cap: u128,
         /// BOCPD run-zero posterior mass.
         changepoint_mass: u64,
         /// BOCPD run-zero posterior threshold.
@@ -677,7 +679,7 @@ impl StatisticalStatistic {
             Self::ExplorationBudget { .. } => 56,
             Self::DrainProgress { .. } => 25,
             Self::RegimeChange { .. } => 32,
-            Self::BocpdSrRegimeChange { .. } => 189,
+            Self::BocpdSrRegimeChange { .. } => 205,
             Self::OffPolicyEvaluation { .. } => 390,
             Self::AnnRecall { .. } => 402,
         }
@@ -806,6 +808,7 @@ impl StatisticalStatistic {
             Self::BocpdSrRegimeChange {
                 sr_statistic,
                 sr_threshold,
+                sr_cap,
                 changepoint_mass,
                 changepoint_threshold_mass,
                 tail_mass,
@@ -816,7 +819,7 @@ impl StatisticalStatistic {
                 successor_effective_sequence,
                 ..
             } => {
-                if sr_threshold == 0 {
+                if sr_threshold == 0 || sr_cap < sr_threshold || sr_statistic > sr_cap {
                     return Err(StatisticalLogRecordError::InvalidBocpdSrStatistic);
                 }
                 if changepoint_mass > BOCPD_SR_SCALE
@@ -1363,10 +1366,11 @@ impl StatisticalLogRecord {
             evidence.selected_policy_oid(),
             StatisticalStatistic::BocpdSrRegimeChange {
                 profile_oid: evidence.profile().detector_profile_oid(),
-                binary_projection_oid: evidence.profile().binary_projection_oid(),
+                binary_input_contract_oid: evidence.profile().binary_input_contract_oid(),
                 typed_evidence_digest,
                 sr_statistic: evidence.sr_statistic(),
                 sr_threshold: evidence.profile().sr_threshold(),
+                sr_cap: evidence.profile().sr_cap(),
                 changepoint_mass: evidence.changepoint_mass(),
                 changepoint_threshold_mass: evidence.profile().changepoint_threshold_mass(),
                 map_run_length: evidence.map_run_length(),
@@ -1886,10 +1890,11 @@ impl StatisticalLogRecord {
             ),
             StatisticalStatistic::BocpdSrRegimeChange {
                 profile_oid,
-                binary_projection_oid,
+                binary_input_contract_oid,
                 typed_evidence_digest,
                 sr_statistic,
                 sr_threshold,
+                sr_cap,
                 changepoint_mass,
                 changepoint_threshold_mass,
                 map_run_length,
@@ -1903,17 +1908,18 @@ impl StatisticalLogRecord {
                 StatisticalErrorControl::NotApplicable,
                 format!("binary-regime-stream:{filtration_or_window}"),
                 format!(
-                    "complete identity-bound binary projection:{}",
-                    object_id_hex(binary_projection_oid)
+                    "complete identity-bound pre-projected binary stream:{}",
+                    object_id_hex(binary_input_contract_oid)
                 ),
                 format!(
-                    "error_control=not-applicable;profile_oid={};typed_evidence_digest={};sr={sr_statistic}/{sr_threshold};changepoint_mass={changepoint_mass}/{changepoint_threshold_mass};map_run_length={map_run_length};tail_mass={tail_mass};observations={observations};detections={detections};combined_detected={combined_detected};successor_regime_epoch={successor_regime_epoch};successor_effective_sequence={successor_effective_sequence}",
+                    "error_control=not-applicable;profile_oid={};typed_evidence_digest={};sr={sr_statistic}/{sr_threshold};sr_cap={sr_cap};changepoint_mass={changepoint_mass}/{changepoint_threshold_mass};map_run_length={map_run_length};tail_mass={tail_mass};observations={observations};detections={detections};combined_detected={combined_detected};successor_regime_epoch={successor_regime_epoch};successor_effective_sequence={successor_effective_sequence}",
                     object_id_hex(profile_oid),
                     digest_hex(typed_evidence_digest),
                 ),
                 vec![
                     "alpha does not apply to this model-qualified BOCPD plus Shiryaev-Roberts receipt".to_owned(),
-                    "the binary projection, Bernoulli hypotheses, Beta prior, hazard, finite run cap, quantization, and conjunction rule are immutable profile identities".to_owned(),
+                    "the upstream binary-stream contract, Bernoulli hypotheses, Beta prior, hazard, finite run cap, SR cap, quantization, and conjunction rule are immutable profile identities".to_owned(),
+                    "this monitor consumes pre-projected binary observations and does not implement or validate an arbitrary raw-metric projection".to_owned(),
                     "the alarm is advisory and does not retroactively validate prior observations or replace dwell, hysteresis, or benefit guards".to_owned(),
                     format!("monitor_oid={monitor_oid}"),
                 ],
@@ -2134,7 +2140,7 @@ impl StatisticalLogRecord {
         ))
     }
 
-    /// Encodes this record under the strict version-4 canonical format.
+    /// Encodes this record under the strict version-5 canonical format.
     pub fn encode_canonical(self) -> Result<Vec<u8>, StatisticalLogCodecError> {
         let capacity = RECORD_FIXED_BYTES
             .checked_add(self.statistic.payload_len())
@@ -2172,7 +2178,7 @@ impl StatisticalLogRecord {
         Ok(bytes)
     }
 
-    /// Decodes exactly one strict version-4 canonical record.
+    /// Decodes exactly one strict version-5 canonical record.
     pub fn decode_canonical(
         bytes: &[u8],
         identity_verifier: &impl StatisticalEvidenceIdentityVerifier,
@@ -2420,7 +2426,7 @@ impl StatisticalDecisionLog {
         Ok(())
     }
 
-    /// Encodes the bound and every record under the strict version-4 format.
+    /// Encodes the bound and every record under the strict version-5 format.
     pub fn encode_canonical(&self) -> Result<Vec<u8>, StatisticalLogCodecError> {
         let mut encoded_records = Vec::new();
         encoded_records
@@ -2464,7 +2470,7 @@ impl StatisticalDecisionLog {
         Ok(bytes)
     }
 
-    /// Decodes a complete strict version-4 log and replays its append checks.
+    /// Decodes a complete strict version-5 log and replays its append checks.
     pub fn decode_canonical(
         bytes: &[u8],
         expected_maximum_records: usize,
@@ -4266,7 +4272,7 @@ const fn stable_statistic_identity_len(statistic: StatisticalStatistic) -> usize
         StatisticalStatistic::ExplorationBudget { .. } => 16,
         StatisticalStatistic::DrainProgress { .. } => 0,
         StatisticalStatistic::RegimeChange { .. } => 8,
-        StatisticalStatistic::BocpdSrRegimeChange { .. } => 96,
+        StatisticalStatistic::BocpdSrRegimeChange { .. } => 112,
         StatisticalStatistic::OffPolicyEvaluation { .. } => 202,
         StatisticalStatistic::AnnRecall { .. } => 301,
     }
@@ -4318,14 +4324,16 @@ fn encode_stable_statistic_identity(bytes: &mut Vec<u8>, statistic: StatisticalS
         StatisticalStatistic::RegimeChange { threshold, .. } => push_i64(bytes, threshold),
         StatisticalStatistic::BocpdSrRegimeChange {
             profile_oid,
-            binary_projection_oid,
+            binary_input_contract_oid,
             sr_threshold,
+            sr_cap,
             changepoint_threshold_mass,
             ..
         } => {
             push_oid(bytes, profile_oid);
-            push_oid(bytes, binary_projection_oid);
+            push_oid(bytes, binary_input_contract_oid);
             push_u128(bytes, sr_threshold);
+            push_u128(bytes, sr_cap);
             push_u64(bytes, changepoint_threshold_mass);
             push_u64(bytes, BOCPD_SR_SCALE);
         }
@@ -4672,10 +4680,11 @@ fn encode_statistic(bytes: &mut Vec<u8>, statistic: StatisticalStatistic) {
         }
         StatisticalStatistic::BocpdSrRegimeChange {
             profile_oid,
-            binary_projection_oid,
+            binary_input_contract_oid,
             typed_evidence_digest,
             sr_statistic,
             sr_threshold,
+            sr_cap,
             changepoint_mass,
             changepoint_threshold_mass,
             map_run_length,
@@ -4687,10 +4696,11 @@ fn encode_statistic(bytes: &mut Vec<u8>, statistic: StatisticalStatistic) {
             successor_effective_sequence,
         } => {
             push_oid(bytes, profile_oid);
-            push_oid(bytes, binary_projection_oid);
+            push_oid(bytes, binary_input_contract_oid);
             bytes.extend_from_slice(typed_evidence_digest.as_bytes());
             push_u128(bytes, sr_statistic);
             push_u128(bytes, sr_threshold);
+            push_u128(bytes, sr_cap);
             push_u64(bytes, changepoint_mass);
             push_u64(bytes, changepoint_threshold_mass);
             push_u32(bytes, map_run_length);
@@ -4848,7 +4858,7 @@ fn decode_statistic(
         5 => 32,
         6 => 390,
         7 => 402,
-        8 => 189,
+        8 => 205,
         _ => return Err(StatisticalLogCodecError::UnknownStatisticKind { tag }),
     };
     if payload.len() != expected {
@@ -4975,10 +4985,11 @@ fn decode_statistic(
         },
         8 => StatisticalStatistic::BocpdSrRegimeChange {
             profile_oid: decoder.read_oid()?,
-            binary_projection_oid: decoder.read_oid()?,
+            binary_input_contract_oid: decoder.read_oid()?,
             typed_evidence_digest: StatisticalEvidenceDigest(decoder.read_array::<32>()?),
             sr_statistic: decoder.read_u128()?,
             sr_threshold: decoder.read_u128()?,
+            sr_cap: decoder.read_u128()?,
             changepoint_mass: decoder.read_u64()?,
             changepoint_threshold_mass: decoder.read_u64()?,
             map_run_length: decoder.read_u32()?,
