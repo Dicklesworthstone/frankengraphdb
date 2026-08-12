@@ -17,8 +17,8 @@ use fgdb_sim::ldfi::{
     G3_GATE, G3_PHASE_OWNER, GENESIS_GATE, LOCAL_TORTURE_OWNER, LdfiTarget, Reachability,
     RegistryValidationError, TARGETS, TargetMetadataError, TargetRowState, W12_GATE,
     W12_PHASE_OWNER, campaign_entrypoint, coverage_statement, expected_phase_boundary,
-    reachable_count, registry_jsonl, unreachable_count, validate_activation,
-    validate_registry_rows, validate_target_metadata,
+    g3_campaign_entrypoint, reachable_count, registry_jsonl, unreachable_count,
+    validate_activation, validate_registry_rows, validate_target_metadata, w12_campaign_entrypoint,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -353,6 +353,26 @@ fn local_g3_and_w12_entrypoints_are_delegated_not_covered_by_the_base_harness() 
             row_state: TargetRowState::Pending,
         })
     );
+    assert_eq!(
+        g3_campaign_entrypoint("raft"),
+        Err(ActivationRejection::ImplementationDisabled),
+        "the dedicated G3 entrypoint must refuse until its product owner activates the row"
+    );
+    assert_eq!(
+        w12_campaign_entrypoint("local-to-w12-seal"),
+        Err(ActivationRejection::ImplementationDisabled),
+        "the dedicated W12 entrypoint must refuse until its product owner activates the row"
+    );
+    assert_eq!(
+        g3_campaign_entrypoint("local-to-w12-seal"),
+        Err(ActivationRejection::WrongPhaseOwner),
+        "a W12 row must not be executable through the G3 adapter"
+    );
+    assert_eq!(
+        w12_campaign_entrypoint("raft"),
+        Err(ActivationRejection::WrongPhaseOwner),
+        "a G3 row must not be executable through the W12 adapter"
+    );
 
     let covered =
         campaign_entrypoint("d1-file-sync").expect("the current D1 witness has a base entrypoint");
@@ -415,7 +435,7 @@ fn the_coverage_gap_is_reported_not_hidden() {
     // aspirational, and with none unreachable it would be lying.
     assert!(
         reachable > 0,
-        "no target is reachable; the lab VFS faults D1/D2 syncs today"
+        "no target is reachable; the lab VFS faults D1/D2 writes and syncs today"
     );
     assert!(
         unreachable > 0,
@@ -441,9 +461,9 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
     // there. The allowlist is exact on purpose: flipping a row to reachable
     // must arrive together with its witness, or this test names the overclaim.
     //
-    //   d1/d2 file syncs — witnessed by the FaultVfs section of
-    //     `durability_semantics_e2e.rs`; file writes remain pending because
-    //     `poll_write` has no injection point yet;
+    //   d1/d2 file writes and syncs — witnessed by the FaultVfs section of
+    //     `durability_semantics_e2e.rs`; write ENOSPC is injected before the
+    //     volatile image accepts any byte, separately from sync faults;
     //   dual-root ordered + physical boundaries — witnessed below in this
     //     file (`a_lying_publish_sync_*`, `enospc_refuses_the_publish_*`);
     //   directory-sync — witnessed by the dirent-durability section of
@@ -454,7 +474,9 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
     //     this file (fgdb-1dgm: `damaged_publish_bytes_mint_no_certificate_*`,
     //     `a_stale_forked_or_absent_continuity_head_*`).
     let witnessed: BTreeSet<&str> = [
+        "d1-file-write",
         "d1-file-sync",
+        "d2-file-write",
         "d2-file-sync",
         "directory-sync",
         "dual-root-ordered-boundary",
@@ -497,7 +519,7 @@ use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, RootSlot};
 use fgdb_chronicle::store::{ContinuityAuthority, ContinuityHead, RootStore, StoreError};
 use fgdb_delta_types::RelationId;
-use fgdb_sim::artifact::{FailureKind, Replay, Scenario};
+use fgdb_sim::artifact::{Failure, FailureKind, Replay, Scenario};
 use fgdb_sim::ldfi::{InjectableFaultClass, TraceLdfiError, derive_fault_hypotheses};
 use fgdb_sim::shrink::shrink;
 use fgdb_sim::vfs::{FAULT_POINT_TRACE_PREFIX, FaultKind, FaultPlan, FaultVfs, Trigger};
@@ -1373,6 +1395,7 @@ fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
     );
 
     let mut experiment_ordinal = 0usize;
+    let mut unexpected_failures: Vec<(usize, Failure)> = Vec::new();
     let report = derived.run_experiments(
         LdfiExperimentBudget {
             max_experiments: 64,
@@ -1388,12 +1411,30 @@ fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
             let outcome = replay.run(&scratch_dir(&format!(
                 "lineage-append-experiment-{experiment_ordinal}"
             )));
-            if outcome.failure.is_some() {
-                LdfiExperimentObservation::InvariantViolated
-            } else {
-                LdfiExperimentObservation::InvariantHeld
+            // This campaign falsifies the acknowledged-durability law. A
+            // planned write refusal is an exercised fault point but a legal
+            // operation error, not a counterexample to that law; treating
+            // every scenario error as the same invariant violation would make
+            // the first newly registered fault class steal this campaign.
+            match outcome.failure {
+                Some(failure) if failure.kind == FailureKind::AcknowledgedBytesLost => {
+                    LdfiExperimentObservation::InvariantViolated
+                }
+                None
+                | Some(Failure {
+                    kind: FailureKind::SyncRefused | FailureKind::WriteRefused,
+                    ..
+                }) => LdfiExperimentObservation::InvariantHeld,
+                Some(failure) => {
+                    unexpected_failures.push((experiment_ordinal, failure));
+                    LdfiExperimentObservation::InvariantHeld
+                }
             }
         },
+    );
+    assert!(
+        unexpected_failures.is_empty(),
+        "an unexpected harness/product failure is inconclusive-red, never evidence that the invariant held: {unexpected_failures:#?}"
     );
     assert!(
         matches!(report.status, LdfiExperimentStatus::FoundViolation { .. }),

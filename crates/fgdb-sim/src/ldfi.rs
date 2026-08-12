@@ -158,10 +158,6 @@ const fn delegated(
     }
 }
 
-const fn pending_base(id: &'static str, source_phrase: &'static str) -> LdfiTarget {
-    delegated(id, source_phrase, BASE_HARNESS_OWNER, GENESIS_GATE)
-}
-
 /// The complete normative LDFI target-id inventory, in plan order.
 ///
 /// Whole-registry validation compares [`TARGETS`] against this independent
@@ -224,13 +220,21 @@ pub static EXPECTED_TARGET_IDS: &[&str] = &[
 /// denominator is the plan's and not ours.
 pub static TARGETS: &[LdfiTarget] = &[
     // "every file/directory action in D1/D2"
-    pending_base("d1-file-write", "every file/directory action in D1/D2"),
+    live(
+        "d1-file-write",
+        "every file/directory action in D1/D2",
+        "crates/fgdb-sim/tests/durability_semantics_e2e.rs::d1_file_write_enospc_refuses_before_marker_publication_and_recovers_prefix",
+    ),
     live(
         "d1-file-sync",
         "every file/directory action in D1/D2",
         "crates/fgdb-sim/tests/durability_semantics_e2e.rs::a_one_shot_d1_fsync_lie_is_reinforced_before_marker_publication",
     ),
-    pending_base("d2-file-write", "every file/directory action in D1/D2"),
+    live(
+        "d2-file-write",
+        "every file/directory action in D1/D2",
+        "crates/fgdb-sim/tests/durability_semantics_e2e.rs::d2_file_write_enospc_refuses_before_acknowledgement_and_recovers_prefix",
+    ),
     live(
         "d2-file-sync",
         "every file/directory action in D1/D2",
@@ -764,6 +768,50 @@ pub fn campaign_entrypoint(target_id: &str) -> Result<CampaignEntrypoint, Activa
     }
 }
 
+fn phase_owned_campaign_entrypoint(
+    target_id: &str,
+    phase_owner_bead: &'static str,
+    first_required_gate: &'static str,
+) -> Result<&'static LdfiTarget, ActivationRejection> {
+    validate_registry_rows(TARGETS).map_err(ActivationRejection::InvalidRegistry)?;
+    let target = TARGETS
+        .iter()
+        .find(|target| target.id == target_id)
+        .ok_or(ActivationRejection::UnknownTarget)?;
+    if target.phase_owner_bead != phase_owner_bead {
+        return Err(ActivationRejection::WrongPhaseOwner);
+    }
+    if target.first_required_gate != first_required_gate {
+        return Err(ActivationRejection::WrongGate);
+    }
+    validate_activation(
+        target_id,
+        phase_owner_bead,
+        first_required_gate,
+        target.coverage_evidence_ref,
+    )
+}
+
+/// Admission boundary for a G3-owned executable fault campaign.
+///
+/// Today every such row refuses with [`ActivationRejection::ImplementationDisabled`].
+/// That refusal is load-bearing: q97e can route a row to G3 but cannot execute
+/// or count it before the G3 torture owner lands the product machinery and an
+/// exact witness in the same row.
+pub fn g3_campaign_entrypoint(target_id: &str) -> Result<&'static LdfiTarget, ActivationRejection> {
+    phase_owned_campaign_entrypoint(target_id, G3_PHASE_OWNER, G3_GATE)
+}
+
+/// Admission boundary for a W12-owned executable fault campaign.
+///
+/// Like [`g3_campaign_entrypoint`], this is a real fail-closed adapter, not a
+/// placeholder success path: pending W12 rows cannot produce campaign proof.
+pub fn w12_campaign_entrypoint(
+    target_id: &str,
+) -> Result<&'static LdfiTarget, ActivationRejection> {
+    phase_owned_campaign_entrypoint(target_id, W12_PHASE_OWNER, W12_GATE)
+}
+
 fn push_json_string(output: &mut String, value: &str) {
     output.push('"');
     for character in value.chars() {
@@ -866,6 +914,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum InjectableFaultClass {
     /// A file sync acknowledges bytes it did not persist.
     FsyncLie,
+    /// A non-empty file write is refused with ENOSPC before accepting bytes.
+    WriteEnospc,
     /// An interior sector is lost during a file sync.
     TornWrite,
     /// A durable byte is damaged after write-through.
@@ -882,6 +932,7 @@ impl InjectableFaultClass {
     fn parse(token: &str) -> Option<Self> {
         match token {
             "fsync-lie" => Some(Self::FsyncLie),
+            "write-enospc" => Some(Self::WriteEnospc),
             "torn-write" => Some(Self::TornWrite),
             "bit-flip" => Some(Self::BitFlip),
             "dirent-sync-lie" => Some(Self::DirentSyncLie),
@@ -894,6 +945,7 @@ impl InjectableFaultClass {
     fn install(self, plan: &mut FaultPlan, trigger: Trigger, latency_micros: u64) {
         match self {
             Self::FsyncLie => plan.fsync_lie = trigger,
+            Self::WriteEnospc => plan.write_enospc = trigger,
             Self::TornWrite => plan.torn_write = trigger,
             Self::BitFlip => plan.bit_flip = trigger,
             Self::DirentSyncLie => plan.dirent_lie = trigger,

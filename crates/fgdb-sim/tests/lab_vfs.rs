@@ -236,6 +236,7 @@ fn nth_zero_never_fires() {
     let path = dir.join("log");
     let vfs = FaultVfs::unix(FaultPlan {
         fsync_lie: Trigger::Nth(0),
+        write_enospc: Trigger::Nth(0),
         torn_write: Trigger::Nth(0),
         bit_flip: Trigger::Nth(0),
         ..FaultPlan::faultless()
@@ -394,6 +395,65 @@ fn a_bit_flip_damages_exactly_one_bit_of_durable_data() {
 // ---------------------------------------------------------------------------
 // ENOSPC
 // ---------------------------------------------------------------------------
+
+#[test]
+fn write_enospc_accepts_no_bytes_and_an_exact_retry_can_progress() {
+    let dir = scratch_dir("write-enospc");
+    let path = dir.join("log");
+    let vfs = FaultVfs::unix(FaultPlan {
+        write_enospc: Trigger::At(1),
+        ..FaultPlan::faultless()
+    });
+
+    let bytes = sector_pattern(2);
+    runtime().block_on(async {
+        let mut file = vfs
+            .open(&path, &OpenOptions::new().write(true).create(true))
+            .await
+            .expect("open");
+        let error = poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &bytes))
+            .await
+            .expect_err("the selected write must be refused");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(28),
+            "a refused write must surface as ENOSPC"
+        );
+        assert!(
+            file.image().expect("handle alive").is_empty(),
+            "the refused write must accept no volatile bytes"
+        );
+        assert!(
+            file.dirty_sectors().expect("handle alive").is_empty(),
+            "the refused write must dirty no sector"
+        );
+
+        let accepted = poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &bytes))
+            .await
+            .expect("the one-shot fault is exhausted");
+        assert_eq!(accepted, bytes.len());
+        asupersync::fs::VfsFile::sync_all(&file)
+            .await
+            .expect("retry syncs");
+        vfs.crash().await.expect("crash rollback");
+        assert_eq!(
+            vfs.read(&path).await.expect("read after crash"),
+            bytes,
+            "the exact retry must persist the complete request"
+        );
+    });
+
+    let events = vfs.events();
+    assert_eq!(events.len(), 1, "expected one write refusal: {events:?}");
+    assert_eq!(
+        events[0].kind,
+        FaultKind::WriteEnospc {
+            requested: (2 * SECTOR) as u64,
+        }
+    );
+    assert_eq!(events[0].kind.class(), "write-enospc");
+    assert_eq!(events[0].path, path);
+}
 
 #[test]
 fn out_of_space_refuses_the_flush_and_leaves_the_bytes_dirty() {

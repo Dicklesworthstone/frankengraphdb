@@ -31,7 +31,7 @@ use fgdb_sim::{
 };
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, ObjectId, VId};
 use std::path::{Path, PathBuf};
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -875,6 +875,155 @@ async fn open_faulted(cx: &CommitCx, vfs: &FaultVfs, dir: &Path) -> CommitCoordi
         .expect("open through the fault model")
 }
 
+fn commit_io_error_code(result: &Result<MarkerRef, CommitError>) -> Option<i32> {
+    match result {
+        Err(CommitError::Io(error)) => error.raw_os_error(),
+        Ok(_) | Err(_) => None,
+    }
+}
+
+fn torn_write_range(kind: FaultKind) -> Option<(u64, u64)> {
+    match kind {
+        FaultKind::TornWrite { start, end } => Some((start, end)),
+        _ => None,
+    }
+}
+
+async fn exercise_file_write_enospc(cx: &CommitCx, dir: &Path, write_ordinal: u32, d2_arm: bool) {
+    let capsules = three_commits();
+    let third = capsules[2].clone();
+    let mut baseline = CommitCoordinator::open(cx, dir, keys())
+        .await
+        .expect("open baseline");
+    commit_capsule(&mut baseline, cx, &capsules[0], vec![])
+        .await
+        .expect("commit 1");
+    commit_capsule(&mut baseline, cx, &capsules[1], vec![])
+        .await
+        .expect("commit 2");
+    drop(baseline);
+
+    // A freshly opened fault model sees exactly two non-empty write calls in
+    // this commit: the capsule container (D1's file action), then the framed
+    // marker append (D2's file action). The event path below independently
+    // pins which one the ordinal selected.
+    let vfs = FaultVfs::unix(FaultPlan {
+        write_enospc: Trigger::At(write_ordinal),
+        ..FaultPlan::faultless()
+    });
+    let mut faulted = open_faulted(cx, &vfs, dir).await;
+    let refused = commit_capsule(&mut faulted, cx, &third, vec![]).await;
+    assert_eq!(
+        commit_io_error_code(&refused),
+        Some(28),
+        "the selected file write must refuse with typed ENOSPC: {refused:?}"
+    );
+    assert_eq!(
+        faulted.is_poisoned(),
+        d2_arm,
+        "a D1 write refusal is pre-marker and reusable; D2 begins after the coordinator's uncertainty fence"
+    );
+    let events = vfs.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly the planted write fault must fire: {events:?}"
+    );
+    assert!(
+        matches!(events[0].kind, FaultKind::WriteEnospc { requested } if requested > 0),
+        "the witness must be a non-empty write refusal: {:?}",
+        events[0].kind
+    );
+    let expected_path = if d2_arm {
+        dir.join(fgdb_chronicle::commit::COMMIT_LOG_NAME)
+    } else {
+        capsule_disk_path(dir, &third.object_id)
+    };
+    assert_eq!(
+        events[0].path, expected_path,
+        "the ordinal selected the wrong D1/D2 file action"
+    );
+
+    assert_eq!(
+        faulted.chain().len(),
+        2,
+        "a refused write must never become an acknowledged commit"
+    );
+    assert_eq!(faulted.next_commit_seq(), Ok(CommitSeq(3)));
+    expect_graph_after(
+        &materialize(cx, &faulted)
+            .await
+            .expect("the committed prefix materializes"),
+        2,
+    );
+
+    if !d2_arm {
+        // `create_new` happened before the first D1 write accepted zero bytes,
+        // so the pathname exists but no immutable object does. The same live
+        // coordinator must be able to finish that exact capsule after the
+        // one-shot fault is exhausted; accepting only a different object would
+        // leave a canonical-name denial of service.
+        let residue = capsule_disk_path(dir, &third.object_id);
+        let residue_metadata = std::fs::metadata(&residue)
+            .expect("the refused create_new write leaves its canonical pathname");
+        assert!(residue_metadata.is_file());
+        assert_eq!(
+            residue_metadata.len(),
+            0,
+            "the planted pre-cache ENOSPC must leave zero accepted bytes"
+        );
+        assert!(
+            !faulted.capsule_exists(cx, third.object_id).await,
+            "an empty pre-D1 staging pathname is not a capsule"
+        );
+        assert_eq!(
+            faulted.orphan_capsules(cx).await.expect("orphan scan"),
+            Vec::<ObjectId>::new(),
+            "an empty pre-D1 staging pathname is not an orphan capsule"
+        );
+        let marker = commit_capsule(&mut faulted, cx, &third, vec![])
+            .await
+            .expect("exact D1 retry completes the empty pre-object residue");
+        assert_eq!(marker.commit_seq, CommitSeq(3));
+    }
+
+    vfs.crash().await.expect("process loss");
+    drop(faulted);
+    let recovered_vfs = FaultVfs::unix(FaultPlan::faultless());
+    let mut recovered = open_faulted(cx, &recovered_vfs, dir).await;
+
+    if d2_arm {
+        assert_eq!(recovered.chain().len(), 2);
+        assert_eq!(recovered.next_commit_seq(), Ok(CommitSeq(3)));
+        // D1 completed before the D2 write was refused. Reusing the durable
+        // capsule and the unconsumed sequence must publish the exact third
+        // commit after recovery.
+        commit_capsule(&mut recovered, cx, &third, vec![])
+            .await
+            .expect("retry after D2 write refusal");
+        expect_graph_after(
+            &materialize(cx, &recovered)
+                .await
+                .expect("retry materializes"),
+            3,
+        );
+    } else {
+        assert_eq!(recovered.chain().len(), 3);
+        assert_eq!(recovered.next_commit_seq(), Ok(CommitSeq(4)));
+        assert_eq!(
+            recovered.orphan_capsules(cx).await.expect("orphan scan"),
+            Vec::<ObjectId>::new(),
+            "an exact retry turns the pre-D1 residue into the referenced immutable capsule"
+        );
+        expect_graph_after(
+            &materialize(cx, &recovered)
+                .await
+                .expect("exact retry survives recovery"),
+            3,
+        );
+    }
+}
+
 /// Commit all three fixtures through `coordinator`, asserting each ack.
 async fn three_commits_through<V: asupersync::fs::Vfs>(
     coordinator: &mut CommitCoordinator<V>,
@@ -935,6 +1084,28 @@ fn a_faultless_fault_model_is_byte_transparent_through_the_real_commit_path() {
             .await
             .expect("reopen without the model");
         expect_graph_after(&materialize(cx, &reopened).await.expect("materializes"), 3);
+    });
+}
+
+/// A D1 file write can fail before the capsule cache accepts any byte. No
+/// marker is published, the committed graph remains the exact prior prefix,
+/// and the abandoned sequence remains available for unrelated progress.
+#[test]
+fn d1_file_write_enospc_refuses_before_marker_publication_and_recovers_prefix() {
+    let dir = scratch_dir("vfs-d1-write-enospc");
+    under_lab(74, move |cx| async move {
+        exercise_file_write_enospc(&cx, &dir, 1, false).await;
+    });
+}
+
+/// A D2 file write can fail after D1 without acknowledging the commit. Reopen
+/// observes the exact prior prefix and can reuse both the durable capsule and
+/// the unconsumed commit sequence.
+#[test]
+fn d2_file_write_enospc_refuses_before_acknowledgement_and_recovers_prefix() {
+    let dir = scratch_dir("vfs-d2-write-enospc");
+    under_lab(75, move |cx| async move {
+        exercise_file_write_enospc(&cx, &dir, 2, true).await;
     });
 }
 
@@ -1084,14 +1255,11 @@ fn enospc_at_either_barrier_refuses_typed_and_recovery_resumes() {
             });
             let mut faulted = open_faulted(cx, &vfs, &dir).await;
             let refused = commit_capsule(&mut faulted, cx, &third, vec![]).await;
-            match &refused {
-                Err(CommitError::Io(error)) => assert_eq!(
-                    error.raw_os_error(),
-                    Some(28),
-                    "the refusal must be the kernel's own ENOSPC, got {error:?}"
-                ),
-                other => panic!("a full disk must surface as a typed Io error, got {other:?}"),
-            }
+            assert_eq!(
+                commit_io_error_code(&refused),
+                Some(28),
+                "a full disk must surface as the kernel's typed ENOSPC: {refused:?}"
+            );
             assert_eq!(
                 faulted.is_poisoned(),
                 d2_arm,
@@ -1125,30 +1293,13 @@ fn enospc_at_either_barrier_refuses_typed_and_recovery_resumes() {
                     .expect("recommit once space returns");
             } else {
                 // The refused D1 left the capsule path behind holding NONE of
-                // its bytes — the same residue a real ENOSPC leaves. A
-                // content-addressed path is immutable even when its bytes are
-                // wrong, so the recommit refuses rather than repairs; the
-                // residue is an orphan, and reclaiming it is what unblocks
-                // the sequence.
-                let refused_again = commit_capsule(&mut recovered, cx, &third, vec![]).await;
-                assert!(
-                    matches!(
-                        &refused_again,
-                        Err(CommitError::CapsulePathConflict { capsule_oid })
-                            if *capsule_oid == third.object_id
-                    ),
-                    "the residue must refuse typed, naming the identity; got {refused_again:?}"
-                );
-                assert_eq!(
-                    recovered.orphan_capsules(cx).await.expect("scan"),
-                    vec![third.object_id],
-                    "the residue is exactly one orphan — bytes nobody committed"
-                );
-                std::fs::remove_file(capsule_disk_path(&dir, &third.object_id))
-                    .expect("reclaim the orphan residue");
+                // its bytes. It is not an immutable object yet and no marker
+                // names it, so the sole writer completes that exact creation
+                // in place. Requiring external deletion here made transient
+                // ENOSPC a permanent canonical-name denial of service.
                 commit_capsule(&mut recovered, cx, &third, vec![])
                     .await
-                    .expect("recommit after reclaiming the residue");
+                    .expect("exact recommit completes the empty pre-D1 residue");
             }
             expect_graph_after(&materialize(cx, &recovered).await.expect("materializes"), 3);
         });
@@ -1189,29 +1340,29 @@ fn an_interior_tear_inside_the_d2_flush_is_corruption_not_a_tail() {
             events[0].path, log_path,
             "the 6th eligible flush is commit 3's D2"
         );
-        let FaultKind::TornWrite { start, end } = events[0].kind else {
-            panic!("expected a torn write, got {:?}", events[0].kind);
-        };
+        let range = torn_write_range(events[0].kind);
+        assert!(
+            range.is_some(),
+            "expected a torn write, got {:?}",
+            events[0].kind
+        );
+        let (start, end) = range.unwrap_or((0, 0));
         assert!(end > start, "the tear names the hole it made");
 
         vfs.crash().await.expect("crash rollback");
         let damaged = std::fs::read(&log_path).expect("durable log");
-        let result = match CommitCoordinator::open_with_vfs(
+        let result = CommitCoordinator::open_with_vfs(
             cx,
             FaultVfs::unix(FaultPlan::faultless()),
             &dir,
             keys(),
         )
-        .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("a hole with valid bytes after it must refuse to open"),
-        };
+        .await;
         assert!(
             matches!(
                 &result,
-                CommitError::CorruptLogEntry { commit_seq: 3 }
-                    | CommitError::ChainDiverged { commit_seq: 3 }
+                Err(CommitError::CorruptLogEntry { commit_seq: 3 }
+                    | CommitError::ChainDiverged { commit_seq: 3 })
             ),
             "an interior hole is damage inside a complete frame — corruption \
              naming sequence 3, never a discardable tail; got {result:?}"

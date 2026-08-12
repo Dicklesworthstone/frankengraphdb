@@ -423,6 +423,65 @@ fn a_conflicting_existing_capsule_path_is_never_overwritten() {
     });
 }
 
+/// An empty pathname is repairable only when publication failed before D1 and
+/// no committed marker names it. If a referenced capsule is later truncated,
+/// the same shape is corruption evidence, not a retry residue. The coordinator
+/// must refuse to rewrite it even though the bytes and length are identical to
+/// the one pre-D1 failure that exact retry is allowed to repair.
+#[test]
+fn an_empty_referenced_capsule_is_never_repaired_in_place() {
+    let dir = scratch_dir("referenced-empty-capsule-conflict");
+    under_lab(36, move |cx| async move {
+        let cx = &cx;
+        let plaintext = capsule_bytes(1);
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        commit_ok(&mut coordinator, cx, 1).await;
+        drop(coordinator);
+
+        let path = only_capsule_path(&dir);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open committed capsule for fault injection")
+            .set_len(0)
+            .expect("model post-commit capsule truncation");
+        let committed_log = log_bytes(&dir);
+
+        let mut reopened = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen from the intact marker log");
+        let chain_snapshot = reopened.chain().clone();
+        let result = reopened
+            .commit(cx, &plaintext, |seq, oid| {
+                marker_for(seq, oid, &chain_snapshot)
+            })
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(CommitError::CapsulePathConflict { capsule_oid: found })
+                    if found == capsule_oid(1)
+            ),
+            "a referenced empty capsule must remain conflict evidence; got {result:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).expect("inspect capsule").len(),
+            0,
+            "the coordinator must not repair a capsule named by durable history"
+        );
+        assert_eq!(
+            log_bytes(&dir),
+            committed_log,
+            "no new marker may be appended"
+        );
+        assert_eq!(reopened.chain().len(), 1);
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(2)));
+        assert!(!reopened.is_poisoned());
+    });
+}
+
 /// Deterministic sealing makes legitimate deduplication ordinary: two commits
 /// may name the same capsule bytes. No-replace publication must therefore
 /// distinguish an identical existing object from a conflicting one rather than

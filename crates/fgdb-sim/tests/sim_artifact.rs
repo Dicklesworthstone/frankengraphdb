@@ -273,6 +273,7 @@ fn an_exact_one_shot_trigger_round_trips_without_becoming_periodic() {
         plan: FaultPlan {
             seed: 0x1774_0000_0000_0006,
             fsync_lie: Trigger::At(3),
+            write_enospc: Trigger::At(2),
             ..FaultPlan::faultless()
         },
     };
@@ -282,6 +283,26 @@ fn an_exact_one_shot_trigger_round_trips_without_becoming_periodic() {
     let decoded = Replay::decode(&replay.encode()).expect("exact trigger decodes");
     assert_eq!(decoded, replay);
     assert_eq!(decoded.plan.fsync_lie, Trigger::At(3));
+    assert_eq!(decoded.plan.write_enospc, Trigger::At(2));
+}
+
+#[test]
+fn an_already_emitted_eleven_field_replay_remains_executable() {
+    let replay = failing_replay();
+    let mut legacy_fields: Vec<_> = replay.encode().split(':').map(str::to_owned).collect();
+    assert_eq!(legacy_fields.len(), 12, "current descriptor shape changed");
+    legacy_fields.remove(4);
+    // Private replay descriptor compatibility, not JWT authentication; see
+    // the format-boundary note on Replay::decode.
+    // ubs:ignore
+    let decoded = Replay::decode(&legacy_fields.join(":"))
+        .expect("the prior descriptor shape remains replayable");
+    assert_eq!(decoded.scenario, replay.scenario);
+    assert_eq!(decoded.plan.write_enospc, Trigger::Never);
+
+    let mut expected = replay.plan;
+    expected.write_enospc = Trigger::Never;
+    assert_eq!(decoded.plan, expected);
 }
 
 #[test]

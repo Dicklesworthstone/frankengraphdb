@@ -513,11 +513,12 @@ impl Replay {
             None => "none".to_string(),
         };
         format!(
-            "{}:{:#x}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{:#x}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.scenario.id(),
             self.plan.seed,
             self.plan.sector_bytes,
             encode_trigger(self.plan.fsync_lie),
+            encode_trigger(self.plan.write_enospc),
             encode_trigger(self.plan.torn_write),
             encode_trigger(self.plan.bit_flip),
             encode_trigger(self.plan.dirent_lie),
@@ -535,8 +536,11 @@ impl Replay {
     /// Returns a message naming the first field that did not parse.
     //
     // Not a JWT decode. This parses our own replay descriptor —
-    // "scenario:seed:sector:lie:torn:flip:dirent-lie:dirent-loss:latency:
-    // latency-micros:budget", eleven colon-separated fields — and there is
+    // "scenario:seed:sector:lie:write-enospc:torn:flip:dirent-lie:
+    // dirent-loss:latency:latency-micros:budget", twelve colon-separated
+    // fields. The prior eleven-field descriptor remains readable with
+    // `write_enospc = Never`, so already-emitted crashpacks do not become
+    // unreplayable merely because the fault vocabulary grew. There is
     // no token, signature, key, claim set or expiry
     // anywhere in it. MEASURED: zero occurrences of `jsonwebtoken` in any
     // manifest in this workspace, and doctrine 1's closed dependency universe
@@ -547,11 +551,12 @@ impl Replay {
     // ubs:ignore
     pub fn decode(text: &str) -> Result<Self, String> {
         let parts: Vec<&str> = text.split(':').collect();
-        let [
+        let (
             scenario,
             seed,
             sector,
             lie,
+            write_enospc,
             torn,
             flip,
             dirent_lie,
@@ -559,12 +564,66 @@ impl Replay {
             latency,
             latency_micros,
             budget,
-        ] = parts.as_slice()
-        else {
-            return Err(format!(
-                "expected 11 colon-separated fields, got {}",
-                parts.len()
-            ));
+        ) = match parts.as_slice() {
+            [
+                scenario,
+                seed,
+                sector,
+                lie,
+                write_enospc,
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ] => (
+                scenario,
+                seed,
+                sector,
+                lie,
+                Some(*write_enospc),
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ),
+            [
+                scenario,
+                seed,
+                sector,
+                lie,
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ] => (
+                scenario,
+                seed,
+                sector,
+                lie,
+                None,
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ),
+            _ => {
+                return Err(format!(
+                    "expected 11 or 12 colon-separated fields, got {}",
+                    parts.len()
+                ));
+            }
         };
         let seed = seed
             .strip_prefix("0x")
@@ -580,6 +639,7 @@ impl Replay {
                     .parse()
                     .map_err(|_| format!("bad sector_bytes {sector:?}"))?,
                 fsync_lie: decode_trigger(lie)?,
+                write_enospc: write_enospc.map_or(Ok(Trigger::Never), decode_trigger)?,
                 torn_write: decode_trigger(torn)?,
                 bit_flip: decode_trigger(flip)?,
                 dirent_lie: decode_trigger(dirent_lie)?,
@@ -674,6 +734,9 @@ pub enum FailureKind {
     UnexpectedSurvival,
     /// The sync itself was refused — ENOSPC is the fault class that does this.
     SyncRefused,
+    /// A write accepted zero bytes and was refused with ENOSPC. This is a
+    /// legal injected outcome, distinct from an unexpected I/O failure.
+    WriteRefused,
     /// An open, write, or read failed outright.
     IoFailed,
     /// Chronicle reached D2 and a named derived-publication stage failed. The
@@ -1027,7 +1090,12 @@ async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Res
         let n = poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &written[done..]))
             .await
             .map_err(|error| {
-                Failure::new(FailureKind::IoFailed, format!("write failed: {error}"))
+                let kind = if error.raw_os_error() == Some(28) {
+                    FailureKind::WriteRefused
+                } else {
+                    FailureKind::IoFailed
+                };
+                Failure::new(kind, format!("write failed: {error}"))
             })?;
         if n == 0 {
             return Err(Failure::new(

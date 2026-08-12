@@ -347,6 +347,7 @@ coverage_of() {
     *.sh|*.bash)                         echo "bash -n + shellcheck (next step)" ;;
     Cargo.toml|*/Cargo.toml)             echo "registry-check all (workspace topology)" ;;
     Cargo.lock)                          echo "cargo check --all-targets" ;;
+    .cargo/config.toml)                  echo "cargo check/clippy/test (workspace rustc configuration)" ;;
     deny.toml)
       if live_gate_inventory "$CHECKER_INDEX" 2>/dev/null \
           | grep -Fx $'script\tscripts/dependency_policy_e2e.sh' >/dev/null; then
@@ -1085,13 +1086,15 @@ run_ubs() {
 #     Io error, a TornWrite fault kind, and a refused open-after-hole — all
 #     three `panic!`s are test-only mismatch arms carrying diagnostics.
 # Re-measured with the gate's own invocation (ubs v5.3.8, --only=rust --ci,
-# 230 tracked sources, quiet clone at eb397ee): panic 137 while timing-safe
-# (164), JWT (122) and randomness (2) match baseline EXACTLY; the partition
-# closes at 137+164+122+2 = 425 = the reported Critical total. Same tool
-# version as the baseline-setting run, so this is not detector drift.
+# 238 tracked sources, HEAD 7dbed03 plus this tranche): four test-only panic
+# branches became explicit assertions/typed comparisons, reducing panic from
+# 137 to 133 while timing-safe (164), JWT (122), and randomness (2) remained
+# exact. The partition closes at 133+164+122+2 = 421 = the reported Critical
+# total. Same tool version as the baseline-setting run, so this is not detector
+# drift.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=164"
-  "panic!/unreachable!/todo!/unimplemented!=137"
+  "panic!/unreachable!/todo!/unimplemented!=133"
   "JWT decode, validation bypass, or missing claim binding=122"
   "Security-sensitive non-crypto randomness=2"
 )

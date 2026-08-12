@@ -522,14 +522,19 @@ impl<V: Vfs> CommitCoordinator<V> {
         &self.keys
     }
 
-    /// Is this capsule durable? Used by recovery to identify orphans — bytes
-    /// written by a commit that never reached D2.
+    /// Does a non-empty regular capsule pathname exist?
+    ///
+    /// This is a presence predicate, not proof that D1 completed. In
+    /// particular, `create_new` followed by a zero-byte write refusal leaves an
+    /// empty staging pathname; that is neither a capsule nor an orphan.
     pub async fn capsule_exists(&self, cx: &impl StorageReadCx, capsule_oid: ObjectId) -> bool {
         cx.with_restriction_async(async {
-            self.vfs
-                .metadata(&Self::capsule_path(&self.dir, capsule_oid))
-                .await
-                .is_ok()
+            matches!(
+                self.vfs
+                    .symlink_metadata(&Self::capsule_path(&self.dir, capsule_oid))
+                    .await,
+                Ok(metadata) if metadata.is_file() && !metadata.is_empty()
+            )
         })
         .await
     }
@@ -565,6 +570,15 @@ impl<V: Vfs> CommitCoordinator<V> {
     async fn reinforce_barrier(cx: &CommitCx, file: &V::File) -> Result<(), CommitError> {
         sync_file(cx, file).await?;
         Ok(())
+    }
+
+    fn capsule_is_referenced(&self, capsule_oid: ObjectId) -> bool {
+        self.chain.entries().iter().any(|entry| {
+            matches!(
+                &entry.marker.effect_source,
+                EffectSource::Local { capsule_ref, .. } if *capsule_ref == capsule_oid
+            )
+        })
     }
 
     /// Tear `bytes` off the end of the commit log, modelling a crash that left
@@ -697,10 +711,31 @@ impl<V: Vfs> CommitCoordinator<V> {
                 let mut file = cx
                     .with_restriction_async(self.vfs.open_read(&capsule_path))
                     .await?;
-                if !Self::existing_capsule_matches(cx, &mut file, &encoded_capsule).await? {
+                if Self::existing_capsule_matches(cx, &mut file, &encoded_capsule).await? {
+                    file
+                } else if metadata.is_empty() && !self.capsule_is_referenced(capsule_oid) {
+                    // `create_new` publishes the pathname before the first
+                    // write. If that write accepts zero bytes and returns an
+                    // error, exact retry finds an empty pre-D1 residue rather
+                    // than an immutable capsule object. The sole writer may
+                    // finish that incomplete creation, but only while no
+                    // committed marker names it. Non-empty mismatches and
+                    // referenced paths remain corruption/conflict evidence
+                    // and are never overwritten.
+                    drop(file);
+                    let mut repair = self
+                        .vfs
+                        .open(
+                            &capsule_path,
+                            &OpenOptions::new().read(true).write(true).truncate(true),
+                        )
+                        .await?;
+                    repair.write_all(&encoded_capsule).await?;
+                    repair.flush().await?;
+                    repair
+                } else {
                     return Err(CommitError::CapsulePathConflict { capsule_oid });
                 }
-                file
             }
             Err(error) => return Err(error.into()),
         };
@@ -1092,7 +1127,9 @@ impl<V: Vfs> CommitCoordinator<V> {
                 let Some(oid) = decode_hex_oid(&stem) else {
                     continue;
                 };
-                if !referenced.contains(&oid) {
+                let file_type = entry.file_type().await?;
+                let metadata = entry.metadata().await?;
+                if file_type.is_file() && !metadata.is_empty() && !referenced.contains(&oid) {
                     orphans.push(oid);
                 }
             }
@@ -1150,13 +1187,10 @@ mod tests {
     /// Drive a future that never actually suspends: the hostile source always
     /// returns `Ready`, so a `Pending` would mean the reader, not the source,
     /// blocked.
-    fn poll_ready<F: Future>(future: F) -> F::Output {
+    fn poll_once<F: Future>(future: F) -> Poll<F::Output> {
         let waker = Waker::noop();
         let mut task = Context::from_waker(waker);
-        match pin!(future).poll(&mut task) {
-            Poll::Ready(output) => output,
-            Poll::Pending => panic!("read future suspended over a ready-only source"),
-        }
+        pin!(future).poll(&mut task)
     }
 
     #[test]
@@ -1165,12 +1199,20 @@ mod tests {
             header_delivered: false,
         };
         let mut entry = Vec::new();
-        let decoded = poll_ready(CommitCoordinator::<UnixVfs>::read_next_entry(
+        let polled = poll_once(CommitCoordinator::<UnixVfs>::read_next_entry(
             &mut source,
             &mut entry,
-        ))
-        .expect("the source itself is readable")
-        .expect("a header was present");
+        ));
+        assert!(
+            matches!(polled, Poll::Ready(_)),
+            "read future suspended over a ready-only source"
+        );
+        let Poll::Ready(decoded) = polled else {
+            return;
+        };
+        let decoded = decoded
+            .expect("the source itself is readable")
+            .expect("a header was present");
         assert!(matches!(decoded, Err(EntryDefect::Corrupt)));
         assert_eq!(entry.len(), ENTRY_HEADER_BYTES);
     }

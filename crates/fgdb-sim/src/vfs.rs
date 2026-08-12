@@ -22,8 +22,10 @@
 //! cache and survive any simulated crash, so the lie would be undetectable.
 //!
 //! So a [`FaultFile`] holds the file's bytes in memory and touches the backing
-//! store **only on an honest sync**. That gives the four fault classes a single
-//! honest place to act, and gives "durable" a meaning a test can check:
+//! store **only on an honest sync**. Durability faults therefore have one
+//! honest place to act, while a separate pre-cache write refusal can test the
+//! file actions that precede D1/D2. Together they give "durable" a meaning a
+//! test can check:
 //!
 //! * an honest `sync_all`/`sync_data` writes every dirty sector through and
 //!   syncs the backing file;
@@ -40,7 +42,11 @@
 //!   erasure-coded capsule path now has something real to heal;
 //! * **ENOSPC** fails the flush once a byte budget is exhausted, leaving the
 //!   dirty set intact — the write-back cache is full and the data is not on
-//!   disk.
+//!   disk;
+//! * **write ENOSPC** refuses a selected non-empty `poll_write` before accepting
+//!   any byte into the volatile image. It is separately counted and traced, so
+//!   a D1/D2 file-write campaign cannot accidentally fault the later sync and
+//!   call that equivalent.
 //!
 //! [`FaultVfs::crash`] then models process loss by invalidating every open
 //! handle. Handles opened before the crash refuse every subsequent operation;
@@ -229,6 +235,11 @@ pub struct FaultPlan {
     pub sector_bytes: u64,
     /// A sync that returns success without persisting anything.
     pub fsync_lie: Trigger,
+    /// A non-empty file write refused with ENOSPC before changing the
+    /// handle's volatile image, cursor, or dirty-sector set. This is a
+    /// write-action fault, deliberately separate from [`FaultPlan::space_budget`],
+    /// which refuses the later write-back performed by a sync.
+    pub write_enospc: Trigger,
     /// A flush that loses one interior sector.
     pub torn_write: Trigger,
     /// One bit flipped in what a flush just wrote.
@@ -266,6 +277,7 @@ impl FaultPlan {
             seed: 0,
             sector_bytes: DEFAULT_SECTOR_BYTES,
             fsync_lie: Trigger::Never,
+            write_enospc: Trigger::Never,
             torn_write: Trigger::Never,
             bit_flip: Trigger::Never,
             dirent_lie: Trigger::Never,
@@ -302,6 +314,13 @@ pub enum FaultKind {
     FsyncLie {
         /// Bytes the caller believed durable that are not.
         unflushed_bytes: u64,
+    },
+    /// A write syscall was refused before accepting any bytes into the
+    /// write-back cache. The caller receives ENOSPC and may retry; no partial
+    /// write is fabricated.
+    WriteEnospc {
+        /// Bytes in the refused non-empty write request.
+        requested: u64,
     },
     /// One interior sector of a flush was dropped. The range is
     /// `[start, end)` in file offsets; sectors before and after it landed, so
@@ -359,6 +378,7 @@ impl FaultKind {
     pub const fn class(self) -> &'static str {
         match self {
             Self::FsyncLie { .. } => "fsync-lie",
+            Self::WriteEnospc { .. } => "write-enospc",
             Self::TornWrite { .. } => "torn-write",
             Self::BitFlip { .. } => "bit-flip",
             Self::OutOfSpace { .. } => "out-of-space",
@@ -392,6 +412,7 @@ enum Class {
     DirentLie = 3,
     DirentLoss = 4,
     Latency = 5,
+    WriteEnospc = 6,
 }
 
 impl Class {
@@ -403,6 +424,7 @@ impl Class {
             Self::DirentLie => "dirent-sync-lie",
             Self::DirentLoss => "dirent-loss",
             Self::Latency => "latency",
+            Self::WriteEnospc => "write-enospc",
         }
     }
 }
@@ -469,7 +491,7 @@ impl NamespaceKind {
 struct LabState {
     plan: FaultPlan,
     rng: u64,
-    eligible: [u64; 6],
+    eligible: [u64; 7],
     events: Vec<FaultEvent>,
     latency_waiters: BTreeMap<PathBuf, u64>,
     namespace: Vec<NamespaceOp>,
@@ -492,6 +514,7 @@ impl LabState {
     fn trigger(&self, class: Class) -> Trigger {
         match class {
             Class::FsyncLie => self.plan.fsync_lie,
+            Class::WriteEnospc => self.plan.write_enospc,
             Class::TornWrite => self.plan.torn_write,
             Class::BitFlip => self.plan.bit_flip,
             Class::DirentLie => self.plan.dirent_lie,
@@ -573,7 +596,7 @@ impl Lab {
             state: Mutex::new(LabState {
                 plan,
                 rng: plan.seed,
-                eligible: [0; 6],
+                eligible: [0; 7],
                 events: Vec::new(),
                 latency_waiters: BTreeMap::new(),
                 namespace: Vec::new(),
@@ -854,9 +877,10 @@ struct FileState {
 
 /// An open file on a [`FaultVfs`].
 ///
-/// Reads and writes are served from an in-memory image and always complete
-/// immediately; the backing store is touched only by
-/// [`VfsFile::sync_all`]/[`VfsFile::sync_data`], which is where every fault is
+/// Reads and accepted writes are served from an in-memory image and complete
+/// immediately; a selected non-empty write may instead fail before accepting
+/// bytes. The backing store is touched only by
+/// [`VfsFile::sync_all`]/[`VfsFile::sync_data`], where durability faults are
 /// injected.
 pub struct FaultFile<V: Vfs> {
     backing: Arc<V>,
@@ -1252,6 +1276,28 @@ impl<V: Vfs> AsyncWrite for FaultFile<V> {
             // An empty write dirties nothing; marking a sector here would make
             // a no-op write cost a flush.
             return Poll::Ready(Ok(0));
+        }
+        let decision = {
+            let mut lab = self.lab.lock();
+            let decision = lab.decide(Class::WriteEnospc);
+            if decision.fires {
+                lab.record(
+                    &self.path,
+                    FaultKind::WriteEnospc {
+                        requested: buf.len() as u64,
+                    },
+                );
+            }
+            decision
+        };
+        trace_fault_point(Class::WriteEnospc, decision.ordinal);
+        if decision.fires {
+            // Refuse before touching the image, cursor, or dirty set. A
+            // short write would be legal too, but it would normally be
+            // retried by `write_all` and would not witness a failed D1/D2
+            // file action. ENOSPC is the deterministic fail-stop fault this
+            // class promises.
+            return Poll::Ready(Err(io::Error::from_raw_os_error(ENOSPC)));
         }
         let sector_bytes = self.lab.lock().plan.sector_bytes();
         let mut state = self.lock();

@@ -95,6 +95,15 @@ fn candidates(plan: FaultPlan) -> Vec<(&'static str, FaultPlan)> {
             },
         ));
     }
+    if plan.write_enospc != Trigger::Never {
+        out.push((
+            "dropped the write-ENOSPC class",
+            FaultPlan {
+                write_enospc: Trigger::Never,
+                ..plan
+            },
+        ));
+    }
     if plan.torn_write != Trigger::Never {
         out.push((
             "dropped the torn-write class",
@@ -161,6 +170,15 @@ fn candidates(plan: FaultPlan) -> Vec<(&'static str, FaultPlan)> {
             "weakened the fsync lie to fire once",
             FaultPlan {
                 fsync_lie: trigger,
+                ..plan
+            },
+        ));
+    }
+    if let Some(trigger) = weaken_to_single_firing(plan.write_enospc) {
+        out.push((
+            "weakened write ENOSPC to fire once",
+            FaultPlan {
+                write_enospc: trigger,
                 ..plan
             },
         ));
