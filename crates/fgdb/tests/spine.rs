@@ -1478,19 +1478,6 @@ fn order_sensitive_batches_fold_to_a_target_disjoint_net() {
         first.add_edge(EId(10), VId(1), VId(2), vec![]);
         let s1 = db.write(cx, first).await.expect("commits");
 
-        let mut vertex_case = WriteBatch::new(KNOWS);
-        vertex_case.set_vertex_property(VId(1), key, None);
-        vertex_case.delete_vertex(VId(1));
-        let after_vertex_delete = db
-            .write(cx, vertex_case)
-            .await
-            .expect("set-then-delete folds to a delete");
-        assert!(
-            db.vertex_at(VId(1), after_vertex_delete)
-                .expect("reads")
-                .is_none()
-        );
-
         let mut edge_case = WriteBatch::new(KNOWS);
         edge_case.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(1)));
         edge_case.delete_edge(EId(10));
@@ -1500,6 +1487,19 @@ fn order_sensitive_batches_fold_to_a_target_disjoint_net() {
             .expect("edge set-then-delete folds to a delete");
         assert!(
             db.edge_at(EId(10), after_edge_delete)
+                .expect("reads")
+                .is_none()
+        );
+
+        let mut vertex_case = WriteBatch::new(KNOWS);
+        vertex_case.set_vertex_property(VId(1), key, None);
+        vertex_case.delete_vertex(VId(1));
+        let after_vertex_delete = db
+            .write(cx, vertex_case)
+            .await
+            .expect("set-then-delete folds to a delete");
+        assert!(
+            db.vertex_at(VId(1), after_vertex_delete)
                 .expect("reads")
                 .is_none()
         );
