@@ -3102,13 +3102,13 @@ owner_crates = ["fgdb-calibrate", "fgdb-evidence"]
 affected_bets = ["B5"]
 affected_constraints = ["FG-CON-10", "FG-CON-11"]
 affected_invariants = []
-affected_evidence = ["FG-CAL-01"]
+affected_evidence = ["FG-CAL-02"]
 affected_slos = []
 affected_cost_rows = []
 affected_format_rows = ["reserved:calibration-ledger"]
 verification_entrypoints = ["cargo-test:architecture_decisions", "cargo-test:conformal-coverage"]
 checker_ids = ["architecture_source_coverage", "architecture_owner_closure"]
-evidence_ids = ["FG-CAL-01"]
+evidence_ids = ["FG-CAL-02"]
 status = "frozen"
 
 [[decision]]
@@ -3127,13 +3127,13 @@ owner_crates = ["fgdb-calibrate", "fgdb-evidence", "fgdb-observatory"]
 affected_bets = ["B5"]
 affected_constraints = ["FG-CON-10", "FG-CON-11"]
 affected_invariants = []
-affected_evidence = ["FG-CAL-02"]
+affected_evidence = ["FG-CAL-01"]
 affected_slos = []
 affected_cost_rows = []
 affected_format_rows = ["reserved:eprocess-ledger"]
 verification_entrypoints = ["cargo-test:architecture_decisions", "cargo-test:eprocess-filtration"]
 checker_ids = ["architecture_source_coverage", "architecture_owner_closure"]
-evidence_ids = ["FG-CAL-02"]
+evidence_ids = ["FG-CAL-01"]
 status = "frozen"
 
 [[decision]]
@@ -3152,13 +3152,13 @@ owner_crates = ["fgdb-calibrate", "fgdb-evidence"]
 affected_bets = ["B5"]
 affected_constraints = ["FG-CON-10", "FG-CON-11"]
 affected_invariants = []
-affected_evidence = ["FG-CAL-02"]
+affected_evidence = ["FG-CAL-01"]
 affected_slos = []
 affected_cost_rows = ["reserved:decision-card"]
 affected_format_rows = ["reserved:decision-card"]
 verification_entrypoints = ["cargo-test:architecture_decisions", "cargo-test:regime-signal-fallback"]
 checker_ids = ["architecture_source_coverage", "architecture_owner_closure"]
-evidence_ids = ["FG-CAL-02"]
+evidence_ids = ["FG-CAL-01"]
 status = "frozen"
 
 [[decision]]
@@ -3202,13 +3202,13 @@ owner_crates = ["fgdb-calibrate", "fgdb-evidence"]
 affected_bets = ["B5"]
 affected_constraints = ["FG-CON-10", "FG-CON-11"]
 affected_invariants = []
-affected_evidence = ["FG-CAL-02"]
+affected_evidence = ["FG-EVID-01"]
 affected_slos = []
 affected_cost_rows = ["reserved:decision-card"]
 affected_format_rows = ["reserved:policy-trial"]
 verification_entrypoints = ["cargo-test:architecture_decisions", "cargo-test:ope-support-firewall"]
 checker_ids = ["architecture_source_coverage", "architecture_owner_closure"]
-evidence_ids = ["FG-CAL-02"]
+evidence_ids = ["FG-EVID-01"]
 status = "frozen"
 
 [[decision]]
@@ -8443,8 +8443,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:ope-support-firewall"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:ope-support-firewall"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "ope_support_firewall_promotes_only_complete_supported_effective_logs"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "ope_support_firewall_promotes_only_complete_supported_effective_logs", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:tail-fit-diagnostics"

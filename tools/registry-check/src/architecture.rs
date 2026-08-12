@@ -209,7 +209,7 @@ pub const PINNED_EXTERNAL_REVIEW_DECISION_COUNT: usize = 64;
 pub const PINNED_DECISION_ID_HASH: &str = "fnv1a64:21402ba5834603dd";
 pub const PINNED_BIBLIOGRAPHY_ID_HASH: &str = "fnv1a64:212896d82dc8caf7";
 pub const PINNED_BIBLIOGRAPHY_ANCHOR_HASH: &str = "fnv1a64:35bc497bde8cd1d4";
-pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:6a1d00e11b6f3f77";
+pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:68aabdf07e901cc5";
 // Filled from the independently reviewed append-only source/review transcript.
 // This is intentionally separate from `PINNED_SEMANTIC_CONTRACT_HASH`.
 pub const PINNED_EXTERNAL_REVIEW_HISTORY_HASH: &str = "fnv1a64:5e15e3d99eec84ac";

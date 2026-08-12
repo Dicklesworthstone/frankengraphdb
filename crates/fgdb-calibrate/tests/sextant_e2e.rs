@@ -51,8 +51,8 @@ use fgdb_calibrate::{
         NoRegretSelectionMode, NoRegretStateSpaceIdentityVerifier,
     },
     ope::{
-        LoggedAction, LoggedDecision, OUTCOME_SCALE, OpeEstimator, OpeEvidence, OpeIdentity,
-        OpeLedger, OpeProfile, OpeSelection, OpeSelectionReason, OpeWindow, Outcome,
+        EvaluatedPolicy, LoggedAction, LoggedDecision, OUTCOME_SCALE, OpeEstimator, OpeEvidence,
+        OpeIdentity, OpeLedger, OpeProfile, OpeSelection, OpeSelectionReason, OpeWindow, Outcome,
         PROBABILITY_SCALE, Probability, WEIGHT_SCALE,
     },
     policy_epoch::{
@@ -1250,10 +1250,56 @@ fn logged_decision(sequence: u64, selected_a: bool) -> TestResult<LoggedDecision
     let half = Probability::try_from_numerator(PROBABILITY_SCALE / 2)?;
     let one = Outcome::try_from_scaled(OUTCOME_SCALE)?;
     let zero = Outcome::try_from_scaled(0)?;
+    logged_binary_decision(
+        sequence,
+        selected_a,
+        half,
+        Probability::one(),
+        Probability::zero(),
+        one,
+        zero,
+    )
+}
+
+fn logged_binary_decision(
+    sequence: u64,
+    selected_a: bool,
+    behavior_a: Probability,
+    candidate_a: Probability,
+    fallback_a: Probability,
+    outcome_a: Outcome,
+    outcome_b: Outcome,
+) -> TestResult<LoggedDecision> {
+    let observed_outcome = if selected_a { outcome_a } else { outcome_b };
+    logged_binary_decision_with_observed(
+        sequence,
+        selected_a,
+        behavior_a,
+        candidate_a,
+        fallback_a,
+        outcome_a,
+        outcome_b,
+        observed_outcome,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn logged_binary_decision_with_observed(
+    sequence: u64,
+    selected_a: bool,
+    behavior_a: Probability,
+    candidate_a: Probability,
+    fallback_a: Probability,
+    direct_outcome_a: Outcome,
+    direct_outcome_b: Outcome,
+    observed_outcome: Outcome,
+) -> TestResult<LoggedDecision> {
+    let behavior_b = Probability::try_from_numerator(PROBABILITY_SCALE - behavior_a.numerator())?;
+    let candidate_b = Probability::try_from_numerator(PROBABILITY_SCALE - candidate_a.numerator())?;
+    let fallback_b = Probability::try_from_numerator(PROBABILITY_SCALE - fallback_a.numerator())?;
     let action_a = oid(20);
     let action_b = oid(21);
     let selected_action = if selected_a { action_a } else { action_b };
-    let observed_outcome = if selected_a { one } else { zero };
 
     Ok(LoggedDecision::try_new(
         sequence,
@@ -1265,26 +1311,32 @@ fn logged_decision(sequence: u64, selected_a: bool) -> TestResult<LoggedDecision
         vec![
             LoggedAction::new(
                 action_a,
-                half,
-                Probability::one(),
-                Probability::zero(),
-                Some(one),
+                behavior_a,
+                candidate_a,
+                fallback_a,
+                Some(direct_outcome_a),
             ),
             LoggedAction::new(
                 action_b,
-                half,
-                Probability::zero(),
-                Probability::one(),
-                Some(zero),
+                behavior_b,
+                candidate_b,
+                fallback_b,
+                Some(direct_outcome_b),
             ),
         ],
     )?)
 }
 
-fn run_ope(candidate_oid: ObjectId, fallback_oid: ObjectId) -> TestResult<Vec<OpeEvidence>> {
-    let identity = OpeIdentity::try_new(
+fn ope_identity(
+    estimator: OpeEstimator,
+    first_sequence: u64,
+    last_sequence: u64,
+    candidate_oid: ObjectId,
+    fallback_oid: ObjectId,
+) -> TestResult<OpeIdentity> {
+    Ok(OpeIdentity::try_new(
         oid(33),
-        OpeWindow::try_new(50, 53)?,
+        OpeWindow::try_new(first_sequence, last_sequence)?,
         oid(34),
         oid(35),
         oid(36),
@@ -1293,7 +1345,17 @@ fn run_ope(candidate_oid: ObjectId, fallback_oid: ObjectId) -> TestResult<Vec<Op
         candidate_oid,
         fallback_oid,
         oid(38),
+        estimator,
+    )?)
+}
+
+fn run_ope(candidate_oid: ObjectId, fallback_oid: ObjectId) -> TestResult<Vec<OpeEvidence>> {
+    let identity = ope_identity(
         OpeEstimator::DoublyRobust,
+        50,
+        53,
+        candidate_oid,
+        fallback_oid,
     )?;
     let profile = OpeProfile::try_new(10 * WEIGHT_SCALE, 2, 4, 2, 8)?;
     let mut ledger = OpeLedger::try_new(identity, profile)?;
@@ -1303,6 +1365,250 @@ fn run_ope(candidate_oid: ObjectId, fallback_oid: ObjectId) -> TestResult<Vec<Op
         prefixes.push(ledger.evidence()?);
     }
     Ok(prefixes)
+}
+
+#[test]
+fn ope_support_firewall_promotes_only_complete_supported_effective_logs() -> TestResult {
+    let candidate_oid = oid(40);
+    let fallback_oid = oid(90);
+    let positive_profile = OpeProfile::try_new(10 * WEIGHT_SCALE, 1, 1, 2, 2)?;
+    let half = Probability::try_from_numerator(PROBABILITY_SCALE / 2)?;
+    let quarter = Probability::try_from_numerator(PROBABILITY_SCALE / 4)?;
+    let three_quarters = Probability::try_from_numerator(3 * PROBABILITY_SCALE / 4)?;
+    let one = Outcome::try_from_scaled(OUTCOME_SCALE)?;
+    let direct_a = Outcome::try_from_scaled(OUTCOME_SCALE * 4 / 5)?;
+    let direct_b = Outcome::try_from_scaled(OUTCOME_SCALE / 5)?;
+    let expected_estimates = [
+        (
+            OpeEstimator::Direct,
+            650_000_000_000_000_i128,
+            350_000_000_000_000_i128,
+        ),
+        (
+            OpeEstimator::ImportanceWeighted,
+            1_500_000_000_000_000_i128,
+            500_000_000_000_000_i128,
+        ),
+        (
+            OpeEstimator::DoublyRobust,
+            950_000_000_000_000_i128,
+            450_000_000_000_000_i128,
+        ),
+    ];
+
+    for (estimator, expected_candidate, expected_fallback) in expected_estimates {
+        let identity = ope_identity(estimator, 100, 100, candidate_oid, fallback_oid)?;
+        let mut left = OpeLedger::try_new(identity, positive_profile)?;
+        let mut right = OpeLedger::try_new(identity, positive_profile)?;
+        let decision = logged_binary_decision_with_observed(
+            100,
+            true,
+            half,
+            three_quarters,
+            quarter,
+            direct_a,
+            direct_b,
+            one,
+        )?;
+        left.record(decision.clone())?;
+        right.record(decision)?;
+        let evidence = left.evidence()?;
+        assert_eq!(evidence, right.evidence()?, "{estimator:?} replay drifted");
+        assert!(evidence.complete());
+        assert!(evidence.zero_support_exclusions().is_empty());
+        assert!(evidence.candidate_ess_gate_passed());
+        assert!(evidence.fallback_ess_gate_passed());
+        assert_eq!(evidence.selection(), OpeSelection::Candidate);
+        assert_eq!(
+            evidence.selection_reason(),
+            OpeSelectionReason::CandidateEstimatedBetter
+        );
+        assert_eq!(
+            evidence.candidate_estimate().numerator(),
+            expected_candidate
+        );
+        assert_eq!(evidence.fallback_estimate().numerator(), expected_fallback);
+        assert_eq!(
+            evidence.advantage_estimate().numerator(),
+            expected_candidate - expected_fallback
+        );
+        assert_eq!(
+            evidence.candidate_estimate().denominator(),
+            u128::from(PROBABILITY_SCALE) * u128::try_from(OUTCOME_SCALE)?
+        );
+
+        let record = StatisticalLogRecord::try_from_ope(&FIXTURE_IDENTITY_AUTHORITY, &evidence)?;
+        let registration = record.evidence_registration();
+        assert_eq!(registration.registry_id(), "FG-EVID-01");
+        assert_eq!(
+            registration.required_disclosures(),
+            &[
+                "state/actions/features",
+                "logged probabilities",
+                "zero-support exclusions",
+                "clipping/estimator",
+                "policy epoch and fallback",
+            ]
+        );
+        let envelope = record.try_to_evidence_envelope()?;
+        let EvidenceClaim::StatisticalClaim { assumptions, .. } = envelope.claim() else {
+            return Err(io::Error::other("OPE evidence was not statistically typed").into());
+        };
+        for disclosure in registration.required_disclosures() {
+            assert!(
+                assumptions
+                    .iter()
+                    .any(|value| value == &format!("registry-disclosure:{disclosure}")),
+                "OPE envelope omitted registry disclosure {disclosure:?}"
+            );
+        }
+        assert_eq!(
+            envelope.propensity_support_identity(),
+            PropensitySupportIdentity::Bound(record.evidence_oid())
+        );
+        assert_eq!(
+            envelope.fallback(),
+            FallbackBehavior::DeterministicPolicy {
+                policy_oid: fallback_oid
+            }
+        );
+        let (_, envelopes, promoted, _) = promote_epoch(candidate_oid, fallback_oid, &[record])?;
+        assert_eq!(envelopes, vec![envelope]);
+        assert_eq!(promoted.pinned_table_oid(), candidate_oid);
+    }
+
+    let zero = Outcome::try_from_scaled(0)?;
+    let mut unsupported = OpeLedger::try_new(
+        ope_identity(OpeEstimator::Direct, 200, 201, candidate_oid, fallback_oid)?,
+        OpeProfile::try_new(WEIGHT_SCALE, 1, 2, 2, 4)?,
+    )?;
+    for sequence in 200..=201 {
+        unsupported.record(logged_binary_decision(
+            sequence,
+            true,
+            Probability::one(),
+            Probability::zero(),
+            Probability::one(),
+            zero,
+            one,
+        )?)?;
+    }
+    let unsupported_evidence = unsupported.evidence()?;
+    assert!(unsupported_evidence.complete());
+    assert_eq!(unsupported_evidence.zero_support_exclusions().len(), 2);
+    for exclusion in unsupported_evidence.zero_support_exclusions() {
+        assert_eq!(exclusion.affected_policy(), EvaluatedPolicy::Candidate);
+        assert_eq!(exclusion.action_oid(), oid(21));
+        assert_eq!(exclusion.unsupported_probability(), Probability::one());
+    }
+    assert_eq!(
+        unsupported_evidence.selection(),
+        OpeSelection::PinnedFallback
+    );
+    assert_eq!(
+        unsupported_evidence.selection_reason(),
+        OpeSelectionReason::ZeroSupport
+    );
+    assert_ope_evidence_refuses_candidate_promotion(
+        &unsupported_evidence,
+        candidate_oid,
+        fallback_oid,
+    )?;
+
+    let mut ineffective = OpeLedger::try_new(
+        ope_identity(OpeEstimator::Direct, 300, 303, candidate_oid, fallback_oid)?,
+        OpeProfile::try_new(10 * WEIGHT_SCALE, 3, 4, 2, 8)?,
+    )?;
+    for sequence in 300..=302 {
+        ineffective.record(logged_binary_decision(
+            sequence, true, half, half, half, zero, one,
+        )?)?;
+    }
+    let ninety_nine_percent = Probability::try_from_numerator(PROBABILITY_SCALE * 99 / 100)?;
+    ineffective.record(logged_binary_decision(
+        303,
+        false,
+        ninety_nine_percent,
+        half,
+        ninety_nine_percent,
+        zero,
+        one,
+    )?)?;
+    let ineffective_evidence = ineffective.evidence()?;
+    assert!(ineffective_evidence.complete());
+    assert!(ineffective_evidence.zero_support_exclusions().is_empty());
+    assert!(ineffective_evidence.advantage_estimate().numerator() > 0);
+    assert!(!ineffective_evidence.candidate_ess_gate_passed());
+    assert!(ineffective_evidence.fallback_ess_gate_passed());
+    assert_eq!(
+        ineffective_evidence.selection(),
+        OpeSelection::PinnedFallback
+    );
+    assert_eq!(
+        ineffective_evidence.selection_reason(),
+        OpeSelectionReason::InsufficientEffectiveSampleSize
+    );
+    assert_ope_evidence_refuses_candidate_promotion(
+        &ineffective_evidence,
+        candidate_oid,
+        fallback_oid,
+    )?;
+
+    let mut incomplete = OpeLedger::try_new(
+        ope_identity(OpeEstimator::Direct, 400, 401, candidate_oid, fallback_oid)?,
+        OpeProfile::try_new(WEIGHT_SCALE, 1, 2, 2, 4)?,
+    )?;
+    incomplete.record(logged_binary_decision(
+        400, true, half, half, half, one, zero,
+    )?)?;
+    let incomplete_evidence = incomplete.evidence()?;
+    assert!(!incomplete_evidence.complete());
+    assert!(incomplete_evidence.zero_support_exclusions().is_empty());
+    assert_eq!(
+        incomplete_evidence.selection(),
+        OpeSelection::PinnedFallback
+    );
+    assert_eq!(
+        incomplete_evidence.selection_reason(),
+        OpeSelectionReason::IncompleteWindow
+    );
+    assert_ope_evidence_refuses_candidate_promotion(
+        &incomplete_evidence,
+        candidate_oid,
+        fallback_oid,
+    )?;
+    Ok(())
+}
+
+fn assert_ope_evidence_refuses_candidate_promotion(
+    evidence: &OpeEvidence,
+    candidate_oid: ObjectId,
+    fallback_oid: ObjectId,
+) -> TestResult {
+    let record = StatisticalLogRecord::try_from_ope(&FIXTURE_IDENTITY_AUTHORITY, evidence)?;
+    assert_eq!(record.evidence_registration().registry_id(), "FG-EVID-01");
+    let envelope = record.try_to_evidence_envelope()?;
+    assert_eq!(envelope.selection_policy_oid(), fallback_oid);
+    let root = DecisionPolicyEpoch::try_root(
+        "policy:ope-support-firewall",
+        0,
+        DecisionPolicyScope::new(oid(70)),
+        LogicalEffectClass::AnswerAffectingExecution,
+        fallback_oid,
+        fallback_oid,
+    )?;
+    let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
+    assert!(matches!(
+        DecisionPolicyEpoch::try_promote(
+            &root,
+            root_oid,
+            candidate_oid,
+            &[record.evidence_oid()],
+            &[envelope],
+        ),
+        Err(DecisionPolicyEpochError::EvidenceSelectionPolicyMismatch { .. })
+    ));
+    Ok(())
 }
 
 fn evidence_envelope(record: StatisticalLogRecord) -> TestResult<EvidenceEnvelope> {
