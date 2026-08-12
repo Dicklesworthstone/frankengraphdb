@@ -45,7 +45,7 @@ required_disclosures = [
   "loss and fallback",
   "stream-sequenced promotion only",
 ]
-binds_to = []
+binds_to = ["DecisionPolicyEpoch", "StatisticalDecisionLog"]
 
 [[evidence]]
 id = "FG-CAL-02"
@@ -59,7 +59,7 @@ required_disclosures = [
   "marginal target",
   "realized coverage and drift",
 ]
-binds_to = []
+binds_to = ["DecisionPolicyEpoch", "StatisticalDecisionLog"]
 
 [[evidence]]
 id = "FG-CAL-03"
@@ -72,7 +72,7 @@ required_disclosures = [
   "candidate policy",
   "confidence interval and rebuild action",
 ]
-binds_to = []
+binds_to = ["StatisticalDecisionLog"]
 
 [[evidence]]
 id = "FG-EVID-01"
@@ -85,7 +85,7 @@ required_disclosures = [
   "clipping/estimator",
   "policy epoch and fallback",
 ]
-binds_to = []
+binds_to = ["DecisionPolicyEpoch", "StatisticalDecisionLog"]
 
 [[evidence]]
 id = "FG-EVID-02"

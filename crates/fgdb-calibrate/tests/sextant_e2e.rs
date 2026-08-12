@@ -7,6 +7,7 @@ use std::{
 };
 
 use asupersync::{
+    cancel::progress_certificate::ProgressConfig,
     lab::{LabConfig, LabRuntime},
     runtime::changepoint::ChangeDirection,
     types::Budget,
@@ -37,8 +38,8 @@ use fgdb_calibrate::{
     log::{
         StatisticalDecisionLog, StatisticalEvidenceIdentityError,
         StatisticalEvidenceIdentityIssuer, StatisticalEvidenceIdentityVerifier,
-        StatisticalLogDecodeLimits, StatisticalLogRecord, StatisticalMonitorKind,
-        StatisticalStatistic,
+        StatisticalEvidenceRegistration, StatisticalLogDecodeLimits, StatisticalLogRecord,
+        StatisticalMonitorKind, StatisticalStatistic,
     },
     no_regret::{
         NoRegretActionSpace, NoRegretAssumptions, NoRegretController, NoRegretDecisionReceipt,
@@ -56,6 +57,10 @@ use fgdb_calibrate::{
     },
     policy_epoch::{
         DecisionPolicyEpoch, DecisionPolicyEpochError, DecisionPolicyScope, LogicalEffectClass,
+    },
+    progress::{
+        DrainProgressEvidence, DrainProgressIdentity, DrainProgressMonitor, DrainProgressProfile,
+        SequencedPotential,
     },
     regime::{
         COMBINED_REGIME_SIGNAL_ID, COMBINED_REGIME_SIGNAL_VERSION, CusumConfig, MetricSample,
@@ -134,6 +139,7 @@ struct FixtureRun {
     sequential_evidence: Vec<EvidenceRecord>,
     ope_prefixes: Vec<OpeEvidence>,
     ope: OpeEvidence,
+    progress_evidence: Vec<DrainProgressEvidence>,
     root_epoch_bytes: Vec<u8>,
     promotion_envelopes: Vec<EvidenceEnvelope>,
     promoted_epoch: DecisionPolicyEpoch,
@@ -1399,10 +1405,11 @@ fn build_statistical_log(
     assessments: &[AssessmentEvidence],
     sequential: &[EvidenceRecord],
     ope: &[OpeEvidence],
+    progress: &[DrainProgressEvidence],
     regime: &[RegimeSignalEvidence],
     ann_recall: &AnnRecallEvidence,
 ) -> TestResult<(StatisticalDecisionLog, Vec<u8>)> {
-    const EXPECTED_RECORDS: usize = 2 + 6 + 3 + 4 + 8 + 1;
+    const EXPECTED_RECORDS: usize = 2 + 6 + 3 + 4 + 3 + 8 + 1;
     let mut log = StatisticalDecisionLog::try_new(EXPECTED_RECORDS)?;
     for evidence in exploration {
         log.append(StatisticalLogRecord::try_from_exploration(
@@ -1424,6 +1431,12 @@ fn build_statistical_log(
     }
     for evidence in ope {
         log.append(StatisticalLogRecord::try_from_ope(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            evidence,
+        )?)?;
+    }
+    for evidence in progress {
+        log.append(StatisticalLogRecord::try_from_progress(
             &FIXTURE_IDENTITY_AUTHORITY,
             evidence,
         )?)?;
@@ -1535,6 +1548,42 @@ fn run_regime_monitor(
     Ok(evidence)
 }
 
+fn run_progress_monitor(
+    candidate_oid: ObjectId,
+    fallback_oid: ObjectId,
+) -> TestResult<Vec<DrainProgressEvidence>> {
+    let identity = DrainProgressIdentity::try_new(
+        oid(71),
+        oid(72),
+        55,
+        57,
+        REGIME_EPOCH,
+        candidate_oid,
+        fallback_oid,
+    )?;
+    let profile = DrainProgressProfile::try_new(
+        ProgressConfig {
+            confidence: 0.9,
+            max_step_bound: 20.0,
+            stall_threshold: 2,
+            min_observations: 2,
+            epsilon: 1e-12,
+        },
+        3,
+    )?;
+    let mut monitor = DrainProgressMonitor::try_new(identity, profile.clone())?;
+    let mut evidence = Vec::new();
+    for (sequence, potential) in [(55, 10.0), (56, 8.0), (57, 5.0)] {
+        evidence.push(monitor.observe(SequencedPotential::new(
+            identity,
+            profile.clone(),
+            sequence,
+            potential,
+        ))?);
+    }
+    Ok(evidence)
+}
+
 fn run_fixture() -> TestResult<FixtureRun> {
     let candidate_oid = oid(40);
     let fallback_oid = oid(90);
@@ -1550,6 +1599,7 @@ fn run_fixture() -> TestResult<FixtureRun> {
         .last()
         .cloned()
         .ok_or_else(|| io::Error::other("OPE fixture produced no evidence"))?;
+    let progress_evidence = run_progress_monitor(candidate_oid, fallback_oid)?;
     let regime_evidence = run_regime_monitor(candidate_oid, fallback_oid)?;
     let shifted = regime_evidence
         .get(5)
@@ -1563,6 +1613,7 @@ fn run_fixture() -> TestResult<FixtureRun> {
         &assessments,
         &sequential_evidence,
         &ope_prefixes,
+        &progress_evidence,
         &regime_evidence,
         &ann_recall.evidence,
     )?;
@@ -1594,6 +1645,7 @@ fn run_fixture() -> TestResult<FixtureRun> {
         sequential_evidence,
         ope_prefixes,
         ope,
+        progress_evidence,
         root_epoch_bytes,
         promotion_envelopes,
         promoted_epoch,
@@ -1703,11 +1755,190 @@ fn unique_field_payload_offset(
     Ok(offsets[0])
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedEvidenceRegistryRow {
+    qualified_claim: String,
+    required_disclosures: Vec<String>,
+    binds_to: Vec<String>,
+}
+
+fn evidence_registry_row_source(registry_id: &str) -> TestResult<&'static str> {
+    const SOURCE: &str = include_str!("../../../registries/evidence.toml");
+    const ROW_HEADER: &str = "[[evidence]]";
+    let marker = format!("id = \"{registry_id}\"");
+    let marker_offset = SOURCE
+        .find(&marker)
+        .ok_or_else(|| io::Error::other(format!("evidence registry omitted row {registry_id}")))?;
+    let row_start = SOURCE[..marker_offset].rfind(ROW_HEADER).ok_or_else(|| {
+        io::Error::other(format!("evidence registry row {registry_id} has no header"))
+    })?;
+    let row_tail = &SOURCE[row_start..];
+    let after_header = &row_tail[ROW_HEADER.len()..];
+    let row_end = after_header
+        .find(ROW_HEADER)
+        .map_or(row_tail.len(), |offset| ROW_HEADER.len() + offset);
+    Ok(&row_tail[..row_end])
+}
+
+fn evidence_registry_scalar(row: &str, key: &str) -> TestResult<String> {
+    let assignment = format!("{key} = ");
+    let line = row
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&assignment))
+        .ok_or_else(|| io::Error::other(format!("evidence row omitted {key}")))?;
+    let value = line[assignment.len()..]
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| io::Error::other(format!("evidence row {key} is not a string")))?;
+    Ok(value.to_owned())
+}
+
+fn evidence_registry_array(row: &str, key: &str) -> TestResult<Vec<String>> {
+    let assignment = format!("{key} = ");
+    let assignment_offset = row
+        .find(&assignment)
+        .ok_or_else(|| io::Error::other(format!("evidence row omitted {key}")))?;
+    let after_assignment = &row[assignment_offset + assignment.len()..];
+    let array_start = after_assignment
+        .find('[')
+        .ok_or_else(|| io::Error::other(format!("evidence row {key} is not an array")))?;
+    let after_open = &after_assignment[array_start + 1..];
+    let array_end = after_open
+        .find(']')
+        .ok_or_else(|| io::Error::other(format!("evidence row {key} array is unterminated")))?;
+    after_open[..array_end]
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    io::Error::other(format!("evidence row {key} contains a non-string value"))
+                        .into()
+                })
+        })
+        .collect()
+}
+
+fn parsed_evidence_registry_row(registry_id: &str) -> TestResult<ParsedEvidenceRegistryRow> {
+    let row = evidence_registry_row_source(registry_id)?;
+    Ok(ParsedEvidenceRegistryRow {
+        qualified_claim: evidence_registry_scalar(row, "qualified_claim")?,
+        required_disclosures: evidence_registry_array(row, "required_disclosures")?,
+        binds_to: evidence_registry_array(row, "binds_to")?,
+    })
+}
+
+fn registration_matches_registry(
+    registration: StatisticalEvidenceRegistration,
+    registry: &ParsedEvidenceRegistryRow,
+) -> bool {
+    registry.qualified_claim == registration.qualified_claim()
+        && registry
+            .required_disclosures
+            .iter()
+            .map(String::as_str)
+            .eq(registration.required_disclosures().iter().copied())
+        && registry
+            .binds_to
+            .iter()
+            .map(String::as_str)
+            .eq(registration.binds_to().iter().copied())
+}
+
+fn object_id_hex_for_test(object_id: ObjectId) -> String {
+    object_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn expected_substantive_assumptions(record: StatisticalLogRecord) -> TestResult<Vec<String>> {
+    let monitor_identity = format!(
+        "monitor_oid={}",
+        object_id_hex_for_test(record.monitor_oid())
+    );
+    let mut assumptions = match record.monitor_kind() {
+        StatisticalMonitorKind::ExplorationBudget => vec![
+            "alpha is the registered exploration-profile alpha only".to_owned(),
+            "binary novelty runs are exchangeable under the named window".to_owned(),
+        ],
+        StatisticalMonitorKind::ConformalThreshold => vec![
+            "alpha is the registered conformal-profile alpha only".to_owned(),
+            "calibration and assessment observations are exchangeable under the named population and selection".to_owned(),
+        ],
+        StatisticalMonitorKind::EProcess => vec![
+            "alpha is the registered e-process-profile alpha only".to_owned(),
+            "the declared null and filtration make the e-value a nonnegative supermartingale"
+                .to_owned(),
+        ],
+        StatisticalMonitorKind::DrainProgress => vec![
+            "alpha does not apply to this bounded progress certificate".to_owned(),
+            "the registered potential and maximum-step bound cover the complete prefix".to_owned(),
+        ],
+        StatisticalMonitorKind::RegimeChange => vec![
+            "alpha does not apply to this versioned change-detector receipt".to_owned(),
+            "the runtime metric series and detector profile are registered identities".to_owned(),
+        ],
+        StatisticalMonitorKind::OffPolicyEvaluation => vec![
+            "alpha does not apply to this exact-rational off-policy evaluation".to_owned(),
+            "every logged action carries exact realized support and propensity evidence".to_owned(),
+        ],
+        StatisticalMonitorKind::AnnRecall => {
+            let StatisticalStatistic::AnnRecall {
+                confidence_exponent,
+                assumptions_supported,
+                ..
+            } = record.statistic()
+            else {
+                return Err(io::Error::other("ANN monitor carried a non-ANN statistic").into());
+            };
+            vec![
+                format!("failure probability is exactly 2^-{confidence_exponent}"),
+                format!("all interval assumptions supported={assumptions_supported}"),
+                "exact-baseline and candidate result lists are complete".to_owned(),
+            ]
+        }
+    };
+    assumptions.push(monitor_identity);
+    Ok(assumptions)
+}
+
 #[test]
 fn sextant_assumption_registration_is_complete_and_fail_closed() -> TestResult {
     let fixture = run_fixture()?;
-    assert_eq!(fixture.statistical_log.len(), 24);
+    assert_eq!(fixture.statistical_log.len(), 27);
+    let mut registrations = Vec::<StatisticalEvidenceRegistration>::new();
+    let mut monitor_registrations = Vec::<(StatisticalMonitorKind, &'static str)>::new();
     for record in fixture.statistical_log.records() {
+        let registration = record.evidence_registration();
+        let expected_registry_id = match record.monitor_kind() {
+            StatisticalMonitorKind::EProcess
+            | StatisticalMonitorKind::ExplorationBudget
+            | StatisticalMonitorKind::DrainProgress
+            | StatisticalMonitorKind::RegimeChange => "FG-CAL-01",
+            StatisticalMonitorKind::ConformalThreshold => "FG-CAL-02",
+            StatisticalMonitorKind::OffPolicyEvaluation => "FG-EVID-01",
+            StatisticalMonitorKind::AnnRecall => "FG-CAL-03",
+        };
+        assert_eq!(registration.registry_id(), expected_registry_id);
+        if !monitor_registrations
+            .iter()
+            .any(|(monitor, _)| *monitor == record.monitor_kind())
+        {
+            monitor_registrations.push((record.monitor_kind(), registration.registry_id()));
+        }
+        if !registrations
+            .iter()
+            .any(|registered| registered.registry_id() == registration.registry_id())
+        {
+            registrations.push(registration);
+        }
         let envelope = record.try_to_evidence_envelope()?;
         assert_eq!(envelope.evidence_oid(), record.evidence_oid());
         assert_eq!(
@@ -1737,9 +1968,25 @@ fn sextant_assumption_registration_is_complete_and_fail_closed() -> TestResult {
                 assert!(!population.is_empty());
                 assert!(!sampling_rule.is_empty());
                 assert!(!power_or_effective_sample_size.is_empty());
-                assert!(
-                    assumptions.len() >= 3,
-                    "monitor {:?} omitted an assumption or its registered identity",
+                let substantive_assumptions = assumptions
+                    .iter()
+                    .filter(|assumption| !assumption.starts_with("registry-disclosure:"))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    substantive_assumptions,
+                    expected_substantive_assumptions(*record)?,
+                    "monitor {:?} changed or omitted a substantive model assumption",
+                    record.monitor_kind()
+                );
+                let registered_disclosures = assumptions
+                    .iter()
+                    .filter_map(|assumption| assumption.strip_prefix("registry-disclosure:"))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    registered_disclosures,
+                    registration.required_disclosures(),
+                    "monitor {:?} did not carry its exact registry disclosures",
                     record.monitor_kind()
                 );
             }
@@ -1752,13 +1999,51 @@ fn sextant_assumption_registration_is_complete_and_fail_closed() -> TestResult {
         }
     }
 
+    registrations.sort_by_key(|registration| registration.registry_id());
+    monitor_registrations.sort_unstable();
+    assert_eq!(
+        monitor_registrations,
+        [
+            (StatisticalMonitorKind::EProcess, "FG-CAL-01"),
+            (StatisticalMonitorKind::ConformalThreshold, "FG-CAL-02"),
+            (StatisticalMonitorKind::ExplorationBudget, "FG-CAL-01"),
+            (StatisticalMonitorKind::DrainProgress, "FG-CAL-01"),
+            (StatisticalMonitorKind::RegimeChange, "FG-CAL-01"),
+            (StatisticalMonitorKind::OffPolicyEvaluation, "FG-EVID-01"),
+            (StatisticalMonitorKind::AnnRecall, "FG-CAL-03"),
+        ]
+    );
+    assert_eq!(
+        registrations
+            .iter()
+            .map(|registration| registration.registry_id())
+            .collect::<Vec<_>>(),
+        ["FG-CAL-01", "FG-CAL-02", "FG-CAL-03", "FG-EVID-01"]
+    );
+    for registration in registrations {
+        let registry = parsed_evidence_registry_row(registration.registry_id())?;
+        assert!(registration_matches_registry(registration, &registry));
+        assert!(
+            !registration.binds_to().is_empty(),
+            "{} remained dead instrumentation",
+            registration.registry_id()
+        );
+
+        let mut missing = registry.clone();
+        missing.required_disclosures.pop();
+        assert!(!registration_matches_registry(registration, &missing));
+        let mut substituted = registry.clone();
+        substituted.required_disclosures[0] = "arbitrary substitute prose".to_owned();
+        assert!(!registration_matches_registry(registration, &substituted));
+    }
+
     let mut tampered = fixture.statistical_log_bytes;
     let final_byte = tampered
         .last_mut()
         .ok_or_else(|| io::Error::other("canonical statistical log was empty"))?;
     *final_byte ^= 1;
     assert!(
-        read_statistical_log(&tampered, 24).is_err(),
+        read_statistical_log(&tampered, 27).is_err(),
         "a post-registration evidence mutation bypassed identity verification"
     );
     Ok(())
@@ -1802,18 +2087,32 @@ fn adaptive_decision_classification_is_closed_and_substitution_fails() -> TestRe
         Err(DecisionPolicyEpochError::LogicalEffectClassChanged)
     );
 
-    let mut unknown_class = fixture.promoted_epoch_bytes.clone();
-    let effect_offset = unique_field_payload_offset(&unknown_class, 0x04, 1)?;
-    unknown_class[effect_offset] = 0xff;
-    assert_eq!(
-        DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
-            &unknown_class,
-            &root,
-            root_oid,
-            &fixture.promotion_envelopes,
-        ),
-        Err(DecisionPolicyEpochError::InvalidLogicalEffectClassTag { actual: 0xff })
-    );
+    let root_bytes = root.try_to_canonical_bytes()?;
+    let effect_offset = unique_field_payload_offset(&root_bytes, 0x04, 1)?;
+    for tag in 0..=u8::MAX {
+        let mut candidate = root_bytes.clone();
+        candidate[effect_offset] = tag;
+        let decoded = DecisionPolicyEpoch::try_root_from_canonical_bytes(&candidate);
+        match tag {
+            0x01 => assert_eq!(
+                decoded?.logical_effect_class(),
+                LogicalEffectClass::AnswerPreservingPhysical
+            ),
+            0x02 => assert_eq!(
+                decoded?.logical_effect_class(),
+                LogicalEffectClass::AnswerAffectingExecution
+            ),
+            0x03 => assert_eq!(
+                decoded?.logical_effect_class(),
+                LogicalEffectClass::CanonicalStateAffecting
+            ),
+            actual => assert_eq!(
+                decoded,
+                Err(DecisionPolicyEpochError::InvalidLogicalEffectClassTag { actual }),
+                "unassigned logical-effect tag {actual:#04x} was accepted"
+            ),
+        }
+    }
 
     let mut substituted_scope = fixture.promoted_epoch_bytes;
     let scope_offset = unique_field_payload_offset(&substituted_scope, 0x03, 32)?;
@@ -2046,12 +2345,13 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
             return Err(io::Error::other("fallback envelope was not statistical").into());
         }
     }
-    assert_eq!(first.statistical_log.len(), 24);
+    assert_eq!(first.statistical_log.len(), 27);
     for (monitor, expected) in [
         (StatisticalMonitorKind::ExplorationBudget, 2),
         (StatisticalMonitorKind::ConformalThreshold, 6),
         (StatisticalMonitorKind::EProcess, 3),
         (StatisticalMonitorKind::OffPolicyEvaluation, 4),
+        (StatisticalMonitorKind::DrainProgress, 3),
         (StatisticalMonitorKind::RegimeChange, 8),
         (StatisticalMonitorKind::AnnRecall, 1),
     ] {

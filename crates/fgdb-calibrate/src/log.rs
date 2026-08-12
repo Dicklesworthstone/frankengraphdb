@@ -306,6 +306,78 @@ impl StatisticalMonitorKind {
     }
 }
 
+const FG_CAL_01_DISCLOSURES: &[&str] = &[
+    "null/outcome filtration",
+    "alpha",
+    "support/overlap",
+    "effective sample size",
+    "loss and fallback",
+    "stream-sequenced promotion only",
+];
+const FG_CAL_02_DISCLOSURES: &[&str] = &[
+    "population",
+    "selection/window",
+    "exchangeability or nonexchangeability method",
+    "strata",
+    "marginal target",
+    "realized coverage and drift",
+];
+const FG_CAL_03_DISCLOSURES: &[&str] = &[
+    "authorized snapshot population",
+    "keyed sample",
+    "exact baseline",
+    "candidate policy",
+    "confidence interval and rebuild action",
+];
+const FG_EVID_01_DISCLOSURES: &[&str] = &[
+    "state/actions/features",
+    "logged probabilities",
+    "zero-support exclusions",
+    "clipping/estimator",
+    "policy epoch and fallback",
+];
+const POLICY_EPOCH_AND_LOG_BINDINGS: &[&str] = &["DecisionPolicyEpoch", "StatisticalDecisionLog"];
+const STATISTICAL_LOG_BINDING: &[&str] = &["StatisticalDecisionLog"];
+
+/// Exact registry contract carried by one typed statistical evidence record.
+///
+/// These values are deliberately closed and byte-exact: they are checked
+/// against `registries/evidence.toml`, so changing a disclosure or consumer
+/// requires the implementation and registry to move together.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatisticalEvidenceRegistration {
+    registry_id: &'static str,
+    qualified_claim: &'static str,
+    required_disclosures: &'static [&'static str],
+    binds_to: &'static [&'static str],
+}
+
+impl StatisticalEvidenceRegistration {
+    /// Stable `FG-CAL-*` or `FG-EVID-*` registry identity.
+    #[must_use]
+    pub const fn registry_id(self) -> &'static str {
+        self.registry_id
+    }
+
+    /// Exact qualified claim from the evidence registry.
+    #[must_use]
+    pub const fn qualified_claim(self) -> &'static str {
+        self.qualified_claim
+    }
+
+    /// Exact, ordered disclosure vocabulary required by the registry row.
+    #[must_use]
+    pub const fn required_disclosures(self) -> &'static [&'static str] {
+        self.required_disclosures
+    }
+
+    /// Concrete decision/evidence consumers to which the row is bound.
+    #[must_use]
+    pub const fn binds_to(self) -> &'static [&'static str] {
+        self.binds_to
+    }
+}
+
 /// Exact statistic payload emitted by one closed monitor family.
 ///
 /// The OPE and ANN variants deliberately remain inline: records are immutable,
@@ -1590,6 +1662,40 @@ impl StatisticalLogRecord {
         self.statistic
     }
 
+    /// Returns the exact governed evidence row for this monitor family.
+    #[must_use]
+    pub const fn evidence_registration(self) -> StatisticalEvidenceRegistration {
+        match self.monitor_kind {
+            StatisticalMonitorKind::EProcess
+            | StatisticalMonitorKind::ExplorationBudget
+            | StatisticalMonitorKind::DrainProgress
+            | StatisticalMonitorKind::RegimeChange => StatisticalEvidenceRegistration {
+                registry_id: "FG-CAL-01",
+                qualified_claim: "Adaptive policy evidence versus pinned fallback",
+                required_disclosures: FG_CAL_01_DISCLOSURES,
+                binds_to: POLICY_EPOCH_AND_LOG_BINDINGS,
+            },
+            StatisticalMonitorKind::ConformalThreshold => StatisticalEvidenceRegistration {
+                registry_id: "FG-CAL-02",
+                qualified_claim: "Cardinality/risk interval coverage",
+                required_disclosures: FG_CAL_02_DISCLOSURES,
+                binds_to: POLICY_EPOCH_AND_LOG_BINDINGS,
+            },
+            StatisticalMonitorKind::OffPolicyEvaluation => StatisticalEvidenceRegistration {
+                registry_id: "FG-EVID-01",
+                qualified_claim: "Decision-card/OPE completeness",
+                required_disclosures: FG_EVID_01_DISCLOSURES,
+                binds_to: POLICY_EPOCH_AND_LOG_BINDINGS,
+            },
+            StatisticalMonitorKind::AnnRecall => StatisticalEvidenceRegistration {
+                registry_id: "FG-CAL-03",
+                qualified_claim: "ANN recall/drift evidence",
+                required_disclosures: FG_CAL_03_DISCLOSURES,
+                binds_to: STATISTICAL_LOG_BINDING,
+            },
+        }
+    }
+
     /// Projects this validated monitor record into the complete statistical
     /// evidence envelope consumed by [`crate::policy_epoch::DecisionPolicyEpoch`].
     ///
@@ -1609,7 +1715,7 @@ impl StatisticalLogRecord {
             population,
             sampling_rule,
             power_or_effective_sample_size,
-            assumptions,
+            mut assumptions,
             strata_identity,
             propensity_support_identity,
         ) = match self.statistic {
@@ -1816,6 +1922,14 @@ impl StatisticalLogRecord {
                 PropensitySupportIdentity::NotApplicable,
             ),
         };
+
+        let registration = self.evidence_registration();
+        assumptions.extend(
+            registration
+                .required_disclosures()
+                .iter()
+                .map(|disclosure| format!("registry-disclosure:{disclosure}")),
+        );
 
         let batch_last = self.batch.last();
         let end_seq = batch_last
