@@ -30,7 +30,7 @@ DIRECT_METADATA="$(cargo metadata --locked --offline --no-deps --format-version 
 ' | LC_ALL=C sort)"
 EXPECTED_DIRECT="$(
   printf '%s\t%s\t%s\t%s\n' \
-    'asupersync' 'normal' 'git+https://github.com/Dicklesworthstone/asupersync?rev=24eb7ec6c62e9ba037d70fed4a69c4e733785926' '' \
+    'asupersync' 'normal' 'git+https://github.com/Dicklesworthstone/asupersync?rev=3b34c9b0a14c55eb814cf4aaeceeba3be0c0a72e' '' \
     'fgdb-types' 'normal' 'path' "$ROOT/crates/fgdb-types" \
     'fnx-generators' 'dev' 'git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f' '' \
     | LC_ALL=C sort

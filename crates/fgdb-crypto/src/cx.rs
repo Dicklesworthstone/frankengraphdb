@@ -6,8 +6,8 @@
 //! deterministic replay seeds" — and the reason it needs its own type is a
 //! hazard that is easy to walk into and invisible once you have.
 //!
-//! **THE HAZARD, MEASURED 2026-08-04 against the pinned asupersync
-//! (24eb7ec6).** `Cx` exposes an entropy capability — `Cx::random_bytes`,
+//! **THE HAZARD, REVERIFIED 2026-08-11 against pinned asupersync v0.4.3
+//! (3b34c9b0).** `Cx` exposes an entropy capability — `Cx::random_bytes`,
 //! `Cx::random_u64` — over a `dyn EntropySource`. There are two production-
 //! relevant implementations in `src/util/entropy.rs`: `OsEntropy` (getrandom,
 //! `source_id` "os") and `DetEntropy`, the deterministic source the lab runtime
