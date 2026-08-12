@@ -7968,8 +7968,8 @@ evidence_scope = "implementation"
 checker_id = "cargo-test:lab-runtime-integration"
 package = "fgdb-sim"
 target = "sim_dual_run"
-selector = "two_lab_runs_at_one_seed_are_byte_identical_across_seeds"
-command_argv = ["cargo", "test", "-p", "fgdb-sim", "--test", "sim_dual_run", "two_lab_runs_at_one_seed_are_byte_identical_across_seeds", "--", "--exact"]
+selector = "lab_runtime_integration_covers_time_disk_network_chaos_pressure_and_lifecycle"
+command_argv = ["cargo", "test", "-p", "fgdb-sim", "--test", "sim_dual_run", "lab_runtime_integration_covers_time_disk_network_chaos_pressure_and_lifecycle", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:proof-lane-resolution"
@@ -8428,8 +8428,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:submodular-premise-check"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:submodular-premise-check"
+package = "fgdb-sim"
+target = "sim_campaign"
+selector = "submodular_premises_card_fallback_and_campaign_execution_are_governed"
+command_argv = ["cargo", "test", "-p", "fgdb-sim", "--test", "sim_campaign", "submodular_premises_card_fallback_and_campaign_execution_are_governed", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:escrow-conservation"

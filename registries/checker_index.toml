@@ -261,6 +261,13 @@ status = "live"
 unit = "artifact"
 
 [[checker]]
+symbol = "cargo-test:submodular-premise-check"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/sim_campaign.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
 symbol = "e2e:g0_architecture_decisions"
 kind = "script"
 artifact = "scripts/g0_architecture_decisions_e2e.sh"
