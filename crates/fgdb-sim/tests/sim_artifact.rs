@@ -22,15 +22,175 @@
 
 use fgdb::{DerivedPublicationStage, RecoveryRequired};
 use fgdb_sim::artifact::{
-    ARTIFACT_REPLAY_ENV, Absence, CONTRACT_FIELDS, CommitDurabilityObservation, FailureKind, Field,
-    Replay, Scenario,
+    ARTIFACT_REPLAY_ENV, ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV, Absence, CONTRACT_FIELDS,
+    CommitDurabilityObservation, FailureKind, Field, Replay, Scenario, ScenarioCatalog,
+    ScenarioRegistration, ScenarioRegistrationError, replay_evidence_digest,
 };
 use fgdb_sim::vfs::{FaultPlan, Trigger};
 use fgdb_types::CommitSeq;
 use std::path::PathBuf;
+use std::process::{Command, Output};
+
+fn replay_command_env<'a>(command: &'a str, name: &str) -> &'a str {
+    let prefix = format!("{name}=");
+    command
+        .split_ascii_whitespace()
+        .find_map(|word| word.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("replay command does not assign {name}: {command}"))
+}
+
+fn execute_replay_consumer_in_fresh_process(command: &str, expected_digest: &str) -> Output {
+    assert!(
+        command
+            .ends_with("cargo test -p fgdb-sim --test sim_artifact -- --ignored replay_from_env"),
+        "the human command no longer selects the registered replay consumer: {command}"
+    );
+    let encoded = replay_command_env(command, ARTIFACT_REPLAY_ENV);
+    let executable = std::env::current_exe().expect("current test executable is discoverable");
+    Command::new("timeout")
+        .arg("30s")
+        .arg(executable)
+        .args(["--ignored", "--exact", "replay_from_env"])
+        .env(ARTIFACT_REPLAY_ENV, encoded)
+        .env(ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV, expected_digest)
+        .output()
+        .expect("the fresh-process replay consumer launches")
+}
 
 /// Plan line 1138 — the artifact contract sentence. 1-based, as cited.
 const CONTRACT_LINE: usize = 1138;
+
+fn later_owner_fixture(plan: FaultPlan, dir: &std::path::Path) -> fgdb_sim::artifact::RunOutcome {
+    Replay {
+        scenario: Scenario::DurableAppend,
+        plan,
+    }
+    .run(dir)
+}
+
+fn plan_substituting_fixture(
+    _plan: FaultPlan,
+    dir: &std::path::Path,
+) -> fgdb_sim::artifact::RunOutcome {
+    Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan::faultless(),
+    }
+    .run(dir)
+}
+
+#[test]
+fn later_owners_can_register_and_execute_a_state_model_without_editing_fgdb_sim() {
+    let rows = [ScenarioRegistration {
+        id: "later-owner.fixture-v1",
+        asserts: "acknowledged fixture bytes survive",
+        state_model: "one append, one crash",
+        execute: later_owner_fixture,
+    }];
+    let catalog = ScenarioCatalog::try_new(&rows).expect("registration is valid");
+    let result = catalog
+        .execute(
+            "later-owner.fixture-v1",
+            FaultPlan::faultless(),
+            &scratch_dir("registered-later-owner"),
+        )
+        .expect("registered scenario resolves and executes");
+    assert!(result.outcome().failure.is_none());
+    assert_eq!(result.id(), "later-owner.fixture-v1");
+    assert_eq!(result.assertion(), "acknowledged fixture bytes survive");
+    assert_eq!(result.state_model(), "one append, one crash");
+    assert!(!result.evidence_digest().is_empty());
+    let log = result.log_lines().join("\n");
+    assert!(log.contains("id=later-owner.fixture-v1"));
+    assert!(log.contains("state_model=\"one append, one crash\""));
+
+    let duplicate = [rows[0], rows[0]];
+    assert!(matches!(
+        ScenarioCatalog::try_new(&duplicate),
+        Err(ScenarioRegistrationError::DuplicateId)
+    ));
+
+    let builtin_collision = [ScenarioRegistration {
+        id: "durable-append",
+        ..rows[0]
+    }];
+    assert!(matches!(
+        ScenarioCatalog::try_new(&builtin_collision),
+        Err(ScenarioRegistrationError::DuplicateId)
+    ));
+
+    let substituted = [ScenarioRegistration {
+        execute: plan_substituting_fixture,
+        ..rows[0]
+    }];
+    let substituted_catalog =
+        ScenarioCatalog::try_new(&substituted).expect("registration is valid");
+    let requested = FaultPlan {
+        seed: 7,
+        ..FaultPlan::faultless()
+    };
+    assert!(matches!(
+        substituted_catalog.execute(
+            "later-owner.fixture-v1",
+            requested,
+            &scratch_dir("registered-plan-substitution"),
+        ),
+        Err(ScenarioRegistrationError::PlanMismatch)
+    ));
+}
+
+#[test]
+fn every_replay_emits_an_immutable_reconstructable_run_receipt() {
+    let passing_replay = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan::faultless(),
+    };
+    let passing = passing_replay.run(&scratch_dir("passing-run-receipt"));
+    assert_eq!(passing.receipt.scenario_id(), "durable-append");
+    assert_eq!(passing.receipt.seed(), passing_replay.plan.seed);
+    assert_eq!(
+        passing.receipt.virtual_clock_epoch_nanos(),
+        passing.virtual_clock_epoch_nanos
+    );
+    assert!(passing.receipt.injected_faults().is_empty());
+    assert!(passing.receipt.artifact_fields_asserted().is_empty());
+    assert_eq!(passing.receipt.shrink_iterations(), 0);
+    assert!(passing.receipt.final_reproducer_path().is_none());
+
+    let failing_replay = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            seed: 0x0A47_FAC7,
+            fsync_lie: Trigger::Always,
+            ..FaultPlan::faultless()
+        },
+    };
+    let failing = failing_replay.run(&scratch_dir("failing-run-receipt"));
+    assert_eq!(failing.receipt.injected_faults(), failing.events.as_slice());
+    assert_eq!(failing.receipt.artifact_fields_asserted(), CONTRACT_FIELDS);
+    assert_eq!(failing.receipt.shrink_iterations(), 0);
+    assert!(
+        failing
+            .receipt
+            .final_reproducer_path()
+            .is_some_and(std::path::Path::is_dir)
+    );
+    let log = failing.receipt.log_lines().join("\n");
+    for required in [
+        "scenario_id=durable-append",
+        "seed=0x",
+        "virtual_clock_epoch_nanos=",
+        "injected_fault",
+        "artifact_fields_asserted=",
+        "shrink_iterations=0",
+        "final_reproducer_path=",
+    ] {
+        assert!(
+            log.contains(required),
+            "run receipt omitted {required:?}:\n{log}"
+        );
+    }
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -255,7 +415,9 @@ fn the_replay_command_round_trips_to_the_value_that_replays() {
 
     // The human command must carry exactly those arguments, or the string a
     // person copies and the value the harness runs are two different things.
-    let command = replay.command();
+    let source = replay.run(&scratch_dir("command-source"));
+    let failure = source.failure.as_ref().expect("source replay fails");
+    let command = replay.command_for(failure, &source.events);
     assert!(
         command.contains(&replay.encode()),
         "command {command:?} does not carry its own replay arguments"
@@ -263,6 +425,51 @@ fn the_replay_command_round_trips_to_the_value_that_replays() {
     assert!(
         command.contains(ARTIFACT_REPLAY_ENV),
         "command {command:?} does not name the variable its runner reads"
+    );
+    assert!(
+        command.contains(ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV),
+        "command {command:?} does not bind the child's exact outcome digest"
+    );
+}
+
+#[test]
+fn the_emitted_replay_command_executes_as_a_subprocess() {
+    let outcome = failing_replay().run(&scratch_dir("literal-command-source"));
+    let artifact = outcome
+        .artifact
+        .as_ref()
+        .expect("a failing run emits an artifact");
+    let command = present_value(
+        artifact
+            .field("replay_command")
+            .expect("replay_command is a contract field"),
+    )
+    .expect("a failing artifact carries a replay command");
+
+    let expected = replay_command_env(command, ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV);
+    let output = execute_replay_consumer_in_fresh_process(command, expected);
+    assert!(
+        output.status.success(),
+        "the emitted replay command did not reproduce successfully: status={}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("test replay_from_env ... ok"),
+        "the command exited successfully without executing its replay consumer:\n{stdout}"
+    );
+
+    let expected = replay_evidence_digest(
+        outcome.failure.as_ref().expect("artifact source failed"),
+        &outcome.events,
+    );
+    let wrong_output =
+        execute_replay_consumer_in_fresh_process(command, &"0".repeat(expected.len()));
+    assert!(
+        !wrong_output.status.success(),
+        "a fresh-process replay accepted the wrong expected outcome digest"
     );
 }
 
@@ -571,9 +778,19 @@ fn replay_from_env() {
     // ubs:ignore
     let replay = Replay::decode(&encoded).expect("FGDB_SIM_REPLAY decodes");
     let outcome = replay.run(&scratch_dir("replay-from-env"));
+    let expected = std::env::var(ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV).unwrap_or_default();
     assert!(
-        outcome.failure.is_some(),
-        "the replay did not reproduce a failure: {outcome:?}"
+        !expected.is_empty(),
+        "{ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV} is unset; the command must bind an exact outcome"
+    );
+    let failure = outcome
+        .failure
+        .as_ref()
+        .expect("the replay did not reproduce a failure");
+    assert_eq!(
+        replay_evidence_digest(failure, &outcome.events),
+        expected,
+        "fresh-process replay reached a different failure or fault-event log"
     );
 }
 

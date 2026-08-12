@@ -14,8 +14,10 @@
 //! The control is `a_retainable_class_can_actually_be_retained`: without it,
 //! a `retain` that refused *everything* would satisfy both laws above.
 
+use fgdb_sim::artifact::{Replay, Scenario};
 use fgdb_sim::completeness::{Recording, ReplayCompleteness, grade};
 use fgdb_sim::redaction::{Disposition, RecordClass, RedactionPolicy};
+use fgdb_sim::vfs::FaultPlan;
 
 /// THE LAW. Not a default — a refusal.
 #[test]
@@ -120,16 +122,14 @@ fn a_redacted_bundle_cannot_grade_as_replayable() {
 
     // An otherwise perfect replay: identical (empty) fault logs, same outcome.
     // Only the withholding can downgrade it.
-    let recording = Recording {
-        events: Vec::new(),
-        failure: None,
-        withheld_classes: withheld.clone(),
+    let replay = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan::faultless(),
     };
-    let replayed = fgdb_sim::artifact::RunOutcome {
-        failure: None,
-        events: Vec::new(),
-        artifact: None,
-    };
+    let dir = std::env::temp_dir().join(format!("fgdb-sim-redacted-grade-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("redaction grade scratch");
+    let replayed = replay.run(&dir);
+    let recording = Recording::from_run(&replayed, withheld.clone()).expect("recording is sealed");
 
     let awarded = grade(&recording, &replayed);
     assert!(

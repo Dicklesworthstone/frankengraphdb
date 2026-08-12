@@ -12,7 +12,7 @@
 //! against a grader hard-wired to `AuditOnly`.
 
 use fgdb_sim::artifact::{Replay, Scenario};
-use fgdb_sim::completeness::{Recording, ReplayCompleteness, grade};
+use fgdb_sim::completeness::{Recording, RecordingError, ReplayCompleteness, grade};
 use fgdb_sim::vfs::{FaultPlan, Trigger};
 use std::path::PathBuf;
 
@@ -46,11 +46,7 @@ fn a_faithful_replay_can_reach_the_top_grade() {
         "premise: the recording must contain faults, or identity is trivial"
     );
 
-    let recording = Recording {
-        events: recorded_run.events.clone(),
-        failure: recorded_run.failure.clone(),
-        withheld_classes: Vec::new(),
-    };
+    let recording = Recording::from_run(&recorded_run, Vec::new()).expect("recording is sealed");
     let replayed = replay.run(&dir);
 
     let awarded = grade(&recording, &replayed);
@@ -61,24 +57,21 @@ fn a_faithful_replay_can_reach_the_top_grade() {
 #[test]
 fn a_diverging_replay_is_downgraded_to_structural() {
     let dir = scratch_dir("structural");
-    let recorded_run = lying_replay().run(&dir);
-    let recording = Recording {
-        events: recorded_run.events.clone(),
-        failure: recorded_run.failure.clone(),
-        withheld_classes: Vec::new(),
-    };
+    let replay = lying_replay();
+    let recorded_run = replay.run(&dir);
+    let recording = Recording::from_run(&recorded_run, Vec::new()).expect("recording is sealed");
 
     // A different plan: the tear fires instead of the lie, so the fault log
     // differs from the recording's.
-    let other = Replay {
+    let other_replay = Replay {
         scenario: Scenario::DurableAppend,
         plan: FaultPlan {
             seed: 0x1774_0000_0000_0021,
             torn_write: Trigger::Always,
             ..FaultPlan::faultless()
         },
-    }
-    .run(&dir);
+    };
+    let other = other_replay.run(&dir);
     assert_ne!(
         recorded_run.events, other.events,
         "premise: the two runs must actually differ"
@@ -109,6 +102,35 @@ fn a_diverging_replay_is_downgraded_to_structural() {
 }
 
 #[test]
+fn identical_faults_and_failure_kind_do_not_hide_a_different_replay_identity() {
+    let dir = scratch_dir("identity-bound");
+    let replay = lying_replay();
+    let recorded_run = replay.run(&dir);
+    let recording = Recording::from_run(&recorded_run, Vec::new()).expect("recording is sealed");
+    let different_replay = Replay {
+        plan: FaultPlan {
+            seed: replay.plan.seed ^ 1,
+            ..replay.plan
+        },
+        ..replay
+    };
+    let different = different_replay.run(&dir);
+    assert_eq!(
+        recorded_run.events, different.events,
+        "control requires the old event-only grader to see identical evidence"
+    );
+    assert_eq!(
+        recorded_run.failure.as_ref().map(|failure| failure.kind),
+        different.failure.as_ref().map(|failure| failure.kind),
+        "control requires the old kind-only comparison to agree"
+    );
+    assert!(
+        !grade(&recording, &different).claims_byte_identity(),
+        "a different scenario/seed/plan claimed byte identity over coarse matching evidence"
+    );
+}
+
+#[test]
 fn a_withheld_class_forbids_the_top_grade_even_on_an_identical_replay() {
     let dir = scratch_dir("withheld");
     let replay = lying_replay();
@@ -117,11 +139,8 @@ fn a_withheld_class_forbids_the_top_grade_even_on_an_identical_replay() {
     // Byte-identical replay — but the bundle admits it withheld something.
     // §15.1: crypto entropy is never recorded, so this is the ordinary case
     // for a real bundle, not an exotic one.
-    let recording = Recording {
-        events: recorded_run.events.clone(),
-        failure: recorded_run.failure.clone(),
-        withheld_classes: vec!["crypto-entropy".to_string()],
-    };
+    let recording = Recording::from_run(&recorded_run, vec!["crypto-entropy".to_string()])
+        .expect("recording is sealed");
     let replayed = replay.run(&dir);
     assert_eq!(
         recorded_run.events, replayed.events,
@@ -144,19 +163,20 @@ fn a_withheld_class_forbids_the_top_grade_even_on_an_identical_replay() {
 #[test]
 fn a_bundle_that_reproduces_nothing_is_audit_only() {
     let dir = scratch_dir("audit-only");
-    let recorded_run = lying_replay().run(&dir);
-    let recording = Recording {
-        events: recorded_run.events,
-        failure: recorded_run.failure,
-        withheld_classes: vec!["crypto-entropy".to_string(), "fsync-lie".to_string()],
-    };
+    let replay = lying_replay();
+    let recorded_run = replay.run(&dir);
+    let recording = Recording::from_run(
+        &recorded_run,
+        vec!["crypto-entropy".to_string(), "fsync-lie".to_string()],
+    )
+    .expect("recording is sealed");
 
     // A faultless run: nothing was injected, so nothing came back.
-    let nothing = Replay {
+    let nothing_replay = Replay {
         scenario: Scenario::DurableAppend,
         plan: FaultPlan::faultless(),
-    }
-    .run(&dir);
+    };
+    let nothing = nothing_replay.run(&dir);
     assert!(
         nothing.events.is_empty(),
         "premise: this replay must reproduce no faults at all"
@@ -172,9 +192,57 @@ fn a_bundle_that_reproduces_nothing_is_audit_only() {
         missing_or_redacted_classes,
     } = &awarded
     {
-        assert_eq!(missing_or_redacted_classes.len(), 2);
+        assert_eq!(missing_or_redacted_classes.len(), 3);
         assert!(missing_or_redacted_classes.contains(&"crypto-entropy".to_string()));
+        assert!(missing_or_redacted_classes.contains(&"replay-identity-mismatch".to_string()));
     }
+}
+
+#[test]
+fn withheld_classes_cannot_disguise_a_different_replay_identity_as_verifiable() {
+    let dir = scratch_dir("withheld-wrong-identity");
+    let replay = lying_replay();
+    let recorded_run = replay.run(&dir);
+    let recording = Recording::from_run(&recorded_run, vec!["crypto-entropy".to_string()])
+        .expect("recording is sealed");
+    let different_replay = Replay {
+        plan: FaultPlan {
+            seed: replay.plan.seed ^ 1,
+            ..replay.plan
+        },
+        ..replay
+    };
+    let different_run = different_replay.run(&dir);
+
+    let awarded = grade(&recording, &different_run);
+    assert!(matches!(awarded, ReplayCompleteness::AuditOnly { .. }));
+    if let ReplayCompleteness::AuditOnly {
+        missing_or_redacted_classes,
+    } = awarded
+    {
+        assert!(missing_or_redacted_classes.contains(&"replay-identity-mismatch".to_string()));
+    }
+}
+
+#[test]
+fn post_execution_evidence_mutation_cannot_be_recorded_or_graded() {
+    let dir = scratch_dir("execution-seal");
+    let replay = lying_replay();
+    let mut run = replay.run(&dir);
+    run.virtual_clock_epoch_nanos ^= 1;
+    assert!(matches!(
+        Recording::from_run(&run, Vec::new()),
+        Err(RecordingError::ExecutionEvidenceMutated)
+    ));
+
+    let original = replay.run(&dir);
+    let recording = Recording::from_run(&original, Vec::new()).expect("recording is sealed");
+    assert_eq!(
+        grade(&recording, &run),
+        ReplayCompleteness::AuditOnly {
+            missing_or_redacted_classes: vec!["execution-evidence-integrity".to_string()],
+        }
+    );
 }
 
 #[test]
@@ -212,42 +280,35 @@ fn all_four_replay_completeness_grades_are_reached_by_executable_fixtures() {
     let recorded_run = replay.run(&dir);
     assert!(!recorded_run.events.is_empty());
 
-    let complete = Recording {
-        events: recorded_run.events.clone(),
-        failure: recorded_run.failure.clone(),
-        withheld_classes: Vec::new(),
-    };
+    let complete = Recording::from_run(&recorded_run, Vec::new()).expect("recording is sealed");
     let faithful = replay.run(&dir);
     let replayable = grade(&complete, &faithful);
 
-    let divergent = Replay {
+    let divergent_replay = Replay {
         scenario: Scenario::DurableAppend,
         plan: FaultPlan {
             seed: 0x1774_0000_0000_0022,
             torn_write: Trigger::Always,
             ..FaultPlan::faultless()
         },
-    }
-    .run(&dir);
+    };
+    let divergent = divergent_replay.run(&dir);
     let structural = grade(&complete, &divergent);
 
-    let withheld = Recording {
-        events: recorded_run.events,
-        failure: recorded_run.failure,
-        withheld_classes: vec!["crypto-entropy".to_string()],
-    };
+    let withheld = Recording::from_run(&recorded_run, vec!["crypto-entropy".to_string()])
+        .expect("recording is sealed");
     let verifiable = grade(&withheld, &faithful);
 
-    let withheld_everything = Recording {
-        events: withheld.events,
-        failure: withheld.failure,
-        withheld_classes: vec!["crypto-entropy".to_string(), "fsync-lie".to_string()],
-    };
-    let faultless = Replay {
+    let withheld_everything = Recording::from_run(
+        &recorded_run,
+        vec!["crypto-entropy".to_string(), "fsync-lie".to_string()],
+    )
+    .expect("recording is sealed");
+    let faultless_replay = Replay {
         scenario: Scenario::DurableAppend,
         plan: FaultPlan::faultless(),
-    }
-    .run(&dir);
+    };
+    let faultless = faultless_replay.run(&dir);
     let audit_only = grade(&withheld_everything, &faultless);
 
     assert_eq!(replayable, ReplayCompleteness::Replayable);
@@ -270,4 +331,10 @@ fn all_four_replay_completeness_grades_are_reached_by_executable_fixtures() {
         1,
         "only the executable Replayable fixture may claim byte identity"
     );
+
+    // These controls are part of the governed aggregate, not merely nearby
+    // tests: withholding cannot hide a replay-identity mismatch, and mutable
+    // post-run evidence cannot be recorded or graded as an authentic run.
+    withheld_classes_cannot_disguise_a_different_replay_identity_as_verifiable();
+    post_execution_evidence_mutation_cannot_be_recorded_or_graded();
 }

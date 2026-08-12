@@ -13,12 +13,14 @@
 //!   owner is a permanent silent zero.
 
 use fgdb_sim::ldfi::{
-    ActivationRejection, BASE_HARNESS_OWNER, CampaignEntrypoint, EXPECTED_TARGET_IDS, G1_GATE,
-    G3_GATE, G3_PHASE_OWNER, GENESIS_GATE, LOCAL_TORTURE_OWNER, LdfiTarget, Reachability,
+    ActivationRejection, BASE_HARNESS_OWNER, CampaignEntrypoint, EXPECTED_LDFI_OWNER_BEADS,
+    EXPECTED_TARGET_IDS, G1_GATE, G3_GATE, G3_PHASE_OWNER, GENESIS_GATE, LOCAL_TORTURE_OWNER,
+    LdfiOwnerCompletion, LdfiOwnerCompletionError, LdfiTarget, Reachability,
     RegistryValidationError, TARGETS, TargetMetadataError, TargetRowState, W12_GATE,
     W12_PHASE_OWNER, campaign_entrypoint, coverage_statement, expected_phase_boundary,
     g3_campaign_entrypoint, reachable_count, registry_jsonl, unreachable_count,
-    validate_activation, validate_registry_rows, validate_target_metadata, w12_campaign_entrypoint,
+    validate_activation, validate_ldfi_owner_completion, validate_registry_rows,
+    validate_target_metadata, w12_campaign_entrypoint,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -37,6 +39,45 @@ fn plan_line() -> String {
         .nth(TARGET_LINE - 1)
         .expect("plan has line 1132")
         .to_ascii_lowercase()
+}
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crates/<crate> has a repository root")
+        .to_path_buf()
+}
+
+fn json_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("\"{field}\":\"");
+    let value = line.split_once(&needle)?.1;
+    value.split_once('"').map(|(value, _)| value)
+}
+
+fn tracked_owner_completion() -> Vec<LdfiOwnerCompletion> {
+    let jsonl = std::fs::read_to_string(repository_root().join(".beads/issues.jsonl"))
+        .expect("the tracked Beads export is mandatory input to this local CI check");
+    EXPECTED_LDFI_OWNER_BEADS
+        .iter()
+        .map(|owner| {
+            let matching: Vec<&str> = jsonl
+                .lines()
+                .filter(|line| json_string_field(line, "id") == Some(*owner))
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "owner {owner:?} must occur exactly once in the tracked Beads export"
+            );
+            let status = json_string_field(matching[0], "status")
+                .expect("an LDFI owner Bead must carry a status");
+            LdfiOwnerCompletion {
+                owner_bead: owner,
+                complete: status == "closed",
+            }
+        })
+        .collect()
 }
 
 #[test]
@@ -137,6 +178,43 @@ fn phase_authority_ids_are_pinned_to_the_tracker_contract() {
     assert_eq!(G3_GATE, "fgdb-gate-g3-30m");
     assert_eq!(W12_PHASE_OWNER, "fgdb-w12-formal-torture-ejx0");
     assert_eq!(W12_GATE, "fgdb-gate-w12-w2y");
+}
+
+#[test]
+fn tracked_owner_completion_cannot_hide_pending_ldfi_rows() {
+    let tracked = tracked_owner_completion();
+    validate_ldfi_owner_completion(TARGETS, &tracked)
+        .expect("open future owners may carry explicit pending rows");
+
+    let mut closed_base = tracked.clone();
+    closed_base[0].complete = true;
+    validate_ldfi_owner_completion(TARGETS, &closed_base)
+        .expect("the q97e base owner has live evidence for every row it owns");
+
+    let mut prematurely_closed_local = tracked.clone();
+    prematurely_closed_local[1].complete = true;
+    assert_eq!(
+        validate_ldfi_owner_completion(TARGETS, &prematurely_closed_local),
+        Err(LdfiOwnerCompletionError::CompletedOwnerMissingCampaign {
+            owner_bead: LOCAL_TORTURE_OWNER,
+            target_id: "checkpoint-install",
+        })
+    );
+
+    assert_eq!(
+        validate_ldfi_owner_completion(TARGETS, &tracked[..tracked.len() - 1]),
+        Err(LdfiOwnerCompletionError::OwnerInventoryLength {
+            expected: EXPECTED_LDFI_OWNER_BEADS.len(),
+            actual: EXPECTED_LDFI_OWNER_BEADS.len() - 1,
+        })
+    );
+
+    let mut reordered = tracked;
+    reordered.swap(1, 2);
+    assert_eq!(
+        validate_ldfi_owner_completion(TARGETS, &reordered),
+        Err(LdfiOwnerCompletionError::OwnerInventoryId { index: 1 })
+    );
 }
 
 #[test]
@@ -520,7 +598,9 @@ use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, Ro
 use fgdb_chronicle::store::{ContinuityAuthority, ContinuityHead, RootStore, StoreError};
 use fgdb_delta_types::RelationId;
 use fgdb_sim::artifact::{Failure, FailureKind, Replay, Scenario};
+use fgdb_sim::campaign::{CampaignRecordError, ClaimClass, FalsificationCampaignRecord};
 use fgdb_sim::ldfi::{InjectableFaultClass, TraceLdfiError, derive_fault_hypotheses};
+use fgdb_sim::redaction::{MediatedRecord, RecordClass, RedactionPolicy};
 use fgdb_sim::shrink::shrink;
 use fgdb_sim::vfs::{FAULT_POINT_TRACE_PREFIX, FaultKind, FaultPlan, FaultVfs, Trigger};
 use fgdb_types::VId;
@@ -1469,7 +1549,7 @@ fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
         reproduced.artifact.is_some(),
         "the reproduced fault skipped the structured artifact boundary"
     );
-    let shrunk = shrink(replay, &scratch_dir("lineage-append-shrink"))
+    let mut shrunk = shrink(replay, &scratch_dir("lineage-append-shrink"))
         .expect("isolated shrink attempts are created")
         .expect("the trace-derived failure reproduces for the shrinker");
     assert_eq!(shrunk.failure.kind, FailureKind::AcknowledgedBytesLost);
@@ -1478,17 +1558,103 @@ fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
         Trigger::At(1),
         "shrinking must retain the one event that caused the failure"
     );
-    let minimal = shrunk
-        .replay
-        .run(&scratch_dir("lineage-append-shrunk-artifact"));
+    let policy = RedactionPolicy::fail_closed()
+        .retain(RecordClass::FaultInjection)
+        .expect("fault injection is retainable")
+        .retain(RecordClass::UserPayload)
+        .expect("user payload is retainable");
+    let mediated_records = [
+        MediatedRecord {
+            class: RecordClass::UserPayload,
+            payload: b"retained-workload-record".to_vec(),
+        },
+        MediatedRecord {
+            class: RecordClass::CryptoEntropy,
+            payload: b"crypto-entropy-secret-material".to_vec(),
+        },
+    ];
+    let record = FalsificationCampaignRecord::materialize(
+        &shrunk,
+        &scratch_dir("lineage-append-campaign-record"),
+        &policy,
+        &mediated_records,
+    )
+    .expect("the artifact and minimized replay form one campaign record");
+    assert_eq!(record.scenario_id(), "durable-append");
+    assert_eq!(record.seed(), 0x1df1_ffff);
     assert_eq!(
-        minimal.failure.as_ref().map(|failure| failure.kind),
-        Some(FailureKind::AcknowledgedBytesLost)
+        record.virtual_clock_epoch_nanos(),
+        shrunk
+            .replay
+            .run(&scratch_dir("lineage-append-epoch-control"))
+            .virtual_clock_epoch_nanos,
+        "the record epoch must come from the minimized replay, not unrelated trace input"
     );
+    assert!(!record.injected_faults().is_empty());
+    assert_eq!(
+        record.artifact_fields_asserted(),
+        fgdb_sim::artifact::CONTRACT_FIELDS
+    );
+    assert!(record.shrink_iterations() > 0);
+    assert!(record.final_reproducer_path().is_dir());
+    assert!(record.bundle_path().is_file());
+    assert_eq!(record.outcome().claim_class(), ClaimClass::Falsification);
+    let log = record.log_lines().join("\n");
+    for required in [
+        "scenario_id=durable-append",
+        "virtual_clock_epoch_nanos=",
+        "injected_fault",
+        "artifact_fields_asserted=",
+        "shrink_iterations=",
+        "final_reproducer_path=",
+        "withheld_record_classes=",
+        "verdict_class=Falsification",
+    ] {
+        assert!(
+            log.contains(required),
+            "campaign record omitted {required:?}:\n{log}"
+        );
+    }
+    let bundle = record
+        .bundle_bytes()
+        .expect("the immutable record remains admissible at serialization");
+    assert_eq!(
+        std::fs::read(record.bundle_path()).expect("emitted campaign receipt is readable"),
+        bundle,
+        "the returned record and emitted receipt diverged"
+    );
+    assert!(bundle.starts_with(b"fgdb-sim-campaign/v1\n"));
+    let hex = |bytes: &[u8]| -> Vec<u8> {
+        bytes
+            .iter()
+            .flat_map(|byte| format!("{byte:02x}").into_bytes())
+            .collect()
+    };
+    let retained = hex(b"retained-workload-record");
     assert!(
-        minimal.artifact.is_some(),
-        "the minimal reproducer skipped the structured artifact boundary"
+        bundle
+            .windows(retained.len())
+            .any(|window| window == retained.as_slice()),
+        "the scan control did not find an explicitly retained record"
     );
+    let forbidden = hex(b"crypto-entropy-secret-material");
+    assert!(
+        !bundle
+            .windows(forbidden.len())
+            .any(|window| window == forbidden.as_slice()), // ubs:ignore -- public fixture-byte absence scan, not authentication.
+        "never-recordable crypto entropy escaped into the bundle"
+    );
+
+    shrunk.rejected = usize::MAX;
+    assert!(matches!(
+        FalsificationCampaignRecord::materialize(
+            &shrunk,
+            &scratch_dir("lineage-mutated-shrink-refusal"),
+            &policy,
+            &mediated_records,
+        ),
+        Err(CampaignRecordError::ShrinkProvenanceMismatch)
+    ));
 }
 
 #[test]

@@ -7,15 +7,28 @@
 //! is `bounded_exhaustion_still_does_not_claim_absence`: the one outcome
 //! strong enough to be mistaken for a proof.
 
-use fgdb_sim::campaign::{
-    CampaignOutcome, ClaimClass, EXPECTED_LIFECYCLE_CONSUMERS, EXPECTED_LIFECYCLE_COVERAGE_IDS,
-    EXPECTED_LIFECYCLE_OWNER_BEADS, FORBIDDEN_CLAIMS, LIFECYCLE_COVERAGE_ROWS,
-    LIFECYCLE_FIRST_REQUIRED_GATE, LifecycleCampaignEntrypoint, LifecycleConsumerCompletion,
-    LifecycleCoverageState, LifecycleOwnerCompletion, LifecycleRegistryError,
-    lifecycle_campaign_entrypoint, lifecycle_coverage_jsonl,
-    validate_lifecycle_consumer_completion, validate_lifecycle_coverage_rows,
-    validate_lifecycle_owner_completion,
+use asupersync::lab::ExplorationBudgetConfig;
+use fgdb_calibrate::exploration::{
+    ExplorationAssumptionAttestation, ExplorationBudgetIdentity, ExplorationBudgetMonitor,
+    ExplorationBudgetProfile, ExplorationDisposition, ExplorationSelection,
+    MAX_EXPLORATION_ESTIMATION_WORK,
 };
+use fgdb_sim::artifact::{FailureKind, Replay, Scenario};
+use fgdb_sim::campaign::{
+    CampaignModelId, CampaignModelIdError, CampaignNoveltyTracker, CampaignOutcome,
+    CampaignSampleError, ClaimClass, CoverageCandidate, CoveragePolicyError,
+    EXPECTED_LIFECYCLE_CONSUMERS, EXPECTED_LIFECYCLE_COVERAGE_IDS, EXPECTED_LIFECYCLE_OWNER_BEADS,
+    FORBIDDEN_CLAIMS, LIFECYCLE_COVERAGE_ROWS, LIFECYCLE_FIRST_REQUIRED_GATE,
+    LifecycleCampaignEntrypoint, LifecycleConsumerCompletion, LifecycleCoverageState,
+    LifecycleOwnerCompletion, LifecycleRegistryError, PrioritizedCampaignError,
+    StoppingPolicyError, file_falsification, lifecycle_campaign_entrypoint,
+    lifecycle_coverage_jsonl, prioritize_coverage_candidates, run_model_qualified_campaign,
+    run_prioritized_model_qualified_campaign, validate_lifecycle_consumer_completion,
+    validate_lifecycle_coverage_rows, validate_lifecycle_owner_completion,
+};
+use fgdb_sim::redaction::{RecordClass, RedactionPolicy};
+use fgdb_sim::vfs::{FaultPlan, Trigger};
+use fgdb_types::ObjectId;
 use std::path::PathBuf;
 
 /// Every outcome the type can express. Extended deliberately when a variant is
@@ -23,18 +36,116 @@ use std::path::PathBuf;
 fn every_outcome() -> Vec<CampaignOutcome> {
     vec![
         CampaignOutcome::Falsified {
-            replay: "durable-append:0x1:512:always:never:never:none".to_string(),
-            failure_kind: "AcknowledgedBytesLost".to_string(),
+            replay: failing_replay(),
+            failure_kind: FailureKind::AcknowledgedBytesLost,
         },
         CampaignOutcome::NotFalsified {
-            sampling_model: "uniform-over-declared-faults".to_string(),
+            sampling_model: model("uniform-over-declared-faults"),
             explored: 10_000,
         },
         CampaignOutcome::BoundedExhausted {
-            model: "two-writer-one-crash".to_string(),
+            model: model("two-writer-one-crash"),
             states: 4_096,
         },
     ]
+}
+
+fn model(value: &str) -> CampaignModelId {
+    CampaignModelId::parse(value).expect("test model id is valid")
+}
+
+fn failing_replay() -> Replay {
+    Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            seed: 0xCA11,
+            fsync_lie: Trigger::Always,
+            ..FaultPlan::faultless()
+        },
+    }
+}
+
+fn clean_replay(seed: u64) -> Replay {
+    Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            seed,
+            ..FaultPlan::faultless()
+        },
+    }
+}
+
+fn observed_samples(
+    replay: Replay,
+    count: usize,
+    name: &str,
+) -> Vec<Result<fgdb_sim::campaign::CampaignSample, CampaignSampleError>> {
+    let root = std::env::temp_dir().join(format!(
+        "fgdb-sim-observed-campaign-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("observed campaign scratch");
+    let mut novelty = CampaignNoveltyTracker::new();
+    (0..count)
+        .map(|ordinal| {
+            let dir = root.join(format!("run-{ordinal:04}"));
+            std::fs::create_dir_all(&dir).expect("observed run scratch");
+            novelty.observe(replay.run(&dir))
+        })
+        .collect()
+}
+
+fn observed_existing_class_samples(
+    replay: Replay,
+    count: usize,
+    name: &str,
+) -> Vec<Result<fgdb_sim::campaign::CampaignSample, CampaignSampleError>> {
+    let root = std::env::temp_dir().join(format!(
+        "fgdb-sim-existing-class-campaign-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("existing-class campaign scratch");
+    let mut novelty = CampaignNoveltyTracker::new();
+    let priming_dir = root.join("priming-run");
+    std::fs::create_dir_all(&priming_dir).expect("priming run scratch");
+    novelty
+        .observe({
+            let run = replay.run(&priming_dir);
+            assert!(
+                run.failure.is_none(),
+                "clean priming run failed: {:?}",
+                run.failure
+            );
+            run
+        })
+        .expect("priming run is sealed");
+    (0..count)
+        .map(|ordinal| {
+            let dir = root.join(format!("run-{ordinal:04}"));
+            std::fs::create_dir_all(&dir).expect("existing-class run scratch");
+            let run = replay.run(&dir);
+            assert!(
+                run.failure.is_none(),
+                "clean observed run failed: {:?}",
+                run.failure
+            );
+            novelty.observe(run)
+        })
+        .collect()
+}
+
+fn coverage_candidate(
+    id: &'static str,
+    covers: &'static [&'static str],
+    cost: u64,
+    seed: u64,
+) -> CoverageCandidate {
+    CoverageCandidate {
+        id,
+        covers,
+        cost,
+        replay: clean_replay(seed),
+    }
 }
 
 #[test]
@@ -80,7 +191,7 @@ fn no_claim_class_licence_promises_absence() {
 #[test]
 fn bounded_exhaustion_still_does_not_claim_absence() {
     let outcome = CampaignOutcome::BoundedExhausted {
-        model: "two-writer-one-crash".to_string(),
+        model: model("two-writer-one-crash"),
         states: 4_096,
     };
     assert_eq!(outcome.claim_class(), ClaimClass::BoundedFormal);
@@ -108,11 +219,11 @@ fn finding_nothing_is_not_reported_as_the_same_claim_as_exhausting_a_model() {
     // from statistical/heuristic stopping." Same observation — no
     // counterexample — must not collapse into one claim class.
     let sampled = CampaignOutcome::NotFalsified {
-        sampling_model: "uniform".to_string(),
+        sampling_model: model("uniform"),
         explored: 1,
     };
     let exhausted = CampaignOutcome::BoundedExhausted {
-        model: "m".to_string(),
+        model: model("m"),
         states: 1,
     };
     assert_eq!(
@@ -153,6 +264,453 @@ fn only_falsification_asserts_anything_unconditionally() {
             .any(CampaignOutcome::found_counterexample),
         "no outcome reports a counterexample; every assertion above would then be vacuous"
     );
+}
+
+#[test]
+fn model_qualified_stopping_uses_the_foundation_bound_and_names_its_assumptions() {
+    let config = ExplorationBudgetConfig::new(0.5, 0.9)
+        .min_samples(20)
+        .max_additional_runs(500);
+    let identity = ExplorationBudgetIdentity::try_new(
+        ObjectId([1; 32]),
+        ObjectId([2; 32]),
+        ObjectId([3; 32]),
+        7,
+        100,
+        199,
+        ObjectId([4; 32]),
+        ObjectId([5; 32]),
+    )
+    .expect("identity is valid");
+    let profile = ExplorationBudgetProfile::try_new(config, 100, MAX_EXPLORATION_ESTIMATION_WORK)
+        .expect("profile is bounded");
+    let mut monitor = ExplorationBudgetMonitor::try_new(
+        identity,
+        profile,
+        ExplorationAssumptionAttestation::fully_supported(),
+    )
+    .expect("monitor is valid");
+    let mut samples = observed_existing_class_samples(clean_replay(0x5100), 100, "qualified-stop");
+    let stop_samples = samples.split_off(10);
+    let continue_decision =
+        run_model_qualified_campaign("uniform-seed-sweep-v1", &mut monitor, samples)
+            .expect("the named model is admissible");
+    assert!(
+        continue_decision.outcome().is_none(),
+        "a campaign below the minimum sample count recommended a stop: {:?}",
+        continue_decision.evidence()
+    );
+    assert!(!continue_decision.evidence().target_met());
+    assert!(continue_decision.evidence().recommended_additional_runs() > 0);
+
+    let stop_decision =
+        run_model_qualified_campaign("uniform-seed-sweep-v1", &mut monitor, stop_samples)
+            .expect("the named model is admissible");
+    assert!(stop_decision.evidence().target_met());
+    let explored = stop_decision.evidence().total_runs();
+    assert_eq!(
+        stop_decision.outcome(),
+        Some(&CampaignOutcome::NotFalsified {
+            sampling_model: model("uniform-seed-sweep-v1"),
+            explored,
+        })
+    );
+    assert!(
+        explored < 100,
+        "the lazy campaign runner ignored the model-qualified stop"
+    );
+    let through = stop_decision
+        .evidence()
+        .through_sequence()
+        .expect("the stop consumed at least one sample");
+    let through_field = format!("through_sequence=Some({through})");
+    for required in [
+        "budget_oid=",
+        "window_oid=",
+        "regime_epoch=7",
+        "first_sequence=100",
+        "last_sequence=199",
+        through_field.as_str(),
+        "alpha_bits=",
+        "min_samples=20",
+        "max_additional_runs=500",
+        "attest_exchangeable=true",
+        "selection=CandidateDecision",
+    ] {
+        assert!(
+            stop_decision.log_line().contains(required),
+            "stopping record omitted {required:?}: {}",
+            stop_decision.log_line()
+        );
+    }
+    assert!(
+        stop_decision
+            .log_line()
+            .contains("unexplored-space=uncharacterised")
+    );
+    assert_eq!(
+        stop_decision
+            .outcome()
+            .expect("target was met")
+            .claim_class(),
+        ClaimClass::Statistical,
+        "model-qualified stopping must never masquerade as bounded exhaustion"
+    );
+}
+
+#[test]
+fn a_statistical_stop_refuses_claim_prose_in_the_sampling_model() {
+    let identity = ExplorationBudgetIdentity::try_new(
+        ObjectId([11; 32]),
+        ObjectId([12; 32]),
+        ObjectId([13; 32]),
+        0,
+        0,
+        0,
+        ObjectId([14; 32]),
+        ObjectId([15; 32]),
+    )
+    .expect("identity");
+    let profile = ExplorationBudgetProfile::try_new(
+        ExplorationBudgetConfig::default().min_samples(1),
+        1,
+        MAX_EXPLORATION_ESTIMATION_WORK,
+    )
+    .expect("profile");
+    let mut monitor = ExplorationBudgetMonitor::try_new(
+        identity,
+        profile,
+        ExplorationAssumptionAttestation::fully_supported(),
+    )
+    .expect("monitor");
+    assert_eq!(
+        run_model_qualified_campaign(
+            "verified fault-free",
+            &mut monitor,
+            observed_samples(clean_replay(0x5101), 1, "invalid-model"),
+        ),
+        Err(StoppingPolicyError::InvalidSamplingModel(
+            CampaignModelIdError::InvalidCharacter
+        ))
+    );
+}
+
+#[test]
+fn a_known_counterexample_can_never_be_reported_not_falsified() {
+    let identity = ExplorationBudgetIdentity::try_new(
+        ObjectId([21; 32]),
+        ObjectId([22; 32]),
+        ObjectId([23; 32]),
+        0,
+        0,
+        99,
+        ObjectId([24; 32]),
+        ObjectId([25; 32]),
+    )
+    .expect("identity");
+    let profile = ExplorationBudgetProfile::try_new(
+        ExplorationBudgetConfig::new(0.5, 0.9).min_samples(20),
+        100,
+        MAX_EXPLORATION_ESTIMATION_WORK,
+    )
+    .expect("profile");
+    let mut monitor = ExplorationBudgetMonitor::try_new(
+        identity,
+        profile,
+        ExplorationAssumptionAttestation::fully_supported(),
+    )
+    .expect("monitor");
+    let replay = failing_replay();
+    let dir = std::env::temp_dir().join(format!(
+        "fgdb-sim-model-stop-counterexample-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("counterexample scratch");
+    let run = replay.run(&dir);
+    assert!(run.failure.is_some());
+    let mut tampered = replay.run(&dir);
+    tampered.virtual_clock_epoch_nanos ^= 1;
+    assert_eq!(
+        CampaignNoveltyTracker::new().observe(tampered),
+        Err(CampaignSampleError::ExecutionEvidenceMutated)
+    );
+    let violated = CampaignNoveltyTracker::new()
+        .observe(run)
+        .expect("the real fixture replay falsifies its durability expectation");
+    let decision = run_model_qualified_campaign(
+        "uniform-seed-sweep-v1",
+        &mut monitor,
+        std::iter::once(Ok(violated)).chain(observed_samples(
+            clean_replay(0x5102),
+            100,
+            "post-counterexample",
+        )),
+    )
+    .expect("typed counterexample is an admissible campaign result");
+    assert!(matches!(
+        decision.outcome(),
+        Some(CampaignOutcome::Falsified { .. })
+    ));
+    assert_eq!(monitor.total_runs(), 0, "iteration must halt at the bug");
+}
+
+#[test]
+fn unsupported_stopping_assumptions_select_the_pinned_fallback() {
+    let identity = ExplorationBudgetIdentity::try_new(
+        ObjectId([31; 32]),
+        ObjectId([32; 32]),
+        ObjectId([33; 32]),
+        0,
+        0,
+        99,
+        ObjectId([34; 32]),
+        ObjectId([35; 32]),
+    )
+    .expect("identity");
+    let profile = ExplorationBudgetProfile::try_new(
+        ExplorationBudgetConfig::new(0.5, 0.9).min_samples(20),
+        100,
+        MAX_EXPLORATION_ESTIMATION_WORK,
+    )
+    .expect("profile");
+    let mut monitor = ExplorationBudgetMonitor::try_new(
+        identity,
+        profile,
+        ExplorationAssumptionAttestation::new(false, true, true),
+    )
+    .expect("monitor");
+    let decision = run_model_qualified_campaign(
+        "nonexchangeable-seed-order-v1",
+        &mut monitor,
+        observed_existing_class_samples(clean_replay(0x5103), 100, "unsupported-assumptions"),
+    )
+    .expect("unsupported assumptions select fallback rather than corrupt input");
+    assert!(
+        decision.outcome().is_none(),
+        "unsupported assumptions produced an outcome: {:?}",
+        decision.evidence()
+    );
+    assert_eq!(
+        decision.evidence().selection(),
+        ExplorationSelection::PinnedFallback
+    );
+    assert_eq!(
+        decision.evidence().disposition(),
+        ExplorationDisposition::AssumptionsUnsupported
+    );
+}
+
+#[test]
+fn finite_ci_time_prioritizes_uncovered_classes_with_a_pinned_fallback() {
+    let candidates = [
+        coverage_candidate("expensive-two-class", &["d1", "d2"], 10, 0x5200),
+        coverage_candidate("cheap-one-class", &["d2"], 2, 0x5201),
+        coverage_candidate("already-covered", &["baseline"], 1, 0x5202),
+        coverage_candidate("same-score-stable-id", &["d3"], 2, 0x5203),
+    ];
+    let card = prioritize_coverage_candidates(&candidates, &["baseline"], 4, 14)
+        .expect("the coverage objective satisfies its declared premise");
+    assert_eq!(
+        card.selections()
+            .iter()
+            .map(|selection| selection.id)
+            .collect::<Vec<_>>(),
+        vec![
+            "cheap-one-class",
+            "same-score-stable-id",
+            "expensive-two-class",
+        ],
+        "marginal coverage-per-cost must be recomputed, with stable ID as final tie-break"
+    );
+    assert_eq!(card.policy_epoch(), 4);
+    assert_eq!(card.budget(), 14);
+    assert_eq!(
+        card.pinned_fallback_selections(),
+        vec![
+            "cheap-one-class",
+            "same-score-stable-id",
+            "expensive-two-class"
+        ]
+    );
+    assert_eq!(
+        card.selections()[2].newly_covered,
+        vec!["d1"],
+        "d2 was already covered by the first selection and must not be counted twice"
+    );
+}
+
+#[test]
+fn coverage_prioritization_refuses_invalid_premises_and_is_permutation_stable() {
+    let duplicate_class = [coverage_candidate("dup-class", &["d1", "d1"], 1, 0x5210)];
+    assert_eq!(
+        prioritize_coverage_candidates(&duplicate_class, &[], 1, 1),
+        Err(CoveragePolicyError::DuplicateCoverageClass)
+    );
+    let zero_cost = [coverage_candidate("zero-cost", &["d1"], 0, 0x5211)];
+    assert_eq!(
+        prioritize_coverage_candidates(&zero_cost, &[], 1, 1),
+        Err(CoveragePolicyError::ZeroCost)
+    );
+    let empty_coverage = [coverage_candidate("empty-coverage", &[], 1, 0x5212)];
+    assert_eq!(
+        prioritize_coverage_candidates(&empty_coverage, &[], 1, 1),
+        Err(CoveragePolicyError::EmptyCoverageSet)
+    );
+    let first = [
+        coverage_candidate("b", &["d2"], 1, 0x5213),
+        coverage_candidate("a", &["d1"], 1, 0x5214),
+    ];
+    let second = [first[1], first[0]];
+    assert_eq!(
+        prioritize_coverage_candidates(&first, &[], 2, 2),
+        prioritize_coverage_candidates(&second, &[], 2, 2),
+        "input order cannot change a replayable decision card"
+    );
+}
+
+#[test]
+fn coverage_decision_card_drives_the_real_campaign_and_halts_at_its_counterexample() {
+    let candidates = [
+        CoverageCandidate {
+            id: "bug-replay",
+            covers: &["durability"],
+            cost: 1,
+            replay: failing_replay(),
+        },
+        coverage_candidate("later-clean", &["other"], 2, 0x5220),
+    ];
+    let identity = ExplorationBudgetIdentity::try_new(
+        ObjectId([41; 32]),
+        ObjectId([42; 32]),
+        ObjectId([43; 32]),
+        3,
+        0,
+        9,
+        ObjectId([44; 32]),
+        ObjectId([45; 32]),
+    )
+    .expect("identity");
+    let profile = ExplorationBudgetProfile::try_new(
+        ExplorationBudgetConfig::new(0.5, 0.9).min_samples(2),
+        10,
+        MAX_EXPLORATION_ESTIMATION_WORK,
+    )
+    .expect("profile");
+    let mut monitor = ExplorationBudgetMonitor::try_new(
+        identity,
+        profile,
+        ExplorationAssumptionAttestation::fully_supported(),
+    )
+    .expect("monitor");
+    let dir = std::env::temp_dir().join(format!(
+        "fgdb-sim-prioritized-campaign-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("campaign scratch");
+    let mut executed = Vec::new();
+    let run = run_prioritized_model_qualified_campaign(
+        &candidates,
+        &[],
+        8,
+        3,
+        "coverage-ranked-fixture-v1",
+        &mut monitor,
+        |candidate| {
+            executed.push(candidate.id);
+            let candidate_dir = dir.join(candidate.id);
+            std::fs::create_dir_all(&candidate_dir).expect("candidate scratch");
+            candidate.replay.run(&candidate_dir)
+        },
+    )
+    .expect("the decision card drives an admissible campaign");
+    assert_eq!(
+        run.decision_card()
+            .selections()
+            .iter()
+            .map(|selection| selection.id)
+            .collect::<Vec<_>>(),
+        vec!["bug-replay", "later-clean"]
+    );
+    assert_eq!(executed, vec!["bug-replay"]);
+    assert!(matches!(
+        run.stopping().outcome(),
+        Some(CampaignOutcome::Falsified { .. })
+    ));
+    assert_eq!(monitor.total_runs(), 0);
+
+    let mismatched = run_prioritized_model_qualified_campaign(
+        &candidates,
+        &[],
+        8,
+        3,
+        "coverage-ranked-fixture-v1",
+        &mut monitor,
+        |_candidate| {
+            let mismatched_dir = dir.join("mismatched-action");
+            std::fs::create_dir_all(&mismatched_dir).expect("mismatched action scratch");
+            clean_replay(0xDEAD).run(&mismatched_dir)
+        },
+    );
+    assert!(matches!(
+        mismatched,
+        Err(PrioritizedCampaignError::Stopping(
+            StoppingPolicyError::Sample(CampaignSampleError::ActionReplayMismatch)
+        ))
+    ));
+}
+
+#[test]
+fn submodular_premises_card_fallback_and_campaign_execution_are_governed() {
+    coverage_prioritization_refuses_invalid_premises_and_is_permutation_stable();
+    finite_ci_time_prioritizes_uncovered_classes_with_a_pinned_fallback();
+    coverage_decision_card_drives_the_real_campaign_and_halts_at_its_counterexample();
+}
+
+#[test]
+fn the_reusable_filing_path_shrinks_failures_and_files_nothing_for_a_repair() {
+    let root =
+        std::env::temp_dir().join(format!("fgdb-sim-automatic-filing-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("automatic filing scratch");
+    let policy = RedactionPolicy::fail_closed()
+        .retain(RecordClass::FaultInjection)
+        .expect("fault injection records are retainable");
+
+    let passing = file_falsification(
+        Replay {
+            scenario: Scenario::DurableAppend,
+            plan: FaultPlan::faultless(),
+        },
+        &root.join("passing-shrink"),
+        &root.join("passing-output"),
+        &policy,
+        &[],
+    )
+    .expect("a repaired/passing replay is an admissible pipeline result");
+    assert!(
+        passing.is_none(),
+        "the filing gate requires the product to remain buggy"
+    );
+
+    let filed = file_falsification(
+        failing_replay(),
+        &root.join("failing-shrink"),
+        &root.join("failing-output"),
+        &policy,
+        &[],
+    )
+    .expect("the failing replay can be shrunk and materialized")
+    .expect("a counterexample files one record");
+    assert_eq!(filed.scenario_id(), "durable-append");
+    assert!(filed.shrink_iterations() > 0);
+    assert!(filed.final_reproducer_path().is_dir());
+    assert!(filed.bundle_path().is_file());
+    assert!(matches!(
+        filed.outcome(),
+        CampaignOutcome::Falsified {
+            failure_kind: FailureKind::AcknowledgedBytesLost,
+            ..
+        }
+    ));
 }
 
 fn repository_root() -> PathBuf {

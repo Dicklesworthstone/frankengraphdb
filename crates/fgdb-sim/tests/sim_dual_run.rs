@@ -12,7 +12,8 @@
 use std::path::PathBuf;
 
 use fgdb_sim::dual_run::{determinism_gate, dual_run_fixture, run_fixture_under_lab};
-use fgdb_sim::fixture::FixtureConfig;
+use fgdb_sim::fixture::{FixtureConfig, MAX_FIXTURE_PAYLOAD_BYTES};
+use fgdb_sim::vfs::Trigger;
 
 use asupersync::lab::LabConfig;
 
@@ -101,13 +102,141 @@ fn the_fixture_advances_virtual_time_and_moves_every_record_through_disk_and_net
 
     assert_eq!(run.semantics.produced, i64::from(cfg.rounds));
     assert_eq!(run.semantics.consumed, i64::from(cfg.rounds));
-    assert_eq!(run.semantics.durable_bytes, i64::from(cfg.rounds) * 24);
+    assert_eq!(
+        run.semantics.durable_bytes,
+        i64::from(cfg.rounds) * i64::try_from(cfg.payload_bytes).expect("payload fits i64")
+    );
+    assert!(run.region_close.quiescent);
+    assert!(run.region_close.close_completed);
+    assert!(run.obligation_balance.balanced);
+    assert_eq!(run.obligation_balance.leaked, 0);
     assert!(
         run.semantics.chain_intact,
         "consumer chain must equal producer chain: every payload crossed the \
          virtual network intact"
     );
     assert!(!run.semantics.final_digest_hex.is_empty());
+}
+
+#[test]
+fn deterministic_latency_and_large_payload_pressure_cross_every_fixture_leg() {
+    let mut cfg = FixtureConfig::new(0xC4A0_5EED);
+    cfg.rounds = 16;
+    cfg.payload_bytes = 65_536;
+    cfg.fault_plan.latency = Trigger::Always;
+    cfg.fault_plan.latency_micros = 750;
+
+    let root = scratch_root("latency-pressure");
+    let verdict = determinism_gate(&cfg, &root, 2);
+    assert!(
+        verdict.passed,
+        "the same injected latency and pressure campaign must replay byte-for-byte:\n{}",
+        verdict.log_lines.join("\n")
+    );
+
+    let run = run_fixture_under_lab(&cfg, &root.join("evidence"), LabConfig::new(cfg.seed));
+    assert_eq!(run.semantics.injected_faults, i64::from(cfg.rounds));
+    assert_eq!(
+        run.semantics.durable_bytes,
+        i64::from(cfg.rounds) * i64::try_from(cfg.payload_bytes).expect("payload fits i64")
+    );
+    let expected_latency_nanos = u64::from(cfg.rounds) * cfg.fault_plan.latency_micros * 1_000;
+    let expected_tick_nanos =
+        u64::from(cfg.rounds) * u64::try_from(cfg.tick.as_nanos()).expect("tick fits u64");
+    assert!(
+        run.virtual_elapsed_nanos >= expected_tick_nanos + expected_latency_nanos,
+        "virtual time must include every pacing interval and injected VFS delay"
+    );
+    assert!(run.semantics.chain_intact);
+    assert!(
+        run.semantics.network_backpressure_events > 0,
+        "a payload spanning the finite virtual-TCP window must observe backpressure"
+    );
+    assert!(run.region_close.quiescent);
+    assert!(run.obligation_balance.balanced);
+}
+
+#[test]
+fn seeded_residual_random_chaos_is_replayable_and_nonvacuous() {
+    let mut cfg = FixtureConfig::new(0xB11D_5A07);
+    cfg.rounds = 64;
+    cfg.fault_plan.latency = Trigger::PerMille(500);
+    cfg.fault_plan.latency_micros = 125;
+    let root = scratch_root("residual-random-chaos");
+
+    let verdict = determinism_gate(&cfg, &root, 2);
+    assert!(
+        verdict.passed,
+        "seeded residual chaos must replay byte-for-byte:\n{}",
+        verdict.log_lines.join("\n")
+    );
+    let run = run_fixture_under_lab(&cfg, &root.join("evidence"), LabConfig::new(cfg.seed));
+    assert!(
+        0 < run.semantics.injected_faults && run.semantics.injected_faults < i64::from(cfg.rounds),
+        "the probabilistic trigger must both fire and decline at this pinned seed: {} of {}",
+        run.semantics.injected_faults,
+        cfg.rounds
+    );
+    assert!(run.semantics.chain_intact);
+    assert!(run.region_close.quiescent);
+    assert!(run.obligation_balance.balanced);
+}
+
+#[test]
+fn lab_runtime_integration_covers_time_disk_network_chaos_pressure_and_lifecycle() {
+    let mut cfg = FixtureConfig::new(0x1AB0_5EED);
+    cfg.rounds = 32;
+    cfg.payload_bytes = 65_536;
+    cfg.fault_plan.latency = Trigger::PerMille(500);
+    cfg.fault_plan.latency_micros = 250;
+    let root = scratch_root("governed-lab-runtime-integration");
+
+    let verdict = determinism_gate(&cfg, &root, 2);
+    assert!(verdict.passed, "{}", verdict.log_lines.join("\n"));
+    let run = run_fixture_under_lab(&cfg, &root.join("evidence"), LabConfig::new(cfg.seed));
+    assert_eq!(run.semantics.produced, i64::from(cfg.rounds));
+    assert_eq!(run.semantics.consumed, i64::from(cfg.rounds));
+    assert_eq!(
+        run.semantics.durable_bytes,
+        i64::from(cfg.rounds) * i64::try_from(cfg.payload_bytes).expect("payload fits i64")
+    );
+    assert!(run.semantics.injected_faults > 0);
+    assert!(run.semantics.network_backpressure_events > 0);
+    assert!(run.semantics.chain_intact);
+    assert!(run.virtual_elapsed_nanos > 0);
+    assert!(run.region_close.quiescent && run.region_close.close_completed);
+    assert!(run.obligation_balance.balanced);
+    assert_eq!(run.obligation_balance.leaked, 0);
+
+    // Keep both refusal controls inside the registered aggregate. Otherwise a
+    // regression that drops task failures or the allocation bound could leave
+    // the positive lab-runtime selector green.
+    lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics();
+}
+
+#[test]
+fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
+    let mut faulting = FixtureConfig::new(0x00FA_11ED);
+    faulting.fault_plan.write_enospc = Trigger::Always;
+    let faulting_root = scratch_root("task-failure-control");
+    let failed = std::panic::catch_unwind(|| {
+        run_fixture_under_lab(&faulting, &faulting_root, LabConfig::new(faulting.seed))
+    });
+    assert!(
+        failed.is_err(),
+        "a producer task that panics on the injected write refusal was reported successful"
+    );
+
+    let mut oversized = FixtureConfig::new(0xB0_0D);
+    oversized.payload_bytes = MAX_FIXTURE_PAYLOAD_BYTES + 1;
+    let oversized_root = scratch_root("payload-bound-control");
+    let refused = std::panic::catch_unwind(|| {
+        run_fixture_under_lab(&oversized, &oversized_root, LabConfig::new(oversized.seed))
+    });
+    assert!(
+        refused.is_err(),
+        "an unbounded allocation request reached the fixture task"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@
 //! refuse it. Without that test the rest would pass against the broken version.
 
 use fgdb_sim::artifact::{FailureKind, Replay, Scenario};
-use fgdb_sim::shrink::{diverge, shrink};
+use fgdb_sim::shrink::{ShrinkTrial, diverge, shrink, shrink_schedule_and_workload};
 use fgdb_sim::vfs::{DEFAULT_SECTOR_BYTES, FaultPlan, Trigger};
 use std::path::PathBuf;
 
@@ -20,6 +20,132 @@ fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-sim-shrink-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
+}
+
+#[test]
+fn schedule_and_workload_shrink_together_to_a_standalone_reproducer() {
+    // Failure requires the commit decision and the conflicting write. Every
+    // other decision/action is deliberately irrelevant blame.
+    let reproduces = |schedule: &[u8], workload: &[u8]| {
+        if schedule.contains(&3) && workload.contains(&12) {
+            ShrinkTrial::Reproduced
+        } else {
+            ShrinkTrial::DidNotReproduce
+        }
+    };
+    let shrunk = shrink_schedule_and_workload(
+        vec![1u8, 2, 3, 4, 5],
+        vec![10u8, 11, 12, 13, 14],
+        reproduces,
+    )
+    .expect("the starting schedule/workload reproduces");
+    assert_eq!(shrunk.schedule, vec![3]);
+    assert_eq!(shrunk.workload, vec![12]);
+    assert!(shrunk.accepted > 0);
+    assert!(shrunk.attempts > shrunk.accepted);
+
+    // 1-minimal across both axes: deleting either remaining item makes the
+    // typed failure predicate false.
+    assert_eq!(
+        reproduces(&[], &shrunk.workload),
+        ShrinkTrial::DidNotReproduce
+    );
+    assert_eq!(
+        reproduces(&shrunk.schedule, &[]),
+        ShrinkTrial::DidNotReproduce
+    );
+}
+
+#[test]
+fn a_nonreproducing_schedule_workload_pair_cannot_be_filed_as_minimal() {
+    assert!(
+        shrink_schedule_and_workload(vec![1u8], vec![2u8], |schedule, workload| {
+            if schedule.contains(&9) && workload.contains(&9) {
+                ShrinkTrial::Reproduced
+            } else {
+                ShrinkTrial::DidNotReproduce
+            }
+        })
+        .is_none()
+    );
+}
+
+#[test]
+fn real_fixture_replays_shrink_fault_schedule_and_workload_without_changing_the_bug() {
+    let root = scratch_dir("hierarchical-real-replay");
+    let target = FailureKind::AcknowledgedBytesLost;
+    let mut ordinal = 0usize;
+    let mut replay_candidate = |schedule: &[Trigger], workload: &[Scenario]| {
+        let fsync_lie = schedule
+            .iter()
+            .copied()
+            .find(|trigger| *trigger != Trigger::Never)
+            .unwrap_or(Trigger::Never);
+        for scenario in workload {
+            let attempt = root.join(format!("candidate-{ordinal:04}"));
+            ordinal += 1;
+            std::fs::create_dir_all(&attempt).expect("isolated hierarchical replay directory");
+            let outcome = Replay {
+                scenario: *scenario,
+                plan: FaultPlan {
+                    seed: 0x1774_0000_0000_0020,
+                    fsync_lie,
+                    ..FaultPlan::faultless()
+                },
+            }
+            .run(&attempt);
+            if let Some(failure) = outcome.failure {
+                if failure.kind == target {
+                    assert!(
+                        outcome.artifact.is_some(),
+                        "a reproduced fixture failure must carry its structured artifact"
+                    );
+                    return ShrinkTrial::Reproduced;
+                }
+                return ShrinkTrial::DifferentFailure(failure.kind);
+            }
+        }
+        ShrinkTrial::DidNotReproduce
+    };
+
+    // `LostAppend` is a real passing workload under the injected fsync lie,
+    // while `DurableAppend` produces the target acknowledged-loss failure.
+    // Without the lie, `LostAppend` remains red as UnexpectedSurvival: this is
+    // the repair-hostile candidate the typed shrinker must reject.
+    let shrunk = shrink_schedule_and_workload(
+        vec![Trigger::Never, Trigger::Always, Trigger::Never],
+        vec![
+            Scenario::LostAppend,
+            Scenario::DurableAppend,
+            Scenario::LostAppend,
+        ],
+        &mut replay_candidate,
+    )
+    .expect("the original real fixture workload reproduces");
+    assert_eq!(shrunk.schedule, vec![Trigger::Always]);
+    assert_eq!(shrunk.workload, vec![Scenario::DurableAppend]);
+    assert!(shrunk.accepted >= 2);
+    assert!(
+        shrunk.rejected_different_failure > 0,
+        "the wrong-failure red path was never exercised"
+    );
+
+    let final_dir = root.join("standalone-final");
+    std::fs::create_dir_all(&final_dir).expect("standalone final replay directory");
+    let final_outcome = Replay {
+        scenario: shrunk.workload[0],
+        plan: FaultPlan {
+            seed: 0x1774_0000_0000_0020,
+            fsync_lie: shrunk.schedule[0],
+            ..FaultPlan::faultless()
+        },
+    }
+    .run(&final_dir);
+    assert_eq!(
+        final_outcome.failure.as_ref().map(|failure| failure.kind),
+        Some(target)
+    );
+    assert!(final_outcome.artifact.is_some());
 }
 
 /// Three fault classes at full strength, only one of which is needed: the lie
