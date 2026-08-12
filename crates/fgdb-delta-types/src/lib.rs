@@ -26,12 +26,14 @@
 #![forbid(unsafe_code)]
 
 mod canonical;
+mod fold;
 mod index;
 mod zweight;
 
 use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
 
 pub use canonical::{CanonicalError, DELTA_FORMAT_V1, canonicalize};
+pub use fold::fold_target_disjoint;
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use index::{INDEX_FORMAT_V1, IndexError, LocalDeltaBatchIndex};
 pub use zweight::{ZWeight, ZWeightError};
