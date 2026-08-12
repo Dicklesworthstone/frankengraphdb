@@ -1461,16 +1461,12 @@ fn edge_property_updates_version_the_row_without_respending_the_identity() {
     });
 }
 
-/// **THE ORDER-SENSITIVITY REFUSAL (fgdb-kokz, found by the generated
-/// differential, seed 11): a batch whose meaning depends on submission order
-/// refuses BEFORE any byte is durable.** The durable template's row order is
-/// canonical byte order, so update-then-delete of one element — directly or
-/// through a cascade — and a double touch of one exact field would commit
-/// bytes that replay in a different order than the caller meant, and the
-/// refusal would otherwise arrive AFTER the irreversible commit, poisoning
-/// the database against its own reopen.
+/// Net-effect fold (fgdb-w5-effects-normal-form-819.2): a batch whose
+/// evaluation-order rows share a target is folded to target-disjoint rows
+/// *before* the template byte-sorts them. Update-then-delete, cascade-after-
+/// update, and two writes of one field all commit; replay matches the net.
 #[test]
-fn order_sensitive_batches_refuse_before_anything_is_durable() {
+fn order_sensitive_batches_fold_to_a_target_disjoint_net() {
     let dir = scratch("order-sensitive");
     under_lab(91, move |cx| async move {
         let cx = &cx;
@@ -1482,60 +1478,92 @@ fn order_sensitive_batches_refuse_before_anything_is_durable() {
         first.add_edge(EId(10), VId(1), VId(2), vec![]);
         let s1 = db.write(cx, first).await.expect("commits");
 
-        // Update-then-delete, both element kinds — including the cascade
-        // route, where the delete reaches the updated edge through a vertex.
         let mut vertex_case = WriteBatch::new(KNOWS);
         vertex_case.set_vertex_property(VId(1), key, None);
         vertex_case.delete_vertex(VId(1));
-        assert!(matches!(
-            db.write(cx, vertex_case).await,
-            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
-        ));
+        let after_vertex_delete = db
+            .write(cx, vertex_case)
+            .await
+            .expect("set-then-delete folds to a delete");
+        assert!(
+            db.vertex_at(VId(1), after_vertex_delete)
+                .expect("reads")
+                .is_none()
+        );
+
         let mut edge_case = WriteBatch::new(KNOWS);
         edge_case.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(1)));
         edge_case.delete_edge(EId(10));
-        assert!(matches!(
-            db.write(cx, edge_case).await,
-            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
-        ));
+        let after_edge_delete = db
+            .write(cx, edge_case)
+            .await
+            .expect("edge set-then-delete folds to a delete");
+        assert!(
+            db.edge_at(EId(10), after_edge_delete)
+                .expect("reads")
+                .is_none()
+        );
+
+        // Recreate the edge on the surviving vertex 2 so the cascade case
+        // has something to retire. Vertex 1 is gone; make a fresh hub.
+        let mut restore = WriteBatch::new(KNOWS);
+        restore.create_vertex(VId(3), vec![], vec![]);
+        restore.add_edge(EId(11), VId(2), VId(3), vec![]);
+        db.write(cx, restore).await.expect("restores an edge");
+
         let mut cascade_case = WriteBatch::new(KNOWS);
-        cascade_case.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(1)));
-        cascade_case.delete_vertex(VId(2));
-        assert!(matches!(
-            db.write(cx, cascade_case).await,
-            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
-        ));
-        // A double touch of one exact field; a DIFFERENT field commutes and
-        // stays lawful — the control that keeps this a refusal about order,
-        // not about updates.
+        cascade_case.set_edge_property(EId(11), key, Some(CanonicalScalar::Int(1)));
+        cascade_case.delete_vertex(VId(3));
+        let after_cascade = db
+            .write(cx, cascade_case)
+            .await
+            .expect("update-then-cascade-delete folds to the vertex delete");
+        assert!(db.edge_at(EId(11), after_cascade).expect("reads").is_none());
+        assert!(
+            db.vertex_at(VId(3), after_cascade)
+                .expect("reads")
+                .is_none()
+        );
+
         let mut double = WriteBatch::new(KNOWS);
-        double.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(1)));
-        double.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(2)));
-        assert!(matches!(
-            db.write(cx, double).await,
-            Err(fgdb::WriteError::OrderSensitiveBatch { .. })
-        ));
+        double.create_vertex(VId(4), vec![], vec![(key, CanonicalScalar::Int(5))]);
+        db.write(cx, double).await.expect("seeds v4");
+        let mut two_sets = WriteBatch::new(KNOWS);
+        two_sets.set_vertex_property(VId(4), key, Some(CanonicalScalar::Int(3)));
+        two_sets.set_vertex_property(VId(4), key, Some(CanonicalScalar::Int(7)));
+        let after_sets = db
+            .write(cx, two_sets)
+            .await
+            .expect("two sets fold to last after");
+        let folded = db
+            .vertex_at(VId(4), after_sets)
+            .expect("reads")
+            .expect("v4 live");
+        assert_eq!(
+            folded.props,
+            vec![(key, CanonicalScalar::Int(7))],
+            "net after-image is the last write"
+        );
+
         let mut commuting = WriteBatch::new(KNOWS);
-        commuting.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(1)));
-        commuting.set_vertex_property(VId(1), PropertyKeyId(9), Some(CanonicalScalar::Int(2)));
-        let s2 = db
+        commuting.set_vertex_property(VId(2), key, Some(CanonicalScalar::Int(1)));
+        commuting.set_vertex_property(VId(2), PropertyKeyId(9), Some(CanonicalScalar::Int(2)));
+        let s_commute = db
             .write(cx, commuting)
             .await
             .expect("distinct fields commute");
 
         // Identity reuse refusals, also pre-commit (the fold's spent law).
         let mut recreate = WriteBatch::new(KNOWS);
-        recreate.create_vertex(VId(1), vec![], vec![]);
+        recreate.create_vertex(VId(2), vec![], vec![]);
         assert!(matches!(
             db.write(cx, recreate).await,
             Err(fgdb::WriteError::AlreadyLive { .. })
         ));
         drop(db);
 
-        // NOTHING refused above became durable: the reopened database sits at
-        // exactly the two acknowledged commits.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(db.frontier().expect("healthy reopened frontier"), s2);
+        assert_eq!(db.frontier().expect("healthy reopened frontier"), s_commute);
         assert!(db.vertex_at(VId(1), s1).expect("reads").is_some());
     });
 }

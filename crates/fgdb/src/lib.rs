@@ -123,7 +123,7 @@ use fgdb_chronicle::{
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, LabelId, LogicalDeltaTemplate,
-    PropertyKeyId, RelationId, SchemaEpoch,
+    PropertyKeyId, RelationId, SchemaEpoch, fold_target_disjoint,
 };
 use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
@@ -1548,17 +1548,6 @@ impl<V: Vfs + Clone> Database<V> {
         // prefix: (labels, props), both kept in canonical order.
         let mut prefix_content: std::collections::BTreeMap<VId, VertexContent> =
             std::collections::BTreeMap::new();
-        // ORDER-SENSITIVITY tracking (fgdb-kokz): the durable template's row
-        // order is canonical byte order, not submission order, so any
-        // composition whose meaning depends on submission order must refuse
-        // HERE — before a byte is durable — or the committed stream refuses
-        // its own replay. `updated` records every exact field this batch has
-        // touched per element; deletes consult it, and a second touch of one
-        // exact field refuses.
-        let mut updated: std::collections::BTreeMap<
-            ElementId,
-            std::collections::BTreeSet<(u8, u64)>,
-        > = std::collections::BTreeMap::new();
         for pending in batch.rows {
             let row = match pending {
                 PendingRow::Vertex { vid, labels, props } => {
@@ -1645,11 +1634,6 @@ impl<V: Vfs + Clone> Database<V> {
                     if !live_now {
                         return Err(WriteError::UnknownEdge { eid });
                     }
-                    if updated.contains_key(&ElementId::Edge(eid)) {
-                        return Err(WriteError::OrderSensitiveBatch {
-                            elem: ElementId::Edge(eid),
-                        });
-                    }
                     let before_version = prefix_versions
                         .get(&ElementId::Edge(eid))
                         .or_else(|| self.snapshot.versions.get(&ElementId::Edge(eid)))
@@ -1686,22 +1670,6 @@ impl<V: Vfs + Clone> Database<V> {
                             cascade.insert(*eid);
                         }
                     }
-                    if updated.contains_key(&ElementId::Vertex(vid)) {
-                        return Err(WriteError::OrderSensitiveBatch {
-                            elem: ElementId::Vertex(vid),
-                        });
-                    }
-                    if let Some(eid) = cascade
-                        .iter()
-                        .find(|eid| updated.contains_key(&ElementId::Edge(**eid)))
-                    {
-                        // The cascade retires this edge, and this batch also
-                        // updated it — the same order sensitivity, reached
-                        // through the vertex.
-                        return Err(WriteError::OrderSensitiveBatch {
-                            elem: ElementId::Edge(*eid),
-                        });
-                    }
                     for eid in &cascade {
                         prefix_deleted_edges.insert(*eid);
                     }
@@ -1720,15 +1688,6 @@ impl<V: Vfs + Clone> Database<V> {
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
                         return Err(WriteError::UnknownVertex { vid });
-                    }
-                    if !updated
-                        .entry(ElementId::Vertex(vid))
-                        .or_default()
-                        .insert((0, label.0))
-                    {
-                        return Err(WriteError::OrderSensitiveBatch {
-                            elem: ElementId::Vertex(vid),
-                        });
                     }
                     let (labels, _) =
                         vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
@@ -1753,9 +1712,8 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     // v3 (fgdb-ge6a): updates do not advance the batch's
                     // version overlay — the chain steps once per COMMIT over
-                    // the durable statement, and no row a batch may lawfully
-                    // contain reads an intra-batch head after an update
-                    // (delete-after-update is an order-sensitivity refusal).
+                    // the durable statement. Delete-after-update is folded to
+                    // a single delete against this durable head.
                     row
                 }
                 PendingRow::SetEdgeProperty { eid, key, value } => {
@@ -1764,15 +1722,6 @@ impl<V: Vfs + Clone> Database<V> {
                             || self.writer.live_edge(eid).is_some());
                     if !live_now {
                         return Err(WriteError::UnknownEdge { eid });
-                    }
-                    if !updated
-                        .entry(ElementId::Edge(eid))
-                        .or_default()
-                        .insert((1, key.0))
-                    {
-                        return Err(WriteError::OrderSensitiveBatch {
-                            elem: ElementId::Edge(eid),
-                        });
                     }
                     let props = prefix_edge_rows
                         .entry(eid)
@@ -1800,9 +1749,8 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     // v3 (fgdb-ge6a): updates do not advance the batch's
                     // version overlay — the chain steps once per COMMIT over
-                    // the durable statement, and no row a batch may lawfully
-                    // contain reads an intra-batch head after an update
-                    // (delete-after-update is an order-sensitivity refusal).
+                    // the durable statement. Delete-after-update is folded to
+                    // a single delete against this durable head.
                     row
                 }
                 PendingRow::SetProperty { vid, key, value } => {
@@ -1812,15 +1760,6 @@ impl<V: Vfs + Clone> Database<V> {
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
                         return Err(WriteError::UnknownVertex { vid });
-                    }
-                    if !updated
-                        .entry(ElementId::Vertex(vid))
-                        .or_default()
-                        .insert((1, key.0))
-                    {
-                        return Err(WriteError::OrderSensitiveBatch {
-                            elem: ElementId::Vertex(vid),
-                        });
                     }
                     let (_, props) = vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
                     let position = props.binary_search_by_key(&key, |(k, _)| *k);
@@ -1846,14 +1785,19 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     // v3 (fgdb-ge6a): updates do not advance the batch's
                     // version overlay — the chain steps once per COMMIT over
-                    // the durable statement, and no row a batch may lawfully
-                    // contain reads an intra-batch head after an update
-                    // (delete-after-update is an order-sensitivity refusal).
+                    // the durable statement. Delete-after-update is folded to
+                    // a single delete against this durable head.
                     row
                 }
             };
             rows.push(row);
         }
+
+        // Fold evaluation-order rows to a target-disjoint net before the
+        // template byte-sorts them (fgdb-w5-effects-normal-form-819.2).
+        // Two sets on one field, set-then-delete, and create-then-delete
+        // become one row or none; byte order is then applicability-safe.
+        let rows = fold_target_disjoint(rows);
 
         let template = LogicalDeltaTemplate::build(
             intent_semantics_oid(),
