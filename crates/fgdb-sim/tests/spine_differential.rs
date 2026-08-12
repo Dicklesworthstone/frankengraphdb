@@ -304,10 +304,9 @@ async fn write_history(cx: &CommitCx, dir: &Path) -> Vec<fgdb_types::CommitSeq> 
 
     // EDGE PROPERTY UPDATES (fgdb-ls5b), every before-image engine-derived
     // and oracle-validated at replay: change a value, unset one, add one to a
-    // previously propertyless edge — two COMMUTING fields, since a same-batch
-    // touch of one exact field is an order-sensitivity refusal (fgdb-kokz).
-    // The per-epoch differential's earlier epochs then also prove the OLD
-    // rows survive in history.
+    // previously propertyless edge — two COMMUTING fields. Same-field
+    // chains now fold (fgdb-w5-effects-normal-form-819.2) and are covered
+    // by the independent net-effect differential below, not this fixture.
     let mut seventh = WriteBatch::new(KNOWS);
     seventh.set_edge_property(EId(10), PropertyKeyId(11), Some(CanonicalScalar::Int(2021)));
     seventh.set_edge_property(EId(10), PropertyKeyId(13), None);
@@ -318,6 +317,14 @@ async fn write_history(cx: &CommitCx, dir: &Path) -> Vec<fgdb_types::CommitSeq> 
     );
     seventh.set_edge_property(EId(13), PropertyKeyId(19), Some(CanonicalScalar::Int(3)));
     epochs.push(db.write(cx, seventh).await.expect("seventh batch commits"));
+
+    // Same-field chain (fgdb-w5-effects-normal-form-819.2): two writes of
+    // one property on a live vertex. The fold must emit {first before,
+    // last after} or the oracle replay refuses PropertyBeforeMismatch.
+    let mut eighth = WriteBatch::new(KNOWS);
+    eighth.set_vertex_property(VId(3), PropertyKeyId(9), Some(CanonicalScalar::Int(3)));
+    eighth.set_vertex_property(VId(3), PropertyKeyId(9), Some(CanonicalScalar::Int(7)));
+    epochs.push(db.write(cx, eighth).await.expect("eighth batch commits"));
     epochs
 }
 
@@ -1648,4 +1655,196 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
             }
         });
     }
+}
+
+/// Independent application of the same fold scenarios through the engine
+/// WriteBatch path and a standalone reference Transaction — not a replay of
+/// the engine stream. Agreement here is what 819.2's differential asked
+/// for: same intents, two implementations, same live graph.
+#[test]
+fn net_effect_fold_agrees_independently_with_reference_transactions() {
+    let dir = scratch("nenf-independent");
+    under_lab(119, move |cx| async move {
+        let cx = &cx;
+        let rank = PropertyKeyId(100);
+
+        let mut engine = Database::create(cx, &dir, engine_keys())
+            .await
+            .expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![(rank, CanonicalScalar::Int(5))]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.create_vertex(VId(8), vec![], vec![(rank, CanonicalScalar::Int(1))]);
+        engine.write(cx, seed).await.expect("seeds");
+
+        let mut two_sets = WriteBatch::new(KNOWS);
+        two_sets.set_vertex_property(VId(1), rank, Some(CanonicalScalar::Int(3)));
+        two_sets.set_vertex_property(VId(1), rank, Some(CanonicalScalar::Int(7)));
+        engine.write(cx, two_sets).await.expect("two sets fold");
+
+        let mut create_set_delete = WriteBatch::new(KNOWS);
+        create_set_delete.create_vertex(VId(9), vec![], vec![(rank, CanonicalScalar::Int(1))]);
+        create_set_delete.set_vertex_property(VId(9), rank, Some(CanonicalScalar::Int(4)));
+        create_set_delete.delete_vertex(VId(9));
+        engine
+            .write(cx, create_set_delete)
+            .await
+            .expect("create+set+delete cancels");
+
+        let mut set_delete = WriteBatch::new(KNOWS);
+        set_delete.set_vertex_property(VId(8), rank, Some(CanonicalScalar::Int(3)));
+        set_delete.delete_vertex(VId(8));
+        engine
+            .write(cx, set_delete)
+            .await
+            .expect("set+delete of an existing vertex");
+        drop(engine);
+
+        let engine = Database::open(cx, &dir, engine_keys())
+            .await
+            .expect("reopens");
+        let engine_v1 = engine.vertex(VId(1)).expect("reads").expect("v1 live");
+        assert_eq!(engine_v1.props, vec![(rank, CanonicalScalar::Int(7))]);
+        assert!(engine.vertex(VId(8)).expect("reads").is_none());
+        assert!(engine.vertex(VId(9)).expect("reads").is_none());
+        assert!(engine.vertex(VId(2)).expect("reads").is_some());
+        drop(engine);
+
+        let mut oracle = fgdb_reference::ReferenceDatabase::new();
+        let semantics = fgdb_types::ObjectId([0x11; 32]);
+        let mut txn = fgdb_reference::txn::Transaction::begin_genesis(&oracle, GRAPH, BRANCH)
+            .expect("genesis");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(1),
+                    labels: vec![],
+                    props: vec![(rank, CanonicalScalar::Int(5))],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(2),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(8),
+                    labels: vec![],
+                    props: vec![(rank, CanonicalScalar::Int(1))],
+                },
+            ]),
+        ])
+        .expect("oracle seeds");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(1),
+            fgdb_types::LogicalCommandSeq(10),
+        )
+        .expect("oracle seed commits")
+        .committed_parts()
+        .expect("oracle seed wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::SetProp {
+                    elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
+                    name: rank,
+                    value: CanonicalScalar::Int(3),
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::SetProp {
+                    elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
+                    name: rank,
+                    value: CanonicalScalar::Int(7),
+                },
+            ]),
+        ])
+        .expect("oracle two sets");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(2),
+            fgdb_types::LogicalCommandSeq(20),
+        )
+        .expect("oracle two sets commit")
+        .committed_parts()
+        .expect("oracle two sets wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(9),
+                    labels: vec![],
+                    props: vec![(rank, CanonicalScalar::Int(1))],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::SetProp {
+                    elem: fgdb_delta_types::ElementId::Vertex(VId(9)),
+                    name: rank,
+                    value: CanonicalScalar::Int(4),
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::DeleteVertex { vid: VId(9) },
+            ]),
+        ])
+        .expect("oracle create+set+delete");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(3),
+            fgdb_types::LogicalCommandSeq(30),
+        )
+        .expect("oracle cancel commits")
+        .committed_parts()
+        .expect("oracle cancel wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::SetProp {
+                    elem: fgdb_delta_types::ElementId::Vertex(VId(8)),
+                    name: rank,
+                    value: CanonicalScalar::Int(3),
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::DeleteVertex { vid: VId(8) },
+            ]),
+        ])
+        .expect("oracle set+delete");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(4),
+            fgdb_types::LogicalCommandSeq(40),
+        )
+        .expect("oracle set+delete commits")
+        .committed_parts()
+        .expect("oracle set+delete wrote");
+
+        let graph = oracle.graph(GRAPH, BRANCH).expect("oracle coordinate");
+        assert_eq!(
+            graph.vertex(VId(1)).expect("v1").props.get(&rank),
+            Some(&CanonicalScalar::Int(7))
+        );
+        assert!(graph.vertex(VId(8)).is_none());
+        assert!(graph.vertex(VId(9)).is_none());
+        assert!(graph.vertex(VId(2)).is_some());
+    });
 }
