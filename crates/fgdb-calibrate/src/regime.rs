@@ -2420,6 +2420,40 @@ pub const BOCPD_SR_SCALE: u64 = 1_000_000;
 /// Absolute bound on retained BOCPD run-length hypotheses.
 pub const MAX_BOCPD_SR_RUN_LENGTH: usize = 4_096;
 
+/// Caller-owned admission bounds for canonical BOCPD+SR evidence replay.
+///
+/// These limits are independent of the profile embedded in untrusted bytes,
+/// so input cannot authorize its own allocation or replay work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BocpdSrDecodeLimits {
+    /// Largest complete canonical evidence value accepted.
+    pub max_encoded_bytes: usize,
+    /// Largest embedded observation budget accepted.
+    pub max_observations: usize,
+    /// Largest posterior-state inventory accepted, including run length zero.
+    pub max_run_states: usize,
+    /// Largest checked `max_observations * max_run_states` replay budget.
+    pub max_replay_work: usize,
+}
+
+impl BocpdSrDecodeLimits {
+    /// Creates an explicit evidence-replay admission policy.
+    #[must_use]
+    pub const fn new(
+        max_encoded_bytes: usize,
+        max_observations: usize,
+        max_run_states: usize,
+        max_replay_work: usize,
+    ) -> Self {
+        Self {
+            max_encoded_bytes,
+            max_observations,
+            max_run_states,
+            max_replay_work,
+        }
+    }
+}
+
 /// Domain separator for canonical BOCPD plus SR evidence.
 pub const BOCPD_SR_EVIDENCE_ENCODING_DOMAIN: &[u8] = b"fgdb:bocpd-sr-regime-evidence";
 
@@ -2453,6 +2487,15 @@ pub enum BocpdSrError {
         /// Supplied bound.
         actual: usize,
         /// Largest supported bound.
+        maximum: usize,
+    },
+    /// Caller-owned evidence replay admission refused an encoded resource.
+    DecodeLimitExceeded {
+        /// Stable resource name.
+        component: &'static str,
+        /// Encoded or profile-authorized amount.
+        actual: usize,
+        /// Caller-authorized maximum.
         maximum: usize,
     },
     /// The receipt bound exceeded the shared regime-evidence ceiling.
@@ -2544,6 +2587,14 @@ impl fmt::Display for BocpdSrError {
             Self::RunLengthLimitTooLarge { actual, maximum } => write!(
                 formatter,
                 "BOCPD+SR run-length limit {actual} exceeds {maximum}"
+            ),
+            Self::DecodeLimitExceeded {
+                component,
+                actual,
+                maximum,
+            } => write!(
+                formatter,
+                "BOCPD+SR decode {component} {actual} exceeds caller limit {maximum}"
             ),
             Self::ReceiptLimitTooLarge { actual, maximum } => write!(
                 formatter,
@@ -3126,7 +3177,17 @@ impl BocpdSrEvidence {
     }
 
     /// Strictly decodes and validates one complete canonical evidence record.
-    pub fn try_from_canonical_bytes(bytes: &[u8]) -> Result<Self, BocpdSrError> {
+    pub fn try_from_canonical_bytes(
+        bytes: &[u8],
+        limits: BocpdSrDecodeLimits,
+    ) -> Result<Self, BocpdSrError> {
+        if bytes.len() > limits.max_encoded_bytes {
+            return Err(BocpdSrError::DecodeLimitExceeded {
+                component: "encoded-bytes",
+                actual: bytes.len(),
+                maximum: limits.max_encoded_bytes,
+            });
+        }
         let mut decoder = BocpdSrDecoder::new(bytes);
         let domain_length = usize::from(decoder.read_u16()?);
         if domain_length != BOCPD_SR_EVIDENCE_ENCODING_DOMAIN.len()
@@ -3144,6 +3205,35 @@ impl BocpdSrEvidence {
         }
         let identity = decode_bocpd_sr_identity(&mut decoder)?;
         let profile = decode_bocpd_sr_profile(&mut decoder)?;
+        if profile.max_observations > limits.max_observations {
+            return Err(BocpdSrError::DecodeLimitExceeded {
+                component: "observations",
+                actual: profile.max_observations,
+                maximum: limits.max_observations,
+            });
+        }
+        let profile_run_states = profile
+            .max_run_length
+            .checked_add(1)
+            .ok_or(BocpdSrError::LengthOverflow)?;
+        if profile_run_states > limits.max_run_states {
+            return Err(BocpdSrError::DecodeLimitExceeded {
+                component: "run-states",
+                actual: profile_run_states,
+                maximum: limits.max_run_states,
+            });
+        }
+        let replay_work = profile
+            .max_observations
+            .checked_mul(profile_run_states)
+            .ok_or(BocpdSrError::LengthOverflow)?;
+        if replay_work > limits.max_replay_work {
+            return Err(BocpdSrError::DecodeLimitExceeded {
+                component: "replay-work",
+                actual: replay_work,
+                maximum: limits.max_replay_work,
+            });
+        }
         let through_sequence = decoder.read_optional_u64("through-sequence")?;
         let observation_count = decoder.read_u64()?;
         let sr_statistic = decoder.read_u128()?;
@@ -3608,10 +3698,14 @@ fn next_bocpd_states(
             .ok_or(BocpdSrError::ArithmeticOverflow {
                 component: "run-failures",
             })?;
-        if let Some(existing) = candidates
-            .iter_mut()
-            .find(|candidate| usize::try_from(candidate.run_length).ok() == Some(target))
-        {
+        if let Some(existing) = candidates.get_mut(target) {
+            if usize::try_from(existing.run_length).map_err(|_| BocpdSrError::LengthOverflow)?
+                != target
+            {
+                return Err(BocpdSrError::InvalidState {
+                    reason: "BOCPD candidate inventory is not contiguous",
+                });
+            }
             let combined =
                 existing
                     .raw_mass
@@ -3635,6 +3729,11 @@ fn next_bocpd_states(
             )?;
             existing.raw_mass = combined;
         } else {
+            if candidates.len() != target {
+                return Err(BocpdSrError::InvalidState {
+                    reason: "BOCPD growth skipped a run-length candidate",
+                });
+            }
             candidates.push(RawBocpdState {
                 run_length: u32::try_from(target).map_err(|_| BocpdSrError::LengthOverflow)?,
                 raw_mass: raw,
@@ -4256,6 +4355,9 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const TEST_BOCPD_SR_DECODE_LIMITS: BocpdSrDecodeLimits =
+        BocpdSrDecodeLimits::new(1 << 20, 64, 64, 4_096);
 
     fn oid(fill: u8) -> ObjectId {
         ObjectId([fill; 32])
@@ -4886,7 +4988,7 @@ mod tests {
     #[test]
     fn bocpd_sr_hand_vector_pins_every_cell_and_sr_recurrence() -> TestResult {
         let identity = bocpd_sr_identity()?;
-        let profile = bocpd_sr_profile(u128::MAX, 900_000, 8)?;
+        let profile = bocpd_sr_profile(90_000_000, 900_000, 8)?;
         let mut monitor = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
         let expected = [
             (3_000_000_u128, &[(200_000, 1, 0), (800_000, 1, 0)][..]),
@@ -5011,7 +5113,7 @@ mod tests {
             Err(BocpdSrError::WindowComplete)
         );
 
-        for (sr_threshold, cp_threshold) in [(4_000_000, 900_000), (u128::MAX, 300_000)] {
+        for (sr_threshold, cp_threshold) in [(4_000_000, 900_000), (90_000_000, 300_000)] {
             let identity = bocpd_sr_identity()?;
             let profile = bocpd_sr_profile(sr_threshold, cp_threshold, 8)?;
             let mut one_component = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
@@ -5044,9 +5146,142 @@ mod tests {
     }
 
     #[test]
-    fn bocpd_sr_tail_codec_resume_and_rejections_are_fail_closed() -> TestResult {
+    fn bocpd_sr_profile_preflights_arithmetic_and_caps_sr_without_losing_policy_control()
+    -> TestResult {
+        assert!(matches!(
+            BocpdSrProfile::try_new(
+                oid(31),
+                oid(32),
+                250_000,
+                750_000,
+                u64::MAX,
+                1,
+                200_000,
+                4_000_000,
+                100_000_000,
+                900_000,
+                8,
+                12,
+                4,
+            ),
+            Err(BocpdSrError::InvalidState {
+                reason: "Beta prior cannot represent the declared observation budget"
+            })
+        ));
+        assert!(matches!(
+            BocpdSrProfile::try_new(
+                oid(31),
+                oid(32),
+                250_000,
+                750_000,
+                1,
+                1,
+                200_000,
+                4_000_000,
+                3_999_999,
+                900_000,
+                8,
+                12,
+                4,
+            ),
+            Err(BocpdSrError::InvalidState {
+                reason: "SR cap is below the alarm threshold"
+            })
+        ));
+
         let identity = bocpd_sr_identity()?;
-        let profile = bocpd_sr_profile(u128::MAX, 900_000, 2)?;
+        let capped = BocpdSrProfile::try_new(
+            oid(31),
+            oid(32),
+            250_000,
+            750_000,
+            1,
+            1,
+            200_000,
+            4_000_000,
+            4_000_000,
+            900_000,
+            8,
+            12,
+            4,
+        )?;
+        let mut monitor = BocpdSrMonitor::try_new(identity.clone(), capped.clone())?;
+        let first = observe_bocpd_sr(
+            &mut monitor,
+            &identity,
+            &capped,
+            100,
+            BocpdSrObservation::One,
+        )?;
+        assert_eq!(first.sr_statistic(), 3_000_000);
+        let second = observe_bocpd_sr(
+            &mut monitor,
+            &identity,
+            &capped,
+            101,
+            BocpdSrObservation::One,
+        )?;
+        assert_eq!(second.sr_statistic(), capped.sr_cap());
+        assert_eq!(second.status(), RegimeSignalStatus::NoChangeDetected);
+        Ok(())
+    }
+
+    #[test]
+    fn bocpd_sr_tail_codec_resume_and_rejections_are_fail_closed() -> TestResult {
+        // Independent small-state oracle: H=1/2 and Beta(1,1) yield exactly
+        // hand-computable masses.  At Rmax=1 the second and third one fold two
+        // growth hypotheses into the tail; these values pin both normalized
+        // mass and the declared rounded sufficient-statistic moment match.
+        let tail_identity = bocpd_sr_identity()?;
+        let tail_profile = BocpdSrProfile::try_new(
+            oid(31),
+            oid(32),
+            250_000,
+            750_000,
+            1,
+            1,
+            500_000,
+            90_000_000,
+            100_000_000,
+            900_000,
+            1,
+            12,
+            4,
+        )?;
+        let mut tail_monitor =
+            BocpdSrMonitor::try_new(tail_identity.clone(), tail_profile.clone())?;
+        let mut folded = None;
+        for sequence in 100..=102 {
+            folded = Some(observe_bocpd_sr(
+                &mut tail_monitor,
+                &tail_identity,
+                &tail_profile,
+                sequence,
+                BocpdSrObservation::One,
+            )?);
+        }
+        let folded = folded.ok_or("missing folded-tail evidence")?;
+        assert_eq!(
+            folded.run_states(),
+            &[
+                BocpdSrRunState {
+                    run_length: 0,
+                    posterior_mass: 411_765,
+                    successes: 1,
+                    failures: 0,
+                },
+                BocpdSrRunState {
+                    run_length: 1,
+                    posterior_mass: 588_235,
+                    successes: 3,
+                    failures: 0,
+                },
+            ]
+        );
+        assert_eq!(folded.tail_mass(), 588_235);
+
+        let identity = bocpd_sr_identity()?;
+        let profile = bocpd_sr_profile(90_000_000, 900_000, 2)?;
         let mut first = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
         for (offset, observation) in [
             BocpdSrObservation::One,
@@ -5068,28 +5303,74 @@ mod tests {
         let evidence = first.evidence();
         assert_eq!(evidence.run_states().len(), 3);
         assert!(evidence.tail_mass() > 0);
-        let encoded = evidence.try_to_canonical_bytes()?;
+        let mut replay_probe =
+            BocpdSrMonitor::try_new(evidence.identity.clone(), evidence.profile.clone())?;
+        for (offset, observation) in evidence.observations.iter().copied().enumerate() {
+            replay_probe.try_advance(100 + u64::try_from(offset)?, observation)?;
+        }
+        assert_eq!(replay_probe.evidence(), evidence);
+        let encoded = evidence
+            .try_to_canonical_bytes()
+            .map_err(|error| format!("BOCPD+SR encode failed: {error}"))?;
         assert_eq!(
-            BocpdSrEvidence::try_from_canonical_bytes(&encoded)?,
+            BocpdSrEvidence::try_from_canonical_bytes(&encoded, TEST_BOCPD_SR_DECODE_LIMITS)
+                .map_err(|error| format!("BOCPD+SR decode failed: {error}"))?,
             evidence
         );
+        let common_prefix = 2
+            + BOCPD_SR_EVIDENCE_ENCODING_DOMAIN.len()
+            + 2
+            + (3 * 32 + 2 + BOCPD_SR_REGIME_SIGNAL_ID.len() + 4 + 3 * 8 + 2 * 32)
+            + (2 * 32 + 5 * 8 + 2 * 16 + 8 + 4 + 8 + 4);
+        let sr_offset = common_prefix + 9 + 8;
+        let mut forged_derived_state = encoded.clone();
+        forged_derived_state[sr_offset] ^= 1;
+        assert!(matches!(
+            BocpdSrEvidence::try_from_canonical_bytes(
+                &forged_derived_state,
+                TEST_BOCPD_SR_DECODE_LIMITS,
+            ),
+            Err(BocpdSrError::InvalidState {
+                reason: "derived evidence does not match replay of the binary prefix"
+            })
+        ));
+        let observation_prefix_offset = sr_offset + 16 + 8 + 4 + 8 + 8 + 8 + 1 + 4;
+        let mut forged_transcript = encoded.clone();
+        forged_transcript[observation_prefix_offset] ^= 1;
+        assert!(matches!(
+            BocpdSrEvidence::try_from_canonical_bytes(
+                &forged_transcript,
+                TEST_BOCPD_SR_DECODE_LIMITS,
+            ),
+            Err(BocpdSrError::InvalidState {
+                reason: "derived evidence does not match replay of the binary prefix"
+            })
+        ));
         for length in 0..encoded.len() {
             assert!(
-                BocpdSrEvidence::try_from_canonical_bytes(&encoded[..length]).is_err(),
+                BocpdSrEvidence::try_from_canonical_bytes(
+                    &encoded[..length],
+                    TEST_BOCPD_SR_DECODE_LIMITS,
+                )
+                .is_err(),
                 "truncation at {length} was accepted"
             );
         }
         let mut trailing = encoded.clone();
         trailing.push(0);
         assert_eq!(
-            BocpdSrEvidence::try_from_canonical_bytes(&trailing),
+            BocpdSrEvidence::try_from_canonical_bytes(&trailing, TEST_BOCPD_SR_DECODE_LIMITS),
             Err(BocpdSrError::TrailingBytes { remaining: 1 })
         );
         let mut wrong_domain = encoded.clone();
         wrong_domain[2] ^= 1;
-        assert!(BocpdSrEvidence::try_from_canonical_bytes(&wrong_domain).is_err());
+        assert!(
+            BocpdSrEvidence::try_from_canonical_bytes(&wrong_domain, TEST_BOCPD_SR_DECODE_LIMITS,)
+                .is_err()
+        );
 
-        let restored = BocpdSrEvidence::try_from_canonical_bytes(&encoded)?;
+        let restored =
+            BocpdSrEvidence::try_from_canonical_bytes(&encoded, TEST_BOCPD_SR_DECODE_LIMITS)?;
         let mut resumed = BocpdSrMonitor::try_resume_from_evidence(restored)?;
         let resumed_terminal = observe_bocpd_sr(
             &mut resumed,
@@ -5126,17 +5407,12 @@ mod tests {
         assert_eq!(first.evidence().try_to_canonical_bytes()?, before);
 
         first.sr_statistic = u128::MAX;
-        let before_overflow = first.evidence().try_to_canonical_bytes()?;
         assert!(matches!(
-            first.observe(SequencedBocpdSrObservation::new(
-                identity,
-                profile,
-                105,
-                BocpdSrObservation::One,
-            )),
-            Err(BocpdSrError::ArithmeticOverflow { .. })
+            first.evidence().try_to_canonical_bytes(),
+            Err(BocpdSrError::InvalidState {
+                reason: "derived evidence does not match replay of the binary prefix"
+            })
         ));
-        assert_eq!(first.evidence().try_to_canonical_bytes()?, before_overflow);
         Ok(())
     }
 }

@@ -63,8 +63,9 @@ use fgdb_calibrate::{
         SequencedPotential,
     },
     regime::{
-        BOCPD_SR_REGIME_SIGNAL_ID, BOCPD_SR_REGIME_SIGNAL_VERSION, BocpdSrEvidence, BocpdSrMonitor,
-        BocpdSrObservation, BocpdSrProfile, COMBINED_REGIME_SIGNAL_ID,
+        BOCPD_SR_EVIDENCE_ENCODING_DOMAIN, BOCPD_SR_REGIME_SIGNAL_ID,
+        BOCPD_SR_REGIME_SIGNAL_VERSION, BocpdSrDecodeLimits, BocpdSrError, BocpdSrEvidence,
+        BocpdSrMonitor, BocpdSrObservation, BocpdSrProfile, COMBINED_REGIME_SIGNAL_ID,
         COMBINED_REGIME_SIGNAL_VERSION, CusumConfig, MetricSample, PageHinkleyConfig,
         RegimePolicySelection, RegimeSequenceWindow, RegimeSignalEvidence, RegimeSignalIdentity,
         RegimeSignalMonitor, RegimeSignalProfile, RegimeSignalStatus, RuntimeMetricSeries,
@@ -108,6 +109,8 @@ const ANN_RECALL_DECODE_LIMITS: AnnRecallReplayDecodeLimits = AnnRecallReplayDec
 const NO_REGRET_FIRST_SEQUENCE: u64 = 80;
 const NO_REGRET_DECISION_COUNT: usize = 3;
 const NO_REGRET_REPLAY_SEED: u64 = 0xa11c_e5e5_7a17;
+const BOCPD_SR_DECODE_LIMITS: BocpdSrDecodeLimits =
+    BocpdSrDecodeLimits::new(1 << 20, 64, 64, 4_096);
 
 #[derive(Debug, PartialEq)]
 struct SketchFixture {
@@ -1601,12 +1604,11 @@ fn assert_ope_evidence_refuses_candidate_promotion(
     )?;
     let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
     assert!(matches!(
-        DecisionPolicyEpoch::try_promote(
+        DecisionPolicyEpoch::try_promote_from_statistical_records(
             &root,
             root_oid,
             candidate_oid,
-            &[record.evidence_oid()],
-            &[envelope],
+            &[record],
         ),
         Err(DecisionPolicyEpochError::EvidenceSelectionPolicyMismatch { .. })
     ));
@@ -1651,20 +1653,18 @@ fn promote_epoch(
     let root_bytes = root.try_to_canonical_bytes()?;
     let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
     let envelopes = sorted_envelopes(promotion_records, candidate_oid)?;
-    let evidence_refs: Vec<_> = envelopes
-        .iter()
-        .map(EvidenceEnvelope::evidence_oid)
-        .collect();
-    let promoted = DecisionPolicyEpoch::try_promote(
+    let promoted = DecisionPolicyEpoch::try_promote_from_statistical_records(
         &root,
         root_oid,
         candidate_oid,
-        &evidence_refs,
-        &envelopes,
+        promotion_records,
     )?;
     let encoded = promoted.try_to_canonical_bytes()?;
-    let decoded = DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
-        &encoded, &root, root_oid, &envelopes,
+    let decoded = DecisionPolicyEpoch::try_promoted_from_canonical_bytes_from_statistical_records(
+        &encoded,
+        &root,
+        root_oid,
+        promotion_records,
     )?;
     assert_eq!(decoded, promoted);
     Ok((root_bytes, envelopes, promoted, encoded))
@@ -1673,41 +1673,40 @@ fn promote_epoch(
 fn revert_epoch(
     promoted_epoch: &DecisionPolicyEpoch,
     _promoted_epoch_bytes: &[u8],
-    shifted: &RegimeSignalEvidence,
     regime_record: StatisticalLogRecord,
 ) -> TestResult<(EvidenceEnvelope, DecisionPolicyEpoch, Vec<u8>)> {
-    let expected_regime_record =
-        StatisticalLogRecord::try_from_regime(&FIXTURE_IDENTITY_AUTHORITY, shifted)?;
-    if regime_record != expected_regime_record {
+    if !matches!(
+        regime_record.statistic(),
+        StatisticalStatistic::BocpdSrRegimeChange { .. }
+    ) {
         return Err(io::Error::other(
-            "persisted regime record does not match the typed regime receipt",
+            "persisted policy-authoritative regime record is not BOCPD+SR",
         )
         .into());
     }
     let evidence_oid = regime_record.evidence_oid();
     let envelope = evidence_envelope(regime_record)?;
     let predecessor_oid = FixtureOnlyIdentityAuthority::epoch_oid(promoted_epoch)?;
-    let reverted = DecisionPolicyEpoch::try_revert_to_fallback(
+    let reverted = DecisionPolicyEpoch::try_revert_to_fallback_from_regime_record(
         promoted_epoch,
         predecessor_oid,
         &[evidence_oid],
         std::slice::from_ref(&envelope),
-        evidence_oid,
-        shifted,
+        regime_record,
     )?;
     let encoded = reverted.try_to_canonical_bytes()?;
-    let decoded = DecisionPolicyEpoch::try_fallback_from_canonical_bytes(
+    let decoded = DecisionPolicyEpoch::try_fallback_from_canonical_bytes_from_regime_record(
         &encoded,
         promoted_epoch,
         predecessor_oid,
         std::slice::from_ref(&envelope),
-        evidence_oid,
-        shifted,
+        regime_record,
     )?;
     assert_eq!(decoded, reverted);
     Ok((envelope, reverted, encoded))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_statistical_log(
     exploration: &[ExplorationBudgetEvidence],
     assessments: &[AssessmentEvidence],
@@ -1715,9 +1714,10 @@ fn build_statistical_log(
     ope: &[OpeEvidence],
     progress: &[DrainProgressEvidence],
     regime: &[RegimeSignalEvidence],
+    bocpd_sr_regime: &BocpdSrEvidence,
     ann_recall: &AnnRecallEvidence,
 ) -> TestResult<(StatisticalDecisionLog, Vec<u8>)> {
-    const EXPECTED_RECORDS: usize = 2 + 6 + 3 + 4 + 3 + 8 + 1;
+    const EXPECTED_RECORDS: usize = 2 + 6 + 3 + 4 + 3 + 8 + 1 + 1;
     let mut log = StatisticalDecisionLog::try_new(EXPECTED_RECORDS)?;
     for evidence in exploration {
         log.append(StatisticalLogRecord::try_from_exploration(
@@ -1755,6 +1755,10 @@ fn build_statistical_log(
             evidence,
         )?)?;
     }
+    log.append(StatisticalLogRecord::try_from_bocpd_sr_regime(
+        &FIXTURE_IDENTITY_AUTHORITY,
+        bocpd_sr_regime,
+    )?)?;
     log.append(StatisticalLogRecord::try_from_ann_recall(
         &FIXTURE_IDENTITY_AUTHORITY,
         ann_recall,
@@ -1784,15 +1788,19 @@ fn records_for_promotion(log: &StatisticalDecisionLog) -> Vec<StatisticalLogReco
     .collect()
 }
 
-fn regime_record(log: &StatisticalDecisionLog) -> TestResult<StatisticalLogRecord> {
+fn bocpd_sr_regime_record(log: &StatisticalDecisionLog) -> TestResult<StatisticalLogRecord> {
     log.records()
         .iter()
         .copied()
         .find(|record| {
             record.monitor_kind() == StatisticalMonitorKind::RegimeChange
+                && matches!(
+                    record.statistic(),
+                    StatisticalStatistic::BocpdSrRegimeChange { .. }
+                )
                 && record.selected_policy_oid() == record.pinned_fallback_oid()
         })
-        .ok_or_else(|| io::Error::other("statistical log omitted regime evidence").into())
+        .ok_or_else(|| io::Error::other("statistical log omitted BOCPD+SR evidence").into())
 }
 
 fn run_regime_monitor(
@@ -1909,12 +1917,14 @@ fn run_fixture() -> TestResult<FixtureRun> {
         .ok_or_else(|| io::Error::other("OPE fixture produced no evidence"))?;
     let progress_evidence = run_progress_monitor(candidate_oid, fallback_oid)?;
     let regime_evidence = run_regime_monitor(candidate_oid, fallback_oid)?;
+    let (_, bocpd_sr_regime_evidence) = run_bocpd_sr_episode_at(63, 4_000_000, 300_000)?;
     let shifted = regime_evidence
         .get(5)
         .ok_or_else(|| io::Error::other("regime fixture omitted its shift sample"))?;
     let (regime_evidence_oid, regime_evidence_bytes) = persist_regime_evidence(shifted)?;
     let persisted_shifted =
         read_persisted_regime_evidence(&regime_evidence_bytes, regime_evidence_oid)?;
+    assert_eq!(&persisted_shifted, shifted);
     let ann_recall = run_ann_recall()?;
     let (statistical_log, statistical_log_bytes) = build_statistical_log(
         &exploration,
@@ -1923,6 +1933,7 @@ fn run_fixture() -> TestResult<FixtureRun> {
         &ope_prefixes,
         &progress_evidence,
         &regime_evidence,
+        &bocpd_sr_regime_evidence,
         &ann_recall.evidence,
     )?;
     let promotion_records = records_for_promotion(&statistical_log);
@@ -1936,8 +1947,7 @@ fn run_fixture() -> TestResult<FixtureRun> {
     let (fallback_envelope, reverted_epoch, reverted_epoch_bytes) = revert_epoch(
         &promoted_epoch,
         &promoted_epoch_bytes,
-        &persisted_shifted,
-        regime_record(&statistical_log)?,
+        bocpd_sr_regime_record(&statistical_log)?,
     )?;
     let sketch = run_sketch_maintenance()?;
     let no_regret = run_no_regret(
@@ -1981,32 +1991,29 @@ fn reconstruct_epochs_from_persisted_records(fixture: &FixtureRun) -> TestResult
         &fixture.regime_evidence_bytes,
         fixture.regime_evidence_oid,
     )?;
+    assert_eq!(fixture.regime_evidence.get(5), Some(&shifted));
     let root = DecisionPolicyEpoch::try_root_from_canonical_bytes(&fixture.root_epoch_bytes)?;
     let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
     let promotion_records = records_for_promotion(&decoded_log);
     let promotion_envelopes = sorted_envelopes(&promotion_records, oid(40))?;
-    let promoted = DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
+    let promoted = DecisionPolicyEpoch::try_promoted_from_canonical_bytes_from_statistical_records(
         &fixture.promoted_epoch_bytes,
         &root,
         root_oid,
-        &promotion_envelopes,
+        &promotion_records,
     )?;
     assert_eq!(promoted, fixture.promoted_epoch);
     assert_eq!(promotion_envelopes, fixture.promotion_envelopes);
 
-    let decoded_regime_record = regime_record(&decoded_log)?;
-    let expected_regime_record =
-        StatisticalLogRecord::try_from_regime(&FIXTURE_IDENTITY_AUTHORITY, &shifted)?;
-    assert_eq!(decoded_regime_record, expected_regime_record);
+    let decoded_regime_record = bocpd_sr_regime_record(&decoded_log)?;
     let fallback_envelope = evidence_envelope(decoded_regime_record)?;
     let promoted_oid = FixtureOnlyIdentityAuthority::epoch_oid(&promoted)?;
-    let reverted = DecisionPolicyEpoch::try_fallback_from_canonical_bytes(
+    let reverted = DecisionPolicyEpoch::try_fallback_from_canonical_bytes_from_regime_record(
         &fixture.reverted_epoch_bytes,
         &promoted,
         promoted_oid,
         std::slice::from_ref(&fallback_envelope),
-        decoded_regime_record.evidence_oid(),
-        &shifted,
+        decoded_regime_record,
     )?;
     assert_eq!(fallback_envelope, fixture.fallback_envelope);
     assert_eq!(reverted, fixture.reverted_epoch);
@@ -2193,10 +2200,24 @@ fn expected_substantive_assumptions(record: StatisticalLogRecord) -> TestResult<
             "alpha does not apply to this bounded progress certificate".to_owned(),
             "the registered potential and maximum-step bound cover the complete prefix".to_owned(),
         ],
-        StatisticalMonitorKind::RegimeChange => vec![
-            "alpha does not apply to this versioned change-detector receipt".to_owned(),
-            "the runtime metric series and detector profile are registered identities".to_owned(),
-        ],
+        StatisticalMonitorKind::RegimeChange => match record.statistic() {
+            StatisticalStatistic::BocpdSrRegimeChange { .. } => vec![
+                "alpha does not apply to this model-qualified BOCPD plus Shiryaev-Roberts receipt".to_owned(),
+                "the upstream binary-stream contract, Bernoulli hypotheses, Beta prior, hazard, finite run cap, SR cap, quantization, and conjunction rule are immutable profile identities".to_owned(),
+                "this monitor consumes pre-projected binary observations and does not implement or validate an arbitrary raw-metric projection".to_owned(),
+                "the alarm is advisory and does not retroactively validate prior observations or replace dwell, hysteresis, or benefit guards".to_owned(),
+            ],
+            StatisticalStatistic::RegimeChange { .. } => vec![
+                "alpha does not apply to this versioned change-detector receipt".to_owned(),
+                "the runtime metric series and detector profile are registered identities".to_owned(),
+            ],
+            _ => {
+                return Err(io::Error::other(
+                    "regime monitor carried a non-regime statistic",
+                )
+                .into());
+            }
+        },
         StatisticalMonitorKind::OffPolicyEvaluation => vec![
             "alpha does not apply to this exact-rational off-policy evaluation".to_owned(),
             "every logged action carries exact realized support and propensity evidence".to_owned(),
@@ -2224,7 +2245,7 @@ fn expected_substantive_assumptions(record: StatisticalLogRecord) -> TestResult<
 #[test]
 fn sextant_assumption_registration_is_complete_and_fail_closed() -> TestResult {
     let fixture = run_fixture()?;
-    assert_eq!(fixture.statistical_log.len(), 27);
+    assert_eq!(fixture.statistical_log.len(), 28);
     let mut registrations = Vec::<StatisticalEvidenceRegistration>::new();
     let mut monitor_registrations = Vec::<(StatisticalMonitorKind, &'static str)>::new();
     for record in fixture.statistical_log.records() {
@@ -2390,11 +2411,11 @@ fn adaptive_decision_classification_is_closed_and_substitution_fails() -> TestRe
     let effect_offset = unique_field_payload_offset(&substituted_class, 0x04, 1)?;
     substituted_class[effect_offset] = LogicalEffectClass::AnswerPreservingPhysical as u8;
     assert_eq!(
-        DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
+        DecisionPolicyEpoch::try_promoted_from_canonical_bytes_from_statistical_records(
             &substituted_class,
             &root,
             root_oid,
-            &fixture.promotion_envelopes,
+            &records_for_promotion(&fixture.statistical_log),
         ),
         Err(DecisionPolicyEpochError::LogicalEffectClassChanged)
     );
@@ -2430,11 +2451,11 @@ fn adaptive_decision_classification_is_closed_and_substitution_fails() -> TestRe
     let scope_offset = unique_field_payload_offset(&substituted_scope, 0x03, 32)?;
     substituted_scope[scope_offset] ^= 1;
     assert_eq!(
-        DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
+        DecisionPolicyEpoch::try_promoted_from_canonical_bytes_from_statistical_records(
             &substituted_scope,
             &root,
             root_oid,
-            &fixture.promotion_envelopes,
+            &records_for_promotion(&fixture.statistical_log),
         ),
         Err(DecisionPolicyEpochError::ScopeChanged)
     );
@@ -2633,7 +2654,7 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
             &first.promoted_epoch
         )?)
     );
-    let persisted_regime_record = regime_record(&first.statistical_log)?;
+    let persisted_regime_record = bocpd_sr_regime_record(&first.statistical_log)?;
     assert_eq!(
         first.reverted_epoch.evidence_refs(),
         &[persisted_regime_record.evidence_oid()]
@@ -2657,14 +2678,14 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
             return Err(io::Error::other("fallback envelope was not statistical").into());
         }
     }
-    assert_eq!(first.statistical_log.len(), 27);
+    assert_eq!(first.statistical_log.len(), 28);
     for (monitor, expected) in [
         (StatisticalMonitorKind::ExplorationBudget, 2),
         (StatisticalMonitorKind::ConformalThreshold, 6),
         (StatisticalMonitorKind::EProcess, 3),
         (StatisticalMonitorKind::OffPolicyEvaluation, 4),
         (StatisticalMonitorKind::DrainProgress, 3),
-        (StatisticalMonitorKind::RegimeChange, 8),
+        (StatisticalMonitorKind::RegimeChange, 9),
         (StatisticalMonitorKind::AnnRecall, 1),
     ] {
         assert_eq!(
@@ -2843,6 +2864,14 @@ fn run_bocpd_sr_episode(
     sr_threshold: u128,
     changepoint_threshold_mass: u64,
 ) -> TestResult<(BocpdSrEvidence, BocpdSrEvidence)> {
+    run_bocpd_sr_episode_at(500, sr_threshold, changepoint_threshold_mass)
+}
+
+fn run_bocpd_sr_episode_at(
+    first_sequence: u64,
+    sr_threshold: u128,
+    changepoint_threshold_mass: u64,
+) -> TestResult<(BocpdSrEvidence, BocpdSrEvidence)> {
     let profile = BocpdSrProfile::try_new(
         oid(201),
         oid(202),
@@ -2864,14 +2893,14 @@ fn run_bocpd_sr_episode(
         oid(201),
         BOCPD_SR_REGIME_SIGNAL_ID,
         BOCPD_SR_REGIME_SIGNAL_VERSION,
-        RegimeSequenceWindow::try_new(500, 511)?,
+        RegimeSequenceWindow::try_new(first_sequence, first_sequence + 11)?,
         REGIME_EPOCH,
         oid(40),
         oid(90),
     )?;
     let mut monitor = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
     let mut quiet = None;
-    for sequence in 500..=504 {
+    for sequence in first_sequence..=first_sequence + 4 {
         quiet = Some(
             monitor
                 .observe(SequencedBocpdSrObservation::new(
@@ -2888,7 +2917,7 @@ fn run_bocpd_sr_episode(
         .observe(SequencedBocpdSrObservation::new(
             identity,
             profile,
-            505,
+            first_sequence + 5,
             BocpdSrObservation::One,
         ))?
         .evidence;
@@ -2912,7 +2941,43 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
     assert_eq!(receipt.successor_effective_sequence(), 506);
 
     let quiet_bytes = quiet.try_to_canonical_bytes()?;
-    let decoded_quiet = BocpdSrEvidence::try_from_canonical_bytes(&quiet_bytes)?;
+    let decoded_quiet =
+        BocpdSrEvidence::try_from_canonical_bytes(&quiet_bytes, BOCPD_SR_DECODE_LIMITS)?;
+    for (limits, component, actual, maximum) in [
+        (
+            BocpdSrDecodeLimits::new(quiet_bytes.len() - 1, 12, 9, 108),
+            "encoded-bytes",
+            quiet_bytes.len(),
+            quiet_bytes.len() - 1,
+        ),
+        (
+            BocpdSrDecodeLimits::new(quiet_bytes.len(), 11, 9, 108),
+            "observations",
+            12,
+            11,
+        ),
+        (
+            BocpdSrDecodeLimits::new(quiet_bytes.len(), 12, 8, 108),
+            "run-states",
+            9,
+            8,
+        ),
+        (
+            BocpdSrDecodeLimits::new(quiet_bytes.len(), 12, 9, 107),
+            "replay-work",
+            108,
+            107,
+        ),
+    ] {
+        assert_eq!(
+            BocpdSrEvidence::try_from_canonical_bytes(&quiet_bytes, limits),
+            Err(BocpdSrError::DecodeLimitExceeded {
+                component,
+                actual,
+                maximum,
+            })
+        );
+    }
     let mut resumed = BocpdSrMonitor::try_resume_from_evidence(decoded_quiet)?;
     let replay_terminal = resumed
         .observe(SequencedBocpdSrObservation::new(
@@ -2944,18 +3009,34 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
         oid(90),
     )?;
     let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
-    let promoted = DecisionPolicyEpoch::try_promote(
+    assert!(matches!(
+        DecisionPolicyEpoch::try_promote_from_statistical_records(
+            &root,
+            root_oid,
+            oid(40),
+            &[quiet_record],
+        ),
+        Err(DecisionPolicyEpochError::RegimeEvidenceCannotPromoteCandidate {
+            evidence_oid
+        }) if evidence_oid == quiet_record.evidence_oid()
+    ));
+    let promotion_evidence = run_ope(oid(40), oid(90))?
+        .pop()
+        .ok_or_else(|| io::Error::other("OPE promotion fixture produced no evidence"))?;
+    let promotion_record =
+        StatisticalLogRecord::try_from_ope(&FIXTURE_IDENTITY_AUTHORITY, &promotion_evidence)?;
+    let promoted = DecisionPolicyEpoch::try_promote_from_statistical_records(
         &root,
         root_oid,
         oid(40),
-        &[quiet_record.evidence_oid()],
-        std::slice::from_ref(&quiet_envelope),
+        &[promotion_record],
     )?;
     assert_eq!(promoted.pinned_table_oid(), oid(40));
 
     let terminal_record =
         StatisticalLogRecord::try_from_bocpd_sr_regime(&FIXTURE_IDENTITY_AUTHORITY, &terminal)?;
     let terminal_record_bytes = terminal_record.encode_canonical()?;
+    assert_eq!(&terminal_record_bytes[..8], b"FGDBSLR5");
     assert_eq!(
         StatisticalLogRecord::decode_canonical(
             &terminal_record_bytes,
@@ -2963,6 +3044,22 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
         )?,
         terminal_record
     );
+    let mut terminal_log = StatisticalDecisionLog::try_new(1)?;
+    terminal_log.append(terminal_record)?;
+    let mut wrong_log_version = terminal_log.encode_canonical()?;
+    wrong_log_version[8..10].copy_from_slice(&4_u16.to_le_bytes());
+    assert!(read_statistical_log(&wrong_log_version, 1).is_err());
+    assert!(matches!(
+        DecisionPolicyEpoch::try_promoted_from_canonical_bytes_from_statistical_records(
+            &promoted.try_to_canonical_bytes()?,
+            &root,
+            root_oid,
+            &[terminal_record],
+        ),
+        Err(DecisionPolicyEpochError::RegimeEvidenceCannotPromoteCandidate {
+            evidence_oid
+        }) if evidence_oid == terminal_record.evidence_oid()
+    ));
     let mut inconsistent_record = terminal_record_bytes.clone();
     let combined_detected_offset = inconsistent_record
         .len()
@@ -2983,6 +3080,7 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
             ..
         } => {
             assert!(power_or_effective_sample_size.contains("sr="));
+            assert!(power_or_effective_sample_size.contains("sr_cap="));
             assert!(power_or_effective_sample_size.contains("changepoint_mass="));
             assert!(
                 assumptions
@@ -2994,6 +3092,10 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
                     .iter()
                     .any(|assumption| assumption.contains("does not retroactively validate"))
             );
+            assert!(assumptions.iter().any(|assumption| {
+                assumption
+                    == "this monitor consumes pre-projected binary observations and does not implement or validate an arbitrary raw-metric projection"
+            }));
         }
         _ => return Err(io::Error::other("BOCPD+SR envelope was not statistical").into()),
     }
@@ -3030,7 +3132,199 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
         Err(DecisionPolicyEpochError::EvidenceEnvelopeRefMismatch { .. })
     ));
 
-    for (sr_threshold, cp_threshold) in [(4_000_000, 900_000), (u128::MAX, 300_000)] {
+    // The live selector itself mutation-proves the canonical resume boundary:
+    // changing the separately encoded SR state while preserving the exact
+    // observation transcript must be rejected by replay validation.
+    let terminal_bytes = terminal.try_to_canonical_bytes()?;
+    let common_prefix = 2
+        + BOCPD_SR_EVIDENCE_ENCODING_DOMAIN.len()
+        + 2
+        + (3 * 32 + 2 + BOCPD_SR_REGIME_SIGNAL_ID.len() + 4 + 3 * 8 + 2 * 32)
+        + (2 * 32 + 5 * 8 + 2 * 16 + 8 + 4 + 8 + 4);
+    let mut forged_resume = terminal_bytes.clone();
+    forged_resume[common_prefix + 9 + 8] ^= 1;
+    assert!(matches!(
+        BocpdSrEvidence::try_from_canonical_bytes(&forged_resume, BOCPD_SR_DECODE_LIMITS),
+        Err(BocpdSrError::InvalidState {
+            reason: "derived evidence does not match replay of the binary prefix"
+        })
+    ));
+
+    // A complete immutable profile must be runnable over its whole declared
+    // window; an overflowing Beta prior is refused at construction.
+    assert!(matches!(
+        BocpdSrProfile::try_new(
+            oid(201),
+            oid(202),
+            250_000,
+            750_000,
+            u64::MAX,
+            1,
+            200_000,
+            4_000_000,
+            100_000_000,
+            300_000,
+            8,
+            12,
+            4,
+        ),
+        Err(BocpdSrError::InvalidState {
+            reason: "Beta prior cannot represent the declared observation budget"
+        })
+    ));
+    assert!(matches!(
+        BocpdSrProfile::try_new(
+            oid(201),
+            oid(202),
+            250_000,
+            750_000,
+            1,
+            1,
+            200_000,
+            4_000_000,
+            3_999_999,
+            900_000,
+            8,
+            12,
+            4,
+        ),
+        Err(BocpdSrError::InvalidState {
+            reason: "SR cap is below the alarm threshold"
+        })
+    ));
+
+    let capped_profile = BocpdSrProfile::try_new(
+        oid(221),
+        oid(222),
+        250_000,
+        750_000,
+        1,
+        1,
+        200_000,
+        4_000_000,
+        4_000_000,
+        900_000,
+        8,
+        12,
+        4,
+    )?;
+    let capped_identity = RegimeSignalIdentity::try_new(
+        oid(220),
+        oid(223),
+        oid(221),
+        BOCPD_SR_REGIME_SIGNAL_ID,
+        BOCPD_SR_REGIME_SIGNAL_VERSION,
+        RegimeSequenceWindow::try_new(800, 811)?,
+        REGIME_EPOCH,
+        oid(40),
+        oid(90),
+    )?;
+    let mut capped_monitor =
+        BocpdSrMonitor::try_new(capped_identity.clone(), capped_profile.clone())?;
+    let _ = capped_monitor.observe(SequencedBocpdSrObservation::new(
+        capped_identity.clone(),
+        capped_profile.clone(),
+        800,
+        BocpdSrObservation::One,
+    ))?;
+    let capped_evidence = capped_monitor
+        .observe(SequencedBocpdSrObservation::new(
+            capped_identity,
+            capped_profile.clone(),
+            801,
+            BocpdSrObservation::One,
+        ))?
+        .evidence;
+    assert_eq!(capped_evidence.sr_statistic(), capped_profile.sr_cap());
+    assert_eq!(
+        capped_evidence.status(),
+        RegimeSignalStatus::NoChangeDetected
+    );
+
+    // Hand-derived Rmax=1 tail oracle.  The rounded moment-matched tail is a
+    // declared approximation, and both its mass and sufficient statistics
+    // are load-bearing.
+    let tail_profile = BocpdSrProfile::try_new(
+        oid(211),
+        oid(212),
+        250_000,
+        750_000,
+        1,
+        1,
+        500_000,
+        90_000_000,
+        100_000_000,
+        900_000,
+        1,
+        12,
+        4,
+    )?;
+    let tail_identity = RegimeSignalIdentity::try_new(
+        oid(210),
+        oid(213),
+        oid(211),
+        BOCPD_SR_REGIME_SIGNAL_ID,
+        BOCPD_SR_REGIME_SIGNAL_VERSION,
+        RegimeSequenceWindow::try_new(700, 711)?,
+        REGIME_EPOCH,
+        oid(40),
+        oid(90),
+    )?;
+    let mut tail_monitor = BocpdSrMonitor::try_new(tail_identity.clone(), tail_profile.clone())?;
+    let mut folded = None;
+    for sequence in 700..=702 {
+        folded = Some(
+            tail_monitor
+                .observe(SequencedBocpdSrObservation::new(
+                    tail_identity.clone(),
+                    tail_profile.clone(),
+                    sequence,
+                    BocpdSrObservation::One,
+                ))?
+                .evidence,
+        );
+    }
+    let folded = folded.ok_or_else(|| io::Error::other("tail oracle produced no evidence"))?;
+    assert_eq!(folded.run_states().len(), 2);
+    assert_eq!(folded.run_states()[0].posterior_mass(), 411_765);
+    assert_eq!(folded.run_states()[0].successes(), 1);
+    assert_eq!(folded.run_states()[1].posterior_mass(), 588_235);
+    assert_eq!(folded.run_states()[1].successes(), 3);
+    assert_eq!(folded.tail_mass(), 588_235);
+
+    // The prior Page-Hinkley/CUSUM comparison stream is retained for
+    // diagnostics only and cannot drive a second policy clock.
+    let legacy = run_regime_monitor(oid(40), oid(90))?
+        .into_iter()
+        .find(|evidence| evidence.status() == RegimeSignalStatus::ChangeDetected)
+        .ok_or_else(|| io::Error::other("legacy diagnostic fixture did not detect a shift"))?;
+    let legacy_record =
+        StatisticalLogRecord::try_from_regime(&FIXTURE_IDENTITY_AUTHORITY, &legacy)?;
+    let legacy_envelope = legacy_record.try_to_evidence_envelope()?;
+    assert_eq!(
+        DecisionPolicyEpoch::try_revert_to_fallback(
+            &promoted,
+            promoted_oid,
+            &[legacy_record.evidence_oid()],
+            std::slice::from_ref(&legacy_envelope),
+            legacy_record.evidence_oid(),
+            &legacy,
+        ),
+        Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
+    );
+    assert_eq!(
+        DecisionPolicyEpoch::try_fallback_from_canonical_bytes(
+            &reverted_bytes,
+            &promoted,
+            promoted_oid,
+            std::slice::from_ref(&legacy_envelope),
+            legacy_record.evidence_oid(),
+            &legacy,
+        ),
+        Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
+    );
+
+    for (sr_threshold, cp_threshold) in [(4_000_000, 900_000), (90_000_000, 300_000)] {
         let (_, one_component) = run_bocpd_sr_episode(sr_threshold, cp_threshold)?;
         assert_eq!(
             one_component.status(),

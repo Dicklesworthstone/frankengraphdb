@@ -179,6 +179,14 @@ pub enum DecisionPolicyEpochError {
         expected: ObjectId,
         actual: Option<ObjectId>,
     },
+    /// Regime alarms may revert an already promoted candidate but cannot be
+    /// used as evidence that the candidate beats its fallback.
+    RegimeEvidenceCannotPromoteCandidate { evidence_oid: ObjectId },
+    /// A typed promotion record could not project its canonical envelope.
+    PromotionRecordEnvelopeProjectionFailed { evidence_oid: ObjectId },
+    /// Page-Hinkley/CUSUM evidence is retained for diagnostics but is not the
+    /// versioned regime clock authorized to change policy state.
+    LegacyRegimeEvidenceIsDiagnosticOnly,
     /// A fallback successor may follow only an evidence-bearing candidate
     /// promotion, never a root epoch.
     FallbackRequiresPromotedPredecessor,
@@ -412,6 +420,17 @@ impl fmt::Display for DecisionPolicyEpochError {
             } => write!(
                 formatter,
                 "evidence envelope {index} fallback {actual:?}; expected deterministic policy {expected:?}"
+            ),
+            Self::RegimeEvidenceCannotPromoteCandidate { evidence_oid } => write!(
+                formatter,
+                "regime evidence {evidence_oid:?} cannot promote a candidate policy"
+            ),
+            Self::PromotionRecordEnvelopeProjectionFailed { evidence_oid } => write!(
+                formatter,
+                "promotion record {evidence_oid:?} could not derive its canonical envelope"
+            ),
+            Self::LegacyRegimeEvidenceIsDiagnosticOnly => formatter.write_str(
+                "Page-Hinkley/CUSUM evidence is diagnostic-only; policy fallback requires a BOCPD+SR record",
             ),
             Self::FallbackRequiresPromotedPredecessor => formatter
                 .write_str("fallback transition requires an evidence-bearing promoted predecessor"),
@@ -660,7 +679,7 @@ impl DecisionPolicyEpoch {
     /// The policy identity, scope, logical-effect class, and fallback are
     /// inherited exactly. Only the pinned candidate table, promotion
     /// evidence, version, and predecessor binding advance.
-    pub fn try_promote(
+    fn try_promote(
         predecessor: &Self,
         predecessor_oid: ObjectId,
         pinned_table_oid: ObjectId,
@@ -691,13 +710,69 @@ impl DecisionPolicyEpoch {
         Ok(candidate)
     }
 
-    /// Constructs the next epoch that explicitly selects the immutable pinned
-    /// fallback after a typed regime-change receipt.
+    /// Constructs the next candidate epoch from typed statistical decision
+    /// records.  Records are sorted by their canonical evidence OIDs, their
+    /// envelopes are derived rather than caller-invented, and regime alarms
+    /// are excluded because absence/presence of a change alarm is not
+    /// candidate-versus-fallback trial evidence.
+    pub fn try_promote_from_statistical_records(
+        predecessor: &Self,
+        predecessor_oid: ObjectId,
+        pinned_table_oid: ObjectId,
+        records: &[StatisticalLogRecord],
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        let (evidence_refs, envelopes) = Self::bind_promotion_records(records)?;
+        Self::try_promote(
+            predecessor,
+            predecessor_oid,
+            pinned_table_oid,
+            &evidence_refs,
+            &envelopes,
+        )
+    }
+
+    fn bind_promotion_records(
+        records: &[StatisticalLogRecord],
+    ) -> Result<(Vec<ObjectId>, Vec<EvidenceEnvelope>), DecisionPolicyEpochError> {
+        let mut bound = Vec::new();
+        bound.try_reserve_exact(records.len()).map_err(|_| {
+            DecisionPolicyEpochError::EvidenceRefsAllocationFailed {
+                count: records.len(),
+            }
+        })?;
+        for record in records {
+            let evidence_oid = record.evidence_oid();
+            if record.monitor_kind() == StatisticalMonitorKind::RegimeChange {
+                return Err(
+                    DecisionPolicyEpochError::RegimeEvidenceCannotPromoteCandidate { evidence_oid },
+                );
+            }
+            let envelope = record.try_to_evidence_envelope().map_err(|_| {
+                DecisionPolicyEpochError::PromotionRecordEnvelopeProjectionFailed { evidence_oid }
+            })?;
+            bound.push((evidence_oid, envelope));
+        }
+        bound.sort_by_key(|(evidence_oid, _)| *evidence_oid);
+        let mut evidence_refs = Vec::new();
+        evidence_refs.try_reserve_exact(bound.len()).map_err(|_| {
+            DecisionPolicyEpochError::EvidenceRefsAllocationFailed { count: bound.len() }
+        })?;
+        let mut envelopes = Vec::new();
+        envelopes.try_reserve_exact(bound.len()).map_err(|_| {
+            DecisionPolicyEpochError::EvidenceRefsAllocationFailed { count: bound.len() }
+        })?;
+        for (evidence_oid, envelope) in bound {
+            evidence_refs.push(evidence_oid);
+            envelopes.push(envelope);
+        }
+        Ok((evidence_refs, envelopes))
+    }
+
+    /// Refuses the legacy Page-Hinkley/CUSUM policy transition.
     ///
-    /// This is a new successor, never a mutation or version rollback. The
-    /// predecessor must itself be an evidence-bearing candidate promotion.
-    /// `regime_evidence_oid` identifies which entry in the complete envelope
-    /// inventory is the typed regime signal checked by this transition.
+    /// That detector remains available for diagnostic comparison, but the
+    /// sole policy-authoritative regime clock is the versioned BOCPD+SR record
+    /// accepted by [`try_revert_to_fallback_from_regime_record`](Self::try_revert_to_fallback_from_regime_record).
     #[allow(clippy::too_many_arguments)]
     pub fn try_revert_to_fallback(
         predecessor: &Self,
@@ -707,30 +782,15 @@ impl DecisionPolicyEpoch {
         regime_evidence_oid: ObjectId,
         regime_evidence: &RegimeSignalEvidence,
     ) -> Result<Self, DecisionPolicyEpochError> {
-        validate_fallback_predecessor(predecessor)?;
-        let version = predecessor.version.checked_add(1).ok_or(
-            DecisionPolicyEpochError::VersionExhausted {
-                predecessor_version: predecessor.version,
-            },
-        )?;
-        let fallback = Self::try_from_parts(
-            predecessor.policy_id(),
-            version,
-            predecessor.scope,
-            predecessor.logical_effect_class,
-            predecessor.fallback_oid,
-            predecessor.fallback_oid,
-            evidence_refs,
-            Some(predecessor_oid),
-        )?;
-        fallback.validate_fallback_from(
+        let _ = (
             predecessor,
             predecessor_oid,
+            evidence_refs,
             evidence_envelopes,
             regime_evidence_oid,
             regime_evidence,
-        )?;
-        Ok(fallback)
+        );
+        Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
     }
 
     /// Constructs the next fallback epoch from one canonical BOCPD plus SR
@@ -773,7 +833,7 @@ impl DecisionPolicyEpoch {
     /// Successor bytes are rejected here rather than exposing a raw decoder
     /// that could manufacture an epoch without checking its predecessor and
     /// evidence. Use
-    /// [`try_promoted_from_canonical_bytes`](Self::try_promoted_from_canonical_bytes)
+    /// [`try_promoted_from_canonical_bytes_from_statistical_records`](Self::try_promoted_from_canonical_bytes_from_statistical_records)
     /// for successor records.
     pub fn try_root_from_canonical_bytes(encoded: &[u8]) -> Result<Self, DecisionPolicyEpochError> {
         let epoch = Self::decode_canonical_bytes(encoded)?;
@@ -788,7 +848,8 @@ impl DecisionPolicyEpoch {
     /// The decoder requires the exact predecessor identity and the referenced
     /// envelopes so decoding cannot bypass the same transition laws enforced
     /// by [`try_promote`](Self::try_promote).
-    pub fn try_promoted_from_canonical_bytes(
+    #[cfg(test)]
+    fn try_promoted_from_canonical_bytes(
         encoded: &[u8],
         predecessor: &Self,
         predecessor_oid: ObjectId,
@@ -799,13 +860,24 @@ impl DecisionPolicyEpoch {
         Ok(epoch)
     }
 
-    /// Strictly decodes and validates one canonical fallback successor.
-    ///
-    /// The exact predecessor, complete envelope inventory, distinguished
-    /// regime evidence OID, and typed regime evidence are mandatory. Raw
-    /// successor decoding remains private, so canonical bytes cannot bypass
-    /// the same transition laws as
-    /// [`try_revert_to_fallback`](Self::try_revert_to_fallback).
+    /// Strictly decodes a candidate successor and derives its complete
+    /// evidence inventory from typed statistical records.  This is the replay
+    /// counterpart of
+    /// [`try_promote_from_statistical_records`](Self::try_promote_from_statistical_records);
+    /// regime alarms remain ineligible for promotion on both paths.
+    pub fn try_promoted_from_canonical_bytes_from_statistical_records(
+        encoded: &[u8],
+        predecessor: &Self,
+        predecessor_oid: ObjectId,
+        records: &[StatisticalLogRecord],
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        let (_, envelopes) = Self::bind_promotion_records(records)?;
+        let epoch = Self::decode_canonical_bytes(encoded)?;
+        epoch.validate_promotion_from(predecessor, predecessor_oid, &envelopes)?;
+        Ok(epoch)
+    }
+
+    /// Refuses canonical replay through the diagnostic-only legacy detector.
     #[allow(clippy::too_many_arguments)]
     pub fn try_fallback_from_canonical_bytes(
         encoded: &[u8],
@@ -815,15 +887,15 @@ impl DecisionPolicyEpoch {
         regime_evidence_oid: ObjectId,
         regime_evidence: &RegimeSignalEvidence,
     ) -> Result<Self, DecisionPolicyEpochError> {
-        let epoch = Self::decode_canonical_bytes(encoded)?;
-        epoch.validate_fallback_from(
+        let _ = (
+            encoded,
             predecessor,
             predecessor_oid,
             evidence_envelopes,
             regime_evidence_oid,
             regime_evidence,
-        )?;
-        Ok(epoch)
+        );
+        Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
     }
 
     /// Strictly decodes and validates a record-driven BOCPD plus SR fallback
@@ -1065,7 +1137,7 @@ impl DecisionPolicyEpoch {
     }
 
     /// Validates every cross-epoch promotion law and its evidence bindings.
-    pub fn validate_promotion_from(
+    fn validate_promotion_from(
         &self,
         predecessor: &Self,
         predecessor_oid: ObjectId,
@@ -1087,8 +1159,7 @@ impl DecisionPolicyEpoch {
         self.validate_statistical_evidence(evidence_envelopes)
     }
 
-    /// Validates one explicit successor transition from a promoted candidate
-    /// to its immutable pinned fallback.
+    /// Refuses validation through the diagnostic-only legacy detector.
     #[allow(clippy::too_many_arguments)]
     pub fn validate_fallback_from(
         &self,
@@ -1098,29 +1169,15 @@ impl DecisionPolicyEpoch {
         regime_evidence_oid: ObjectId,
         regime_evidence: &RegimeSignalEvidence,
     ) -> Result<(), DecisionPolicyEpochError> {
-        if self.previous_epoch_oid.is_none() {
-            return Err(DecisionPolicyEpochError::MissingPredecessor);
-        }
-        if self.evidence_refs.is_empty() {
-            return Err(DecisionPolicyEpochError::MissingPromotionEvidence);
-        }
-        self.validate_successor_identity_from(predecessor, predecessor_oid)?;
-        validate_fallback_predecessor(predecessor)?;
-        if self.pinned_table_oid != self.fallback_oid {
-            return Err(
-                DecisionPolicyEpochError::FallbackTransitionMustSelectPinnedFallback {
-                    expected: self.fallback_oid,
-                    actual: self.pinned_table_oid,
-                },
-            );
-        }
-        self.validate_statistical_evidence(evidence_envelopes)?;
-        self.validate_regime_fallback_evidence(
+        let _ = (
+            self,
             predecessor,
+            predecessor_oid,
             evidence_envelopes,
             regime_evidence_oid,
             regime_evidence,
-        )
+        );
+        Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
     }
 
     fn validate_successor_identity_from(
@@ -1159,90 +1216,6 @@ impl DecisionPolicyEpoch {
                 expected: predecessor.fallback_oid,
                 actual: self.fallback_oid,
             });
-        }
-        Ok(())
-    }
-
-    fn validate_regime_fallback_evidence(
-        &self,
-        predecessor: &Self,
-        evidence_envelopes: &[EvidenceEnvelope],
-        regime_evidence_oid: ObjectId,
-        regime_evidence: &RegimeSignalEvidence,
-    ) -> Result<(), DecisionPolicyEpochError> {
-        let evidence_index = self
-            .evidence_refs
-            .binary_search(&regime_evidence_oid)
-            .map_err(|_| DecisionPolicyEpochError::RegimeEvidenceRefMissing {
-                evidence_oid: regime_evidence_oid,
-            })?;
-        let envelope = evidence_envelopes.get(evidence_index).ok_or(
-            DecisionPolicyEpochError::EvidenceEnvelopeCountMismatch {
-                referenced: self.evidence_refs.len(),
-                supplied: evidence_envelopes.len(),
-            },
-        )?;
-
-        if regime_evidence.status() != RegimeSignalStatus::ChangeDetected {
-            return Err(DecisionPolicyEpochError::RegimeEvidenceMustReportChange {
-                actual: regime_evidence.status(),
-            });
-        }
-        if regime_evidence.selection() != RegimePolicySelection::PinnedFallback {
-            return Err(DecisionPolicyEpochError::RegimeEvidenceMustSelectFallback {
-                actual: regime_evidence.selection(),
-            });
-        }
-        let identity = regime_evidence.identity();
-        let actual_candidate = identity.candidate_decision_oid();
-        if actual_candidate != predecessor.pinned_table_oid {
-            return Err(DecisionPolicyEpochError::RegimeEvidenceCandidateMismatch {
-                expected: predecessor.pinned_table_oid,
-                actual: actual_candidate,
-            });
-        }
-        let actual_fallback = identity.pinned_fallback_oid();
-        if actual_fallback != predecessor.fallback_oid {
-            return Err(DecisionPolicyEpochError::RegimeEvidenceFallbackMismatch {
-                expected: predecessor.fallback_oid,
-                actual: actual_fallback,
-            });
-        }
-        if envelope.regime_epoch() != identity.regime_epoch() {
-            return Err(DecisionPolicyEpochError::RegimeEvidenceEpochMismatch {
-                expected: identity.regime_epoch(),
-                actual: envelope.regime_epoch(),
-            });
-        }
-        let fallback_sequence = regime_evidence
-            .fallback_sequence()
-            .ok_or(DecisionPolicyEpochError::RegimeEvidenceMissingFallbackSequence)?;
-        let through_sequence = regime_evidence
-            .through_sequence()
-            .ok_or(DecisionPolicyEpochError::RegimeEvidenceMissingThroughSequence)?;
-        let expected_start = identity.window().first();
-        let expected_end = through_sequence.checked_add(1).ok_or(
-            DecisionPolicyEpochError::RegimeEvidenceWindowEndOverflow { through_sequence },
-        )?;
-        let window = envelope
-            .calibration_window()
-            .ok_or(DecisionPolicyEpochError::RegimeEvidenceWindowMissing)?;
-        if window.start_seq() != expected_start || window.end_seq() != expected_end {
-            return Err(DecisionPolicyEpochError::RegimeEvidenceWindowMismatch {
-                expected_start,
-                expected_end,
-                actual_start: window.start_seq(),
-                actual_end: window.end_seq(),
-            });
-        }
-        if fallback_sequence < window.start_seq() || fallback_sequence >= window.end_seq() {
-            return Err(
-                DecisionPolicyEpochError::RegimeFallbackSequenceOutsideWindow {
-                    fallback_sequence,
-                    window_start: window.start_seq(),
-                    window_end: window.end_seq(),
-                },
-            );
         }
         Ok(())
     }
@@ -2874,264 +2847,41 @@ mod tests {
     }
 
     #[test]
-    fn fallback_transition_is_consecutive_and_preserves_epoch_identity() -> TestResult {
+    fn legacy_fallback_transition_is_diagnostic_only() -> TestResult {
         let predecessor = promoted_candidate_epoch()?;
         let regime_evidence = detected_regime_evidence(oid(30), oid(90))?;
         let envelopes = [regime_fallback_envelope(oid(70), oid(90))?];
-        let fallback = DecisionPolicyEpoch::try_revert_to_fallback(
-            &predecessor,
-            oid(81),
-            &[oid(70)],
-            &envelopes,
-            oid(70),
-            &regime_evidence,
-        )?;
-
-        assert_eq!(fallback.policy_id(), predecessor.policy_id());
-        assert_eq!(fallback.version(), predecessor.version() + 1);
-        assert_eq!(fallback.scope(), predecessor.scope());
         assert_eq!(
-            fallback.logical_effect_class(),
-            predecessor.logical_effect_class()
+            DecisionPolicyEpoch::try_revert_to_fallback(
+                &predecessor,
+                oid(81),
+                &[oid(70)],
+                &envelopes,
+                oid(70),
+                &regime_evidence,
+            ),
+            Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
         );
-        assert_eq!(fallback.pinned_table_oid(), oid(90));
-        assert_eq!(fallback.fallback_oid(), predecessor.fallback_oid());
-        assert_eq!(fallback.evidence_refs(), &[oid(70)]);
-        assert_eq!(fallback.previous_epoch_oid(), Some(oid(81)));
-        Ok(())
-    }
-
-    #[test]
-    fn fallback_transition_canonical_replay_cannot_bypass_laws() -> TestResult {
-        let predecessor = promoted_candidate_epoch()?;
-        let regime_evidence = detected_regime_evidence(oid(30), oid(90))?;
-        let envelopes = [regime_fallback_envelope(oid(70), oid(90))?];
-        let first = DecisionPolicyEpoch::try_revert_to_fallback(
-            &predecessor,
-            oid(81),
-            &[oid(70)],
-            &envelopes,
-            oid(70),
-            &regime_evidence,
-        )?;
-        let replay = DecisionPolicyEpoch::try_revert_to_fallback(
-            &predecessor,
-            oid(81),
-            &[oid(70)],
-            &envelopes,
-            oid(70),
-            &regime_evidence,
-        )?;
-        let first_bytes = first.try_to_canonical_bytes()?;
-        let replay_bytes = replay.try_to_canonical_bytes()?;
-        assert_eq!(first_bytes, replay_bytes);
+        assert_eq!(
+            predecessor.validate_fallback_from(
+                &predecessor,
+                oid(81),
+                &envelopes,
+                oid(70),
+                &regime_evidence,
+            ),
+            Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
+        );
         assert_eq!(
             DecisionPolicyEpoch::try_fallback_from_canonical_bytes(
-                &first_bytes,
-                &predecessor,
-                oid(81),
-                &envelopes,
-                oid(70),
-                &regime_evidence,
-            )?,
-            first
-        );
-        assert_eq!(
-            DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
-                &first_bytes,
-                &predecessor,
-                oid(81),
-                &envelopes,
-            ),
-            Err(DecisionPolicyEpochError::CandidateEqualsFallback {
-                policy_oid: oid(90),
-            })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn fallback_transition_rejects_wrong_predecessor_and_regime_binding() -> TestResult {
-        let predecessor = promoted_candidate_epoch()?;
-        let regime_evidence = detected_regime_evidence(oid(30), oid(90))?;
-        let envelopes = [regime_fallback_envelope(oid(70), oid(90))?];
-        let fallback = DecisionPolicyEpoch::try_revert_to_fallback(
-            &predecessor,
-            oid(81),
-            &[oid(70)],
-            &envelopes,
-            oid(70),
-            &regime_evidence,
-        )?;
-        let bytes = fallback.try_to_canonical_bytes()?;
-        assert_eq!(
-            DecisionPolicyEpoch::try_fallback_from_canonical_bytes(
-                &bytes,
-                &predecessor,
-                oid(82),
-                &envelopes,
-                oid(70),
-                &regime_evidence,
-            ),
-            Err(DecisionPolicyEpochError::PreviousEpochOidMismatch {
-                expected: oid(82),
-                actual: Some(oid(81)),
-            })
-        );
-        assert_eq!(
-            DecisionPolicyEpoch::try_revert_to_fallback(
-                &predecessor,
-                oid(81),
-                &[oid(70)],
-                &envelopes,
-                oid(71),
-                &regime_evidence,
-            ),
-            Err(DecisionPolicyEpochError::RegimeEvidenceRefMissing {
-                evidence_oid: oid(71),
-            })
-        );
-
-        let quiet_regime_evidence =
-            regime_evidence_for_samples(oid(30), oid(90), &[10_i64, 10, 10])?;
-        assert_eq!(
-            DecisionPolicyEpoch::try_revert_to_fallback(
-                &predecessor,
-                oid(81),
-                &[oid(70)],
-                &envelopes,
-                oid(70),
-                &quiet_regime_evidence,
-            ),
-            Err(DecisionPolicyEpochError::RegimeEvidenceMustReportChange {
-                actual: RegimeSignalStatus::NoChangeDetected,
-            })
-        );
-
-        let wrong_candidate_evidence = detected_regime_evidence(oid(31), oid(90))?;
-        assert_eq!(
-            DecisionPolicyEpoch::try_revert_to_fallback(
-                &predecessor,
-                oid(81),
-                &[oid(70)],
-                &envelopes,
-                oid(70),
-                &wrong_candidate_evidence,
-            ),
-            Err(DecisionPolicyEpochError::RegimeEvidenceCandidateMismatch {
-                expected: oid(30),
-                actual: oid(31),
-            })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn fallback_decoder_rejects_nonconsecutive_successor() -> TestResult {
-        let predecessor = promoted_candidate_epoch()?;
-        let regime_evidence = detected_regime_evidence(oid(30), oid(90))?;
-        let envelopes = [regime_fallback_envelope(oid(70), oid(90))?];
-        let nonconsecutive = DecisionPolicyEpoch::try_from_parts(
-            predecessor.policy_id(),
-            predecessor.version() + 2,
-            predecessor.scope(),
-            predecessor.logical_effect_class(),
-            predecessor.fallback_oid(),
-            predecessor.fallback_oid(),
-            &[oid(70)],
-            Some(oid(81)),
-        )?;
-        let bytes = nonconsecutive.try_to_canonical_bytes()?;
-        assert_eq!(
-            DecisionPolicyEpoch::try_fallback_from_canonical_bytes(
-                &bytes,
+                &predecessor.try_to_canonical_bytes()?,
                 &predecessor,
                 oid(81),
                 &envelopes,
                 oid(70),
                 &regime_evidence,
             ),
-            Err(DecisionPolicyEpochError::NonConsecutiveVersion {
-                predecessor_version: predecessor.version(),
-                successor_version: predecessor.version() + 2,
-            })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn fallback_alias_is_confined_to_validated_fallback_successors() -> TestResult {
-        let predecessor = promoted_candidate_epoch()?;
-        let regime_evidence = detected_regime_evidence(oid(30), oid(90))?;
-        let envelopes = [regime_fallback_envelope(oid(70), oid(90))?];
-        let candidate_root = root_with(
-            "policy:fallback-transition",
-            predecessor.version(),
-            predecessor.scope(),
-            predecessor.logical_effect_class(),
-            oid(30),
-            oid(90),
-        )?;
-        assert_eq!(
-            DecisionPolicyEpoch::try_revert_to_fallback(
-                &candidate_root,
-                oid(81),
-                &[oid(70)],
-                &envelopes,
-                oid(70),
-                &regime_evidence,
-            ),
-            Err(DecisionPolicyEpochError::FallbackRequiresPromotedPredecessor)
-        );
-
-        let nonfallback_successor = DecisionPolicyEpoch::try_from_parts(
-            predecessor.policy_id(),
-            predecessor.version() + 1,
-            predecessor.scope(),
-            predecessor.logical_effect_class(),
-            oid(31),
-            predecessor.fallback_oid(),
-            &[oid(70)],
-            Some(oid(81)),
-        )?;
-        assert_eq!(
-            nonfallback_successor.validate_fallback_from(
-                &predecessor,
-                oid(81),
-                &envelopes,
-                oid(70),
-                &regime_evidence,
-            ),
-            Err(
-                DecisionPolicyEpochError::FallbackTransitionMustSelectPinnedFallback {
-                    expected: oid(90),
-                    actual: oid(31),
-                }
-            )
-        );
-
-        let fallback = DecisionPolicyEpoch::try_revert_to_fallback(
-            &predecessor,
-            oid(81),
-            &[oid(70)],
-            &envelopes,
-            oid(70),
-            &regime_evidence,
-        )?;
-        assert_eq!(
-            DecisionPolicyEpoch::try_revert_to_fallback(
-                &fallback,
-                oid(82),
-                &[oid(71)],
-                &[regime_fallback_envelope(oid(71), oid(90))?],
-                oid(71),
-                &regime_evidence,
-            ),
-            Err(
-                DecisionPolicyEpochError::FallbackPredecessorAlreadyUsesPinnedFallback {
-                    policy_oid: oid(90),
-                }
-            )
+            Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
         );
         Ok(())
     }

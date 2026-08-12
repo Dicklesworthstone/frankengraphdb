@@ -676,7 +676,8 @@ fn a_promotion_may_not_pin_the_fallback_as_its_candidate() {
     )
     .expect("root");
 
-    let attempted = DecisionPolicyEpoch::try_promote(&root, oid(72), fallback, &[], &[]);
+    let attempted =
+        DecisionPolicyEpoch::try_promote_from_statistical_records(&root, oid(72), fallback, &[]);
     // Assert the REASON, not merely that it failed: a promotion with no
     // evidence would also fail, and an `is_err()` check could pass for that
     // reason while the candidate/fallback guard was gone.
