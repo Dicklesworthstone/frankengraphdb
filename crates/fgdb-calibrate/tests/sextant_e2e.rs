@@ -2,7 +2,7 @@
 
 use std::{
     error::Error,
-    io,
+    fs, io,
     sync::{Arc, Mutex},
 };
 
@@ -1762,22 +1762,26 @@ struct ParsedEvidenceRegistryRow {
     binds_to: Vec<String>,
 }
 
-fn evidence_registry_row_source(registry_id: &str) -> TestResult<&'static str> {
-    const SOURCE: &str = include_str!("../../../registries/evidence.toml");
+fn evidence_registry_row_source(registry_id: &str) -> TestResult<String> {
     const ROW_HEADER: &str = "[[evidence]]";
+    let source_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../registries/evidence.toml");
+    let source = fs::read_to_string(&source_path).map_err(|error| {
+        io::Error::other(format!("failed to read {}: {error}", source_path.display()))
+    })?;
     let marker = format!("id = \"{registry_id}\"");
-    let marker_offset = SOURCE
+    let marker_offset = source
         .find(&marker)
         .ok_or_else(|| io::Error::other(format!("evidence registry omitted row {registry_id}")))?;
-    let row_start = SOURCE[..marker_offset].rfind(ROW_HEADER).ok_or_else(|| {
+    let row_start = source[..marker_offset].rfind(ROW_HEADER).ok_or_else(|| {
         io::Error::other(format!("evidence registry row {registry_id} has no header"))
     })?;
-    let row_tail = &SOURCE[row_start..];
+    let row_tail = &source[row_start..];
     let after_header = &row_tail[ROW_HEADER.len()..];
     let row_end = after_header
         .find(ROW_HEADER)
         .map_or(row_tail.len(), |offset| ROW_HEADER.len() + offset);
-    Ok(&row_tail[..row_end])
+    Ok(row_tail[..row_end].to_owned())
 }
 
 fn evidence_registry_scalar(row: &str, key: &str) -> TestResult<String> {
@@ -1827,9 +1831,9 @@ fn evidence_registry_array(row: &str, key: &str) -> TestResult<Vec<String>> {
 fn parsed_evidence_registry_row(registry_id: &str) -> TestResult<ParsedEvidenceRegistryRow> {
     let row = evidence_registry_row_source(registry_id)?;
     Ok(ParsedEvidenceRegistryRow {
-        qualified_claim: evidence_registry_scalar(row, "qualified_claim")?,
-        required_disclosures: evidence_registry_array(row, "required_disclosures")?,
-        binds_to: evidence_registry_array(row, "binds_to")?,
+        qualified_claim: evidence_registry_scalar(&row, "qualified_claim")?,
+        required_disclosures: evidence_registry_array(&row, "required_disclosures")?,
+        binds_to: evidence_registry_array(&row, "binds_to")?,
     })
 }
 
