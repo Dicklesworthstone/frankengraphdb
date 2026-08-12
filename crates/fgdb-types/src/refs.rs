@@ -161,6 +161,7 @@ active_logical_object_kinds! {
     VertexRowPatch = 0x057f => "VertexRowPatch",
     EdgePropertyPatch = 0x0580 => "EdgePropertyPatch",
     PartitionManifest = 0x0581 => "PartitionManifest",
+    DecisionPolicyEpoch = 0x0582 => "DecisionPolicyEpoch",
 }
 
 /// Implemented by every durable logical object type that references can

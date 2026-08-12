@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 48
+registry_epoch = 49
 
 [[type]]
 wire_type_id = 0x0001
@@ -6049,4 +6049,46 @@ kind = "discriminant"
 status = "reserved"
 encoding_context = "generated tag-refined discriminant over the RestoreServicePromotionManifestTargetPosture union admitting both arms (Local 0x0001 | Sharded 0x0002); the reservation receipt carries the union's u8 tag and never an arm payload (a20:2575, a20:2581)"
 allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0574
+name = "LogicalEffectClass"
+kind = "discriminant"
+status = "active"
+encoding_context = "closed u8 tag: AnswerPreservingPhysical 0x01 | AnswerAffectingExecution 0x02 | CanonicalStateAffecting 0x03; rejects every other tag"
+allowed_containing_schemas = ["DecisionPolicyEpoch"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0575
+name = "LogicalEffectClass.answer_preserving_physical"
+kind = "union_variant"
+status = "active"
+containing_union = "LogicalEffectClass"
+wire_tag = 0x0001
+encoding_context = "arm AnswerPreservingPhysical of closed discriminant LogicalEffectClass"
+allowed_containing_schemas = ["LogicalEffectClass"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0576
+name = "LogicalEffectClass.answer_affecting_execution"
+kind = "union_variant"
+status = "active"
+containing_union = "LogicalEffectClass"
+wire_tag = 0x0002
+encoding_context = "arm AnswerAffectingExecution of closed discriminant LogicalEffectClass"
+allowed_containing_schemas = ["LogicalEffectClass"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0577
+name = "LogicalEffectClass.canonical_state_affecting"
+kind = "union_variant"
+status = "active"
+containing_union = "LogicalEffectClass"
+wire_tag = 0x0003
+encoding_context = "arm CanonicalStateAffecting of closed discriminant LogicalEffectClass"
+allowed_containing_schemas = ["LogicalEffectClass"]
 max_size_bytes = 1

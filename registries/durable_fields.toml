@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 86
+registry_epoch = 87
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -2666,6 +2666,118 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the exact Local authorization decision the command must byte-match; retained while the command is retained, with the target constructed no later than its owner (a10:1912)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0001
+stable_name = "policy_id"
+exact_wire_type = "string"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "stable printable-ASCII adaptive-policy identity, bounded to 256 bytes; retained and cut with the immutable epoch (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0002
+stable_name = "version"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "checked stream-sequenced policy version; retained and cut with the immutable epoch (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0003
+stable_name = "scope"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "OID-backed adaptive-policy scope identity; comparison and validation input only, while the owning policy/replay closure roots the scope object explicitly (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0004
+stable_name = "logical_effect_class"
+exact_wire_type = "LogicalEffectClass"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "closed adaptive-effect class tag: answer-preserving physical 0x01, answer-affecting execution 0x02, or canonical-state-affecting 0x03; retained and cut with the epoch (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0005
+stable_name = "pinned_table_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "identity of the selected deterministic policy table; compared and validated here while the policy/replay closure owns reachability (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0006
+stable_name = "fallback_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "identity of the immutable deterministic fallback table; compared and validated here while the policy/replay closure owns reachability (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0007
+stable_name = "evidence_refs"
+exact_wire_type = "oid256"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "sorted-unique inventory of at most 4096 statistical evidence identities; promotion validates the exact supplied envelopes, while their evidence/replay owner roots them and no entry may become an invariant proof (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0008
+stable_name = "previous_epoch_oid"
+exact_wire_type = "oid256"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining predecessor identity required on every promoted or fallback successor and absent only on a root epoch; history retention is owned by the stream/checkpoint closure (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 33
 
 [[field]]
 containing_schema = "DeliveredBaselinePayload"

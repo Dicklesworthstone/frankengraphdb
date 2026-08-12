@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 63
+registry_epoch = 64
 
 [[kind]]
 object_kind = 0x0001
@@ -5047,3 +5047,12 @@ construction_order = 35
 role_predicate = "true"
 max_size_bytes = 134217728
 golden_corpus = "corpus/logical/partition_manifest/"
+
+[[kind]]
+object_kind = 0x0582
+name = "DecisionPolicyEpoch"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 131543
+golden_corpus = "corpus/logical/decision_policy_epoch/"

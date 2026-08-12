@@ -142,6 +142,213 @@ fn source_range(source: &[u8], start_line: i64, end_line: i64) -> Vec<u8> {
         .collect()
 }
 
+#[test]
+fn idr_a21_decision_policy_epoch_source_and_active_field_table_are_exact() {
+    let catalog = real_appendix_catalog();
+    let plan = real_plan_source();
+    let appendix = source_range(
+        &plan,
+        catalog.source_manifest.start_line,
+        catalog.source_manifest.end_line,
+    );
+    let specs = catalog
+        .slices
+        .iter()
+        .map(|slice| appendix_source::SourceSliceSpec {
+            id: &slice.id,
+            start_line: usize::try_from(slice.start_line).expect("slice start fits"),
+            end_line: usize::try_from(slice.end_line).expect("slice end fits"),
+        })
+        .collect::<Vec<_>>();
+    let census = appendix_source::census_appendix_source(
+        &appendix,
+        usize::try_from(catalog.source_manifest.start_line).expect("source start fits"),
+        &specs,
+    )
+    .expect("source census");
+    let observed_source_keys = census
+        .schemas
+        .iter()
+        .map(|row| row.key.source_key())
+        .chain(census.fields.iter().map(|row| row.key.source_key()))
+        .filter(|key| key.contains("DecisionPolicyEpoch"))
+        .collect::<Vec<_>>();
+    assert!(
+        observed_source_keys.is_empty(),
+        "the terminal A21 prose deliberately requires explicit projection fallbacks; it must not silently become a second structurally parsed authority: {observed_source_keys:?}"
+    );
+
+    let registries = real_identity();
+    let logical = registries
+        .logical
+        .iter()
+        .find(|row| row.name == "DecisionPolicyEpoch")
+        .expect("DecisionPolicyEpoch logical kind");
+    assert_eq!(logical.object_kind, 0x0582);
+    assert_eq!(logical.status, "active");
+    assert_eq!(logical.construction_order, 30);
+    assert_eq!(logical.role_predicate, "true");
+    assert_eq!(logical.max_size_bytes, 131_543);
+
+    let observed_fields = registries
+        .fields
+        .iter()
+        .filter(|row| row.containing_schema == "DecisionPolicyEpoch")
+        .map(|row| {
+            (
+                row.field_tag,
+                row.stable_name.as_str(),
+                row.exact_wire_type.as_str(),
+                row.cardinality.as_str(),
+                row.identity_class.as_str(),
+                row.reference_semantics.as_str(),
+                row.version_status.as_str(),
+                row.max_size_bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed_fields,
+        [
+            (
+                0x0001,
+                "policy_id",
+                "string",
+                "one",
+                "scalar",
+                "none",
+                "active",
+                256
+            ),
+            (
+                0x0002, "version", "u64", "one", "scalar", "none", "active", 8
+            ),
+            (
+                0x0003,
+                "scope",
+                "oid256",
+                "one",
+                "logical",
+                "weak_digest",
+                "active",
+                32
+            ),
+            (
+                0x0004,
+                "logical_effect_class",
+                "LogicalEffectClass",
+                "one",
+                "inline",
+                "none",
+                "active",
+                1
+            ),
+            (
+                0x0005,
+                "pinned_table_oid",
+                "oid256",
+                "one",
+                "logical",
+                "weak_digest",
+                "active",
+                32
+            ),
+            (
+                0x0006,
+                "fallback_oid",
+                "oid256",
+                "one",
+                "logical",
+                "weak_digest",
+                "active",
+                32
+            ),
+            (
+                0x0007,
+                "evidence_refs",
+                "oid256",
+                "many",
+                "logical",
+                "weak_digest",
+                "active",
+                32
+            ),
+            (
+                0x0008,
+                "previous_epoch_oid",
+                "oid256",
+                "optional",
+                "logical",
+                "weak_digest",
+                "active",
+                33
+            ),
+        ],
+        "the implementation's canonical tags and the durable field table must remain one exact contract"
+    );
+
+    let observed_effect_types = registries
+        .wire
+        .iter()
+        .filter(|row| {
+            row.name == "LogicalEffectClass" || row.name.starts_with("LogicalEffectClass.")
+        })
+        .map(|row| {
+            (
+                row.wire_type_id,
+                row.name.as_str(),
+                row.kind.as_str(),
+                row.containing_union.as_deref(),
+                row.wire_tag,
+                row.status.as_str(),
+                row.max_size_bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed_effect_types,
+        [
+            (
+                0x0574,
+                "LogicalEffectClass",
+                "discriminant",
+                None,
+                None,
+                "active",
+                1
+            ),
+            (
+                0x0575,
+                "LogicalEffectClass.answer_preserving_physical",
+                "union_variant",
+                Some("LogicalEffectClass"),
+                Some(0x0001),
+                "active",
+                1
+            ),
+            (
+                0x0576,
+                "LogicalEffectClass.answer_affecting_execution",
+                "union_variant",
+                Some("LogicalEffectClass"),
+                Some(0x0002),
+                "active",
+                1
+            ),
+            (
+                0x0577,
+                "LogicalEffectClass.canonical_state_affecting",
+                "union_variant",
+                Some("LogicalEffectClass"),
+                Some(0x0003),
+                "active",
+                1
+            ),
+        ],
+        "LogicalEffectClass must remain the closed three-tag durable vocabulary implemented by policy_epoch.rs"
+    );
+}
+
 fn line_start_offset(source: &[u8], line: i64) -> usize {
     let preceding = usize::try_from(line - 1).expect("positive source line");
     source
@@ -3459,7 +3666,9 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // 616 -> 617 (fgdb-a20-restore-promotion-ivsp): the receipt's
         // tag-refined posture discriminant names its one exact host; the two
         // shared record mints are wildcard and add no citation.
-        (617, 437),
+        // 617 -> 621 (fgdb-ad4m): the LogicalEffectClass parent plus its
+        // three exact variants each name their one closed containing schema.
+        (621, 437),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -10561,7 +10770,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     };
     // a21 landed DurableCapabilityValidationEvidence's field table after the
     // erratum, so those rows are not part of the pre-erratum namespace.
-    let post_erratum_a21_field = |schema: &str| schema == "DurableCapabilityValidationEvidence";
+    let post_erratum_a21_field = |schema: &str| {
+        matches!(
+            schema,
+            "DurableCapabilityValidationEvidence" | "DecisionPolicyEpoch"
+        )
+    };
     // Landed by fgdb-a10-active-spec-gap-nowp: every SequenceNeutralSpec<Tag>
     // wrapper field row (a10:1914) is younger than the witness — the schema had
     // zero field rows before that increment, so the schema scope cannot
@@ -12278,7 +12492,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // ServiceCatalogPromotionReservationReceipt fields, claimed by
         // post_erratum_a20_field and enumerated there. The current field
         // count carries them and the frozen reconstruction remains 225.
-        pre_erratum.fields.len() + 887,
+        // 887 -> 895 (fgdb-ad4m): DecisionPolicyEpoch's exact eight-field
+        // canonical table is an A21 post-erratum cohort. The current field
+        // count carries all eight and the reconstruction remains frozen at 225.
+        pre_erratum.fields.len() + 895,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

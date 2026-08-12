@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3833
-projection_fallback_count = 181
-target_source_assignment_sha256 = "930332958fac35aea6ebea8555d0621cbbaa70c16e309d4cd085302513562084"
+target_count = 3846
+projection_fallback_count = 194
+target_source_assignment_sha256 = "8f5db3fe6160f8142cd13852a34a39e1fafa06c2efcd467f343376b83c763101"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 63
+registry_epoch = 64
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 48
+registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 86
+registry_epoch = 87
 
 [[logical_kind]]
 slice_id = "a03"
@@ -116435,6 +116435,299 @@ row_id = "a20:target:field-service-catalog-promotion-reservation-receipt-reserve
 target_row_id = "a20:field:service-catalog-promotion-reservation-receipt-reserved-target-row-digest-and-version"
 slice_id = "a20"
 source_key = "field|ServiceCatalogPromotionReservationReceipt|ServiceCatalogPromotionReservationReceipt.reserved_target_row_digest_and_version|reserved_target_row_digest_and_version"
+target_kind = "field"
+definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:decision-policy-epoch"
+object_kind = 0x0582
+name = "DecisionPolicyEpoch"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 131543
+golden_corpus = "corpus/logical/decision_policy_epoch/"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-policy-id"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0001
+stable_name = "policy_id"
+exact_wire_type = "string"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "stable printable-ASCII adaptive-policy identity, bounded to 256 bytes; retained and cut with the immutable epoch (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-version"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0002
+stable_name = "version"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "checked stream-sequenced policy version; retained and cut with the immutable epoch (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-scope"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0003
+stable_name = "scope"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "OID-backed adaptive-policy scope identity; comparison and validation input only, while the owning policy/replay closure roots the scope object explicitly (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-logical-effect-class"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0004
+stable_name = "logical_effect_class"
+exact_wire_type = "LogicalEffectClass"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "closed adaptive-effect class tag: answer-preserving physical 0x01, answer-affecting execution 0x02, or canonical-state-affecting 0x03; retained and cut with the epoch (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 1
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-pinned-table-oid"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0005
+stable_name = "pinned_table_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "identity of the selected deterministic policy table; compared and validated here while the policy/replay closure owns reachability (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-fallback-oid"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0006
+stable_name = "fallback_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "identity of the immutable deterministic fallback table; compared and validated here while the policy/replay closure owns reachability (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-evidence-refs"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0007
+stable_name = "evidence_refs"
+exact_wire_type = "oid256"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "sorted-unique inventory of at most 4096 statistical evidence identities; promotion validates the exact supplied envelopes, while their evidence/replay owner roots them and no entry may become an invariant proof (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:decision-policy-epoch-previous-epoch-oid"
+containing_schema = "DecisionPolicyEpoch"
+field_tag = 0x0008
+stable_name = "previous_epoch_oid"
+exact_wire_type = "oid256"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining predecessor identity required on every promoted or fallback successor and absent only on a root epoch; history retention is owned by the stream/checkpoint closure (a21:2727; fgdb-ad4m)"
+version_status = "active"
+max_size_bytes = 33
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:logical-effect-class"
+wire_type_id = 0x0574
+name = "LogicalEffectClass"
+kind = "discriminant"
+status = "active"
+encoding_context = "closed u8 tag: AnswerPreservingPhysical 0x01 | AnswerAffectingExecution 0x02 | CanonicalStateAffecting 0x03; rejects every other tag"
+allowed_containing_schemas = ["DecisionPolicyEpoch"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:logical-effect-class-answer-preserving-physical"
+wire_type_id = 0x0575
+name = "LogicalEffectClass.answer_preserving_physical"
+kind = "union_variant"
+containing_union = "LogicalEffectClass"
+wire_tag = 0x0001
+status = "active"
+encoding_context = "arm AnswerPreservingPhysical of closed discriminant LogicalEffectClass"
+allowed_containing_schemas = ["LogicalEffectClass"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:logical-effect-class-answer-affecting-execution"
+wire_type_id = 0x0576
+name = "LogicalEffectClass.answer_affecting_execution"
+kind = "union_variant"
+containing_union = "LogicalEffectClass"
+wire_tag = 0x0002
+status = "active"
+encoding_context = "arm AnswerAffectingExecution of closed discriminant LogicalEffectClass"
+allowed_containing_schemas = ["LogicalEffectClass"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:logical-effect-class-canonical-state-affecting"
+wire_type_id = 0x0577
+name = "LogicalEffectClass.canonical_state_affecting"
+kind = "union_variant"
+containing_union = "LogicalEffectClass"
+wire_tag = 0x0003
+status = "active"
+encoding_context = "arm CanonicalStateAffecting of closed discriminant LogicalEffectClass"
+allowed_containing_schemas = ["LogicalEffectClass"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a21:target:logical-kind-decision-policy-epoch"
+target_row_id = "a21:logical-kind:decision-policy-epoch"
+slice_id = "a21"
+source_key = "projection|logical_object_kinds|DecisionPolicyEpoch"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-logical-effect-class"
+target_row_id = "a21:wire-type:logical-effect-class"
+slice_id = "a21"
+source_key = "projection|wire_types|LogicalEffectClass"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-logical-effect-class-answer-preserving-physical"
+target_row_id = "a21:wire-type:logical-effect-class-answer-preserving-physical"
+slice_id = "a21"
+source_key = "projection|wire_types|LogicalEffectClass.answer_preserving_physical"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-logical-effect-class-answer-affecting-execution"
+target_row_id = "a21:wire-type:logical-effect-class-answer-affecting-execution"
+slice_id = "a21"
+source_key = "projection|wire_types|LogicalEffectClass.answer_affecting_execution"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-logical-effect-class-canonical-state-affecting"
+target_row_id = "a21:wire-type:logical-effect-class-canonical-state-affecting"
+slice_id = "a21"
+source_key = "projection|wire_types|LogicalEffectClass.canonical_state_affecting"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-policy-id"
+target_row_id = "a21:field:decision-policy-epoch-policy-id"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.policy_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-version"
+target_row_id = "a21:field:decision-policy-epoch-version"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.version"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-scope"
+target_row_id = "a21:field:decision-policy-epoch-scope"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.scope"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-logical-effect-class"
+target_row_id = "a21:field:decision-policy-epoch-logical-effect-class"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.logical_effect_class"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-pinned-table-oid"
+target_row_id = "a21:field:decision-policy-epoch-pinned-table-oid"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.pinned_table_oid"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-fallback-oid"
+target_row_id = "a21:field:decision-policy-epoch-fallback-oid"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.fallback_oid"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-evidence-refs"
+target_row_id = "a21:field:decision-policy-epoch-evidence-refs"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.evidence_refs"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-decision-policy-epoch-previous-epoch-oid"
+target_row_id = "a21:field:decision-policy-epoch-previous-epoch-oid"
+slice_id = "a21"
+source_key = "projection|durable_fields|DecisionPolicyEpoch.previous_epoch_oid"
 target_kind = "field"
 definition_status = "declared"
 
