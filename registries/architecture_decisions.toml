@@ -8433,8 +8433,13 @@ command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:regime-signal-fallback"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:regime-signal-fallback"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:estimator-risk-evidence"
