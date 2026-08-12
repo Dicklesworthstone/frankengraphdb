@@ -30,6 +30,7 @@ use fgdb_sketch::count_min::{
 };
 use fgdb_sketch::distinct::{DistinctHashAlgorithm, DistinctProfile, DistinctSketch};
 use fgdb_sketch::zone_map::{ByteZoneMap, ZoneMapProfile};
+use fnx_generators::GraphGenerator;
 
 /// Deterministic keys chosen to collide across rows in a narrow sketch and to
 /// include empty and maximal-byte edges.
@@ -386,4 +387,93 @@ fn zone_map_merging_an_empty_map_is_an_identity() {
         right.canonical_state().maximum,
         populated.canonical_state().maximum
     );
+}
+
+// ------------------------------------------------------ fnx fixture seam ---
+
+#[test]
+fn named_fixtures_are_produced_by_pinned_fnx_generators_and_drive_accuracy_contracts() {
+    const GENERATOR_CASES: [(&str, usize, usize); 4] = [
+        ("path", 1_024, 1_023),
+        ("star", 1_024, 1_023),
+        ("cycle", 1_024, 1_024),
+        ("complete-bipartite", 112, 3_072),
+    ];
+    const SKETCH_SEED: u64 = 0x464e_585f_5049_4e31;
+
+    let mut generator = GraphGenerator::strict();
+    for (name, expected_nodes, expected_edges) in GENERATOR_CASES {
+        let report = match name {
+            "path" => generator.path_graph(expected_nodes),
+            "star" => generator.star_graph(expected_nodes - 1),
+            "cycle" => generator.cycle_graph(expected_nodes),
+            "complete-bipartite" => generator.complete_multipartite_graph(&[48, 64]),
+            _ => unreachable!("closed generator fixture table"),
+        }
+        .expect("pinned fnx fixture generator must accept the fixed valid parameters");
+
+        assert!(
+            report.warnings.is_empty(),
+            "pinned fnx {name} fixture emitted warnings: {:?}",
+            report.warnings
+        );
+        assert_eq!(report.graph.node_count(), expected_nodes, "{name} nodes");
+        let edges = report.graph.edges_ordered_indices();
+        assert_eq!(edges.len(), expected_edges, "{name} edges");
+
+        let total_weight = u64::try_from(edges.len())
+            .expect("fixture edge count fits u64")
+            .checked_mul(2)
+            .expect("fixture endpoint count fits u64");
+        let profile = CountMinProfile {
+            width: 256,
+            depth: 5,
+            hash_algorithm: CountMinHashAlgorithm::SeededFnvMix64V1,
+            seed: SKETCH_SEED,
+            max_total_weight: total_weight,
+            max_cells: 256 * 5,
+        };
+        let contract = profile.error_contract().expect("bounded accuracy profile");
+        let maximum_overestimate = contract.maximum_overestimate(total_weight);
+        let mut sketch = CountMinSketch::try_new(profile).expect("bounded sketch");
+        let mut exact = vec![0_u64; expected_nodes];
+
+        for (left, right) in edges {
+            let left = u64::try_from(left).expect("fnx node index fits u64");
+            let right = u64::try_from(right).expect("fnx node index fits u64");
+            exact[left as usize] += 1;
+            exact[right as usize] += 1;
+            sketch
+                .try_observe(&left.to_be_bytes(), 1)
+                .expect("fixture stays within declared total weight");
+            sketch
+                .try_observe(&right.to_be_bytes(), 1)
+                .expect("fixture stays within declared total weight");
+        }
+
+        assert_eq!(sketch.total_weight(), total_weight, "{name} total weight");
+        for (node, truth) in exact.into_iter().enumerate() {
+            let estimate = sketch.estimate(&(node as u64).to_be_bytes());
+            assert!(
+                estimate >= truth && estimate - truth <= maximum_overestimate,
+                "fixture={name} node={node} seed={SKETCH_SEED:#018x} profile={profile:?} \
+                 truth={truth} estimate={estimate} bound={maximum_overestimate} \
+                 confidence_ppm={}",
+                contract.confidence_parts_per_million_floor()
+            );
+        }
+
+        let mut wrong_profile = profile;
+        wrong_profile.seed ^= 1;
+        let before = sketch.clone();
+        assert_eq!(
+            sketch.try_merge(&CountMinSketch::try_new(wrong_profile).expect("wrong profile")),
+            Err(CountMinError::ProfileMismatch),
+            "{name}: generator-backed evidence cannot cross a profile identity"
+        );
+        assert_eq!(
+            sketch, before,
+            "{name}: rejected provenance must not mutate"
+        );
+    }
 }

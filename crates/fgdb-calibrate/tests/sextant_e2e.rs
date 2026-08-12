@@ -10,6 +10,7 @@ use asupersync::{
     lab::{LabConfig, LabRuntime},
     runtime::changepoint::ChangeDirection,
     types::Budget,
+    util::DetRng,
 };
 use fgdb_calibrate::{
     ann_recall::{
@@ -53,7 +54,9 @@ use fgdb_calibrate::{
         OpeLedger, OpeProfile, OpeSelection, OpeSelectionReason, OpeWindow, Outcome,
         PROBABILITY_SCALE, Probability, WEIGHT_SCALE,
     },
-    policy_epoch::{DecisionPolicyEpoch, DecisionPolicyScope, LogicalEffectClass},
+    policy_epoch::{
+        DecisionPolicyEpoch, DecisionPolicyEpochError, DecisionPolicyScope, LogicalEffectClass,
+    },
     regime::{
         COMBINED_REGIME_SIGNAL_ID, COMBINED_REGIME_SIGNAL_VERSION, CusumConfig, MetricSample,
         PageHinkleyConfig, RegimePolicySelection, RegimeSequenceWindow, RegimeSignalEvidence,
@@ -63,8 +66,7 @@ use fgdb_calibrate::{
 };
 use fgdb_claim::{EvidenceClaim, StatisticalErrorControl};
 use fgdb_evidence::{
-    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity,
-    StrataIdentity,
+    EvidenceEnvelope, FallbackBehavior, PropensitySupportIdentity, StrataIdentity,
 };
 use fgdb_sketch::{
     count_min::{CountMinDecodeLimits, CountMinError, CountMinProfile, CountMinSketch},
@@ -83,7 +85,7 @@ type PromotionResult = (Vec<u8>, Vec<EvidenceEnvelope>, DecisionPolicyEpoch, Vec
 
 const REGIME_EPOCH: u64 = 7;
 const FIXTURE_LOG_DECODE_LIMITS: StatisticalLogDecodeLimits =
-    StatisticalLogDecodeLimits::new(16, 1 << 20);
+    StatisticalLogDecodeLimits::new(32, 1 << 20);
 const SKETCH_MAINTENANCE_MAX_RECORDS: usize = 3;
 const SKETCH_MAINTENANCE_DECODE_LIMITS: SketchMaintenanceLogDecodeLimits =
     SketchMaintenanceLogDecodeLimits::new(SKETCH_MAINTENANCE_MAX_RECORDS, 1 << 10);
@@ -127,8 +129,10 @@ struct NoRegretFixture {
 struct FixtureRun {
     exploration: Vec<ExplorationBudgetEvidence>,
     calibration: Vec<CalibrationEvidence>,
+    assessments: Vec<AssessmentEvidence>,
     assessment: AssessmentEvidence,
     sequential_evidence: Vec<EvidenceRecord>,
+    ope_prefixes: Vec<OpeEvidence>,
     ope: OpeEvidence,
     root_epoch_bytes: Vec<u8>,
     promotion_envelopes: Vec<EvidenceEnvelope>,
@@ -153,14 +157,17 @@ fn oid(fill: u8) -> ObjectId {
 
 /// Explicitly test-scoped identity authority.
 ///
-/// This deterministic mapping exists only to exercise the canonical binding
-/// contract before the production `K_oid` + security-namespace authority is
-/// available. It intentionally does not claim to implement production
-/// FrankenGraphDB ObjectId derivation.
+/// Statistical sub-artifacts use a deterministic test mapping because this
+/// fixture does not own database key management. Policy epochs themselves use
+/// [`DecisionPolicyEpoch::try_object_id`] with a fixed test key and namespace,
+/// so the end-to-end path exercises the production §5.1 identity transcript.
 #[derive(Clone, Copy)]
 struct FixtureOnlyIdentityAuthority;
 
 const FIXTURE_IDENTITY_AUTHORITY: FixtureOnlyIdentityAuthority = FixtureOnlyIdentityAuthority;
+const FIXTURE_K_OID: [u8; 32] = [0xa7; 32];
+const FIXTURE_SECURITY_NAMESPACE: fgdb_types::DatabaseSecurityNamespaceId =
+    fgdb_types::DatabaseSecurityNamespaceId([0xb8; 32]);
 
 impl FixtureOnlyIdentityAuthority {
     fn issue_for_domain(domain: &[u8], canonical_bytes: &[u8]) -> ObjectId {
@@ -186,8 +193,8 @@ impl FixtureOnlyIdentityAuthority {
         )
     }
 
-    fn epoch_oid(canonical_epoch: &[u8]) -> ObjectId {
-        Self::issue_for_domain(b"fgdb:fixture-only:policy-epoch-oid:v1", canonical_epoch)
+    fn epoch_oid(epoch: &DecisionPolicyEpoch) -> TestResult<ObjectId> {
+        Ok(epoch.try_object_id(&FIXTURE_K_OID, FIXTURE_SECURITY_NAMESPACE)?)
     }
 
     fn regime_evidence_oid(canonical_evidence: &[u8]) -> ObjectId {
@@ -980,7 +987,7 @@ fn run_exploration(
 fn run_conformal(
     candidate_oid: ObjectId,
     fallback_oid: ObjectId,
-) -> TestResult<(Vec<CalibrationEvidence>, AssessmentEvidence)> {
+) -> TestResult<(Vec<CalibrationEvidence>, Vec<AssessmentEvidence>)> {
     let identity = GraphMetricIdentity::try_new(
         oid(10),
         oid(11),
@@ -994,7 +1001,7 @@ fn run_conformal(
     let profile = ConformalProfile::try_new(oid(14), 0.2, MetricThresholdMode::Upper, 5, 10)?;
     let mut trial = GraphMetricConformal::try_new(identity, profile)?;
     let mut calibration = Vec::new();
-    for (offset, value) in (1_u64..=10).enumerate() {
+    for (offset, value) in (1_u64..=5).enumerate() {
         let sequence = 20_u64
             .checked_add(u64::try_from(offset)?)
             .ok_or_else(|| io::Error::other("conformal fixture sequence arithmetic overflowed"))?;
@@ -1005,8 +1012,13 @@ fn run_conformal(
             value as f64,
         ))?);
     }
-    let assessment = trial.assess(SequencedMetricValue::new(identity, profile, 30, 5.0))?;
-    Ok((calibration, assessment))
+    let mut assessments = Vec::new();
+    for (sequence, value) in (25_u64..=30).zip([3.0, 4.0, 5.0, 2.0, 1.0, 5.0]) {
+        assessments.push(trial.assess(SequencedMetricValue::new(
+            identity, profile, sequence, value,
+        ))?);
+    }
+    Ok((calibration, assessments))
 }
 
 fn run_eprocess(
@@ -1047,6 +1059,187 @@ fn run_eprocess(
     Ok(evidence)
 }
 
+#[test]
+fn eprocess_type_i_control_holds_under_null_and_adversarial_stopping() -> TestResult {
+    const ROOT_SEED: u64 = 0xe000_c355_7a17_0001;
+    const NULL_TRIALS: u64 = 8_192;
+    const HORIZON: u64 = 128;
+    const ALPHA: f64 = 0.05;
+    const P0: f64 = 0.25;
+    const FAILURE_CONFIDENCE: f64 = 1.0e-6;
+    const PLANTED_TRIALS: u64 = 256;
+
+    let config = EProcessConfig {
+        p0: P0,
+        lambda: 1.0,
+        alpha: ALPHA,
+        max_evalue: 1.0e12,
+    };
+    let profile = EProcessProfile::try_new(oid(17), config.clone())?;
+    let identity = TrialIdentity::try_new(
+        oid(15),
+        oid(16),
+        EProcessWindow::try_new(0, HORIZON - 1)?,
+        REGIME_EPOCH,
+        oid(200),
+        oid(201),
+    )?;
+
+    // Every null trial peeks after every prefix and stops at its first
+    // rejection. This is the adversarial optional-stopping rule Ville's bound
+    // is meant to survive; checking only a fixed terminal time would miss the
+    // exact failure mode an e-process is selected to prevent.
+    let mut false_rejections = 0_u64;
+    for trial_index in 0..NULL_TRIALS {
+        let mut rng = DetRng::new(ROOT_SEED ^ trial_index.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let mut trial = EProcessTrial::try_new(identity, profile)?;
+        for sequence in 0..HORIZON {
+            let observation = if rng.next_u64() & 3 == 0 {
+                BinaryObservation::One
+            } else {
+                BinaryObservation::Zero
+            };
+            let update = trial.observe(SequencedObservation::new(
+                identity,
+                profile,
+                sequence,
+                observation,
+            ))?;
+            if update.evidence.first_rejection_sequence().is_some() {
+                false_rejections += 1;
+                break;
+            }
+        }
+    }
+
+    let empirical_type_i = false_rejections as f64 / NULL_TRIALS as f64;
+    let hoeffding_margin = ((1.0 / FAILURE_CONFIDENCE).ln() / (2.0 * NULL_TRIALS as f64)).sqrt();
+    assert!(
+        empirical_type_i <= ALPHA + hoeffding_margin,
+        "seed={ROOT_SEED:#018x} config={config:?} null_trials={NULL_TRIALS} \
+         horizon={HORIZON} false_rejections={false_rejections} \
+         empirical_type_i={empirical_type_i:.8} alpha={ALPHA:.8} \
+         one_sided_hoeffding_margin={hoeffding_margin:.8} \
+         failure_confidence={FAILURE_CONFIDENCE:.1e}"
+    );
+
+    // A planted alternative proves that the campaign is not a detector that
+    // merely stays green. Three quarters of observations are violations while
+    // the declared null rate remains one quarter.
+    let mut planted_rejections = 0_u64;
+    for trial_index in 0..PLANTED_TRIALS {
+        let mut rng = DetRng::new(
+            ROOT_SEED
+                .rotate_left(29)
+                .wrapping_add(trial_index.wrapping_mul(0xd1b5_4a32_d192_ed03)),
+        );
+        let mut trial = EProcessTrial::try_new(identity, profile)?;
+        for sequence in 0..HORIZON {
+            let observation = if rng.next_u64() & 3 != 0 {
+                BinaryObservation::One
+            } else {
+                BinaryObservation::Zero
+            };
+            let update = trial.observe(SequencedObservation::new(
+                identity,
+                profile,
+                sequence,
+                observation,
+            ))?;
+            if update.evidence.first_rejection_sequence().is_some() {
+                planted_rejections += 1;
+                break;
+            }
+        }
+    }
+    assert!(
+        planted_rejections * 100 >= PLANTED_TRIALS * 95,
+        "seed={ROOT_SEED:#018x} config={config:?} planted_trials={PLANTED_TRIALS} \
+         planted_rejections={planted_rejections}: the alternative-population \
+         control did not prove detector liveness"
+    );
+    Ok(())
+}
+
+#[test]
+fn conformal_marginal_coverage_holds_under_exchangeability_and_degrades_under_seeded_drift()
+-> TestResult {
+    const ROOT_SEED: u64 = 0xc0f0_4a1a_7a17_0001;
+    const TRIALS: u64 = 8_192;
+    const CALIBRATION_SAMPLES: u64 = 64;
+    const ALPHA: f64 = 0.10;
+    const FAILURE_CONFIDENCE: f64 = 1.0e-6;
+    const DRIFT_OFFSET: f64 = 1_000_000.0;
+
+    let profile = ConformalProfile::try_new(
+        oid(14),
+        ALPHA,
+        MetricThresholdMode::Upper,
+        32,
+        CALIBRATION_SAMPLES as usize,
+    )?;
+    let identity = GraphMetricIdentity::try_new(
+        oid(10),
+        oid(11),
+        oid(12),
+        oid(13),
+        ConformalWindow::try_new(0, CALIBRATION_SAMPLES + 1)?,
+        REGIME_EPOCH,
+        oid(200),
+        oid(201),
+    )?;
+    let mut exchangeable_covered = 0_u64;
+    let mut drift_covered = 0_u64;
+
+    for trial_index in 0..TRIALS {
+        let mut rng = DetRng::new(ROOT_SEED ^ trial_index.wrapping_mul(0xa076_1d64_78bd_642f));
+        let mut trial = GraphMetricConformal::try_new(identity, profile)?;
+        for sequence in 0..CALIBRATION_SAMPLES {
+            let value = (rng.next_u64() % 1_000_003) as f64;
+            trial.calibrate(SequencedMetricValue::new(
+                identity, profile, sequence, value,
+            ))?;
+        }
+
+        let held_out = (rng.next_u64() % 1_000_003) as f64;
+        let exchangeable = trial.assess(SequencedMetricValue::new(
+            identity,
+            profile,
+            CALIBRATION_SAMPLES,
+            held_out,
+        ))?;
+        exchangeable_covered += u64::from(exchangeable.conforming() == Some(true));
+
+        let shifted = trial.assess(SequencedMetricValue::new(
+            identity,
+            profile,
+            CALIBRATION_SAMPLES + 1,
+            held_out + DRIFT_OFFSET,
+        ))?;
+        drift_covered += u64::from(shifted.conforming() == Some(true));
+    }
+
+    let exchangeable_rate = exchangeable_covered as f64 / TRIALS as f64;
+    let drift_rate = drift_covered as f64 / TRIALS as f64;
+    let target_coverage = 1.0 - ALPHA;
+    let hoeffding_margin = ((1.0 / FAILURE_CONFIDENCE).ln() / (2.0 * TRIALS as f64)).sqrt();
+    assert!(
+        exchangeable_rate + hoeffding_margin >= target_coverage,
+        "seed={ROOT_SEED:#018x} trials={TRIALS} calibration={CALIBRATION_SAMPLES} \
+         alpha={ALPHA:.8} exchangeable_covered={exchangeable_covered} \
+         exchangeable_rate={exchangeable_rate:.8} target={target_coverage:.8} \
+         one_sided_hoeffding_margin={hoeffding_margin:.8} \
+         failure_confidence={FAILURE_CONFIDENCE:.1e}"
+    );
+    assert!(
+        drift_rate <= 0.05 && exchangeable_rate - drift_rate >= 0.75,
+        "seed={ROOT_SEED:#018x} trials={TRIALS} drift_offset={DRIFT_OFFSET} \
+         exchangeable_rate={exchangeable_rate:.8} drift_covered={drift_covered} \
+         drift_rate={drift_rate:.8}: planted drift did not materially degrade coverage"
+    );
+    Ok(())
+}
+
 fn logged_decision(sequence: u64, selected_a: bool) -> TestResult<LoggedDecision> {
     let half = Probability::try_from_numerator(PROBABILITY_SCALE / 2)?;
     let one = Outcome::try_from_scaled(OUTCOME_SCALE)?;
@@ -1082,7 +1275,7 @@ fn logged_decision(sequence: u64, selected_a: bool) -> TestResult<LoggedDecision
     )?)
 }
 
-fn run_ope(candidate_oid: ObjectId, fallback_oid: ObjectId) -> TestResult<OpeEvidence> {
+fn run_ope(candidate_oid: ObjectId, fallback_oid: ObjectId) -> TestResult<Vec<OpeEvidence>> {
     let identity = OpeIdentity::try_new(
         oid(33),
         OpeWindow::try_new(50, 53)?,
@@ -1098,191 +1291,16 @@ fn run_ope(candidate_oid: ObjectId, fallback_oid: ObjectId) -> TestResult<OpeEvi
     )?;
     let profile = OpeProfile::try_new(10 * WEIGHT_SCALE, 2, 4, 2, 8)?;
     let mut ledger = OpeLedger::try_new(identity, profile)?;
+    let mut prefixes = Vec::new();
     for sequence in 50..=53 {
         ledger.record(logged_decision(sequence, sequence % 2 == 0)?)?;
+        prefixes.push(ledger.evidence()?);
     }
-    Ok(ledger.evidence()?)
-}
-
-fn calibration_window(record: StatisticalLogRecord) -> TestResult<CalibrationWindow> {
-    let identity_window = record.identity_window();
-    let end = record
-        .batch()
-        .last()
-        .checked_add(1)
-        .ok_or_else(|| io::Error::other("statistical identity window end overflowed"))?;
-    Ok(CalibrationWindow::new(identity_window.first(), end)?)
+    Ok(prefixes)
 }
 
 fn evidence_envelope(record: StatisticalLogRecord) -> TestResult<EvidenceEnvelope> {
-    let evidence_oid = record.evidence_oid();
-    let statistic = record.statistic();
-    let (strata_identity, propensity_support_identity) = match statistic {
-        StatisticalStatistic::OffPolicyEvaluation { strata_oid, .. } => (
-            StrataIdentity::Bound(strata_oid),
-            PropensitySupportIdentity::Bound(evidence_oid),
-        ),
-        _ => (
-            StrataIdentity::NotApplicable,
-            PropensitySupportIdentity::NotApplicable,
-        ),
-    };
-    let (error_control, population, sampling_rule, power_or_effective_sample_size, assumptions) =
-        match statistic {
-            StatisticalStatistic::ExplorationBudget {
-                alpha_bits,
-                residual_rate_bits,
-                upper_bound_bits,
-                target_rate_bits,
-                total_runs,
-                discoveries,
-                recommended_additional_runs,
-            } => (
-                StatisticalErrorControl::try_alpha(f64::from_bits(alpha_bits))?,
-                "fixed-sextant-exploration-window".into(),
-                "complete-identity-bound-sequenced-novelty-prefix".into(),
-                format!(
-                    "runs={total_runs};discoveries={discoveries};residual_rate_bits=0x{residual_rate_bits:016x};upper_bound_bits=0x{upper_bound_bits:016x};target_rate_bits=0x{target_rate_bits:016x};recommended_additional_runs={recommended_additional_runs}"
-                ),
-                vec![
-                    "alpha-is-the-exploration-profile-alpha-only".into(),
-                    "exchangeable-binary-novelty-runs".into(),
-                ],
-            ),
-            StatisticalStatistic::ConformalCoverage {
-                alpha_bits,
-                mode,
-                minimum_calibration_samples,
-                maximum_calibration_samples,
-                threshold_bits,
-                nonconformity_score_bits,
-                coverage_target_bits,
-                assessments,
-                covered,
-                ..
-            } => (
-                StatisticalErrorControl::try_alpha(f64::from_bits(alpha_bits))?,
-                "fixed-sextant-conformal-population".into(),
-                "complete-identity-bound-calibration-plus-assessment".into(),
-                format!(
-                    "mode={mode:?};calibration_bounds={minimum_calibration_samples}..={maximum_calibration_samples};threshold_bits=0x{threshold_bits:016x};score_bits=0x{nonconformity_score_bits:016x};coverage_target_bits=0x{coverage_target_bits:016x};assessments={assessments};covered={covered}"
-                ),
-                vec![
-                    "alpha-is-the-conformal-profile-alpha-only".into(),
-                    "registered-population-and-selection".into(),
-                ],
-            ),
-            StatisticalStatistic::EProcess {
-                p0_bits,
-                lambda_bits,
-                alpha_bits,
-                max_evalue_bits,
-                e_value_bits,
-                rejection_threshold_bits,
-                observations,
-                one_observations,
-                ..
-            } => (
-                StatisticalErrorControl::try_alpha(f64::from_bits(alpha_bits))?,
-                "fixed-sextant-binary-observation-stream".into(),
-                "complete-identity-bound-filtration-prefix".into(),
-                format!(
-                    "p0_bits=0x{p0_bits:016x};lambda_bits=0x{lambda_bits:016x};max_evalue_bits=0x{max_evalue_bits:016x};e_value_bits=0x{e_value_bits:016x};rejection_threshold_bits=0x{rejection_threshold_bits:016x};observations={observations};one_observations={one_observations}"
-                ),
-                vec![
-                    "alpha-is-the-eprocess-profile-alpha-only".into(),
-                    "registered-null-and-filtration".into(),
-                ],
-            ),
-            StatisticalStatistic::OffPolicyEvaluation {
-                candidate_numerator,
-                fallback_numerator,
-                common_denominator,
-                candidate_ess_numerator,
-                candidate_ess_denominator,
-                observations,
-                zero_support_exclusions,
-                ..
-            } => (
-                StatisticalErrorControl::NotApplicable,
-                "fixed-sextant-logged-decision-window".into(),
-                "complete-identity-bound-action-propensity-ledger".into(),
-                format!(
-                    "error_control=not-applicable;candidate={candidate_numerator}/{common_denominator};fallback={fallback_numerator}/{common_denominator};candidate_ess={candidate_ess_numerator}/{candidate_ess_denominator};observations={observations};zero_support_exclusions={zero_support_exclusions}"
-                ),
-                vec![
-                    "alpha-does-not-apply-to-this-exact-rational-ope-claim".into(),
-                    "logged-action-support-and-exact-propensities".into(),
-                ],
-            ),
-            StatisticalStatistic::RegimeChange {
-                statistic,
-                threshold,
-                observations,
-                detections,
-            } => (
-                StatisticalErrorControl::NotApplicable,
-                "fixed-sextant-regime-stream".into(),
-                "complete-identity-bound-regime-prefix".into(),
-                format!(
-                    "error_control=not-applicable;detector_statistic={statistic};threshold={threshold};observations={observations};detections={detections}"
-                ),
-                vec![
-                    "alpha-does-not-apply-to-this-versioned-change-receipt".into(),
-                    "registered-runtime-series-and-combined-detector".into(),
-                ],
-            ),
-            StatisticalStatistic::AnnRecall {
-                confidence_exponent,
-                query_observations,
-                exact_baseline_results,
-                candidate_results,
-                intersection_hits,
-                interval_lower_units,
-                interval_upper_units,
-                assumptions_supported,
-                action,
-                action_reason,
-                ..
-            } => (
-                StatisticalErrorControl::try_alpha(2_f64.powi(-i32::from(confidence_exponent)))?,
-                "fixed-authorized-ann-query-population".into(),
-                "complete-keyed-fixed-window-top-k-comparison".into(),
-                format!(
-                    "queries={query_observations};baseline_results={exact_baseline_results};candidate_results={candidate_results};intersection_hits={intersection_hits};interval={interval_lower_units}..={interval_upper_units}/{RECALL_SCALE};action={action:?};reason={action_reason:?}"
-                ),
-                vec![
-                    format!("failure-probability-is-exactly-2^-{confidence_exponent}"),
-                    format!("all-interval-assumptions-supported={assumptions_supported}"),
-                    "exact-baseline-and-candidate-top-k-lists-are-complete".into(),
-                ],
-            ),
-            StatisticalStatistic::DrainProgress { .. } => {
-                return Err(io::Error::other(
-                    "drain-progress evidence is outside the Sextant fixture",
-                )
-                .into());
-            }
-        };
-
-    Ok(EvidenceEnvelope::new(
-        EvidenceClaim::StatisticalClaim {
-            population,
-            sampling_rule,
-            error_control,
-            power_or_effective_sample_size,
-            assumptions,
-        },
-        evidence_oid,
-        record.selected_policy_oid(),
-        strata_identity,
-        propensity_support_identity,
-        Some(calibration_window(record)?),
-        record.regime_epoch(),
-        FallbackBehavior::DeterministicPolicy {
-            policy_oid: record.pinned_fallback_oid(),
-        },
-    ))
+    Ok(record.try_to_evidence_envelope()?)
 }
 
 fn sorted_envelopes(
@@ -1317,7 +1335,7 @@ fn promote_epoch(
         fallback_oid,
     )?;
     let root_bytes = root.try_to_canonical_bytes()?;
-    let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root_bytes);
+    let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
     let envelopes = sorted_envelopes(promotion_records, candidate_oid)?;
     let evidence_refs: Vec<_> = envelopes
         .iter()
@@ -1340,7 +1358,7 @@ fn promote_epoch(
 
 fn revert_epoch(
     promoted_epoch: &DecisionPolicyEpoch,
-    promoted_epoch_bytes: &[u8],
+    _promoted_epoch_bytes: &[u8],
     shifted: &RegimeSignalEvidence,
     regime_record: StatisticalLogRecord,
 ) -> TestResult<(EvidenceEnvelope, DecisionPolicyEpoch, Vec<u8>)> {
@@ -1354,7 +1372,7 @@ fn revert_epoch(
     }
     let evidence_oid = regime_record.evidence_oid();
     let envelope = evidence_envelope(regime_record)?;
-    let predecessor_oid = FixtureOnlyIdentityAuthority::epoch_oid(promoted_epoch_bytes);
+    let predecessor_oid = FixtureOnlyIdentityAuthority::epoch_oid(promoted_epoch)?;
     let reverted = DecisionPolicyEpoch::try_revert_to_fallback(
         promoted_epoch,
         predecessor_oid,
@@ -1377,65 +1395,82 @@ fn revert_epoch(
 }
 
 fn build_statistical_log(
-    exploration: &ExplorationBudgetEvidence,
-    assessment: &AssessmentEvidence,
-    sequential: &EvidenceRecord,
-    ope: &OpeEvidence,
-    shifted: &RegimeSignalEvidence,
+    exploration: &[ExplorationBudgetEvidence],
+    assessments: &[AssessmentEvidence],
+    sequential: &[EvidenceRecord],
+    ope: &[OpeEvidence],
+    regime: &[RegimeSignalEvidence],
     ann_recall: &AnnRecallEvidence,
 ) -> TestResult<(StatisticalDecisionLog, Vec<u8>)> {
-    let mut log = StatisticalDecisionLog::try_new(6)?;
-    log.append(StatisticalLogRecord::try_from_exploration(
-        &FIXTURE_IDENTITY_AUTHORITY,
-        exploration,
-    )?)?;
-    log.append(StatisticalLogRecord::try_from_conformal(
-        &FIXTURE_IDENTITY_AUTHORITY,
-        assessment,
-    )?)?;
-    log.append(StatisticalLogRecord::try_from_eprocess(
-        &FIXTURE_IDENTITY_AUTHORITY,
-        sequential,
-    )?)?;
-    log.append(StatisticalLogRecord::try_from_ope(
-        &FIXTURE_IDENTITY_AUTHORITY,
-        ope,
-    )?)?;
-    log.append(StatisticalLogRecord::try_from_regime(
-        &FIXTURE_IDENTITY_AUTHORITY,
-        shifted,
-    )?)?;
+    const EXPECTED_RECORDS: usize = 2 + 6 + 3 + 4 + 8 + 1;
+    let mut log = StatisticalDecisionLog::try_new(EXPECTED_RECORDS)?;
+    for evidence in exploration {
+        log.append(StatisticalLogRecord::try_from_exploration(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            evidence,
+        )?)?;
+    }
+    for evidence in assessments {
+        log.append(StatisticalLogRecord::try_from_conformal(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            evidence,
+        )?)?;
+    }
+    for evidence in sequential {
+        log.append(StatisticalLogRecord::try_from_eprocess(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            evidence,
+        )?)?;
+    }
+    for evidence in ope {
+        log.append(StatisticalLogRecord::try_from_ope(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            evidence,
+        )?)?;
+    }
+    for evidence in regime {
+        log.append(StatisticalLogRecord::try_from_regime(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            evidence,
+        )?)?;
+    }
     log.append(StatisticalLogRecord::try_from_ann_recall(
         &FIXTURE_IDENTITY_AUTHORITY,
         ann_recall,
     )?)?;
+    assert_eq!(log.len(), EXPECTED_RECORDS);
     let encoded = log.encode_canonical()?;
-    let decoded = read_statistical_log(&encoded, 6)?;
+    let decoded = read_statistical_log(&encoded, EXPECTED_RECORDS)?;
     assert_eq!(decoded, log);
     Ok((log, encoded))
 }
 
 fn records_for_promotion(log: &StatisticalDecisionLog) -> Vec<StatisticalLogRecord> {
-    log.records()
-        .iter()
-        .copied()
-        .filter(|record| {
-            matches!(
-                record.monitor_kind(),
-                StatisticalMonitorKind::ExplorationBudget
-                    | StatisticalMonitorKind::ConformalThreshold
-                    | StatisticalMonitorKind::EProcess
-                    | StatisticalMonitorKind::OffPolicyEvaluation
-            )
-        })
-        .collect()
+    [
+        StatisticalMonitorKind::ExplorationBudget,
+        StatisticalMonitorKind::ConformalThreshold,
+        StatisticalMonitorKind::EProcess,
+        StatisticalMonitorKind::OffPolicyEvaluation,
+    ]
+    .into_iter()
+    .filter_map(|monitor| {
+        log.records()
+            .iter()
+            .rev()
+            .copied()
+            .find(|record| record.monitor_kind() == monitor)
+    })
+    .collect()
 }
 
 fn regime_record(log: &StatisticalDecisionLog) -> TestResult<StatisticalLogRecord> {
     log.records()
         .iter()
         .copied()
-        .find(|record| record.monitor_kind() == StatisticalMonitorKind::RegimeChange)
+        .find(|record| {
+            record.monitor_kind() == StatisticalMonitorKind::RegimeChange
+                && record.selected_policy_oid() == record.pinned_fallback_oid()
+        })
         .ok_or_else(|| io::Error::other("statistical log omitted regime evidence").into())
 }
 
@@ -1504,15 +1539,17 @@ fn run_fixture() -> TestResult<FixtureRun> {
     let candidate_oid = oid(40);
     let fallback_oid = oid(90);
     let exploration = run_exploration(candidate_oid, fallback_oid)?;
-    let (calibration, assessment) = run_conformal(candidate_oid, fallback_oid)?;
+    let (calibration, assessments) = run_conformal(candidate_oid, fallback_oid)?;
+    let assessment = assessments
+        .last()
+        .cloned()
+        .ok_or_else(|| io::Error::other("conformal fixture produced no assessment evidence"))?;
     let sequential_evidence = run_eprocess(candidate_oid, fallback_oid)?;
-    let ope = run_ope(candidate_oid, fallback_oid)?;
-    let final_exploration = exploration
+    let ope_prefixes = run_ope(candidate_oid, fallback_oid)?;
+    let ope = ope_prefixes
         .last()
-        .ok_or_else(|| io::Error::other("exploration fixture produced no evidence"))?;
-    let final_sequential = sequential_evidence
-        .last()
-        .ok_or_else(|| io::Error::other("e-process fixture produced no evidence"))?;
+        .cloned()
+        .ok_or_else(|| io::Error::other("OPE fixture produced no evidence"))?;
     let regime_evidence = run_regime_monitor(candidate_oid, fallback_oid)?;
     let shifted = regime_evidence
         .get(5)
@@ -1522,11 +1559,11 @@ fn run_fixture() -> TestResult<FixtureRun> {
         read_persisted_regime_evidence(&regime_evidence_bytes, regime_evidence_oid)?;
     let ann_recall = run_ann_recall()?;
     let (statistical_log, statistical_log_bytes) = build_statistical_log(
-        final_exploration,
-        &assessment,
-        final_sequential,
-        &ope,
-        &persisted_shifted,
+        &exploration,
+        &assessments,
+        &sequential_evidence,
+        &ope_prefixes,
+        &regime_evidence,
         &ann_recall.evidence,
     )?;
     let promotion_records = records_for_promotion(&statistical_log);
@@ -1545,15 +1582,17 @@ fn run_fixture() -> TestResult<FixtureRun> {
     )?;
     let sketch = run_sketch_maintenance()?;
     let no_regret = run_no_regret(
-        FixtureOnlyIdentityAuthority::epoch_oid(&promoted_epoch_bytes),
+        FixtureOnlyIdentityAuthority::epoch_oid(&promoted_epoch)?,
         regime_evidence_oid,
     )?;
 
     Ok(FixtureRun {
         exploration,
         calibration,
+        assessments,
         assessment,
         sequential_evidence,
+        ope_prefixes,
         ope,
         root_epoch_bytes,
         promotion_envelopes,
@@ -1574,13 +1613,16 @@ fn run_fixture() -> TestResult<FixtureRun> {
 }
 
 fn reconstruct_epochs_from_persisted_records(fixture: &FixtureRun) -> TestResult {
-    let decoded_log = read_statistical_log(&fixture.statistical_log_bytes, 6)?;
+    let decoded_log = read_statistical_log(
+        &fixture.statistical_log_bytes,
+        fixture.statistical_log.maximum_records(),
+    )?;
     let shifted = read_persisted_regime_evidence(
         &fixture.regime_evidence_bytes,
         fixture.regime_evidence_oid,
     )?;
     let root = DecisionPolicyEpoch::try_root_from_canonical_bytes(&fixture.root_epoch_bytes)?;
-    let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&fixture.root_epoch_bytes);
+    let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
     let promotion_records = records_for_promotion(&decoded_log);
     let promotion_envelopes = sorted_envelopes(&promotion_records, oid(40))?;
     let promoted = DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
@@ -1597,7 +1639,7 @@ fn reconstruct_epochs_from_persisted_records(fixture: &FixtureRun) -> TestResult
         StatisticalLogRecord::try_from_regime(&FIXTURE_IDENTITY_AUTHORITY, &shifted)?;
     assert_eq!(decoded_regime_record, expected_regime_record);
     let fallback_envelope = evidence_envelope(decoded_regime_record)?;
-    let promoted_oid = FixtureOnlyIdentityAuthority::epoch_oid(&fixture.promoted_epoch_bytes);
+    let promoted_oid = FixtureOnlyIdentityAuthority::epoch_oid(&promoted)?;
     let reverted = DecisionPolicyEpoch::try_fallback_from_canonical_bytes(
         &fixture.reverted_epoch_bytes,
         &promoted,
@@ -1636,6 +1678,156 @@ fn run_fixture_in_lab(seed: u64) -> TestResult<FixtureRun> {
         .take()
         .ok_or_else(|| io::Error::other("seeded lab fixture produced no result"))?
         .map_err(|message| io::Error::other(message).into())
+}
+
+fn unique_field_payload_offset(
+    encoded: &[u8],
+    field_tag: u8,
+    payload_len: u32,
+) -> TestResult<usize> {
+    let mut header = [0_u8; 5];
+    header[0] = field_tag;
+    header[1..].copy_from_slice(&payload_len.to_le_bytes());
+    let offsets: Vec<_> = encoded
+        .windows(header.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == header).then_some(offset + header.len()))
+        .collect();
+    if offsets.len() != 1 {
+        return Err(io::Error::other(format!(
+            "canonical field tag {field_tag:#04x} length {payload_len} occurred {} times",
+            offsets.len()
+        ))
+        .into());
+    }
+    Ok(offsets[0])
+}
+
+#[test]
+fn sextant_assumption_registration_is_complete_and_fail_closed() -> TestResult {
+    let fixture = run_fixture()?;
+    assert_eq!(fixture.statistical_log.len(), 24);
+    for record in fixture.statistical_log.records() {
+        let envelope = record.try_to_evidence_envelope()?;
+        assert_eq!(envelope.evidence_oid(), record.evidence_oid());
+        assert_eq!(
+            envelope.selection_policy_oid(),
+            record.selected_policy_oid()
+        );
+        assert_eq!(envelope.regime_epoch(), record.regime_epoch());
+        assert_eq!(
+            envelope.fallback(),
+            FallbackBehavior::DeterministicPolicy {
+                policy_oid: record.pinned_fallback_oid()
+            }
+        );
+        let window = envelope
+            .calibration_window()
+            .ok_or_else(|| io::Error::other("statistical envelope omitted its source window"))?;
+        assert_eq!(window.start_seq(), record.identity_window().first());
+        assert_eq!(window.end_seq(), record.batch().last() + 1);
+        match envelope.claim() {
+            EvidenceClaim::StatisticalClaim {
+                population,
+                sampling_rule,
+                power_or_effective_sample_size,
+                assumptions,
+                ..
+            } => {
+                assert!(!population.is_empty());
+                assert!(!sampling_rule.is_empty());
+                assert!(!power_or_effective_sample_size.is_empty());
+                assert!(
+                    assumptions.len() >= 3,
+                    "monitor {:?} omitted an assumption or its registered identity",
+                    record.monitor_kind()
+                );
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "statistical monitor projected a stronger claim: {other:?}"
+                ))
+                .into());
+            }
+        }
+    }
+
+    let mut tampered = fixture.statistical_log_bytes;
+    let final_byte = tampered
+        .last_mut()
+        .ok_or_else(|| io::Error::other("canonical statistical log was empty"))?;
+    *final_byte ^= 1;
+    assert!(
+        read_statistical_log(&tampered, 24).is_err(),
+        "a post-registration evidence mutation bypassed identity verification"
+    );
+    Ok(())
+}
+
+#[test]
+fn adaptive_decision_classification_is_closed_and_substitution_fails() -> TestResult {
+    for class in [
+        LogicalEffectClass::AnswerPreservingPhysical,
+        LogicalEffectClass::AnswerAffectingExecution,
+        LogicalEffectClass::CanonicalStateAffecting,
+    ] {
+        let root = DecisionPolicyEpoch::try_root(
+            "policy:classification",
+            0,
+            DecisionPolicyScope::new(oid(70)),
+            class,
+            oid(90),
+            oid(90),
+        )?;
+        let encoded = root.try_to_canonical_bytes()?;
+        assert_eq!(
+            DecisionPolicyEpoch::try_root_from_canonical_bytes(&encoded)?,
+            root
+        );
+    }
+
+    let fixture = run_fixture()?;
+    let root = DecisionPolicyEpoch::try_root_from_canonical_bytes(&fixture.root_epoch_bytes)?;
+    let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
+    let mut substituted_class = fixture.promoted_epoch_bytes.clone();
+    let effect_offset = unique_field_payload_offset(&substituted_class, 0x04, 1)?;
+    substituted_class[effect_offset] = LogicalEffectClass::AnswerPreservingPhysical as u8;
+    assert_eq!(
+        DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
+            &substituted_class,
+            &root,
+            root_oid,
+            &fixture.promotion_envelopes,
+        ),
+        Err(DecisionPolicyEpochError::LogicalEffectClassChanged)
+    );
+
+    let mut unknown_class = fixture.promoted_epoch_bytes.clone();
+    let effect_offset = unique_field_payload_offset(&unknown_class, 0x04, 1)?;
+    unknown_class[effect_offset] = 0xff;
+    assert_eq!(
+        DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
+            &unknown_class,
+            &root,
+            root_oid,
+            &fixture.promotion_envelopes,
+        ),
+        Err(DecisionPolicyEpochError::InvalidLogicalEffectClassTag { actual: 0xff })
+    );
+
+    let mut substituted_scope = fixture.promoted_epoch_bytes;
+    let scope_offset = unique_field_payload_offset(&substituted_scope, 0x03, 32)?;
+    substituted_scope[scope_offset] ^= 1;
+    assert_eq!(
+        DecisionPolicyEpoch::try_promoted_from_canonical_bytes(
+            &substituted_scope,
+            &root,
+            root_oid,
+            &fixture.promotion_envelopes,
+        ),
+        Err(DecisionPolicyEpochError::ScopeChanged)
+    );
+    Ok(())
 }
 
 #[test]
@@ -1693,11 +1885,10 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
     assert_eq!(first.promoted_epoch.version(), 1);
     assert_eq!(first.promoted_epoch.pinned_table_oid(), oid(40));
     assert_eq!(first.promoted_epoch.fallback_oid(), oid(90));
+    let decoded_root = DecisionPolicyEpoch::try_root_from_canonical_bytes(&first.root_epoch_bytes)?;
     assert_eq!(
         first.promoted_epoch.previous_epoch_oid(),
-        Some(FixtureOnlyIdentityAuthority::epoch_oid(
-            &first.root_epoch_bytes
-        ))
+        Some(FixtureOnlyIdentityAuthority::epoch_oid(&decoded_root)?)
     );
     let mut expected_promotion_refs: Vec<_> = records_for_promotion(&first.statistical_log)
         .iter()
@@ -1785,7 +1976,7 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
                     assert!(
                         assumptions
                             .iter()
-                            .any(|assumption| assumption.contains("alpha-does-not-apply"))
+                            .any(|assumption| assumption.contains("alpha does not apply"))
                     );
                 }
                 _ => {
@@ -1828,8 +2019,8 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
     assert_eq!(
         first.reverted_epoch.previous_epoch_oid(),
         Some(FixtureOnlyIdentityAuthority::epoch_oid(
-            &first.promoted_epoch_bytes
-        ))
+            &first.promoted_epoch
+        )?)
     );
     let persisted_regime_record = regime_record(&first.statistical_log)?;
     assert_eq!(
@@ -1848,14 +2039,33 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
             assert!(
                 assumptions
                     .iter()
-                    .any(|assumption| assumption.contains("alpha-does-not-apply"))
+                    .any(|assumption| assumption.contains("alpha does not apply"))
             );
         }
         _ => {
             return Err(io::Error::other("fallback envelope was not statistical").into());
         }
     }
-    assert_eq!(first.statistical_log.len(), 6);
+    assert_eq!(first.statistical_log.len(), 24);
+    for (monitor, expected) in [
+        (StatisticalMonitorKind::ExplorationBudget, 2),
+        (StatisticalMonitorKind::ConformalThreshold, 6),
+        (StatisticalMonitorKind::EProcess, 3),
+        (StatisticalMonitorKind::OffPolicyEvaluation, 4),
+        (StatisticalMonitorKind::RegimeChange, 8),
+        (StatisticalMonitorKind::AnnRecall, 1),
+    ] {
+        assert_eq!(
+            first
+                .statistical_log
+                .records()
+                .iter()
+                .filter(|record| record.monitor_kind() == monitor)
+                .count(),
+            expected,
+            "monitor {monitor:?} did not persist every decision-bearing observation batch"
+        );
+    }
     assert!(
         first
             .statistical_log
@@ -1874,6 +2084,7 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
         .statistical_log
         .records()
         .iter()
+        .rev()
         .copied()
         .find(|record| record.monitor_kind() == StatisticalMonitorKind::AnnRecall)
         .ok_or_else(|| io::Error::other("statistical log omitted ANN recall evidence"))?;
@@ -1993,8 +2204,10 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
     let replay = run_fixture_in_lab(LAB_SEED)?;
     assert_eq!(first.exploration, replay.exploration);
     assert_eq!(first.calibration, replay.calibration);
+    assert_eq!(first.assessments, replay.assessments);
     assert_eq!(first.assessment, replay.assessment);
     assert_eq!(first.sequential_evidence, replay.sequential_evidence);
+    assert_eq!(first.ope_prefixes, replay.ope_prefixes);
     assert_eq!(first.ope, replay.ope);
     assert_eq!(first.root_epoch_bytes, replay.root_epoch_bytes);
     assert_eq!(first.promotion_envelopes, replay.promotion_envelopes);

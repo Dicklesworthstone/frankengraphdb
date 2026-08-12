@@ -499,6 +499,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fgdb-claim",
+ "fgdb-crypto",
  "fgdb-evidence",
  "fgdb-sketch",
  "fgdb-types",
@@ -597,6 +598,7 @@ dependencies = [
  "asupersync",
  "fgdb-collections",
  "fgdb-types",
+ "fnx-generators",
 ]
 
 [[package]]

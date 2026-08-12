@@ -8023,8 +8023,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:sextant-assumption-registration"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:sextant-assumption-registration"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "sextant_assumption_registration_is_complete_and_fail_closed"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "sextant_assumption_registration_is_complete_and_fail_closed", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:database-specific-distributed-protocols"
@@ -8083,8 +8088,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:decision-classification"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:decision-classification"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "adaptive_decision_classification_is_closed_and_substitution_fails"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "adaptive_decision_classification_is_closed_and_substitution_fails", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:claims"
@@ -8123,8 +8133,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:generator-fixture-pinning"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:generator-fixture-pinning"
+package = "fgdb-sketch"
+target = "merge_algebra_properties"
+selector = "named_fixtures_are_produced_by_pinned_fnx_generators_and_drive_accuracy_contracts"
+command_argv = ["cargo", "test", "-p", "fgdb-sketch", "--test", "merge_algebra_properties", "named_fixtures_are_produced_by_pinned_fnx_generators_and_drive_accuracy_contracts", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:chronicle-scrub"
@@ -8233,8 +8248,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:sextant-evidence"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:sextant-evidence"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "sextant_evidence_promotes_then_stickily_reverts_on_regime_shift"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "sextant_evidence_promotes_then_stickily_reverts_on_regime_shift", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:transparency-proof-scope"
@@ -8393,13 +8413,23 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:conformal-coverage"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:conformal-coverage"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "conformal_marginal_coverage_holds_under_exchangeability_and_degrades_under_seeded_drift"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "conformal_marginal_coverage_holds_under_exchangeability_and_degrades_under_seeded_drift", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:eprocess-filtration"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:eprocess-filtration"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "eprocess_type_i_control_holds_under_null_and_adversarial_stopping"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "eprocess_type_i_control_holds_under_null_and_adversarial_stopping", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:regime-signal-fallback"

@@ -11,7 +11,7 @@ use std::fmt;
 use crate::regime::{RegimePolicySelection, RegimeSignalEvidence, RegimeSignalStatus};
 use fgdb_claim::EvidenceClaim;
 use fgdb_evidence::{EvidenceEnvelope, FallbackBehavior};
-use fgdb_types::ObjectId;
+use fgdb_types::{DatabaseSecurityNamespaceId, LogicalObjectKind, LogicalObjectKindCode, ObjectId};
 
 /// Domain separator for the version-1 canonical epoch encoding.
 pub const DECISION_POLICY_EPOCH_ENCODING_DOMAIN: &[u8] = b"fgdb:decision-policy-epoch";
@@ -549,6 +549,10 @@ pub struct DecisionPolicyEpoch {
     fallback_oid: ObjectId,
     evidence_refs: Vec<ObjectId>,
     previous_epoch_oid: Option<ObjectId>,
+}
+
+impl LogicalObjectKind for DecisionPolicyEpoch {
+    const OBJECT_KIND: LogicalObjectKindCode = LogicalObjectKindCode::DecisionPolicyEpoch;
 }
 
 impl DecisionPolicyEpoch {
@@ -1324,6 +1328,30 @@ impl DecisionPolicyEpoch {
         }
 
         Ok(encoded)
+    }
+
+    /// Derives the production §5.1 logical object identity for this epoch.
+    ///
+    /// The keyed database identity domain, security namespace, active
+    /// `DecisionPolicyEpoch` kind code, and complete canonical bytes all enter
+    /// the transcript. This is the same derivation used by Chronicle/Strata
+    /// logical objects; no unkeyed fixture hash or caller-supplied OID can
+    /// substitute for it.
+    pub fn try_object_id(
+        &self,
+        k_oid: &[u8; 32],
+        namespace: DatabaseSecurityNamespaceId,
+    ) -> Result<ObjectId, DecisionPolicyEpochError> {
+        let canonical = self.try_to_canonical_bytes()?;
+        Ok(ObjectId(
+            fgdb_crypto::logical_object_id(
+                k_oid,
+                &namespace.0,
+                &Self::OBJECT_KIND.code().to_le_bytes(),
+                &canonical,
+            )
+            .0,
+        ))
     }
 }
 
@@ -2316,6 +2344,81 @@ mod tests {
         expected.extend_from_slice(&[0x08, 33, 0, 0, 0, 1]);
         expected.extend_from_slice(&[5; 32]);
         assert_eq!(first_bytes, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn keyed_object_identity_binds_kind_namespace_key_and_complete_canonical_epoch() -> TestResult {
+        let epoch = root_with(
+            "policy:identity",
+            7,
+            scope(1),
+            LogicalEffectClass::CanonicalStateAffecting,
+            oid(2),
+            oid(3),
+        )?;
+        let canonical = epoch.try_to_canonical_bytes()?;
+        let key = [0x41; 32];
+        let namespace = DatabaseSecurityNamespaceId([0x52; 32]);
+        let object_id = epoch.try_object_id(&key, namespace)?;
+
+        assert_eq!(
+            DecisionPolicyEpoch::OBJECT_KIND,
+            LogicalObjectKindCode::DecisionPolicyEpoch
+        );
+        assert_eq!(DecisionPolicyEpoch::OBJECT_KIND.code(), 0x0582);
+        assert_eq!(
+            object_id,
+            ObjectId(
+                fgdb_crypto::logical_object_id(
+                    &key,
+                    &namespace.0,
+                    &LogicalObjectKindCode::DecisionPolicyEpoch
+                        .code()
+                        .to_le_bytes(),
+                    &canonical,
+                )
+                .0
+            ),
+            "the public helper must be the shared §5.1 keyed derivation"
+        );
+        assert_eq!(
+            DecisionPolicyEpoch::try_root_from_canonical_bytes(&canonical)?
+                .try_object_id(&key, namespace)?,
+            object_id,
+            "canonical replay must reproduce the exact ObjectId"
+        );
+
+        let different_namespace = DatabaseSecurityNamespaceId([0x53; 32]);
+        let different_key = [0x42; 32];
+        let different_epoch = root_with(
+            "policy:identity",
+            8,
+            scope(1),
+            LogicalEffectClass::CanonicalStateAffecting,
+            oid(2),
+            oid(3),
+        )?;
+        assert_ne!(
+            epoch.try_object_id(&key, different_namespace)?,
+            object_id,
+            "identity must not cross database security namespaces"
+        );
+        assert_ne!(
+            epoch.try_object_id(&different_key, namespace)?,
+            object_id,
+            "identity must not cross database K_oid domains"
+        );
+        assert_ne!(
+            different_epoch.try_object_id(&key, namespace)?,
+            object_id,
+            "one canonical field change must move the logical identity"
+        );
+        assert_ne!(
+            ObjectId(fgdb_crypto::logical_object_id(&key, &namespace.0, &[], &canonical).0),
+            object_id,
+            "omitting the active DecisionPolicyEpoch kind must change the identity"
+        );
         Ok(())
     }
 

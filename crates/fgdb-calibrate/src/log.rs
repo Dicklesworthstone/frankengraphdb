@@ -60,7 +60,13 @@
 
 use core::{cmp::Ordering, fmt};
 
-use fgdb_claim::RegistryClaimClass;
+use fgdb_claim::{
+    EvidenceClaim, InvalidStatisticalAlpha, RegistryClaimClass, StatisticalErrorControl,
+};
+use fgdb_evidence::{
+    CalibrationWindow, EvidenceEnvelope, FallbackBehavior, InvalidWindow,
+    PropensitySupportIdentity, StrataIdentity,
+};
 use fgdb_types::ObjectId;
 
 use crate::{
@@ -131,6 +137,16 @@ const MIN_STATISTIC_PAYLOAD_BYTES: usize = 25;
 const MAX_STATISTIC_PAYLOAD_BYTES: usize = 402;
 const MIN_CANONICAL_RECORD_BYTES: usize = RECORD_FIXED_BYTES + MIN_STATISTIC_PAYLOAD_BYTES;
 const MAX_CANONICAL_RECORD_BYTES: usize = RECORD_FIXED_BYTES + MAX_STATISTIC_PAYLOAD_BYTES;
+
+fn object_id_hex(oid: ObjectId) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in oid.0 {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
 
 /// Unkeyed digest of the canonical statistical-evidence body.
 ///
@@ -817,6 +833,57 @@ impl StatisticalBatchRange {
     #[must_use]
     pub const fn last(self) -> u64 {
         self.last
+    }
+}
+
+/// Failures while projecting validated statistical evidence into the complete
+/// envelope consumed by a decision-policy epoch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StatisticalEvidenceEnvelopeError {
+    /// The inclusive logged batch ended at `u64::MAX`, so it cannot be
+    /// represented by the envelope's half-open calibration window.
+    WindowEndOverflow {
+        /// Inclusive final sequence carried by the statistical record.
+        last: u64,
+    },
+    /// The record's source and batch ranges did not form a non-empty window.
+    InvalidWindow(InvalidWindow),
+    /// A statistic carried an alpha that cannot become a statistical claim.
+    InvalidAlpha(InvalidStatisticalAlpha),
+}
+
+impl fmt::Display for StatisticalEvidenceEnvelopeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WindowEndOverflow { last } => write!(
+                formatter,
+                "statistical batch ending at {last} cannot form a half-open evidence window"
+            ),
+            Self::InvalidWindow(error) => error.fmt(formatter),
+            Self::InvalidAlpha(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for StatisticalEvidenceEnvelopeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::WindowEndOverflow { .. } => None,
+            Self::InvalidWindow(error) => Some(error),
+            Self::InvalidAlpha(error) => Some(error),
+        }
+    }
+}
+
+impl From<InvalidWindow> for StatisticalEvidenceEnvelopeError {
+    fn from(error: InvalidWindow) -> Self {
+        Self::InvalidWindow(error)
+    }
+}
+
+impl From<InvalidStatisticalAlpha> for StatisticalEvidenceEnvelopeError {
+    fn from(error: InvalidStatisticalAlpha) -> Self {
+        Self::InvalidAlpha(error)
     }
 }
 
@@ -1521,6 +1588,258 @@ impl StatisticalLogRecord {
     #[must_use]
     pub const fn statistic(self) -> StatisticalStatistic {
         self.statistic
+    }
+
+    /// Projects this validated monitor record into the complete statistical
+    /// evidence envelope consumed by [`crate::policy_epoch::DecisionPolicyEpoch`].
+    ///
+    /// This is the production seam between the typed monitor log and policy
+    /// promotion. Population, sampling, error control, model assumptions,
+    /// immutable identities, the exact observation window, and the pinned
+    /// fallback are all derived from the record; callers cannot supply a
+    /// parallel prose description that disagrees with the evidence.
+    pub fn try_to_evidence_envelope(
+        self,
+    ) -> Result<EvidenceEnvelope, StatisticalEvidenceEnvelopeError> {
+        let evidence_oid = self.evidence_oid;
+        let filtration_or_window = object_id_hex(self.filtration_or_window_oid);
+        let monitor_oid = object_id_hex(self.monitor_oid);
+        let (
+            error_control,
+            population,
+            sampling_rule,
+            power_or_effective_sample_size,
+            assumptions,
+            strata_identity,
+            propensity_support_identity,
+        ) = match self.statistic {
+            StatisticalStatistic::ExplorationBudget {
+                alpha_bits,
+                residual_rate_bits,
+                upper_bound_bits,
+                target_rate_bits,
+                total_runs,
+                discoveries,
+                recommended_additional_runs,
+            } => (
+                StatisticalErrorControl::try_alpha(f64::from_bits(alpha_bits))?,
+                format!("exploration-window:{filtration_or_window}"),
+                "complete identity-bound sequenced novelty prefix".to_owned(),
+                format!(
+                    "runs={total_runs};discoveries={discoveries};residual_rate_bits=0x{residual_rate_bits:016x};upper_bound_bits=0x{upper_bound_bits:016x};target_rate_bits=0x{target_rate_bits:016x};recommended_additional_runs={recommended_additional_runs}"
+                ),
+                vec![
+                    "alpha is the registered exploration-profile alpha only".to_owned(),
+                    "binary novelty runs are exchangeable under the named window".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
+            StatisticalStatistic::ConformalCoverage {
+                population_oid,
+                selection_oid,
+                alpha_bits,
+                mode,
+                minimum_calibration_samples,
+                maximum_calibration_samples,
+                threshold_bits,
+                nonconformity_score_bits,
+                coverage_target_bits,
+                assessments,
+                covered,
+                ..
+            } => (
+                StatisticalErrorControl::try_alpha(f64::from_bits(alpha_bits))?,
+                format!("graph-metric-population:{}", object_id_hex(population_oid)),
+                format!(
+                    "split conformal selection:{} over window:{filtration_or_window}",
+                    object_id_hex(selection_oid)
+                ),
+                format!(
+                    "mode={mode:?};calibration_bounds={minimum_calibration_samples}..={maximum_calibration_samples};threshold_bits=0x{threshold_bits:016x};score_bits=0x{nonconformity_score_bits:016x};coverage_target_bits=0x{coverage_target_bits:016x};assessments={assessments};covered={covered}"
+                ),
+                vec![
+                    "alpha is the registered conformal-profile alpha only".to_owned(),
+                    "calibration and assessment observations are exchangeable under the named population and selection".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
+            StatisticalStatistic::EProcess {
+                profile_oid,
+                p0_bits,
+                lambda_bits,
+                alpha_bits,
+                max_evalue_bits,
+                e_value_bits,
+                rejection_threshold_bits,
+                observations,
+                one_observations,
+            } => (
+                StatisticalErrorControl::try_alpha(f64::from_bits(alpha_bits))?,
+                format!("binary-filtration:{filtration_or_window}"),
+                "complete identity-bound filtration prefix with anytime peeking".to_owned(),
+                format!(
+                    "profile_oid={};p0_bits=0x{p0_bits:016x};lambda_bits=0x{lambda_bits:016x};max_evalue_bits=0x{max_evalue_bits:016x};e_value_bits=0x{e_value_bits:016x};rejection_threshold_bits=0x{rejection_threshold_bits:016x};observations={observations};one_observations={one_observations}",
+                    object_id_hex(profile_oid)
+                ),
+                vec![
+                    "alpha is the registered e-process-profile alpha only".to_owned(),
+                    "the declared null and filtration make the e-value a nonnegative supermartingale".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
+            StatisticalStatistic::DrainProgress {
+                current_potential_bits,
+                confidence_bound_bits,
+                observations,
+                stall_detected,
+            } => (
+                StatisticalErrorControl::NotApplicable,
+                format!("drain-filtration:{filtration_or_window}"),
+                "complete identity-bound potential prefix".to_owned(),
+                format!(
+                    "error_control=not-applicable;current_potential_bits=0x{current_potential_bits:016x};confidence_bound_bits=0x{confidence_bound_bits:016x};observations={observations};stall_detected={stall_detected}"
+                ),
+                vec![
+                    "alpha does not apply to this bounded progress certificate".to_owned(),
+                    "the registered potential and maximum-step bound cover the complete prefix".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
+            StatisticalStatistic::RegimeChange {
+                statistic,
+                threshold,
+                observations,
+                detections,
+            } => (
+                StatisticalErrorControl::NotApplicable,
+                format!("regime-metric-stream:{filtration_or_window}"),
+                "complete identity-bound versioned detector prefix".to_owned(),
+                format!(
+                    "error_control=not-applicable;detector_statistic={statistic};threshold={threshold};observations={observations};detections={detections}"
+                ),
+                vec![
+                    "alpha does not apply to this versioned change-detector receipt".to_owned(),
+                    "the runtime metric series and detector profile are registered identities".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
+            StatisticalStatistic::OffPolicyEvaluation {
+                population_oid,
+                strata_oid,
+                action_space_oid,
+                policy_epoch_oid,
+                estimator_oid,
+                estimator,
+                failure_behavior,
+                candidate_numerator,
+                fallback_numerator,
+                common_denominator,
+                candidate_ess_numerator,
+                candidate_ess_denominator,
+                fallback_ess_numerator,
+                fallback_ess_denominator,
+                observations,
+                zero_support_exclusions,
+                selection_reason,
+                ..
+            } => (
+                StatisticalErrorControl::NotApplicable,
+                format!("logged-decision-population:{}", object_id_hex(population_oid)),
+                format!(
+                    "complete action-propensity ledger;action_space={};policy_epoch={}",
+                    object_id_hex(action_space_oid),
+                    object_id_hex(policy_epoch_oid)
+                ),
+                format!(
+                    "error_control=not-applicable;estimator={estimator:?};estimator_oid={};failure_behavior={failure_behavior:?};candidate={candidate_numerator}/{common_denominator};fallback={fallback_numerator}/{common_denominator};candidate_ess={candidate_ess_numerator}/{candidate_ess_denominator};fallback_ess={fallback_ess_numerator}/{fallback_ess_denominator};observations={observations};zero_support_exclusions={zero_support_exclusions};selection_reason={selection_reason:?}",
+                    object_id_hex(estimator_oid)
+                ),
+                vec![
+                    "alpha does not apply to this exact-rational off-policy evaluation".to_owned(),
+                    "every logged action carries exact realized support and propensity evidence".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::Bound(strata_oid),
+                PropensitySupportIdentity::Bound(evidence_oid),
+            ),
+            StatisticalStatistic::AnnRecall {
+                authorized_population_oid,
+                snapshot_oid,
+                sample_key_oid,
+                sample_design_oid,
+                exact_baseline_oid,
+                confidence_exponent,
+                query_observations,
+                exact_baseline_results,
+                candidate_results,
+                intersection_hits,
+                interval_scale,
+                interval_lower_units,
+                interval_upper_units,
+                assumptions_supported,
+                action,
+                action_reason,
+                ..
+            } => (
+                StatisticalErrorControl::try_alpha(2_f64.powi(-i32::from(confidence_exponent)))?,
+                format!(
+                    "authorized-ann-query-population:{};snapshot={}",
+                    object_id_hex(authorized_population_oid),
+                    object_id_hex(snapshot_oid)
+                ),
+                format!(
+                    "fixed keyed query sample:{};design={};exact_baseline={}",
+                    object_id_hex(sample_key_oid),
+                    object_id_hex(sample_design_oid),
+                    object_id_hex(exact_baseline_oid)
+                ),
+                format!(
+                    "queries={query_observations};baseline_results={exact_baseline_results};candidate_results={candidate_results};intersection_hits={intersection_hits};interval={interval_lower_units}..={interval_upper_units}/{interval_scale};action={action:?};reason={action_reason:?}"
+                ),
+                vec![
+                    format!("failure probability is exactly 2^-{confidence_exponent}"),
+                    format!("all interval assumptions supported={assumptions_supported}"),
+                    "exact-baseline and candidate result lists are complete".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
+        };
+
+        let batch_last = self.batch.last();
+        let end_seq = batch_last
+            .checked_add(1)
+            .ok_or(StatisticalEvidenceEnvelopeError::WindowEndOverflow { last: batch_last })?;
+        let calibration_window = CalibrationWindow::new(self.identity_window.first(), end_seq)?;
+        Ok(EvidenceEnvelope::new(
+            EvidenceClaim::StatisticalClaim {
+                population,
+                sampling_rule,
+                error_control,
+                power_or_effective_sample_size,
+                assumptions,
+            },
+            evidence_oid,
+            self.selected_policy_oid,
+            strata_identity,
+            propensity_support_identity,
+            Some(calibration_window),
+            self.regime_epoch,
+            FallbackBehavior::DeterministicPolicy {
+                policy_oid: self.pinned_fallback_oid,
+            },
+        ))
     }
 
     /// Encodes this record under the strict version-4 canonical format.
@@ -5281,6 +5600,66 @@ mod tests {
         assert_eq!(
             fallback.selection(),
             StatisticalPolicySelection::PinnedFallback
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_monitor_projects_a_complete_statistical_envelope_and_window_overflow_fails_closed()
+    -> TestResult {
+        let records = records_for_every_monitor()?;
+        assert_eq!(records.len(), 7, "closed monitor inventory changed");
+        for record in records {
+            let envelope = record.try_to_evidence_envelope()?;
+            assert_eq!(envelope.evidence_oid(), record.evidence_oid());
+            assert_eq!(
+                envelope.selection_policy_oid(),
+                record.selected_policy_oid()
+            );
+            assert_eq!(envelope.regime_epoch(), record.regime_epoch());
+            assert_eq!(
+                envelope.fallback(),
+                FallbackBehavior::DeterministicPolicy {
+                    policy_oid: record.pinned_fallback_oid()
+                }
+            );
+            let window = envelope
+                .calibration_window()
+                .expect("statistical records always carry a bounded window");
+            assert_eq!(window.start_seq(), record.identity_window().first());
+            assert_eq!(window.end_seq(), record.batch().last() + 1);
+            if let EvidenceClaim::StatisticalClaim {
+                population,
+                sampling_rule,
+                power_or_effective_sample_size,
+                assumptions,
+                ..
+            } = envelope.claim()
+            {
+                assert!(!population.is_empty());
+                assert!(!sampling_rule.is_empty());
+                assert!(!power_or_effective_sample_size.is_empty());
+                assert!(
+                    assumptions.len() >= 3,
+                    "{:?} omitted the model assumptions and monitor identity",
+                    record.monitor_kind()
+                );
+            } else {
+                assert!(
+                    matches!(envelope.claim(), EvidenceClaim::StatisticalClaim { .. }),
+                    "statistical record projected a stronger claim: {:?}",
+                    envelope.claim()
+                );
+            }
+        }
+
+        let terminal = eprocess_record_in_window(
+            StatisticalBatchRange::try_new(0, u64::MAX)?,
+            StatisticalBatchRange::try_new(u64::MAX, u64::MAX)?,
+        )?;
+        assert_eq!(
+            terminal.try_to_evidence_envelope(),
+            Err(StatisticalEvidenceEnvelopeError::WindowEndOverflow { last: u64::MAX })
         );
         Ok(())
     }
