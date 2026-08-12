@@ -86,7 +86,7 @@ use crate::{
         OpeSelectionReason, PROBABILITY_SCALE,
     },
     progress::DrainProgressEvidence,
-    regime::RegimeSignalEvidence,
+    regime::{BOCPD_SR_SCALE, BocpdSrEvidence, RegimeSignalEvidence},
 };
 
 /// Canonical record encoding version.
@@ -142,6 +142,16 @@ fn object_id_hex(oid: ObjectId) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(64);
     for byte in oid.0 {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn digest_hex(digest: StatisticalEvidenceDigest) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest.0 {
         encoded.push(char::from(HEX[usize::from(byte >> 4)]));
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
@@ -478,6 +488,37 @@ pub enum StatisticalStatistic {
         /// Foundation-surfaced combined receipts.
         detections: u64,
     },
+    /// Model-qualified BOCPD plus Shiryaev--Roberts combined signal.
+    BocpdSrRegimeChange {
+        /// Immutable model profile identity.
+        profile_oid: ObjectId,
+        /// Registered raw-metric to binary projection identity.
+        binary_projection_oid: ObjectId,
+        /// Digest of the complete canonical typed detector evidence.
+        typed_evidence_digest: StatisticalEvidenceDigest,
+        /// Exact fixed-point Shiryaev--Roberts statistic.
+        sr_statistic: u128,
+        /// Exact fixed-point Shiryaev--Roberts threshold.
+        sr_threshold: u128,
+        /// BOCPD run-zero posterior mass.
+        changepoint_mass: u64,
+        /// BOCPD run-zero posterior threshold.
+        changepoint_threshold_mass: u64,
+        /// Maximum-a-posteriori run-length bucket.
+        map_run_length: u32,
+        /// Posterior mass in the bounded tail bucket.
+        tail_mass: u64,
+        /// Accepted binary observations.
+        observations: u64,
+        /// Same-prefix joint crossings.
+        detections: u64,
+        /// Whether both detector thresholds crossed on this prefix.
+        combined_detected: bool,
+        /// Successor regime epoch, or zero before a crossing.
+        successor_regime_epoch: u64,
+        /// First successor-regime sequence, or zero before a crossing.
+        successor_effective_sequence: u64,
+    },
     /// Exact rational off-policy values and effective sample size.
     OffPolicyEvaluation {
         /// Population from which the logged trial window was selected.
@@ -623,6 +664,7 @@ impl StatisticalStatistic {
             Self::ExplorationBudget { .. } => 3,
             Self::DrainProgress { .. } => 4,
             Self::RegimeChange { .. } => 5,
+            Self::BocpdSrRegimeChange { .. } => 8,
             Self::OffPolicyEvaluation { .. } => 6,
             Self::AnnRecall { .. } => 7,
         }
@@ -635,6 +677,7 @@ impl StatisticalStatistic {
             Self::ExplorationBudget { .. } => 56,
             Self::DrainProgress { .. } => 25,
             Self::RegimeChange { .. } => 32,
+            Self::BocpdSrRegimeChange { .. } => 189,
             Self::OffPolicyEvaluation { .. } => 390,
             Self::AnnRecall { .. } => 402,
         }
@@ -759,6 +802,43 @@ impl StatisticalStatistic {
                     });
                 }
                 validate_subcount(StatisticField::Detections, detections, observations)
+            }
+            Self::BocpdSrRegimeChange {
+                sr_statistic,
+                sr_threshold,
+                changepoint_mass,
+                changepoint_threshold_mass,
+                tail_mass,
+                observations,
+                detections,
+                combined_detected,
+                successor_regime_epoch,
+                successor_effective_sequence,
+                ..
+            } => {
+                if sr_threshold == 0 {
+                    return Err(StatisticalLogRecordError::InvalidBocpdSrStatistic);
+                }
+                if changepoint_mass > BOCPD_SR_SCALE
+                    || changepoint_threshold_mass == 0
+                    || changepoint_threshold_mass >= BOCPD_SR_SCALE
+                    || tail_mass > BOCPD_SR_SCALE
+                {
+                    return Err(StatisticalLogRecordError::InvalidBocpdSrStatistic);
+                }
+                validate_subcount(StatisticField::Detections, detections, observations)?;
+                let crossed =
+                    sr_statistic >= sr_threshold && changepoint_mass >= changepoint_threshold_mass;
+                if combined_detected != crossed
+                    || combined_detected != (detections != 0)
+                    || (combined_detected
+                        && (successor_regime_epoch == 0 || successor_effective_sequence == 0))
+                    || (!combined_detected
+                        && (successor_regime_epoch != 0 || successor_effective_sequence != 0))
+                {
+                    return Err(StatisticalLogRecordError::InvalidBocpdSrStatistic);
+                }
+                Ok(())
             }
             Self::OffPolicyEvaluation {
                 clipping_weight_units,
@@ -1235,6 +1315,68 @@ impl StatisticalLogRecord {
                 threshold,
                 observations: evidence.observation_count(),
                 detections: evidence.detection_count(),
+            },
+        )
+    }
+
+    /// Constructs a single authenticated record from complete BOCPD plus SR
+    /// evidence.  The record binds the entire typed evidence digest and both
+    /// detector thresholds, so the policy layer never has to accept a second,
+    /// independently supplied evidence object for the same fallback.
+    pub fn try_from_bocpd_sr_regime(
+        identity_issuer: &impl StatisticalEvidenceIdentityIssuer,
+        evidence: &BocpdSrEvidence,
+    ) -> Result<Self, StatisticalLogRecordError> {
+        let identity = evidence.identity();
+        let identity_window =
+            StatisticalBatchRange::try_new(identity.window().first(), identity.window().last())?;
+        let batch = singleton_batch_from_cumulative_evidence(
+            StatisticalMonitorKind::RegimeChange,
+            identity.window().first(),
+            identity.window().last(),
+            evidence.through_sequence(),
+            evidence.observation_count(),
+        )?;
+        let canonical = evidence
+            .try_to_canonical_bytes()
+            .map_err(|_| StatisticalLogRecordError::BocpdSrEvidenceEncodingFailed)?;
+        let typed_evidence_digest =
+            StatisticalEvidenceDigest(asupersync::atp::object::compute_hash(&canonical));
+        let receipt = evidence.retained_receipts().last().copied();
+        let (successor_regime_epoch, successor_effective_sequence) =
+            receipt.map_or((0, 0), |receipt| {
+                (
+                    receipt.successor_regime_epoch(),
+                    receipt.successor_effective_sequence(),
+                )
+            });
+        Self::try_from_bound_parts(
+            identity_issuer,
+            StatisticalMonitorKind::RegimeChange,
+            identity.signal_oid(),
+            identity.metric_stream_oid(),
+            identity_window,
+            batch,
+            identity.regime_epoch(),
+            identity.candidate_decision_oid(),
+            identity.pinned_fallback_oid(),
+            evidence.selected_policy_oid(),
+            StatisticalStatistic::BocpdSrRegimeChange {
+                profile_oid: evidence.profile().detector_profile_oid(),
+                binary_projection_oid: evidence.profile().binary_projection_oid(),
+                typed_evidence_digest,
+                sr_statistic: evidence.sr_statistic(),
+                sr_threshold: evidence.profile().sr_threshold(),
+                changepoint_mass: evidence.changepoint_mass(),
+                changepoint_threshold_mass: evidence.profile().changepoint_threshold_mass(),
+                map_run_length: evidence.map_run_length(),
+                tail_mass: evidence.tail_mass(),
+                observations: evidence.observation_count(),
+                detections: evidence.detection_count(),
+                combined_detected: evidence.status()
+                    == crate::regime::RegimeSignalStatus::ChangeDetected,
+                successor_regime_epoch,
+                successor_effective_sequence,
             },
         )
     }
@@ -1737,6 +1879,42 @@ impl StatisticalLogRecord {
                 vec![
                     "alpha is the registered exploration-profile alpha only".to_owned(),
                     "binary novelty runs are exchangeable under the named window".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
+            StatisticalStatistic::BocpdSrRegimeChange {
+                profile_oid,
+                binary_projection_oid,
+                typed_evidence_digest,
+                sr_statistic,
+                sr_threshold,
+                changepoint_mass,
+                changepoint_threshold_mass,
+                map_run_length,
+                tail_mass,
+                observations,
+                detections,
+                combined_detected,
+                successor_regime_epoch,
+                successor_effective_sequence,
+            } => (
+                StatisticalErrorControl::NotApplicable,
+                format!("binary-regime-stream:{filtration_or_window}"),
+                format!(
+                    "complete identity-bound binary projection:{}",
+                    object_id_hex(binary_projection_oid)
+                ),
+                format!(
+                    "error_control=not-applicable;profile_oid={};typed_evidence_digest={};sr={sr_statistic}/{sr_threshold};changepoint_mass={changepoint_mass}/{changepoint_threshold_mass};map_run_length={map_run_length};tail_mass={tail_mass};observations={observations};detections={detections};combined_detected={combined_detected};successor_regime_epoch={successor_regime_epoch};successor_effective_sequence={successor_effective_sequence}",
+                    object_id_hex(profile_oid),
+                    digest_hex(typed_evidence_digest),
+                ),
+                vec![
+                    "alpha does not apply to this model-qualified BOCPD plus Shiryaev-Roberts receipt".to_owned(),
+                    "the binary projection, Bernoulli hypotheses, Beta prior, hazard, finite run cap, quantization, and conjunction rule are immutable profile identities".to_owned(),
+                    "the alarm is advisory and does not retroactively validate prior observations or replace dwell, hysteresis, or benefit guards".to_owned(),
                     format!("monitor_oid={monitor_oid}"),
                 ],
                 StrataIdentity::NotApplicable,
@@ -2523,6 +2701,8 @@ pub enum StatisticalLogRecordError {
         advantage: u128,
     },
     MissingRegimeDetectorSnapshot,
+    BocpdSrEvidenceEncodingFailed,
+    InvalidBocpdSrStatistic,
     EvidenceIdentityLengthOverflow,
     EvidenceIdentityAllocationFailed {
         requested: usize,
@@ -2754,6 +2934,12 @@ impl fmt::Display for StatisticalLogRecordError {
             ),
             Self::MissingRegimeDetectorSnapshot => {
                 formatter.write_str("regime evidence contains no detector snapshot")
+            }
+            Self::BocpdSrEvidenceEncodingFailed => {
+                formatter.write_str("BOCPD+SR evidence could not be canonically encoded")
+            }
+            Self::InvalidBocpdSrStatistic => {
+                formatter.write_str("BOCPD+SR statistical record is internally inconsistent")
             }
             Self::EvidenceIdentityLengthOverflow => {
                 formatter.write_str("canonical evidence identity length overflowed")
@@ -3591,7 +3777,15 @@ fn validate_record_parts(
             },
         );
     }
-    if monitor_kind.canonical_tag() != statistic.canonical_tag() {
+    let monitor_matches_statistic = monitor_kind.canonical_tag() == statistic.canonical_tag()
+        || matches!(
+            (monitor_kind, statistic),
+            (
+                StatisticalMonitorKind::RegimeChange,
+                StatisticalStatistic::BocpdSrRegimeChange { .. }
+            )
+        );
+    if !monitor_matches_statistic {
         return Err(StatisticalLogRecordError::MonitorStatisticMismatch {
             monitor: monitor_kind,
             statistic_tag: statistic.canonical_tag(),
@@ -4072,6 +4266,7 @@ const fn stable_statistic_identity_len(statistic: StatisticalStatistic) -> usize
         StatisticalStatistic::ExplorationBudget { .. } => 16,
         StatisticalStatistic::DrainProgress { .. } => 0,
         StatisticalStatistic::RegimeChange { .. } => 8,
+        StatisticalStatistic::BocpdSrRegimeChange { .. } => 96,
         StatisticalStatistic::OffPolicyEvaluation { .. } => 202,
         StatisticalStatistic::AnnRecall { .. } => 301,
     }
@@ -4121,6 +4316,19 @@ fn encode_stable_statistic_identity(bytes: &mut Vec<u8>, statistic: StatisticalS
         }
         StatisticalStatistic::DrainProgress { .. } => {}
         StatisticalStatistic::RegimeChange { threshold, .. } => push_i64(bytes, threshold),
+        StatisticalStatistic::BocpdSrRegimeChange {
+            profile_oid,
+            binary_projection_oid,
+            sr_threshold,
+            changepoint_threshold_mass,
+            ..
+        } => {
+            push_oid(bytes, profile_oid);
+            push_oid(bytes, binary_projection_oid);
+            push_u128(bytes, sr_threshold);
+            push_u64(bytes, changepoint_threshold_mass);
+            push_u64(bytes, BOCPD_SR_SCALE);
+        }
         StatisticalStatistic::OffPolicyEvaluation {
             population_oid,
             strata_oid,
@@ -4462,6 +4670,37 @@ fn encode_statistic(bytes: &mut Vec<u8>, statistic: StatisticalStatistic) {
             push_u64(bytes, observations);
             push_u64(bytes, detections);
         }
+        StatisticalStatistic::BocpdSrRegimeChange {
+            profile_oid,
+            binary_projection_oid,
+            typed_evidence_digest,
+            sr_statistic,
+            sr_threshold,
+            changepoint_mass,
+            changepoint_threshold_mass,
+            map_run_length,
+            tail_mass,
+            observations,
+            detections,
+            combined_detected,
+            successor_regime_epoch,
+            successor_effective_sequence,
+        } => {
+            push_oid(bytes, profile_oid);
+            push_oid(bytes, binary_projection_oid);
+            bytes.extend_from_slice(typed_evidence_digest.as_bytes());
+            push_u128(bytes, sr_statistic);
+            push_u128(bytes, sr_threshold);
+            push_u64(bytes, changepoint_mass);
+            push_u64(bytes, changepoint_threshold_mass);
+            push_u32(bytes, map_run_length);
+            push_u64(bytes, tail_mass);
+            push_u64(bytes, observations);
+            push_u64(bytes, detections);
+            bytes.push(u8::from(combined_detected));
+            push_u64(bytes, successor_regime_epoch);
+            push_u64(bytes, successor_effective_sequence);
+        }
         StatisticalStatistic::OffPolicyEvaluation {
             population_oid,
             strata_oid,
@@ -4609,6 +4848,7 @@ fn decode_statistic(
         5 => 32,
         6 => 390,
         7 => 402,
+        8 => 189,
         _ => return Err(StatisticalLogCodecError::UnknownStatisticKind { tag }),
     };
     if payload.len() != expected {
@@ -4732,6 +4972,22 @@ fn decode_statistic(
             assumptions_supported: decoder.read_bool(7, "assumptions_supported")?,
             action: decode_ann_action(decoder.read_u8()?)?,
             action_reason: decode_ann_action_reason(decoder.read_u8()?)?,
+        },
+        8 => StatisticalStatistic::BocpdSrRegimeChange {
+            profile_oid: decoder.read_oid()?,
+            binary_projection_oid: decoder.read_oid()?,
+            typed_evidence_digest: StatisticalEvidenceDigest(decoder.read_array::<32>()?),
+            sr_statistic: decoder.read_u128()?,
+            sr_threshold: decoder.read_u128()?,
+            changepoint_mass: decoder.read_u64()?,
+            changepoint_threshold_mass: decoder.read_u64()?,
+            map_run_length: decoder.read_u32()?,
+            tail_mass: decoder.read_u64()?,
+            observations: decoder.read_u64()?,
+            detections: decoder.read_u64()?,
+            combined_detected: decoder.read_bool(8, "combined_detected")?,
+            successor_regime_epoch: decoder.read_u64()?,
+            successor_effective_sequence: decoder.read_u64()?,
         },
         _ => return Err(StatisticalLogCodecError::UnknownStatisticKind { tag }),
     };

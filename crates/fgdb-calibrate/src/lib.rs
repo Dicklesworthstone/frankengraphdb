@@ -2,9 +2,10 @@
 
 //! Deterministic calibration primitives for FrankenGraphDB.
 //!
-//! This crate binds the statistical cores supplied by asupersync to complete,
-//! immutable FrankenGraphDB trial identities. It does not implement a second
-//! statistical engine.
+//! This crate binds statistical cores supplied by asupersync to complete,
+//! immutable FrankenGraphDB trial identities. The one local exception is the
+//! plan-mandated, model-qualified BOCPD plus Shiryaev--Roberts regime signal;
+//! it uses bounded checked fixed-point arithmetic and remains advisory.
 
 pub mod ann_recall;
 pub mod conformal;

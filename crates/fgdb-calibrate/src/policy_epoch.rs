@@ -8,7 +8,10 @@
 
 use std::fmt;
 
-use crate::regime::{RegimePolicySelection, RegimeSignalEvidence, RegimeSignalStatus};
+use crate::{
+    log::{StatisticalLogRecord, StatisticalMonitorKind, StatisticalStatistic},
+    regime::{RegimePolicySelection, RegimeSignalEvidence, RegimeSignalStatus},
+};
 use fgdb_claim::EvidenceClaim;
 use fgdb_evidence::{EvidenceEnvelope, FallbackBehavior};
 use fgdb_types::{DatabaseSecurityNamespaceId, LogicalObjectKind, LogicalObjectKindCode, ObjectId};
@@ -234,6 +237,18 @@ pub enum DecisionPolicyEpochError {
         window_start: u64,
         window_end: u64,
     },
+    /// A record-driven fallback did not carry the BOCPD plus SR statistic.
+    RegimeRecordMustBeBocpdSr,
+    /// A record-driven fallback did not report a same-prefix joint crossing.
+    RegimeRecordMustReportJointCrossing,
+    /// A record-driven fallback selected the wrong candidate or fallback.
+    RegimeRecordPolicyMismatch,
+    /// A record-driven fallback named a different regime epoch.
+    RegimeRecordEpochMismatch,
+    /// The record could not project its canonical FG-CAL-01 envelope.
+    RegimeRecordEnvelopeProjectionFailed,
+    /// The supplied envelope was not exactly the record-derived envelope.
+    RegimeRecordEnvelopeMismatch { evidence_oid: ObjectId },
     /// A canonical record ended before the declared component was complete.
     CanonicalTruncated {
         offset: usize,
@@ -461,6 +476,20 @@ impl fmt::Display for DecisionPolicyEpochError {
             } => write!(
                 formatter,
                 "fallback sequence {fallback_sequence} is outside regime evidence window [{window_start}, {window_end})"
+            ),
+            Self::RegimeRecordMustBeBocpdSr => formatter
+                .write_str("regime fallback record is not BOCPD plus Shiryaev-Roberts evidence"),
+            Self::RegimeRecordMustReportJointCrossing => formatter
+                .write_str("regime fallback record does not report both detector crossings"),
+            Self::RegimeRecordPolicyMismatch => formatter
+                .write_str("regime fallback record names a different candidate or fallback"),
+            Self::RegimeRecordEpochMismatch => formatter
+                .write_str("regime fallback record has an inconsistent successor epoch boundary"),
+            Self::RegimeRecordEnvelopeProjectionFailed => formatter
+                .write_str("regime fallback record could not derive its FG-CAL-01 envelope"),
+            Self::RegimeRecordEnvelopeMismatch { evidence_oid } => write!(
+                formatter,
+                "regime fallback envelope {evidence_oid:?} differs from the canonical record projection"
             ),
             Self::CanonicalTruncated {
                 offset,
@@ -704,6 +733,41 @@ impl DecisionPolicyEpoch {
         Ok(fallback)
     }
 
+    /// Constructs the next fallback epoch from one canonical BOCPD plus SR
+    /// statistical record.  The record is the single typed source: its exact
+    /// FG-CAL-01 envelope is recomputed here and must byte-semantically equal
+    /// the referenced envelope, eliminating a separately supplied detector
+    /// object that could disagree with the authenticated record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_revert_to_fallback_from_regime_record(
+        predecessor: &Self,
+        predecessor_oid: ObjectId,
+        evidence_refs: &[ObjectId],
+        evidence_envelopes: &[EvidenceEnvelope],
+        regime_record: StatisticalLogRecord,
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        validate_fallback_predecessor(predecessor)?;
+        let version = predecessor.version.checked_add(1).ok_or(
+            DecisionPolicyEpochError::VersionExhausted {
+                predecessor_version: predecessor.version,
+            },
+        )?;
+        let fallback = Self::try_from_parts(
+            predecessor.policy_id(),
+            version,
+            predecessor.scope,
+            predecessor.logical_effect_class,
+            predecessor.fallback_oid,
+            predecessor.fallback_oid,
+            evidence_refs,
+            Some(predecessor_oid),
+        )?;
+        fallback.validate_successor_identity_from(predecessor, predecessor_oid)?;
+        fallback.validate_statistical_evidence(evidence_envelopes)?;
+        fallback.validate_bocpd_sr_regime_record(predecessor, evidence_envelopes, regime_record)?;
+        Ok(fallback)
+    }
+
     /// Strictly decodes a canonical root epoch.
     ///
     /// Successor bytes are rejected here rather than exposing a raw decoder
@@ -759,6 +823,32 @@ impl DecisionPolicyEpoch {
             regime_evidence_oid,
             regime_evidence,
         )?;
+        Ok(epoch)
+    }
+
+    /// Strictly decodes and validates a record-driven BOCPD plus SR fallback
+    /// successor.  This is the persisted replay counterpart of
+    /// [`try_revert_to_fallback_from_regime_record`](Self::try_revert_to_fallback_from_regime_record).
+    pub fn try_fallback_from_canonical_bytes_from_regime_record(
+        encoded: &[u8],
+        predecessor: &Self,
+        predecessor_oid: ObjectId,
+        evidence_envelopes: &[EvidenceEnvelope],
+        regime_record: StatisticalLogRecord,
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        let epoch = Self::decode_canonical_bytes(encoded)?;
+        epoch.validate_successor_identity_from(predecessor, predecessor_oid)?;
+        validate_fallback_predecessor(predecessor)?;
+        if epoch.pinned_table_oid != epoch.fallback_oid {
+            return Err(
+                DecisionPolicyEpochError::FallbackTransitionMustSelectPinnedFallback {
+                    expected: epoch.fallback_oid,
+                    actual: epoch.pinned_table_oid,
+                },
+            );
+        }
+        epoch.validate_statistical_evidence(evidence_envelopes)?;
+        epoch.validate_bocpd_sr_regime_record(predecessor, evidence_envelopes, regime_record)?;
         Ok(epoch)
     }
 
@@ -1153,6 +1243,76 @@ impl DecisionPolicyEpoch {
                     window_end: window.end_seq(),
                 },
             );
+        }
+        Ok(())
+    }
+
+    fn validate_bocpd_sr_regime_record(
+        &self,
+        predecessor: &Self,
+        evidence_envelopes: &[EvidenceEnvelope],
+        record: StatisticalLogRecord,
+    ) -> Result<(), DecisionPolicyEpochError> {
+        if record.monitor_kind() != StatisticalMonitorKind::RegimeChange {
+            return Err(DecisionPolicyEpochError::RegimeRecordMustBeBocpdSr);
+        }
+        let StatisticalStatistic::BocpdSrRegimeChange {
+            sr_statistic,
+            sr_threshold,
+            changepoint_mass,
+            changepoint_threshold_mass,
+            detections,
+            combined_detected,
+            successor_regime_epoch,
+            successor_effective_sequence,
+            ..
+        } = record.statistic()
+        else {
+            return Err(DecisionPolicyEpochError::RegimeRecordMustBeBocpdSr);
+        };
+        if !combined_detected
+            || detections == 0
+            || sr_statistic < sr_threshold
+            || changepoint_mass < changepoint_threshold_mass
+        {
+            return Err(DecisionPolicyEpochError::RegimeRecordMustReportJointCrossing);
+        }
+        if record.candidate_decision_oid() != predecessor.pinned_table_oid
+            || record.pinned_fallback_oid() != predecessor.fallback_oid
+            || record.selected_policy_oid() != predecessor.fallback_oid
+        {
+            return Err(DecisionPolicyEpochError::RegimeRecordPolicyMismatch);
+        }
+        if successor_regime_epoch
+            != record
+                .regime_epoch()
+                .checked_add(1)
+                .ok_or(DecisionPolicyEpochError::RegimeRecordEpochMismatch)?
+            || successor_effective_sequence
+                != record
+                    .batch()
+                    .last()
+                    .checked_add(1)
+                    .ok_or(DecisionPolicyEpochError::RegimeRecordEpochMismatch)?
+        {
+            return Err(DecisionPolicyEpochError::RegimeRecordEpochMismatch);
+        }
+        let evidence_oid = record.evidence_oid();
+        let evidence_index = self
+            .evidence_refs
+            .binary_search(&evidence_oid)
+            .map_err(|_| DecisionPolicyEpochError::RegimeEvidenceRefMissing { evidence_oid })?;
+        let supplied = evidence_envelopes.get(evidence_index).ok_or(
+            DecisionPolicyEpochError::EvidenceEnvelopeCountMismatch {
+                referenced: self.evidence_refs.len(),
+                supplied: evidence_envelopes.len(),
+            },
+        )?;
+        let derived = record
+            .try_to_evidence_envelope()
+            .map_err(|_| DecisionPolicyEpochError::RegimeRecordEnvelopeProjectionFailed)?;
+        if *supplied != derived {
+            return Err(DecisionPolicyEpochError::RegimeRecordEnvelopeMismatch { evidence_oid });
         }
         Ok(())
     }

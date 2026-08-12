@@ -2404,6 +2404,1853 @@ fn copy_detector_id(value: &str) -> Result<String, RegimeBuildError> {
     Ok(owned)
 }
 
+/// Stable identity of the model-qualified BOCPD plus Shiryaev--Roberts signal.
+///
+/// This is deliberately distinct from [`COMBINED_REGIME_SIGNAL_ID`].  The
+/// latter permanently identifies the version-1 Page-Hinkley/CUSUM format;
+/// silently changing its meaning would make persisted evidence ambiguous.
+pub const BOCPD_SR_REGIME_SIGNAL_ID: &str = "fgdb.calibrate.regime.bocpd-sr";
+
+/// First version of the bounded Beta-Bernoulli BOCPD plus SR composition.
+pub const BOCPD_SR_REGIME_SIGNAL_VERSION: u32 = 1;
+
+/// Exact probability and likelihood-ratio scale used by the version-1 model.
+pub const BOCPD_SR_SCALE: u64 = 1_000_000;
+
+/// Absolute bound on retained BOCPD run-length hypotheses.
+pub const MAX_BOCPD_SR_RUN_LENGTH: usize = 4_096;
+
+/// Domain separator for canonical BOCPD plus SR evidence.
+pub const BOCPD_SR_EVIDENCE_ENCODING_DOMAIN: &[u8] = b"fgdb:bocpd-sr-regime-evidence";
+
+/// Current canonical BOCPD plus SR evidence encoding version.
+pub const BOCPD_SR_EVIDENCE_ENCODING_VERSION: u16 = 1;
+
+/// Construction, observation, arithmetic, or canonical-codec failure for the
+/// BOCPD plus SR regime signal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BocpdSrError {
+    /// The shared immutable identity was malformed.
+    Identity(RegimeBuildError),
+    /// The identity did not name the BOCPD plus SR contract exactly.
+    WrongDetectorContract,
+    /// Identity and profile referred to different immutable profile objects.
+    IdentityProfileOidMismatch,
+    /// A fixed-point probability was not strictly between zero and one.
+    InvalidProbability {
+        /// Stable profile-field name.
+        component: &'static str,
+        /// Rejected fixed-point mass.
+        value: u64,
+    },
+    /// A positive integer model parameter was zero.
+    ZeroParameter {
+        /// Stable profile-field name.
+        component: &'static str,
+    },
+    /// The run-length bound exceeded the implementation ceiling.
+    RunLengthLimitTooLarge {
+        /// Supplied bound.
+        actual: usize,
+        /// Largest supported bound.
+        maximum: usize,
+    },
+    /// The receipt bound exceeded the shared regime-evidence ceiling.
+    ReceiptLimitTooLarge {
+        /// Supplied bound.
+        actual: usize,
+        /// Largest supported bound.
+        maximum: usize,
+    },
+    /// The receipt bound exceeded the observation budget.
+    ReceiptLimitExceedsObservationLimit,
+    /// The observation budget exceeded the immutable source window.
+    ObservationLimitExceedsWindow,
+    /// The input belongs to another signal identity.
+    IdentityMismatch,
+    /// The input carries another detector profile.
+    ProfileMismatch,
+    /// The input was not the exact next source sequence.
+    UnexpectedSequence {
+        /// Required sequence.
+        expected: u64,
+        /// Supplied sequence.
+        actual: u64,
+    },
+    /// The immutable source window is complete.
+    WindowComplete,
+    /// The bounded observation budget is complete.
+    ObservationLimitReached,
+    /// Exact arithmetic could not represent the next state.
+    ArithmeticOverflow {
+        /// Stable operation name.
+        component: &'static str,
+    },
+    /// A bounded state or evidence allocation failed.
+    AllocationFailed,
+    /// Canonical bytes ended before one complete value was available.
+    Truncated {
+        /// Offset at which the read began.
+        offset: usize,
+        /// Bytes requested.
+        needed: usize,
+        /// Bytes remaining.
+        remaining: usize,
+    },
+    /// A canonical length could not be represented.
+    LengthOverflow,
+    /// A canonical discriminator was unknown.
+    InvalidTag {
+        /// Stable component name.
+        component: &'static str,
+        /// Rejected value.
+        actual: u8,
+    },
+    /// Canonical evidence violated a dynamic invariant.
+    InvalidState {
+        /// Stable diagnostic.
+        reason: &'static str,
+    },
+    /// Bytes remained after one complete evidence value.
+    TrailingBytes {
+        /// Unconsumed byte count.
+        remaining: usize,
+    },
+}
+
+impl From<RegimeBuildError> for BocpdSrError {
+    fn from(value: RegimeBuildError) -> Self {
+        Self::Identity(value)
+    }
+}
+
+impl fmt::Display for BocpdSrError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Identity(error) => write!(formatter, "invalid BOCPD+SR identity: {error}"),
+            Self::WrongDetectorContract => {
+                formatter.write_str("identity does not name BOCPD+SR version 1")
+            }
+            Self::IdentityProfileOidMismatch => {
+                formatter.write_str("BOCPD+SR identity/profile OIDs differ")
+            }
+            Self::InvalidProbability { component, value } => write!(
+                formatter,
+                "BOCPD+SR probability {component}={value} is outside 1..{BOCPD_SR_SCALE}"
+            ),
+            Self::ZeroParameter { component } => {
+                write!(formatter, "BOCPD+SR parameter {component} is zero")
+            }
+            Self::RunLengthLimitTooLarge { actual, maximum } => write!(
+                formatter,
+                "BOCPD+SR run-length limit {actual} exceeds {maximum}"
+            ),
+            Self::ReceiptLimitTooLarge { actual, maximum } => write!(
+                formatter,
+                "BOCPD+SR receipt limit {actual} exceeds {maximum}"
+            ),
+            Self::ReceiptLimitExceedsObservationLimit => {
+                formatter.write_str("BOCPD+SR receipt limit exceeds the observation limit")
+            }
+            Self::ObservationLimitExceedsWindow => {
+                formatter.write_str("BOCPD+SR observation limit exceeds the identity window")
+            }
+            Self::IdentityMismatch => formatter.write_str("BOCPD+SR identity mismatch"),
+            Self::ProfileMismatch => formatter.write_str("BOCPD+SR profile mismatch"),
+            Self::UnexpectedSequence { expected, actual } => write!(
+                formatter,
+                "expected BOCPD+SR sequence {expected}, received {actual}"
+            ),
+            Self::WindowComplete => formatter.write_str("BOCPD+SR window is complete"),
+            Self::ObservationLimitReached => {
+                formatter.write_str("BOCPD+SR observation limit reached")
+            }
+            Self::ArithmeticOverflow { component } => {
+                write!(formatter, "BOCPD+SR arithmetic overflow in {component}")
+            }
+            Self::AllocationFailed => formatter.write_str("BOCPD+SR allocation failed"),
+            Self::Truncated {
+                offset,
+                needed,
+                remaining,
+            } => write!(
+                formatter,
+                "truncated BOCPD+SR evidence at {offset}: need {needed}, have {remaining}"
+            ),
+            Self::LengthOverflow => formatter.write_str("BOCPD+SR length overflow"),
+            Self::InvalidTag { component, actual } => {
+                write!(formatter, "invalid BOCPD+SR {component} tag {actual}")
+            }
+            Self::InvalidState { reason } => {
+                write!(formatter, "invalid BOCPD+SR evidence state: {reason}")
+            }
+            Self::TrailingBytes { remaining } => {
+                write!(formatter, "{remaining} trailing BOCPD+SR evidence bytes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BocpdSrError {}
+
+/// Immutable, bounded model profile for one binary BOCPD plus SR signal.
+///
+/// The BOCPD branch uses a pinned Beta-Bernoulli reset-prior recurrence.  Each
+/// update quantizes predictive probabilities to [`BOCPD_SR_SCALE`], folds all
+/// run lengths beyond `max_run_length` into one declared tail cell, and uses
+/// deterministic largest-remainder normalization.  This is model-qualified
+/// advisory evidence, not a universal change-point or false-alarm guarantee.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct BocpdSrProfile {
+    detector_profile_oid: ObjectId,
+    binary_input_contract_oid: ObjectId,
+    null_one_mass: u64,
+    alternative_one_mass: u64,
+    beta_alpha: u64,
+    beta_beta: u64,
+    hazard_mass: u64,
+    sr_threshold: u128,
+    sr_cap: u128,
+    changepoint_threshold_mass: u64,
+    max_run_length: usize,
+    max_observations: usize,
+    max_retained_receipts: usize,
+}
+
+impl BocpdSrProfile {
+    /// Validates one complete version-1 binary model profile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        detector_profile_oid: ObjectId,
+        binary_input_contract_oid: ObjectId,
+        null_one_mass: u64,
+        alternative_one_mass: u64,
+        beta_alpha: u64,
+        beta_beta: u64,
+        hazard_mass: u64,
+        sr_threshold: u128,
+        sr_cap: u128,
+        changepoint_threshold_mass: u64,
+        max_run_length: usize,
+        max_observations: usize,
+        max_retained_receipts: usize,
+    ) -> Result<Self, BocpdSrError> {
+        for (component, value) in [
+            ("null_one_mass", null_one_mass),
+            ("alternative_one_mass", alternative_one_mass),
+            ("hazard_mass", hazard_mass),
+            ("changepoint_threshold_mass", changepoint_threshold_mass),
+        ] {
+            if value == 0 || value >= BOCPD_SR_SCALE {
+                return Err(BocpdSrError::InvalidProbability { component, value });
+            }
+        }
+        for (component, value) in [
+            ("beta_alpha", beta_alpha),
+            ("beta_beta", beta_beta),
+            ("max_run_length", canonical_count(max_run_length)),
+            ("max_observations", canonical_count(max_observations)),
+            (
+                "max_retained_receipts",
+                canonical_count(max_retained_receipts),
+            ),
+        ] {
+            if value == 0 {
+                return Err(BocpdSrError::ZeroParameter { component });
+            }
+        }
+        if sr_threshold == 0 {
+            return Err(BocpdSrError::ZeroParameter {
+                component: "sr_threshold",
+            });
+        }
+        if sr_cap < sr_threshold {
+            return Err(BocpdSrError::InvalidState {
+                reason: "SR cap is below the alarm threshold",
+            });
+        }
+        let maximum_sr_cap = u128::MAX
+            .checked_div(u128::from(BOCPD_SR_SCALE))
+            .and_then(|value| value.checked_sub(u128::from(BOCPD_SR_SCALE)))
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "sr-cap-bound",
+            })?;
+        if sr_cap > maximum_sr_cap {
+            return Err(BocpdSrError::InvalidState {
+                reason: "SR cap exceeds the checked recurrence bound",
+            });
+        }
+        if max_run_length > MAX_BOCPD_SR_RUN_LENGTH {
+            return Err(BocpdSrError::RunLengthLimitTooLarge {
+                actual: max_run_length,
+                maximum: MAX_BOCPD_SR_RUN_LENGTH,
+            });
+        }
+        if max_observations > MAX_REGIME_OBSERVATIONS {
+            return Err(BocpdSrError::ZeroParameter {
+                component: "max_observations_out_of_range",
+            });
+        }
+        if max_retained_receipts > MAX_RETAINED_REGIME_RECEIPTS {
+            return Err(BocpdSrError::ReceiptLimitTooLarge {
+                actual: max_retained_receipts,
+                maximum: MAX_RETAINED_REGIME_RECEIPTS,
+            });
+        }
+        if max_retained_receipts > max_observations {
+            return Err(BocpdSrError::ReceiptLimitExceedsObservationLimit);
+        }
+        let observation_bound = u64::try_from(max_observations)
+            .map_err(|_| BocpdSrError::LengthOverflow)?;
+        if beta_alpha
+            .checked_add(beta_beta)
+            .and_then(|sum| sum.checked_add(observation_bound))
+            .is_none()
+        {
+            return Err(BocpdSrError::InvalidState {
+                reason: "Beta prior cannot represent the declared observation budget",
+            });
+        }
+        Ok(Self {
+            detector_profile_oid,
+            binary_input_contract_oid,
+            null_one_mass,
+            alternative_one_mass,
+            beta_alpha,
+            beta_beta,
+            hazard_mass,
+            sr_threshold,
+            sr_cap,
+            changepoint_threshold_mass,
+            max_run_length,
+            max_observations,
+            max_retained_receipts,
+        })
+    }
+
+    /// OID of the complete parameter object.
+    #[must_use]
+    pub const fn detector_profile_oid(&self) -> ObjectId {
+        self.detector_profile_oid
+    }
+
+    /// Identity of the already-projected binary input contract.
+    ///
+    /// Version 1 deliberately does not transform arbitrary raw metrics.  A
+    /// producer must register and persist that upstream transformation, then
+    /// feed this monitor the resulting immutable binary stream.
+    #[must_use]
+    pub const fn binary_input_contract_oid(&self) -> ObjectId {
+        self.binary_input_contract_oid
+    }
+
+    /// Null probability of a one, scaled by [`BOCPD_SR_SCALE`].
+    #[must_use]
+    pub const fn null_one_mass(&self) -> u64 {
+        self.null_one_mass
+    }
+
+    /// Alternative probability of a one, scaled by [`BOCPD_SR_SCALE`].
+    #[must_use]
+    pub const fn alternative_one_mass(&self) -> u64 {
+        self.alternative_one_mass
+    }
+
+    /// Constant BOCPD hazard, scaled by [`BOCPD_SR_SCALE`].
+    #[must_use]
+    pub const fn hazard_mass(&self) -> u64 {
+        self.hazard_mass
+    }
+
+    /// SR alarm threshold in fixed-point likelihood-ratio units.
+    #[must_use]
+    pub const fn sr_threshold(&self) -> u128 {
+        self.sr_threshold
+    }
+
+    /// Saturating bound for the SR statistic.  The cap is immutable evidence
+    /// identity and must be no smaller than the alarm threshold.
+    #[must_use]
+    pub const fn sr_cap(&self) -> u128 {
+        self.sr_cap
+    }
+
+    /// BOCPD run-zero posterior threshold.
+    #[must_use]
+    pub const fn changepoint_threshold_mass(&self) -> u64 {
+        self.changepoint_threshold_mass
+    }
+
+    /// Largest exact run-length cell before tail folding.
+    #[must_use]
+    pub const fn max_run_length(&self) -> usize {
+        self.max_run_length
+    }
+
+    /// Maximum accepted observations.
+    #[must_use]
+    pub const fn max_observations(&self) -> usize {
+        self.max_observations
+    }
+}
+
+/// Binary observation vocabulary for the version-1 model.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum BocpdSrObservation {
+    /// The bound pre-projected binary stream emitted zero.
+    Zero = 0,
+    /// The bound pre-projected binary stream emitted one.
+    One = 1,
+}
+
+/// One immutable, exactly sequenced BOCPD plus SR input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequencedBocpdSrObservation {
+    identity: RegimeSignalIdentity,
+    profile: BocpdSrProfile,
+    stream_sequence: u64,
+    observation: BocpdSrObservation,
+}
+
+impl SequencedBocpdSrObservation {
+    /// Constructs one immutable input envelope.
+    #[must_use]
+    pub const fn new(
+        identity: RegimeSignalIdentity,
+        profile: BocpdSrProfile,
+        stream_sequence: u64,
+        observation: BocpdSrObservation,
+    ) -> Self {
+        Self {
+            identity,
+            profile,
+            stream_sequence,
+            observation,
+        }
+    }
+}
+
+/// One bounded posterior run-length hypothesis.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BocpdSrRunState {
+    run_length: u32,
+    posterior_mass: u64,
+    successes: u64,
+    failures: u64,
+}
+
+impl BocpdSrRunState {
+    /// Run length represented by this cell.
+    #[must_use]
+    pub const fn run_length(self) -> u32 {
+        self.run_length
+    }
+
+    /// Normalized posterior mass over [`BOCPD_SR_SCALE`].
+    #[must_use]
+    pub const fn posterior_mass(self) -> u64 {
+        self.posterior_mass
+    }
+
+    /// Effective one count retained by the Beta-Bernoulli cell.
+    #[must_use]
+    pub const fn successes(self) -> u64 {
+        self.successes
+    }
+
+    /// Effective zero count retained by the Beta-Bernoulli cell.
+    #[must_use]
+    pub const fn failures(self) -> u64 {
+        self.failures
+    }
+}
+
+/// One same-sample crossing of both SR and BOCPD thresholds.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BocpdSrReceipt {
+    stream_sequence: u64,
+    sr_statistic: u128,
+    sr_threshold: u128,
+    changepoint_mass: u64,
+    changepoint_threshold_mass: u64,
+    map_run_length: u32,
+    tail_mass: u64,
+    successor_regime_epoch: u64,
+    successor_effective_sequence: u64,
+}
+
+impl BocpdSrReceipt {
+    /// Source sequence where both detectors crossed.
+    #[must_use]
+    pub const fn stream_sequence(self) -> u64 {
+        self.stream_sequence
+    }
+
+    /// Updated SR statistic.
+    #[must_use]
+    pub const fn sr_statistic(self) -> u128 {
+        self.sr_statistic
+    }
+
+    /// Configured SR crossing threshold.
+    #[must_use]
+    pub const fn sr_threshold(self) -> u128 {
+        self.sr_threshold
+    }
+
+    /// Updated BOCPD run-zero posterior mass.
+    #[must_use]
+    pub const fn changepoint_mass(self) -> u64 {
+        self.changepoint_mass
+    }
+
+    /// Configured BOCPD run-zero posterior threshold.
+    #[must_use]
+    pub const fn changepoint_threshold_mass(self) -> u64 {
+        self.changepoint_threshold_mass
+    }
+
+    /// Maximum-a-posteriori run-length bucket at the crossing.
+    #[must_use]
+    pub const fn map_run_length(self) -> u32 {
+        self.map_run_length
+    }
+
+    /// Folded tail mass at the crossing.
+    #[must_use]
+    pub const fn tail_mass(self) -> u64 {
+        self.tail_mass
+    }
+
+    /// New regime epoch created by this terminal receipt.
+    #[must_use]
+    pub const fn successor_regime_epoch(self) -> u64 {
+        self.successor_regime_epoch
+    }
+
+    /// First source sequence belonging to the successor regime.
+    #[must_use]
+    pub const fn successor_effective_sequence(self) -> u64 {
+        self.successor_effective_sequence
+    }
+
+    /// A receipt is assumption-bearing evidence, never ground truth.
+    #[must_use]
+    pub const fn is_ground_truth(self) -> bool {
+        false
+    }
+}
+
+/// Complete deterministic evidence after a binary observation prefix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BocpdSrEvidence {
+    identity: RegimeSignalIdentity,
+    profile: BocpdSrProfile,
+    through_sequence: Option<u64>,
+    observation_count: u64,
+    sr_statistic: u128,
+    changepoint_mass: u64,
+    map_run_length: u32,
+    tail_mass: u64,
+    detection_count: u64,
+    dropped_receipt_count: u64,
+    fallback_sequence: Option<u64>,
+    observations: Vec<BocpdSrObservation>,
+    run_states: Vec<BocpdSrRunState>,
+    retained_receipts: Vec<BocpdSrReceipt>,
+}
+
+impl BocpdSrEvidence {
+    /// Immutable signal identity.
+    #[must_use]
+    pub const fn identity(&self) -> &RegimeSignalIdentity {
+        &self.identity
+    }
+
+    /// Immutable model profile.
+    #[must_use]
+    pub const fn profile(&self) -> &BocpdSrProfile {
+        &self.profile
+    }
+
+    /// Last accepted sequence.
+    #[must_use]
+    pub const fn through_sequence(&self) -> Option<u64> {
+        self.through_sequence
+    }
+
+    /// Accepted binary observations.
+    #[must_use]
+    pub const fn observation_count(&self) -> u64 {
+        self.observation_count
+    }
+
+    /// Exact accepted binary prefix.  Retaining this bounded prefix makes a
+    /// decoded resume state mechanically replay-checkable instead of merely
+    /// shape-valid.
+    #[must_use]
+    pub fn observations(&self) -> &[BocpdSrObservation] {
+        &self.observations
+    }
+
+    /// Current SR statistic.
+    #[must_use]
+    pub const fn sr_statistic(&self) -> u128 {
+        self.sr_statistic
+    }
+
+    /// Current BOCPD run-zero posterior mass.
+    #[must_use]
+    pub const fn changepoint_mass(&self) -> u64 {
+        self.changepoint_mass
+    }
+
+    /// Current maximum-a-posteriori run length.
+    #[must_use]
+    pub const fn map_run_length(&self) -> u32 {
+        self.map_run_length
+    }
+
+    /// Posterior mass in the declared folded tail cell.
+    #[must_use]
+    pub const fn tail_mass(&self) -> u64 {
+        self.tail_mass
+    }
+
+    /// Total same-sample joint crossings, including evicted receipts.
+    #[must_use]
+    pub const fn detection_count(&self) -> u64 {
+        self.detection_count
+    }
+
+    /// First sequence that selected the deterministic fallback.
+    #[must_use]
+    pub const fn fallback_sequence(&self) -> Option<u64> {
+        self.fallback_sequence
+    }
+
+    /// Advisory combined-signal status.
+    #[must_use]
+    pub const fn status(&self) -> RegimeSignalStatus {
+        if self.fallback_sequence.is_some() {
+            RegimeSignalStatus::ChangeDetected
+        } else {
+            RegimeSignalStatus::NoChangeDetected
+        }
+    }
+
+    /// Sticky policy selection derived from the first combined receipt.
+    #[must_use]
+    pub const fn selection(&self) -> RegimePolicySelection {
+        if self.fallback_sequence.is_some() {
+            RegimePolicySelection::PinnedFallback
+        } else {
+            RegimePolicySelection::CandidateDecision
+        }
+    }
+
+    /// Exact selected policy identity.
+    #[must_use]
+    pub const fn selected_policy_oid(&self) -> ObjectId {
+        match self.selection() {
+            RegimePolicySelection::CandidateDecision => self.identity.candidate_decision_oid,
+            RegimePolicySelection::PinnedFallback => self.identity.pinned_fallback_oid,
+        }
+    }
+
+    /// Ordered posterior cells, starting at run length zero.
+    #[must_use]
+    pub fn run_states(&self) -> &[BocpdSrRunState] {
+        &self.run_states
+    }
+
+    /// Retained joint-crossing receipts in ascending sequence order.
+    #[must_use]
+    pub fn retained_receipts(&self) -> &[BocpdSrReceipt] {
+        &self.retained_receipts
+    }
+
+    /// Canonical, strict evidence encoding.
+    pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, BocpdSrError> {
+        validate_bocpd_sr_evidence(self)?;
+        let mut encoder = BocpdSrEncoder::try_with_capacity(bocpd_sr_encoded_len(self)?)?;
+        encoder.write_u16(
+            u16::try_from(BOCPD_SR_EVIDENCE_ENCODING_DOMAIN.len())
+                .map_err(|_| BocpdSrError::LengthOverflow)?,
+        );
+        encoder.write_bytes(BOCPD_SR_EVIDENCE_ENCODING_DOMAIN);
+        encoder.write_u16(BOCPD_SR_EVIDENCE_ENCODING_VERSION);
+        encode_bocpd_sr_identity(&mut encoder, &self.identity)?;
+        encode_bocpd_sr_profile(&mut encoder, &self.profile)?;
+        encoder.write_optional_u64(self.through_sequence);
+        encoder.write_u64(self.observation_count);
+        encoder.write_u128(self.sr_statistic);
+        encoder.write_u64(self.changepoint_mass);
+        encoder.write_u32(self.map_run_length);
+        encoder.write_u64(self.tail_mass);
+        encoder.write_u64(self.detection_count);
+        encoder.write_u64(self.dropped_receipt_count);
+        encoder.write_optional_u64(self.fallback_sequence);
+        encoder.write_u32(
+            u32::try_from(self.observations.len()).map_err(|_| BocpdSrError::LengthOverflow)?,
+        );
+        for observation in &self.observations {
+            encoder.write_u8(*observation as u8);
+        }
+        encoder.write_u32(
+            u32::try_from(self.run_states.len()).map_err(|_| BocpdSrError::LengthOverflow)?,
+        );
+        for state in &self.run_states {
+            encoder.write_u32(state.run_length);
+            encoder.write_u64(state.posterior_mass);
+            encoder.write_u64(state.successes);
+            encoder.write_u64(state.failures);
+        }
+        encoder.write_u32(
+            u32::try_from(self.retained_receipts.len())
+                .map_err(|_| BocpdSrError::LengthOverflow)?,
+        );
+        for receipt in &self.retained_receipts {
+            encoder.write_u64(receipt.stream_sequence);
+            encoder.write_u128(receipt.sr_statistic);
+            encoder.write_u128(receipt.sr_threshold);
+            encoder.write_u64(receipt.changepoint_mass);
+            encoder.write_u64(receipt.changepoint_threshold_mass);
+            encoder.write_u32(receipt.map_run_length);
+            encoder.write_u64(receipt.tail_mass);
+            encoder.write_u64(receipt.successor_regime_epoch);
+            encoder.write_u64(receipt.successor_effective_sequence);
+        }
+        Ok(encoder.finish())
+    }
+
+    /// Strictly decodes and validates one complete canonical evidence record.
+    pub fn try_from_canonical_bytes(bytes: &[u8]) -> Result<Self, BocpdSrError> {
+        let mut decoder = BocpdSrDecoder::new(bytes);
+        let domain_length = usize::from(decoder.read_u16()?);
+        if domain_length != BOCPD_SR_EVIDENCE_ENCODING_DOMAIN.len()
+            || decoder.read_bytes(domain_length)? != BOCPD_SR_EVIDENCE_ENCODING_DOMAIN
+        {
+            return Err(BocpdSrError::InvalidState {
+                reason: "encoding domain mismatch",
+            });
+        }
+        let version = decoder.read_u16()?;
+        if version != BOCPD_SR_EVIDENCE_ENCODING_VERSION {
+            return Err(BocpdSrError::InvalidState {
+                reason: "unsupported encoding version",
+            });
+        }
+        let identity = decode_bocpd_sr_identity(&mut decoder)?;
+        let profile = decode_bocpd_sr_profile(&mut decoder)?;
+        let through_sequence = decoder.read_optional_u64("through-sequence")?;
+        let observation_count = decoder.read_u64()?;
+        let sr_statistic = decoder.read_u128()?;
+        let changepoint_mass = decoder.read_u64()?;
+        let map_run_length = decoder.read_u32()?;
+        let tail_mass = decoder.read_u64()?;
+        let detection_count = decoder.read_u64()?;
+        let dropped_receipt_count = decoder.read_u64()?;
+        let fallback_sequence = decoder.read_optional_u64("fallback-sequence")?;
+        let observation_length =
+            usize::try_from(decoder.read_u32()?).map_err(|_| BocpdSrError::LengthOverflow)?;
+        if observation_length > profile.max_observations {
+            return Err(BocpdSrError::InvalidState {
+                reason: "observation prefix exceeds the profile bound",
+            });
+        }
+        let mut observations = Vec::new();
+        observations
+            .try_reserve_exact(observation_length)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        for _ in 0..observation_length {
+            observations.push(match decoder.read_u8()? {
+                0 => BocpdSrObservation::Zero,
+                1 => BocpdSrObservation::One,
+                actual => {
+                    return Err(BocpdSrError::InvalidTag {
+                        component: "binary-observation",
+                        actual,
+                    });
+                }
+            });
+        }
+        let state_count =
+            usize::try_from(decoder.read_u32()?).map_err(|_| BocpdSrError::LengthOverflow)?;
+        if state_count == 0 || state_count > profile.max_run_length + 1 {
+            return Err(BocpdSrError::InvalidState {
+                reason: "posterior state count is outside the profile bound",
+            });
+        }
+        let mut run_states = Vec::new();
+        run_states
+            .try_reserve_exact(state_count)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        for _ in 0..state_count {
+            run_states.push(BocpdSrRunState {
+                run_length: decoder.read_u32()?,
+                posterior_mass: decoder.read_u64()?,
+                successes: decoder.read_u64()?,
+                failures: decoder.read_u64()?,
+            });
+        }
+        let receipt_count =
+            usize::try_from(decoder.read_u32()?).map_err(|_| BocpdSrError::LengthOverflow)?;
+        if receipt_count > profile.max_retained_receipts {
+            return Err(BocpdSrError::InvalidState {
+                reason: "receipt count exceeds the profile bound",
+            });
+        }
+        let mut retained_receipts = Vec::new();
+        retained_receipts
+            .try_reserve_exact(receipt_count)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        for _ in 0..receipt_count {
+            retained_receipts.push(BocpdSrReceipt {
+                stream_sequence: decoder.read_u64()?,
+                sr_statistic: decoder.read_u128()?,
+                sr_threshold: decoder.read_u128()?,
+                changepoint_mass: decoder.read_u64()?,
+                changepoint_threshold_mass: decoder.read_u64()?,
+                map_run_length: decoder.read_u32()?,
+                tail_mass: decoder.read_u64()?,
+                successor_regime_epoch: decoder.read_u64()?,
+                successor_effective_sequence: decoder.read_u64()?,
+            });
+        }
+        if decoder.remaining() != 0 {
+            return Err(BocpdSrError::TrailingBytes {
+                remaining: decoder.remaining(),
+            });
+        }
+        let evidence = Self {
+            identity,
+            profile,
+            through_sequence,
+            observation_count,
+            sr_statistic,
+            changepoint_mass,
+            map_run_length,
+            tail_mass,
+            detection_count,
+            dropped_receipt_count,
+            fallback_sequence,
+            observations,
+            run_states,
+            retained_receipts,
+        };
+        validate_bocpd_sr_evidence(&evidence)?;
+        Ok(evidence)
+    }
+}
+
+/// Accepted binary input plus the evidence state it produced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BocpdSrObservationUpdate {
+    /// Accepted immutable observation.
+    pub observation: SequencedBocpdSrObservation,
+    /// Evidence immediately after acceptance.
+    pub evidence: BocpdSrEvidence,
+}
+
+/// Deterministic, bounded BOCPD plus Shiryaev--Roberts monitor.
+#[derive(Debug)]
+pub struct BocpdSrMonitor {
+    identity: RegimeSignalIdentity,
+    profile: BocpdSrProfile,
+    next_sequence: Option<u64>,
+    through_sequence: Option<u64>,
+    observation_count: usize,
+    sr_statistic: u128,
+    run_states: Vec<BocpdSrRunState>,
+    detection_count: u64,
+    dropped_receipt_count: u64,
+    fallback_sequence: Option<u64>,
+    observations: Vec<BocpdSrObservation>,
+    retained_receipts: Vec<BocpdSrReceipt>,
+}
+
+impl BocpdSrMonitor {
+    /// Constructs an empty monitor after validating all immutable bindings.
+    pub fn try_new(
+        identity: RegimeSignalIdentity,
+        profile: BocpdSrProfile,
+    ) -> Result<Self, BocpdSrError> {
+        if identity.detector_id() != BOCPD_SR_REGIME_SIGNAL_ID
+            || identity.detector_version() != BOCPD_SR_REGIME_SIGNAL_VERSION
+        {
+            return Err(BocpdSrError::WrongDetectorContract);
+        }
+        if identity.detector_profile_oid() != profile.detector_profile_oid {
+            return Err(BocpdSrError::IdentityProfileOidMismatch);
+        }
+        if canonical_count(profile.max_observations) > identity.window().len() {
+            return Err(BocpdSrError::ObservationLimitExceedsWindow);
+        }
+        let mut run_states = Vec::new();
+        run_states
+            .try_reserve_exact(profile.max_run_length + 1)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        run_states.push(BocpdSrRunState {
+            run_length: 0,
+            posterior_mass: BOCPD_SR_SCALE,
+            successes: 0,
+            failures: 0,
+        });
+        let mut retained_receipts = Vec::new();
+        retained_receipts
+            .try_reserve_exact(profile.max_retained_receipts)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        let mut observations = Vec::new();
+        observations
+            .try_reserve_exact(profile.max_observations)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        let first = identity.window().first();
+        Ok(Self {
+            identity,
+            profile,
+            next_sequence: Some(first),
+            through_sequence: None,
+            observation_count: 0,
+            sr_statistic: 0,
+            run_states,
+            detection_count: 0,
+            dropped_receipt_count: 0,
+            fallback_sequence: None,
+            observations,
+            retained_receipts,
+        })
+    }
+
+    /// Restores an exactly replayable monitor from strict canonical evidence.
+    /// A terminal detected prefix remains terminal; a quiet prefix resumes at
+    /// the exact next source sequence.
+    pub fn try_resume_from_evidence(evidence: BocpdSrEvidence) -> Result<Self, BocpdSrError> {
+        validate_bocpd_sr_evidence(&evidence)?;
+        let observation_count = usize::try_from(evidence.observation_count)
+            .map_err(|_| BocpdSrError::LengthOverflow)?;
+        let next_sequence = if evidence.fallback_sequence.is_some()
+            || observation_count >= evidence.profile.max_observations
+            || evidence.through_sequence == Some(evidence.identity.window().last())
+        {
+            None
+        } else {
+            match evidence.through_sequence {
+                None => Some(evidence.identity.window().first()),
+                Some(sequence) => Some(sequence.checked_add(1).ok_or(
+                    BocpdSrError::ArithmeticOverflow {
+                        component: "resume-sequence",
+                    },
+                )?),
+            }
+        };
+        Ok(Self {
+            identity: evidence.identity,
+            profile: evidence.profile,
+            next_sequence,
+            through_sequence: evidence.through_sequence,
+            observation_count,
+            sr_statistic: evidence.sr_statistic,
+            run_states: evidence.run_states,
+            detection_count: evidence.detection_count,
+            dropped_receipt_count: evidence.dropped_receipt_count,
+            fallback_sequence: evidence.fallback_sequence,
+            observations: evidence.observations,
+            retained_receipts: evidence.retained_receipts,
+        })
+    }
+
+    /// Current immutable evidence without advancing the monitor.
+    #[must_use]
+    pub fn evidence(&self) -> BocpdSrEvidence {
+        let (changepoint_mass, map_run_length, tail_mass) =
+            posterior_summary(&self.run_states, self.profile.max_run_length);
+        BocpdSrEvidence {
+            identity: self.identity.clone(),
+            profile: self.profile.clone(),
+            through_sequence: self.through_sequence,
+            observation_count: canonical_count(self.observation_count),
+            sr_statistic: self.sr_statistic,
+            changepoint_mass,
+            map_run_length,
+            tail_mass,
+            detection_count: self.detection_count,
+            dropped_receipt_count: self.dropped_receipt_count,
+            fallback_sequence: self.fallback_sequence,
+            observations: self.observations.clone(),
+            run_states: self.run_states.clone(),
+            retained_receipts: self.retained_receipts.clone(),
+        }
+    }
+
+    /// Accepts one exact source position.  Every fallible next-state operation
+    /// completes in temporaries; an error leaves the monitor byte-identical.
+    pub fn observe(
+        &mut self,
+        input: SequencedBocpdSrObservation,
+    ) -> Result<BocpdSrObservationUpdate, BocpdSrError> {
+        if input.identity != self.identity {
+            return Err(BocpdSrError::IdentityMismatch);
+        }
+        if input.profile != self.profile {
+            return Err(BocpdSrError::ProfileMismatch);
+        }
+        self.try_advance(input.stream_sequence, input.observation)?;
+        Ok(BocpdSrObservationUpdate {
+            observation: input,
+            evidence: self.evidence(),
+        })
+    }
+
+    fn try_advance(
+        &mut self,
+        stream_sequence: u64,
+        observation: BocpdSrObservation,
+    ) -> Result<(), BocpdSrError> {
+        let Some(expected) = self.next_sequence else {
+            return Err(BocpdSrError::WindowComplete);
+        };
+        if self.observation_count >= self.profile.max_observations {
+            return Err(BocpdSrError::ObservationLimitReached);
+        }
+        if stream_sequence != expected {
+            return Err(BocpdSrError::UnexpectedSequence {
+                expected,
+                actual: stream_sequence,
+            });
+        }
+
+        let next_count =
+            self.observation_count
+                .checked_add(1)
+                .ok_or(BocpdSrError::ArithmeticOverflow {
+                    component: "observation-count",
+                })?;
+        let next_sr = next_sr_statistic(self.sr_statistic, observation, &self.profile)?;
+        let next_states = next_bocpd_states(&self.run_states, observation, &self.profile)?;
+        let (changepoint_mass, map_run_length, tail_mass) =
+            posterior_summary(&next_states, self.profile.max_run_length);
+        let crossed = next_sr >= self.profile.sr_threshold
+            && changepoint_mass >= self.profile.changepoint_threshold_mass;
+
+        let mut next_receipts = Vec::new();
+        next_receipts
+            .try_reserve_exact(self.profile.max_retained_receipts)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        next_receipts.extend_from_slice(&self.retained_receipts);
+        let mut next_detection_count = self.detection_count;
+        let mut next_dropped_count = self.dropped_receipt_count;
+        let mut next_fallback = self.fallback_sequence;
+        if crossed {
+            next_detection_count =
+                next_detection_count
+                    .checked_add(1)
+                    .ok_or(BocpdSrError::ArithmeticOverflow {
+                        component: "detection-count",
+                    })?;
+            let receipt = BocpdSrReceipt {
+                stream_sequence,
+                sr_statistic: next_sr,
+                sr_threshold: self.profile.sr_threshold,
+                changepoint_mass,
+                changepoint_threshold_mass: self.profile.changepoint_threshold_mass,
+                map_run_length,
+                tail_mass,
+                successor_regime_epoch: self.identity.regime_epoch().checked_add(1).ok_or(
+                    BocpdSrError::ArithmeticOverflow {
+                        component: "successor-regime-epoch",
+                    },
+                )?,
+                successor_effective_sequence: stream_sequence.checked_add(1).ok_or(
+                    BocpdSrError::ArithmeticOverflow {
+                        component: "successor-effective-sequence",
+                    },
+                )?,
+            };
+            if next_receipts.len() == self.profile.max_retained_receipts {
+                next_receipts.rotate_left(1);
+                if let Some(last) = next_receipts.last_mut() {
+                    *last = receipt;
+                }
+                next_dropped_count =
+                    next_dropped_count
+                        .checked_add(1)
+                        .ok_or(BocpdSrError::ArithmeticOverflow {
+                            component: "dropped-receipt-count",
+                        })?;
+            } else {
+                next_receipts.push(receipt);
+            }
+            if next_fallback.is_none() {
+                next_fallback = Some(stream_sequence);
+            }
+        }
+        let next_sequence =
+            if crossed
+                || stream_sequence == self.identity.window().last()
+                || next_count >= self.profile.max_observations
+            {
+                None
+            } else {
+                Some(stream_sequence.checked_add(1).ok_or(
+                    BocpdSrError::ArithmeticOverflow {
+                        component: "stream-sequence",
+                    },
+                )?)
+            };
+
+        self.next_sequence = next_sequence;
+        self.through_sequence = Some(stream_sequence);
+        self.observation_count = next_count;
+        self.sr_statistic = next_sr;
+        self.run_states = next_states;
+        self.detection_count = next_detection_count;
+        self.dropped_receipt_count = next_dropped_count;
+        self.fallback_sequence = next_fallback;
+        self.observations.push(observation);
+        self.retained_receipts = next_receipts;
+        Ok(())
+    }
+}
+
+fn next_sr_statistic(
+    previous: u128,
+    observation: BocpdSrObservation,
+    profile: &BocpdSrProfile,
+) -> Result<u128, BocpdSrError> {
+    let (alternative, null) = match observation {
+        BocpdSrObservation::Zero => (
+            BOCPD_SR_SCALE - profile.alternative_one_mass,
+            BOCPD_SR_SCALE - profile.null_one_mass,
+        ),
+        BocpdSrObservation::One => (profile.alternative_one_mass, profile.null_one_mass),
+    };
+    let numerator = previous
+        .checked_add(u128::from(BOCPD_SR_SCALE))
+        .and_then(|value| value.checked_mul(u128::from(alternative)))
+        .ok_or(BocpdSrError::ArithmeticOverflow {
+            component: "shiryaev-roberts-recurrence",
+        })?;
+    Ok(round_ratio_u128(
+        numerator,
+        u128::from(null),
+        "shiryaev-roberts-rounding",
+    )?
+    .min(profile.sr_cap))
+}
+
+fn next_bocpd_states(
+    previous: &[BocpdSrRunState],
+    observation: BocpdSrObservation,
+    profile: &BocpdSrProfile,
+) -> Result<Vec<BocpdSrRunState>, BocpdSrError> {
+    let prior_predictive =
+        beta_predictive_mass(profile.beta_alpha, profile.beta_beta, observation)?;
+    let total_previous_mass = previous.iter().try_fold(0_u128, |sum, state| {
+        sum.checked_add(u128::from(state.posterior_mass))
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "posterior-mass-sum",
+            })
+    })?;
+    let cp_raw = total_previous_mass
+        .checked_mul(u128::from(profile.hazard_mass))
+        .and_then(|value| value.checked_mul(u128::from(prior_predictive)))
+        .ok_or(BocpdSrError::ArithmeticOverflow {
+            component: "bocpd-changepoint-mass",
+        })?;
+    let (cp_successes, cp_failures) = match observation {
+        BocpdSrObservation::Zero => (0, 1),
+        BocpdSrObservation::One => (1, 0),
+    };
+    let mut candidates = Vec::<RawBocpdState>::new();
+    candidates
+        .try_reserve_exact(profile.max_run_length + 1)
+        .map_err(|_| BocpdSrError::AllocationFailed)?;
+    candidates.push(RawBocpdState {
+        run_length: 0,
+        raw_mass: cp_raw,
+        successes: cp_successes,
+        failures: cp_failures,
+    });
+    for state in previous {
+        let predictive = beta_predictive_mass(
+            profile.beta_alpha.checked_add(state.successes).ok_or(
+                BocpdSrError::ArithmeticOverflow {
+                    component: "beta-successes",
+                },
+            )?,
+            profile.beta_beta.checked_add(state.failures).ok_or(
+                BocpdSrError::ArithmeticOverflow {
+                    component: "beta-failures",
+                },
+            )?,
+            observation,
+        )?;
+        let raw = u128::from(state.posterior_mass)
+            .checked_mul(u128::from(BOCPD_SR_SCALE - profile.hazard_mass))
+            .and_then(|value| value.checked_mul(u128::from(predictive)))
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "bocpd-growth-mass",
+            })?;
+        let target = usize::try_from(state.run_length)
+            .map_err(|_| BocpdSrError::LengthOverflow)?
+            .saturating_add(1)
+            .min(profile.max_run_length);
+        let successes = state
+            .successes
+            .checked_add(u64::from(observation == BocpdSrObservation::One))
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "run-successes",
+            })?;
+        let failures = state
+            .failures
+            .checked_add(u64::from(observation == BocpdSrObservation::Zero))
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "run-failures",
+            })?;
+        if let Some(existing) = candidates
+            .iter_mut()
+            .find(|candidate| usize::try_from(candidate.run_length).ok() == Some(target))
+        {
+            let combined =
+                existing
+                    .raw_mass
+                    .checked_add(raw)
+                    .ok_or(BocpdSrError::ArithmeticOverflow {
+                        component: "bocpd-tail-mass",
+                    })?;
+            existing.successes = weighted_round(
+                existing.successes,
+                existing.raw_mass,
+                successes,
+                raw,
+                combined,
+            )?;
+            existing.failures = weighted_round(
+                existing.failures,
+                existing.raw_mass,
+                failures,
+                raw,
+                combined,
+            )?;
+            existing.raw_mass = combined;
+        } else {
+            candidates.push(RawBocpdState {
+                run_length: u32::try_from(target).map_err(|_| BocpdSrError::LengthOverflow)?,
+                raw_mass: raw,
+                successes,
+                failures,
+            });
+        }
+    }
+    normalize_bocpd_states(candidates)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RawBocpdState {
+    run_length: u32,
+    raw_mass: u128,
+    successes: u64,
+    failures: u64,
+}
+
+fn beta_predictive_mass(
+    successes: u64,
+    failures: u64,
+    observation: BocpdSrObservation,
+) -> Result<u64, BocpdSrError> {
+    let numerator = match observation {
+        BocpdSrObservation::Zero => failures,
+        BocpdSrObservation::One => successes,
+    };
+    let denominator = successes
+        .checked_add(failures)
+        .ok_or(BocpdSrError::ArithmeticOverflow {
+            component: "beta-denominator",
+        })?;
+    let scaled = u128::from(numerator)
+        .checked_mul(u128::from(BOCPD_SR_SCALE))
+        .ok_or(BocpdSrError::ArithmeticOverflow {
+            component: "beta-predictive",
+        })?;
+    u64::try_from(round_ratio_u128(
+        scaled,
+        u128::from(denominator),
+        "beta-predictive-rounding",
+    )?)
+    .map_err(|_| BocpdSrError::ArithmeticOverflow {
+        component: "beta-predictive-conversion",
+    })
+}
+
+fn weighted_round(
+    left: u64,
+    left_weight: u128,
+    right: u64,
+    right_weight: u128,
+    total_weight: u128,
+) -> Result<u64, BocpdSrError> {
+    let numerator = u128::from(left)
+        .checked_mul(left_weight)
+        .and_then(|value| {
+            u128::from(right)
+                .checked_mul(right_weight)
+                .and_then(|rhs| value.checked_add(rhs))
+        })
+        .ok_or(BocpdSrError::ArithmeticOverflow {
+            component: "tail-sufficient-statistic",
+        })?;
+    u64::try_from(round_ratio_u128(
+        numerator,
+        total_weight,
+        "tail-sufficient-statistic-rounding",
+    )?)
+    .map_err(|_| BocpdSrError::ArithmeticOverflow {
+        component: "tail-sufficient-statistic-conversion",
+    })
+}
+
+fn round_ratio_u128(
+    numerator: u128,
+    denominator: u128,
+    component: &'static str,
+) -> Result<u128, BocpdSrError> {
+    if denominator == 0 {
+        return Err(BocpdSrError::InvalidState {
+            reason: "zero arithmetic denominator",
+        });
+    }
+    numerator
+        .checked_add(denominator / 2)
+        .ok_or(BocpdSrError::ArithmeticOverflow { component })
+        .map(|rounded| rounded / denominator)
+}
+
+fn normalize_bocpd_states(
+    candidates: Vec<RawBocpdState>,
+) -> Result<Vec<BocpdSrRunState>, BocpdSrError> {
+    let total = candidates.iter().try_fold(0_u128, |sum, candidate| {
+        sum.checked_add(candidate.raw_mass)
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "bocpd-normalizer",
+            })
+    })?;
+    if total == 0 {
+        return Err(BocpdSrError::InvalidState {
+            reason: "zero BOCPD normalizer",
+        });
+    }
+    let mut states = Vec::new();
+    states
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| BocpdSrError::AllocationFailed)?;
+    let mut remainders = Vec::new();
+    remainders
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| BocpdSrError::AllocationFailed)?;
+    let mut assigned = 0_u64;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let scaled = candidate
+            .raw_mass
+            .checked_mul(u128::from(BOCPD_SR_SCALE))
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "bocpd-normalization",
+            })?;
+        let quotient =
+            u64::try_from(scaled / total).map_err(|_| BocpdSrError::ArithmeticOverflow {
+                component: "bocpd-normalized-mass",
+            })?;
+        assigned = assigned
+            .checked_add(quotient)
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "bocpd-assigned-mass",
+            })?;
+        states.push(BocpdSrRunState {
+            run_length: candidate.run_length,
+            posterior_mass: quotient,
+            successes: candidate.successes,
+            failures: candidate.failures,
+        });
+        remainders.push((scaled % total, candidate.run_length, index));
+    }
+    remainders.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let missing = BOCPD_SR_SCALE
+        .checked_sub(assigned)
+        .ok_or(BocpdSrError::InvalidState {
+            reason: "normalization assigned more than one",
+        })?;
+    let missing = usize::try_from(missing).map_err(|_| BocpdSrError::LengthOverflow)?;
+    if missing > remainders.len() {
+        return Err(BocpdSrError::InvalidState {
+            reason: "largest-remainder correction exceeds state count",
+        });
+    }
+    for (_, _, index) in remainders.into_iter().take(missing) {
+        states[index].posterior_mass = states[index].posterior_mass.checked_add(1).ok_or(
+            BocpdSrError::ArithmeticOverflow {
+                component: "largest-remainder-correction",
+            },
+        )?;
+    }
+    Ok(states)
+}
+
+fn posterior_summary(states: &[BocpdSrRunState], max_run_length: usize) -> (u64, u32, u64) {
+    let changepoint_mass = states.first().map_or(0, |state| state.posterior_mass);
+    let map_run_length = states
+        .iter()
+        .max_by(|left, right| {
+            left.posterior_mass
+                .cmp(&right.posterior_mass)
+                .then_with(|| right.run_length.cmp(&left.run_length))
+        })
+        .map_or(0, |state| state.run_length);
+    let tail_mass = states
+        .iter()
+        .find(|state| usize::try_from(state.run_length).ok() == Some(max_run_length))
+        .map_or(0, |state| state.posterior_mass);
+    (changepoint_mass, map_run_length, tail_mass)
+}
+
+fn validate_bocpd_sr_evidence(evidence: &BocpdSrEvidence) -> Result<(), BocpdSrError> {
+    if evidence.identity.detector_id() != BOCPD_SR_REGIME_SIGNAL_ID
+        || evidence.identity.detector_version() != BOCPD_SR_REGIME_SIGNAL_VERSION
+    {
+        return Err(BocpdSrError::WrongDetectorContract);
+    }
+    if evidence.identity.detector_profile_oid() != evidence.profile.detector_profile_oid {
+        return Err(BocpdSrError::IdentityProfileOidMismatch);
+    }
+    if u64::try_from(evidence.observations.len()).map_err(|_| BocpdSrError::LengthOverflow)?
+        != evidence.observation_count
+    {
+        return Err(BocpdSrError::InvalidState {
+            reason: "observation transcript length does not match the observation count",
+        });
+    }
+    if evidence.observation_count
+        > u64::try_from(evidence.profile.max_observations)
+            .map_err(|_| BocpdSrError::LengthOverflow)?
+    {
+        return Err(BocpdSrError::InvalidState {
+            reason: "observation count exceeds the profile bound",
+        });
+    }
+    if evidence.run_states.is_empty()
+        || evidence.run_states.len() > evidence.profile.max_run_length + 1
+    {
+        return Err(BocpdSrError::InvalidState {
+            reason: "posterior inventory is empty or over bound",
+        });
+    }
+    let mut mass_sum = 0_u64;
+    for (index, state) in evidence.run_states.iter().enumerate() {
+        if usize::try_from(state.run_length).ok() != Some(index) {
+            return Err(BocpdSrError::InvalidState {
+                reason: "posterior run lengths are not contiguous",
+            });
+        }
+        mass_sum =
+            mass_sum
+                .checked_add(state.posterior_mass)
+                .ok_or(BocpdSrError::ArithmeticOverflow {
+                    component: "decoded-posterior-mass",
+                })?;
+        if state
+            .successes
+            .checked_add(state.failures)
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "decoded-sufficient-statistics",
+            })?
+            > evidence.observation_count
+        {
+            return Err(BocpdSrError::InvalidState {
+                reason: "posterior sufficient statistics exceed the observation prefix",
+            });
+        }
+    }
+    if mass_sum != BOCPD_SR_SCALE {
+        return Err(BocpdSrError::InvalidState {
+            reason: "posterior masses do not sum to the fixed scale",
+        });
+    }
+    let (cp, map, tail) = posterior_summary(&evidence.run_states, evidence.profile.max_run_length);
+    if (cp, map, tail)
+        != (
+            evidence.changepoint_mass,
+            evidence.map_run_length,
+            evidence.tail_mass,
+        )
+    {
+        return Err(BocpdSrError::InvalidState {
+            reason: "posterior summary does not match the encoded inventory",
+        });
+    }
+    let expected_through = if evidence.observation_count == 0 {
+        None
+    } else {
+        Some(
+            evidence
+                .identity
+                .window()
+                .first()
+                .checked_add(evidence.observation_count - 1)
+                .ok_or(BocpdSrError::ArithmeticOverflow {
+                    component: "decoded-through-sequence",
+                })?,
+        )
+    };
+    if evidence.through_sequence != expected_through {
+        return Err(BocpdSrError::InvalidState {
+            reason: "through sequence does not match the observation count",
+        });
+    }
+    let retained = u64::try_from(evidence.retained_receipts.len())
+        .map_err(|_| BocpdSrError::LengthOverflow)?;
+    if evidence.dropped_receipt_count.checked_add(retained).ok_or(
+        BocpdSrError::ArithmeticOverflow {
+            component: "decoded-detection-count",
+        },
+    )? != evidence.detection_count
+    {
+        return Err(BocpdSrError::InvalidState {
+            reason: "receipt accounting does not match detection count",
+        });
+    }
+    if evidence.fallback_sequence.is_some() != (evidence.detection_count != 0) {
+        return Err(BocpdSrError::InvalidState {
+            reason: "fallback presence does not match detection count",
+        });
+    }
+    let mut prior_sequence = None;
+    for receipt in &evidence.retained_receipts {
+        if receipt.sr_threshold != evidence.profile.sr_threshold
+            || receipt.changepoint_threshold_mass != evidence.profile.changepoint_threshold_mass
+            || receipt.sr_statistic < receipt.sr_threshold
+            || receipt.changepoint_mass < receipt.changepoint_threshold_mass
+        {
+            return Err(BocpdSrError::InvalidState {
+                reason: "receipt did not encode a same-sample joint crossing",
+            });
+        }
+        let expected_successor_epoch = evidence.identity.regime_epoch().checked_add(1).ok_or(
+            BocpdSrError::ArithmeticOverflow {
+                component: "decoded-successor-regime-epoch",
+            },
+        )?;
+        let expected_effective =
+            receipt
+                .stream_sequence
+                .checked_add(1)
+                .ok_or(BocpdSrError::ArithmeticOverflow {
+                    component: "decoded-successor-effective-sequence",
+                })?;
+        if receipt.successor_regime_epoch != expected_successor_epoch
+            || receipt.successor_effective_sequence != expected_effective
+        {
+            return Err(BocpdSrError::InvalidState {
+                reason: "receipt successor epoch boundary is inconsistent",
+            });
+        }
+        if prior_sequence.is_some_and(|prior| prior >= receipt.stream_sequence) {
+            return Err(BocpdSrError::InvalidState {
+                reason: "receipt sequences are not strictly increasing",
+            });
+        }
+        prior_sequence = Some(receipt.stream_sequence);
+    }
+
+    // A persisted prefix is authoritative only when every separately encoded
+    // derived field is exactly the state reached by replaying that prefix from
+    // the empty version-1 monitor.  Shape checks alone admit forged resume
+    // states (for example a quiet prefix paired with an already-crossed SR
+    // statistic), so the codec deliberately pays this bounded verification
+    // cost at its trust boundary.
+    let mut replayed = BocpdSrMonitor::try_new(evidence.identity.clone(), evidence.profile.clone())?;
+    for (offset, observation) in evidence.observations.iter().copied().enumerate() {
+        let offset = u64::try_from(offset).map_err(|_| BocpdSrError::LengthOverflow)?;
+        let sequence = evidence
+            .identity
+            .window()
+            .first()
+            .checked_add(offset)
+            .ok_or(BocpdSrError::ArithmeticOverflow {
+                component: "evidence-replay-sequence",
+            })?;
+        replayed.try_advance(sequence, observation)?;
+    }
+    if replayed.evidence() != *evidence {
+        return Err(BocpdSrError::InvalidState {
+            reason: "derived evidence does not match replay of the binary prefix",
+        });
+    }
+    Ok(())
+}
+
+struct BocpdSrEncoder {
+    bytes: Vec<u8>,
+}
+
+impl BocpdSrEncoder {
+    fn try_with_capacity(capacity: usize) -> Result<Self, BocpdSrError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| BocpdSrError::AllocationFailed)?;
+        Ok(Self { bytes })
+    }
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+    fn write_bytes(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+    }
+    fn write_u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+    fn write_u16(&mut self, value: u16) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+    fn write_u32(&mut self, value: u32) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+    fn write_u128(&mut self, value: u128) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+    fn write_oid(&mut self, value: ObjectId) {
+        self.write_bytes(&value.0);
+    }
+    fn write_optional_u64(&mut self, value: Option<u64>) {
+        self.write_u8(u8::from(value.is_some()));
+        if let Some(value) = value {
+            self.write_u64(value);
+        }
+    }
+}
+
+fn bocpd_sr_encoded_len(evidence: &BocpdSrEvidence) -> Result<usize, BocpdSrError> {
+    fn add(total: &mut usize, value: usize) -> Result<(), BocpdSrError> {
+        *total = total
+            .checked_add(value)
+            .ok_or(BocpdSrError::LengthOverflow)?;
+        Ok(())
+    }
+
+    let mut total = 0_usize;
+    // Domain length + domain + version.
+    add(&mut total, 2)?;
+    add(&mut total, BOCPD_SR_EVIDENCE_ENCODING_DOMAIN.len())?;
+    add(&mut total, 2)?;
+    // Identity: three OIDs, detector string, version, window, epoch, and two
+    // policy OIDs.
+    add(&mut total, 3 * 32 + 2)?;
+    add(&mut total, evidence.identity.detector_id().len())?;
+    add(&mut total, 4 + 3 * 8 + 2 * 32)?;
+    // Profile: two OIDs, five u64 parameters, the SR threshold and cap, one
+    // u64 threshold, and the three bounded counts.
+    add(&mut total, 2 * 32 + 5 * 8 + 2 * 16 + 8 + 4 + 8 + 4)?;
+    // Dynamic evidence header. Optional u64 values use one presence byte.
+    add(
+        &mut total,
+        1 + usize::from(evidence.through_sequence.is_some()) * 8,
+    )?;
+    add(&mut total, 8 + 16 + 8 + 4 + 8 + 8 + 8)?;
+    add(
+        &mut total,
+        1 + usize::from(evidence.fallback_sequence.is_some()) * 8,
+    )?;
+    add(&mut total, 4)?;
+    add(&mut total, evidence.observations.len())?;
+    add(&mut total, 4)?;
+    add(
+        &mut total,
+        evidence
+            .run_states
+            .len()
+            .checked_mul(4 + 3 * 8)
+            .ok_or(BocpdSrError::LengthOverflow)?,
+    )?;
+    add(&mut total, 4)?;
+    add(
+        &mut total,
+        evidence
+            .retained_receipts
+            .len()
+            .checked_mul(8 + 2 * 16 + 2 * 8 + 4 + 3 * 8)
+            .ok_or(BocpdSrError::LengthOverflow)?,
+    )?;
+    Ok(total)
+}
+
+struct BocpdSrDecoder<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> BocpdSrDecoder<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+    fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], BocpdSrError> {
+        let remaining = self.remaining();
+        if remaining < length {
+            return Err(BocpdSrError::Truncated {
+                offset: self.offset,
+                needed: length,
+                remaining,
+            });
+        }
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(BocpdSrError::LengthOverflow)?;
+        let value = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(value)
+    }
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], BocpdSrError> {
+        let mut value = [0; N];
+        value.copy_from_slice(self.read_bytes(N)?);
+        Ok(value)
+    }
+    fn read_u8(&mut self) -> Result<u8, BocpdSrError> {
+        Ok(self.read_array::<1>()?[0])
+    }
+    fn read_u16(&mut self) -> Result<u16, BocpdSrError> {
+        Ok(u16::from_le_bytes(self.read_array()?))
+    }
+    fn read_u32(&mut self) -> Result<u32, BocpdSrError> {
+        Ok(u32::from_le_bytes(self.read_array()?))
+    }
+    fn read_u64(&mut self) -> Result<u64, BocpdSrError> {
+        Ok(u64::from_le_bytes(self.read_array()?))
+    }
+    fn read_u128(&mut self) -> Result<u128, BocpdSrError> {
+        Ok(u128::from_le_bytes(self.read_array()?))
+    }
+    fn read_oid(&mut self) -> Result<ObjectId, BocpdSrError> {
+        Ok(ObjectId(self.read_array()?))
+    }
+    fn read_optional_u64(&mut self, component: &'static str) -> Result<Option<u64>, BocpdSrError> {
+        match self.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_u64()?)),
+            actual => Err(BocpdSrError::InvalidTag { component, actual }),
+        }
+    }
+}
+
+fn encode_bocpd_sr_identity(
+    encoder: &mut BocpdSrEncoder,
+    identity: &RegimeSignalIdentity,
+) -> Result<(), BocpdSrError> {
+    encoder.write_oid(identity.signal_oid());
+    encoder.write_oid(identity.metric_stream_oid());
+    encoder.write_oid(identity.detector_profile_oid());
+    encoder.write_u16(
+        u16::try_from(identity.detector_id().len()).map_err(|_| BocpdSrError::LengthOverflow)?,
+    );
+    encoder.write_bytes(identity.detector_id().as_bytes());
+    encoder.write_u32(identity.detector_version());
+    encoder.write_u64(identity.window().first());
+    encoder.write_u64(identity.window().last());
+    encoder.write_u64(identity.regime_epoch());
+    encoder.write_oid(identity.candidate_decision_oid());
+    encoder.write_oid(identity.pinned_fallback_oid());
+    Ok(())
+}
+
+fn decode_bocpd_sr_identity(
+    decoder: &mut BocpdSrDecoder<'_>,
+) -> Result<RegimeSignalIdentity, BocpdSrError> {
+    let signal_oid = decoder.read_oid()?;
+    let stream_oid = decoder.read_oid()?;
+    let profile_oid = decoder.read_oid()?;
+    let id_length = usize::from(decoder.read_u16()?);
+    if id_length > MAX_DETECTOR_ID_BYTES {
+        return Err(BocpdSrError::InvalidState {
+            reason: "detector ID exceeds its bound",
+        });
+    }
+    let detector_id = core::str::from_utf8(decoder.read_bytes(id_length)?).map_err(|_| {
+        BocpdSrError::InvalidState {
+            reason: "detector ID is not UTF-8",
+        }
+    })?;
+    let detector_version = decoder.read_u32()?;
+    let window = RegimeSequenceWindow::try_new(decoder.read_u64()?, decoder.read_u64()?)?;
+    let identity = RegimeSignalIdentity::try_new(
+        signal_oid,
+        stream_oid,
+        profile_oid,
+        detector_id,
+        detector_version,
+        window,
+        decoder.read_u64()?,
+        decoder.read_oid()?,
+        decoder.read_oid()?,
+    )?;
+    if identity.detector_id() != BOCPD_SR_REGIME_SIGNAL_ID
+        || identity.detector_version() != BOCPD_SR_REGIME_SIGNAL_VERSION
+    {
+        return Err(BocpdSrError::WrongDetectorContract);
+    }
+    Ok(identity)
+}
+
+fn encode_bocpd_sr_profile(
+    encoder: &mut BocpdSrEncoder,
+    profile: &BocpdSrProfile,
+) -> Result<(), BocpdSrError> {
+    encoder.write_oid(profile.detector_profile_oid);
+    encoder.write_oid(profile.binary_input_contract_oid);
+    encoder.write_u64(profile.null_one_mass);
+    encoder.write_u64(profile.alternative_one_mass);
+    encoder.write_u64(profile.beta_alpha);
+    encoder.write_u64(profile.beta_beta);
+    encoder.write_u64(profile.hazard_mass);
+    encoder.write_u128(profile.sr_threshold);
+    encoder.write_u128(profile.sr_cap);
+    encoder.write_u64(profile.changepoint_threshold_mass);
+    encoder.write_u32(
+        u32::try_from(profile.max_run_length).map_err(|_| BocpdSrError::LengthOverflow)?,
+    );
+    encoder.write_u64(
+        u64::try_from(profile.max_observations).map_err(|_| BocpdSrError::LengthOverflow)?,
+    );
+    encoder.write_u32(
+        u32::try_from(profile.max_retained_receipts).map_err(|_| BocpdSrError::LengthOverflow)?,
+    );
+    Ok(())
+}
+
+fn decode_bocpd_sr_profile(
+    decoder: &mut BocpdSrDecoder<'_>,
+) -> Result<BocpdSrProfile, BocpdSrError> {
+    BocpdSrProfile::try_new(
+        decoder.read_oid()?,
+        decoder.read_oid()?,
+        decoder.read_u64()?,
+        decoder.read_u64()?,
+        decoder.read_u64()?,
+        decoder.read_u64()?,
+        decoder.read_u64()?,
+        decoder.read_u128()?,
+        decoder.read_u128()?,
+        decoder.read_u64()?,
+        usize::try_from(decoder.read_u32()?).map_err(|_| BocpdSrError::LengthOverflow)?,
+        usize::try_from(decoder.read_u64()?).map_err(|_| BocpdSrError::LengthOverflow)?,
+        usize::try_from(decoder.read_u32()?).map_err(|_| BocpdSrError::LengthOverflow)?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2980,6 +4827,316 @@ mod tests {
         assert_eq!(evidence.fallback_sequence(), Some(105));
         assert_eq!(evidence.selected_policy_oid(), oid(5));
         assert!(!evidence.is_ground_truth());
+        Ok(())
+    }
+
+    fn bocpd_sr_profile(
+        sr_threshold: u128,
+        changepoint_threshold_mass: u64,
+        max_run_length: usize,
+    ) -> Result<BocpdSrProfile, BocpdSrError> {
+        BocpdSrProfile::try_new(
+            oid(31),
+            oid(32),
+            250_000,
+            750_000,
+            1,
+            1,
+            200_000,
+            sr_threshold,
+            100_000_000,
+            changepoint_threshold_mass,
+            max_run_length,
+            12,
+            4,
+        )
+    }
+
+    fn bocpd_sr_identity() -> Result<RegimeSignalIdentity, BocpdSrError> {
+        Ok(RegimeSignalIdentity::try_new(
+            oid(30),
+            oid(33),
+            oid(31),
+            BOCPD_SR_REGIME_SIGNAL_ID,
+            BOCPD_SR_REGIME_SIGNAL_VERSION,
+            RegimeSequenceWindow::try_new(100, 111)?,
+            7,
+            oid(4),
+            oid(5),
+        )?)
+    }
+
+    fn observe_bocpd_sr(
+        monitor: &mut BocpdSrMonitor,
+        identity: &RegimeSignalIdentity,
+        profile: &BocpdSrProfile,
+        sequence: u64,
+        observation: BocpdSrObservation,
+    ) -> Result<BocpdSrEvidence, BocpdSrError> {
+        Ok(monitor
+            .observe(SequencedBocpdSrObservation::new(
+                identity.clone(),
+                profile.clone(),
+                sequence,
+                observation,
+            ))?
+            .evidence)
+    }
+
+    #[test]
+    fn bocpd_sr_hand_vector_pins_every_cell_and_sr_recurrence() -> TestResult {
+        let identity = bocpd_sr_identity()?;
+        let profile = bocpd_sr_profile(u128::MAX, 900_000, 8)?;
+        let mut monitor = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
+        let expected = [
+            (3_000_000_u128, &[(200_000, 1, 0), (800_000, 1, 0)][..]),
+            (
+                12_000_000,
+                &[(157_895, 1, 0), (168_421, 2, 0), (673_684, 2, 0)][..],
+            ),
+            (
+                4_333_333,
+                &[
+                    (322_034, 0, 1),
+                    (135_593, 1, 1),
+                    (108_475, 2, 1),
+                    (433_898, 2, 1),
+                ][..],
+            ),
+            (
+                15_999_999,
+                &[
+                    (199_819, 1, 0),
+                    (171_596, 1, 1),
+                    (108_377, 2, 1),
+                    (104_042, 3, 1),
+                    (416_166, 3, 1),
+                ][..],
+            ),
+            (
+                50_999_997,
+                &[
+                    (165_378, 1, 0),
+                    (176_244, 2, 0),
+                    (113_513, 2, 1),
+                    (86_032, 3, 1),
+                    (91_767, 4, 1),
+                    (367_066, 4, 1),
+                ][..],
+            ),
+        ];
+        for (offset, observation) in [
+            BocpdSrObservation::One,
+            BocpdSrObservation::One,
+            BocpdSrObservation::Zero,
+            BocpdSrObservation::One,
+            BocpdSrObservation::One,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let sequence = 100 + u64::try_from(offset)?;
+            let evidence =
+                observe_bocpd_sr(&mut monitor, &identity, &profile, sequence, observation)?;
+            let (expected_sr, expected_states) = expected[offset];
+            assert_eq!(evidence.sr_statistic(), expected_sr);
+            assert_eq!(evidence.run_states().len(), expected_states.len());
+            for (run_length, (state, (mass, successes, failures))) in evidence
+                .run_states()
+                .iter()
+                .zip(expected_states.iter())
+                .enumerate()
+            {
+                assert_eq!(usize::try_from(state.run_length())?, run_length);
+                assert_eq!(state.posterior_mass(), *mass);
+                assert_eq!(state.successes(), *successes);
+                assert_eq!(state.failures(), *failures);
+            }
+            assert_eq!(
+                evidence
+                    .run_states()
+                    .iter()
+                    .map(|state| state.posterior_mass())
+                    .sum::<u64>(),
+                BOCPD_SR_SCALE
+            );
+            assert_eq!(evidence.status(), RegimeSignalStatus::NoChangeDetected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bocpd_sr_requires_both_crossings_and_emits_an_exact_epoch_boundary() -> TestResult {
+        let identity = bocpd_sr_identity()?;
+        let profile = bocpd_sr_profile(4_000_000, 300_000, 8)?;
+        let mut monitor = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
+        let mut terminal = None;
+        for (offset, observation) in [
+            BocpdSrObservation::Zero,
+            BocpdSrObservation::Zero,
+            BocpdSrObservation::Zero,
+            BocpdSrObservation::Zero,
+            BocpdSrObservation::Zero,
+            BocpdSrObservation::One,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            terminal = Some(observe_bocpd_sr(
+                &mut monitor,
+                &identity,
+                &profile,
+                100 + u64::try_from(offset)?,
+                observation,
+            )?);
+        }
+        let terminal = terminal.ok_or("missing terminal evidence")?;
+        assert_eq!(terminal.fallback_sequence(), Some(105));
+        assert_eq!(terminal.status(), RegimeSignalStatus::ChangeDetected);
+        assert_eq!(terminal.selection(), RegimePolicySelection::PinnedFallback);
+        assert_eq!(terminal.selected_policy_oid(), oid(5));
+        assert_eq!(terminal.retained_receipts().len(), 1);
+        let receipt = terminal.retained_receipts()[0];
+        assert_eq!(receipt.stream_sequence(), 105);
+        assert_eq!(receipt.successor_regime_epoch(), 8);
+        assert_eq!(receipt.successor_effective_sequence(), 106);
+        assert!(!receipt.is_ground_truth());
+        assert_eq!(
+            monitor.observe(SequencedBocpdSrObservation::new(
+                identity,
+                profile,
+                106,
+                BocpdSrObservation::One,
+            )),
+            Err(BocpdSrError::WindowComplete)
+        );
+
+        for (sr_threshold, cp_threshold) in [(4_000_000, 900_000), (u128::MAX, 300_000)] {
+            let identity = bocpd_sr_identity()?;
+            let profile = bocpd_sr_profile(sr_threshold, cp_threshold, 8)?;
+            let mut one_component = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
+            for (offset, observation) in [
+                BocpdSrObservation::Zero,
+                BocpdSrObservation::Zero,
+                BocpdSrObservation::Zero,
+                BocpdSrObservation::Zero,
+                BocpdSrObservation::Zero,
+                BocpdSrObservation::One,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                observe_bocpd_sr(
+                    &mut one_component,
+                    &identity,
+                    &profile,
+                    100 + u64::try_from(offset)?,
+                    observation,
+                )?;
+            }
+            assert_eq!(
+                one_component.evidence().status(),
+                RegimeSignalStatus::NoChangeDetected,
+                "one detector crossing must not trigger the combined signal"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bocpd_sr_tail_codec_resume_and_rejections_are_fail_closed() -> TestResult {
+        let identity = bocpd_sr_identity()?;
+        let profile = bocpd_sr_profile(u128::MAX, 900_000, 2)?;
+        let mut first = BocpdSrMonitor::try_new(identity.clone(), profile.clone())?;
+        for (offset, observation) in [
+            BocpdSrObservation::One,
+            BocpdSrObservation::Zero,
+            BocpdSrObservation::One,
+            BocpdSrObservation::One,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            observe_bocpd_sr(
+                &mut first,
+                &identity,
+                &profile,
+                100 + u64::try_from(offset)?,
+                observation,
+            )?;
+        }
+        let evidence = first.evidence();
+        assert_eq!(evidence.run_states().len(), 3);
+        assert!(evidence.tail_mass() > 0);
+        let encoded = evidence.try_to_canonical_bytes()?;
+        assert_eq!(
+            BocpdSrEvidence::try_from_canonical_bytes(&encoded)?,
+            evidence
+        );
+        for length in 0..encoded.len() {
+            assert!(
+                BocpdSrEvidence::try_from_canonical_bytes(&encoded[..length]).is_err(),
+                "truncation at {length} was accepted"
+            );
+        }
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            BocpdSrEvidence::try_from_canonical_bytes(&trailing),
+            Err(BocpdSrError::TrailingBytes { remaining: 1 })
+        );
+        let mut wrong_domain = encoded.clone();
+        wrong_domain[2] ^= 1;
+        assert!(BocpdSrEvidence::try_from_canonical_bytes(&wrong_domain).is_err());
+
+        let restored = BocpdSrEvidence::try_from_canonical_bytes(&encoded)?;
+        let mut resumed = BocpdSrMonitor::try_resume_from_evidence(restored)?;
+        let resumed_terminal = observe_bocpd_sr(
+            &mut resumed,
+            &identity,
+            &profile,
+            104,
+            BocpdSrObservation::Zero,
+        )?;
+        let direct_terminal = observe_bocpd_sr(
+            &mut first,
+            &identity,
+            &profile,
+            104,
+            BocpdSrObservation::Zero,
+        )?;
+        assert_eq!(
+            resumed_terminal.try_to_canonical_bytes()?,
+            direct_terminal.try_to_canonical_bytes()?
+        );
+
+        let before = first.evidence().try_to_canonical_bytes()?;
+        assert_eq!(
+            first.observe(SequencedBocpdSrObservation::new(
+                identity.clone(),
+                profile.clone(),
+                106,
+                BocpdSrObservation::One,
+            )),
+            Err(BocpdSrError::UnexpectedSequence {
+                expected: 105,
+                actual: 106,
+            })
+        );
+        assert_eq!(first.evidence().try_to_canonical_bytes()?, before);
+
+        first.sr_statistic = u128::MAX;
+        let before_overflow = first.evidence().try_to_canonical_bytes()?;
+        assert!(matches!(
+            first.observe(SequencedBocpdSrObservation::new(
+                identity,
+                profile,
+                105,
+                BocpdSrObservation::One,
+            )),
+            Err(BocpdSrError::ArithmeticOverflow { .. })
+        ));
+        assert_eq!(first.evidence().try_to_canonical_bytes()?, before_overflow);
         Ok(())
     }
 }
