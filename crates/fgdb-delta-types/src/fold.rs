@@ -11,7 +11,7 @@
 
 use crate::{DeltaRow, ElementId, LabelId, PropertyKeyId, ValidTimePeriod};
 use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Collapse `rows` (evaluation order) so remaining rows are target-disjoint
 /// and therefore safe to byte-sort before apply.
@@ -100,7 +100,10 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                     net.props.insert(key, (None, Some(value)));
                 }
             }
-            DeltaRow::DeleteEdge { eid, before_version } => {
+            DeltaRow::DeleteEdge {
+                eid,
+                before_version,
+            } => {
                 absorb_edge_with_delete(&mut edges, eid, before_version);
             }
             DeltaRow::Property {
@@ -154,40 +157,38 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 contract_id,
                 before,
                 after,
-            } => {
-                match elem {
-                    ElementId::Vertex(vid) => {
-                        let net = vertices.entry(vid).or_default();
-                        if net.cancelled || net.deleted.is_some() {
-                            continue;
-                        }
-                        if let Some(created) = &mut net.created {
-                            created.valid_time = after;
-                            continue;
-                        }
-                        net.valid_time = Some(match net.valid_time {
-                            None => (before, after),
-                            Some((first, _)) => (first, after),
-                        });
-                        net.valid_time_contract = Some(contract_id);
+            } => match elem {
+                ElementId::Vertex(vid) => {
+                    let net = vertices.entry(vid).or_default();
+                    if net.cancelled || net.deleted.is_some() {
+                        continue;
                     }
-                    ElementId::Edge(eid) => {
-                        let net = edges.entry(eid).or_default();
-                        if net.cancelled || net.deleted.is_some() {
-                            continue;
-                        }
-                        if let Some(created) = &mut net.created {
-                            created.valid_time = after;
-                            continue;
-                        }
-                        net.valid_time = Some(match net.valid_time {
-                            None => (before, after),
-                            Some((first, _)) => (first, after),
-                        });
-                        net.valid_time_contract = Some(contract_id);
+                    if let Some(created) = &mut net.created {
+                        created.valid_time = after;
+                        continue;
                     }
+                    net.valid_time = Some(match net.valid_time {
+                        None => (before, after),
+                        Some((first, _)) => (first, after),
+                    });
+                    net.valid_time_contract = Some(contract_id);
                 }
-            }
+                ElementId::Edge(eid) => {
+                    let net = edges.entry(eid).or_default();
+                    if net.cancelled || net.deleted.is_some() {
+                        continue;
+                    }
+                    if let Some(created) = &mut net.created {
+                        created.valid_time = after;
+                        continue;
+                    }
+                    net.valid_time = Some(match net.valid_time {
+                        None => (before, after),
+                        Some((first, _)) => (first, after),
+                    });
+                    net.valid_time_contract = Some(contract_id);
+                }
+            },
             other => pass_through.push(other),
         }
     }
@@ -327,11 +328,7 @@ fn absorb_edge(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId) {
     }
 }
 
-fn absorb_edge_with_delete(
-    edges: &mut BTreeMap<EId, EdgeNet>,
-    eid: EId,
-    before_version: ObjectId,
-) {
+fn absorb_edge_with_delete(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId, before_version: ObjectId) {
     let net = edges.entry(eid).or_default();
     if net.created.is_some() {
         *net = EdgeNet::default();
