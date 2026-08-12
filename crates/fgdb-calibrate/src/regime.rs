@@ -2700,8 +2700,8 @@ impl BocpdSrProfile {
         if max_retained_receipts > max_observations {
             return Err(BocpdSrError::ReceiptLimitExceedsObservationLimit);
         }
-        let observation_bound = u64::try_from(max_observations)
-            .map_err(|_| BocpdSrError::LengthOverflow)?;
+        let observation_bound =
+            u64::try_from(max_observations).map_err(|_| BocpdSrError::LengthOverflow)?;
         if beta_alpha
             .checked_add(beta_beta)
             .and_then(|sum| sum.checked_add(observation_bound))
@@ -3486,19 +3486,20 @@ impl BocpdSrMonitor {
                 next_fallback = Some(stream_sequence);
             }
         }
-        let next_sequence =
-            if crossed
-                || stream_sequence == self.identity.window().last()
-                || next_count >= self.profile.max_observations
-            {
-                None
-            } else {
-                Some(stream_sequence.checked_add(1).ok_or(
-                    BocpdSrError::ArithmeticOverflow {
+        let next_sequence = if crossed
+            || stream_sequence == self.identity.window().last()
+            || next_count >= self.profile.max_observations
+        {
+            None
+        } else {
+            Some(
+                stream_sequence
+                    .checked_add(1)
+                    .ok_or(BocpdSrError::ArithmeticOverflow {
                         component: "stream-sequence",
-                    },
-                )?)
-            };
+                    })?,
+            )
+        };
 
         self.next_sequence = next_sequence;
         self.through_sequence = Some(stream_sequence);
@@ -3532,12 +3533,10 @@ fn next_sr_statistic(
         .ok_or(BocpdSrError::ArithmeticOverflow {
             component: "shiryaev-roberts-recurrence",
         })?;
-    Ok(round_ratio_u128(
-        numerator,
-        u128::from(null),
-        "shiryaev-roberts-rounding",
-    )?
-    .min(profile.sr_cap))
+    Ok(
+        round_ratio_u128(numerator, u128::from(null), "shiryaev-roberts-rounding")?
+            .min(profile.sr_cap),
+    )
 }
 
 fn next_bocpd_states(
@@ -3967,7 +3966,8 @@ fn validate_bocpd_sr_evidence(evidence: &BocpdSrEvidence) -> Result<(), BocpdSrE
     // states (for example a quiet prefix paired with an already-crossed SR
     // statistic), so the codec deliberately pays this bounded verification
     // cost at its trust boundary.
-    let mut replayed = BocpdSrMonitor::try_new(evidence.identity.clone(), evidence.profile.clone())?;
+    let mut replayed =
+        BocpdSrMonitor::try_new(evidence.identity.clone(), evidence.profile.clone())?;
     for (offset, observation) in evidence.observations.iter().copied().enumerate() {
         let offset = u64::try_from(offset).map_err(|_| BocpdSrError::LengthOverflow)?;
         let sequence = evidence
