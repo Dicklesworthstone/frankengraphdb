@@ -2202,13 +2202,19 @@ fn delta_index_is_maintained_on_write_and_rebuilt_at_open() {
         let cx = &cx;
         let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
         let empty = db.delta_index().expect("healthy empty index");
+        let empty_since: Vec<_> = db
+            .delta_since(CommitSeq::ORIGIN)
+            .expect("since origin on empty")
+            .map(|batch| batch.commit_seq())
+            .collect();
         assert_eq!(
             (
                 db.delta_frontier().expect("healthy empty frontier"),
-                empty.len()
+                empty.len(),
+                empty_since.as_slice()
             ),
-            (CommitSeq::ORIGIN, 0),
-            "empty create: seq=origin frontier={:?} entries={}",
+            (CommitSeq::ORIGIN, 0, &[][..]),
+            "empty create: asked=origin frontier={:?} entries={} yielded={empty_since:?}",
             db.delta_frontier().expect("healthy empty frontier"),
             empty.len()
         );
@@ -2265,6 +2271,33 @@ fn delta_index_is_maintained_on_write_and_rebuilt_at_open() {
             "next_commit_seq is the successor of seq={seq2:?}; frontier={:?} entries={}",
             db.delta_frontier().expect("frontier after second"),
             after_second.len()
+        );
+        let since_origin: Vec<_> = db
+            .delta_since(CommitSeq::ORIGIN)
+            .expect("since origin after two writes")
+            .map(|batch| batch.commit_seq())
+            .collect();
+        let since_first: Vec<_> = db
+            .delta_since(seq1)
+            .expect("since first after two writes")
+            .map(|batch| batch.commit_seq())
+            .collect();
+        assert_eq!(
+            (since_origin.as_slice(), since_first.as_slice()),
+            (&[seq1, seq2][..], &[seq2][..]),
+            "stream: asked origin/first={seq1:?} frontier={:?} yielded origin={since_origin:?} first={since_first:?}",
+            db.delta_frontier().expect("frontier after second")
+        );
+        let future = CommitSeq(3);
+        assert!(
+            matches!(
+                db.delta_since(future),
+                Err(fgdb::ReadError::BeyondFrontier {
+                    asked,
+                    frontier
+                }) if asked == future && frontier == seq2
+            ),
+            "future cursor asked={future:?} frontier={seq2:?} must refuse, not clamp"
         );
         let before_drop_frontier = db.delta_frontier().expect("pre-drop frontier");
         let before_drop_len = after_second.len();

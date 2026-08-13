@@ -43,7 +43,7 @@ use fgdb_sim::{
 use fgdb_strata::store::StoreError as BlockStoreError;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
 use std::task::Poll;
@@ -511,6 +511,65 @@ fn agreement_survives_a_reopen() {
     });
 }
 
+/// Independent reconstructions of the derived delta window must agree: the
+/// engine rebuilds `LocalDeltaBatchIndex` from the recovered chain at open,
+/// and `fgdb_sim::replay` inserts in the same walk. They share nothing but
+/// bytes on disk. A window the engine invented in memory would diverge.
+#[test]
+fn the_reopened_delta_index_equals_the_independent_replay() {
+    let dir = scratch("delta-index-replay");
+    under_lab(8198, move |cx| async move {
+        let cx = &cx;
+        let _ = write_history(cx, &dir).await;
+
+        let (engine_index, engine_seqs, engine_frontier) = {
+            let engine = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("reopens");
+            let engine_index = engine.delta_index().expect("healthy rebuilt index").clone();
+            let engine_seqs: Vec<_> = engine
+                .delta_since(CommitSeq::ORIGIN)
+                .expect("since origin")
+                .map(|batch| batch.commit_seq())
+                .collect();
+            let engine_frontier = engine.delta_frontier().expect("reopened frontier");
+            (engine_index, engine_seqs, engine_frontier)
+        };
+        assert!(
+            engine_index.len() >= 2 && engine_frontier.0 >= 2,
+            "the fixture must leave a non-trivial window or agreement is about \
+             emptiness: frontier={engine_frontier:?} entries={} seqs={engine_seqs:?}",
+            engine_index.len()
+        );
+
+        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("oracle opens");
+        let replayed = replay(cx, &coordinator).await.expect("the stream replays");
+        let replay_seqs: Vec<_> = replayed
+            .index
+            .since(CommitSeq::ORIGIN)
+            .expect("replay since origin")
+            .map(|batch| batch.commit_seq())
+            .collect();
+        assert_eq!(
+            engine_index,
+            replayed.index,
+            "engine rebuilt window must equal independent replay: \
+             engine frontier={engine_frontier:?} entries={} seqs={engine_seqs:?}; \
+             replay frontier={:?} entries={} seqs={replay_seqs:?}",
+            engine_index.len(),
+            replayed.index.frontier(),
+            replayed.index.len()
+        );
+        assert_eq!(
+            engine_seqs, replay_seqs,
+            "delta_since(origin) seqs must match the replay walk: \
+             engine={engine_seqs:?} replay={replay_seqs:?} frontier={engine_frontier:?}"
+        );
+    });
+}
+
 /// Every derived-publication boundary after Chronicle D2 has the same law:
 /// the retained handle is totally fenced, and a fresh open agrees with the
 /// independent reference replay about the commit that triggered the failure
@@ -618,6 +677,9 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
                 recovery,
                 db.vertex_at(VId(3), recovery.published_frontier),
             );
+            assert_recovery_fence(stage, recovery, db.delta_frontier());
+            assert_recovery_fence(stage, recovery, db.delta_index());
+            assert_recovery_fence(stage, recovery, db.delta_since(CommitSeq::ORIGIN));
             assert_recovery_fence(stage, recovery, db.vertices());
             assert_recovery_fence(stage, recovery, db.vertices_at(recovery.published_frontier));
             assert_recovery_fence(stage, recovery, db.edges());

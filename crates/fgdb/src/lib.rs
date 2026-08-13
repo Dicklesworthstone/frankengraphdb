@@ -436,6 +436,18 @@ pub enum ReadError {
         asked: CommitSeq,
         frontier: CommitSeq,
     },
+    /// A delta-window cursor names a sequence the retained index no longer
+    /// holds. The batches between the cursor and `retained_after` were
+    /// retired; answering with the remaining suffix would be a gapped stream.
+    DeltaCursorRetired {
+        asked: CommitSeq,
+        retained_after: CommitSeq,
+        frontier: CommitSeq,
+    },
+    /// A derived-window query failed for a reason other than a future or
+    /// retired cursor. `since` does not construct these; the arm exists so a
+    /// new index-query error cannot be silently remapped.
+    DeltaWindow(IndexError),
 }
 
 macro_rules! from_error {
@@ -625,6 +637,15 @@ impl core::fmt::Display for ReadError {
                 f,
                 "asked about {asked:?}, beyond the published frontier {frontier:?}"
             ),
+            Self::DeltaCursorRetired {
+                asked,
+                retained_after,
+                frontier,
+            } => write!(
+                f,
+                "delta cursor {asked:?} was retired: window is ({retained_after:?}, {frontier:?}]"
+            ),
+            Self::DeltaWindow(error) => write!(f, "delta window: {error}"),
         }
     }
 }
@@ -2363,6 +2384,35 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn delta_frontier(&self) -> Result<CommitSeq, ReadError> {
         self.ensure_readable()?;
         Ok(self.delta_index.frontier())
+    }
+
+    /// The retained committed batches strictly after `after`, in commit order.
+    ///
+    /// This is the live frontier-stream face (og6n subset): a consumer names
+    /// the last sequence it has applied and receives the gap-free suffix, or
+    /// a refusal. A cursor past the frontier is [`ReadError::BeyondFrontier`];
+    /// a cursor below the retained floor is [`ReadError::DeltaCursorRetired`].
+    /// Reads check `Healthy` like every other graph read.
+    pub fn delta_since(
+        &self,
+        after: CommitSeq,
+    ) -> Result<impl Iterator<Item = &LogicalDeltaBatch> + '_, ReadError> {
+        self.ensure_readable()?;
+        self.delta_index.since(after).map_err(|error| match error {
+            IndexError::BeyondFrontier { asked, frontier } => {
+                ReadError::BeyondFrontier { asked, frontier }
+            }
+            IndexError::CursorRetired {
+                asked,
+                retained_after,
+                frontier,
+            } => ReadError::DeltaCursorRetired {
+                asked,
+                retained_after,
+                frontier,
+            },
+            other => ReadError::DeltaWindow(other),
+        })
     }
 
     /// Consolidate the partition's durable history: fewer blocks, the SAME
