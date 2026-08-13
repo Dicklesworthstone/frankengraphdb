@@ -16,20 +16,22 @@ use fgdb_calibrate::exploration::{
 use fgdb_sim::artifact::{FailureKind, Replay, Scenario};
 use fgdb_sim::campaign::{
     CampaignModelId, CampaignModelIdError, CampaignNoveltyTracker, CampaignOutcome,
-    CampaignSampleError, ClaimClass, CoverageCandidate, CoveragePolicyError,
+    CampaignRecordError, CampaignSampleError, ClaimClass, CoverageCandidate, CoveragePolicyError,
     EXPECTED_LIFECYCLE_CONSUMERS, EXPECTED_LIFECYCLE_COVERAGE_IDS, EXPECTED_LIFECYCLE_OWNER_BEADS,
-    FORBIDDEN_CLAIMS, LIFECYCLE_COVERAGE_ROWS, LIFECYCLE_FIRST_REQUIRED_GATE,
-    LifecycleCampaignEntrypoint, LifecycleConsumerCompletion, LifecycleCoverageState,
-    LifecycleOwnerCompletion, LifecycleRegistryError, PrioritizedCampaignError,
-    StoppingPolicyError, file_falsification, lifecycle_campaign_entrypoint,
-    lifecycle_coverage_jsonl, prioritize_coverage_candidates, run_model_qualified_campaign,
-    run_prioritized_model_qualified_campaign, validate_lifecycle_consumer_completion,
-    validate_lifecycle_coverage_rows, validate_lifecycle_owner_completion,
+    FORBIDDEN_CLAIMS, FalsificationPipelineError, LIFECYCLE_COVERAGE_ROWS,
+    LIFECYCLE_FIRST_REQUIRED_GATE, LifecycleCampaignEntrypoint, LifecycleConsumerCompletion,
+    LifecycleCoverageState, LifecycleOwnerCompletion, LifecycleRegistryError,
+    PrioritizedCampaignConfig, PrioritizedCampaignError, StoppingPolicyError, file_falsification,
+    lifecycle_campaign_entrypoint, lifecycle_coverage_jsonl, prioritize_coverage_candidates,
+    run_model_qualified_campaign, run_prioritized_model_qualified_campaign,
+    validate_lifecycle_consumer_completion, validate_lifecycle_coverage_rows,
+    validate_lifecycle_owner_completion,
 };
 use fgdb_sim::redaction::{RecordClass, RedactionPolicy};
 use fgdb_sim::vfs::{FaultPlan, Trigger};
 use fgdb_types::ObjectId;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Every outcome the type can express. Extended deliberately when a variant is
 /// added — the guards below are only as total as this list.
@@ -55,10 +57,14 @@ fn model(value: &str) -> CampaignModelId {
 }
 
 fn failing_replay() -> Replay {
+    failing_replay_with_seed(0xCA11)
+}
+
+fn failing_replay_with_seed(seed: u64) -> Replay {
     Replay {
         scenario: Scenario::DurableAppend,
         plan: FaultPlan {
-            seed: 0xCA11,
+            seed,
             fsync_lie: Trigger::Always,
             ..FaultPlan::faultless()
         },
@@ -383,7 +389,7 @@ fn a_statistical_stop_refuses_claim_prose_in_the_sampling_model() {
         ExplorationAssumptionAttestation::fully_supported(),
     )
     .expect("monitor");
-    assert_eq!(
+    assert!(matches!(
         run_model_qualified_campaign(
             "verified fault-free",
             &mut monitor,
@@ -392,7 +398,7 @@ fn a_statistical_stop_refuses_claim_prose_in_the_sampling_model() {
         Err(StoppingPolicyError::InvalidSamplingModel(
             CampaignModelIdError::InvalidCharacter
         ))
-    );
+    ));
 }
 
 #[test]
@@ -430,10 +436,10 @@ fn a_known_counterexample_can_never_be_reported_not_falsified() {
     assert!(run.failure.is_some());
     let mut tampered = replay.run(&dir);
     tampered.virtual_clock_epoch_nanos ^= 1;
-    assert_eq!(
+    assert!(matches!(
         CampaignNoveltyTracker::new().observe(tampered),
         Err(CampaignSampleError::ExecutionEvidenceMutated)
-    );
+    ));
     let violated = CampaignNoveltyTracker::new()
         .observe(run)
         .expect("the real fixture replay falsifies its durability expectation");
@@ -569,7 +575,8 @@ fn coverage_prioritization_refuses_invalid_premises_and_is_permutation_stable() 
 }
 
 #[test]
-fn coverage_decision_card_drives_the_real_campaign_and_halts_at_its_counterexample() {
+fn prioritized_campaign_files_minimized_reproducer_or_nothing() {
+    static INVOCATION: AtomicU64 = AtomicU64::new(0);
     let candidates = [
         CoverageCandidate {
             id: "bug-replay",
@@ -603,23 +610,38 @@ fn coverage_decision_card_drives_the_real_campaign_and_halts_at_its_counterexamp
     )
     .expect("monitor");
     let dir = std::env::temp_dir().join(format!(
-        "fgdb-sim-prioritized-campaign-{}",
-        std::process::id()
+        "fgdb-sim-prioritized-campaign-{}-{}",
+        std::process::id(),
+        INVOCATION.fetch_add(1, Ordering::Relaxed),
     ));
     std::fs::create_dir_all(&dir).expect("campaign scratch");
+    let policy = RedactionPolicy::fail_closed()
+        .retain(RecordClass::FaultInjection)
+        .expect("fault injection records are retainable");
+    let shrink_root = dir.join("filed-shrink");
+    let output_root = dir.join("filed-output");
     let mut executed = Vec::new();
+    let mut observed_source_digest = None;
     let run = run_prioritized_model_qualified_campaign(
         &candidates,
         &[],
         8,
         3,
-        "coverage-ranked-fixture-v1",
         &mut monitor,
+        PrioritizedCampaignConfig::new(
+            "coverage-ranked-fixture-v1",
+            &shrink_root,
+            &output_root,
+            &policy,
+            &[],
+        ),
         |candidate| {
             executed.push(candidate.id);
             let candidate_dir = dir.join(candidate.id);
             std::fs::create_dir_all(&candidate_dir).expect("candidate scratch");
-            candidate.replay.run(&candidate_dir)
+            let outcome = candidate.replay.run(&candidate_dir);
+            observed_source_digest = outcome.replay_completeness_digest();
+            outcome
         },
     )
     .expect("the decision card drives an admissible campaign");
@@ -637,14 +659,284 @@ fn coverage_decision_card_drives_the_real_campaign_and_halts_at_its_counterexamp
         Some(CampaignOutcome::Falsified { .. })
     ));
     assert_eq!(monitor.total_runs(), 0);
+    let filed = run
+        .filed_falsification()
+        .expect("a detected counterexample must traverse the shrink/file pipeline");
+    assert_eq!(filed.source_replay(), failing_replay());
+    assert_eq!(
+        Some(filed.source_execution_digest()),
+        observed_source_digest.as_deref(),
+        "filing must preserve the exact execution root that triggered the campaign"
+    );
+    assert_eq!(
+        filed.source_failure_kind(),
+        FailureKind::AcknowledgedBytesLost
+    );
+    assert_eq!(filed.scenario_id(), "durable-append");
+    assert!(filed.shrink_iterations() > 0);
+    assert!(filed.final_reproducer_path().is_dir());
+    assert!(filed.bundle_path().is_file());
+    assert_eq!(
+        filed.bundle_path(),
+        output_root.join(format!(
+            "{}.campaign-receipt.fgsc",
+            filed.source_execution_digest()
+        )),
+        "the immutable namespace is the exact sealed source execution"
+    );
+    assert_eq!(
+        filed
+            .final_reproducer_path()
+            .parent()
+            .and_then(std::path::Path::parent),
+        Some(output_root.as_path()),
+        "staging must live on the destination filesystem"
+    );
+    let minimized_replay = Replay {
+        scenario: Scenario::DurableAppend,
+        plan: FaultPlan {
+            fsync_lie: Trigger::At(1),
+            ..failing_replay().plan
+        },
+    };
+    assert_eq!(
+        filed.outcome(),
+        &CampaignOutcome::Falsified {
+            replay: minimized_replay,
+            failure_kind: FailureKind::AcknowledgedBytesLost,
+        }
+    );
+    let filed_bytes = std::fs::read(filed.bundle_path()).expect("filed receipt is readable");
+    let filed_text = std::str::from_utf8(&filed_bytes).expect("receipt is canonical text");
+    assert!(filed_text.contains(&format!(
+        "source_replay={} source_execution_digest={} source_failure_kind=AcknowledgedBytesLost",
+        failing_replay().encode(),
+        observed_source_digest.as_deref().expect("source digest"),
+    )));
+    assert!(filed_text.contains("verdict=falsified: AcknowledgedBytesLost"));
+    assert!(filed_text.contains(&minimized_replay.encode()));
 
+    let first_bundle_path = filed.bundle_path().to_path_buf();
+    let first_bundle_bytes = filed_bytes.clone();
+    let second_replay = failing_replay_with_seed(0xCA12);
+    let second_candidates = [CoverageCandidate {
+        id: "second-bug-replay",
+        covers: &["durability-second-seed"],
+        cost: 1,
+        replay: second_replay,
+    }];
+    let second = run_prioritized_model_qualified_campaign(
+        &second_candidates,
+        &[],
+        8,
+        1,
+        &mut monitor,
+        PrioritizedCampaignConfig::new(
+            "coverage-ranked-fixture-v1",
+            &dir.join("second-filed-shrink"),
+            &output_root,
+            &policy,
+            &[],
+        ),
+        |candidate| {
+            let candidate_dir = dir.join(candidate.id);
+            std::fs::create_dir_all(&candidate_dir).expect("second candidate scratch");
+            candidate.replay.run(&candidate_dir)
+        },
+    )
+    .expect("a distinct failure shares the campaign collection without overwriting it");
+    let second_filed = second
+        .filed_falsification()
+        .expect("the second failure files its own record");
+    assert_ne!(first_bundle_path, second_filed.bundle_path());
+    assert_eq!(
+        second_filed.bundle_path(),
+        output_root.join(format!(
+            "{}.campaign-receipt.fgsc",
+            second_filed.source_execution_digest()
+        ))
+    );
+    assert!(second_filed.bundle_path().is_file());
+    assert_eq!(
+        std::fs::read(&first_bundle_path).expect("first receipt remains readable"),
+        first_bundle_bytes,
+        "a later campaign cannot overwrite earlier evidence"
+    );
+    let exact_retry = run_prioritized_model_qualified_campaign(
+        &candidates,
+        &[],
+        8,
+        1,
+        &mut monitor,
+        PrioritizedCampaignConfig::new(
+            "coverage-ranked-fixture-v1",
+            &dir.join("exact-retry-shrink"),
+            &output_root,
+            &policy,
+            &[],
+        ),
+        |candidate| {
+            let candidate_dir = dir.join("exact-retry-execution");
+            std::fs::create_dir_all(&candidate_dir).expect("exact retry scratch");
+            candidate.replay.run(&candidate_dir)
+        },
+    );
+    assert!(matches!(
+        exact_retry,
+        Err(PrioritizedCampaignError::Filing(
+            FalsificationPipelineError::Record(CampaignRecordError::FalsificationAlreadyFiled)
+        ))
+    ));
+    assert_eq!(
+        std::fs::read(&first_bundle_path).expect("first receipt survives exact retry"),
+        first_bundle_bytes,
+        "an exact retry cannot replace its previously filed evidence"
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&first_bundle_path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            file.write_all(b"campaign tampered_but_source_line_preserved=true\n")
+        })
+        .expect("plant a post-publication mutation");
+    let tampered_retry = run_prioritized_model_qualified_campaign(
+        &candidates,
+        &[],
+        8,
+        1,
+        &mut monitor,
+        PrioritizedCampaignConfig::new(
+            "coverage-ranked-fixture-v1",
+            &dir.join("tampered-retry-shrink"),
+            &output_root,
+            &policy,
+            &[],
+        ),
+        |candidate| {
+            let candidate_dir = dir.join("tampered-retry-execution");
+            std::fs::create_dir_all(&candidate_dir).expect("tampered retry scratch");
+            candidate.replay.run(&candidate_dir)
+        },
+    );
+    assert!(matches!(
+        tampered_retry,
+        Err(PrioritizedCampaignError::Filing(
+            FalsificationPipelineError::Record(CampaignRecordError::FalsificationPathConflict)
+        ))
+    ));
+
+    let blocked_output = dir.join("occupied-output");
+    std::fs::create_dir_all(&blocked_output).expect("occupied output collection");
+    let publish_failure_replay = failing_replay_with_seed(0xCA13);
+    let publish_probe_dir = dir.join("publish-failure-probe");
+    std::fs::create_dir_all(&publish_probe_dir).expect("publish probe scratch");
+    let publish_digest = publish_failure_replay
+        .run(&publish_probe_dir)
+        .replay_completeness_digest()
+        .expect("publish probe is sealed");
+    let occupied_receipt = blocked_output.join(format!("{publish_digest}.campaign-receipt.fgsc"));
+    std::fs::write(&occupied_receipt, b"foreign-incomplete-receipt")
+        .expect("occupy the canonical receipt path");
+    let publish_failure = file_falsification(
+        publish_failure_replay,
+        &dir.join("publish-failure-staging"),
+        &blocked_output,
+        &policy,
+        &[],
+    );
+    assert!(matches!(
+        publish_failure,
+        Err(FalsificationPipelineError::Record(
+            CampaignRecordError::FalsificationPathConflict
+        ))
+    ));
+    assert_eq!(
+        std::fs::read(&occupied_receipt).expect("failed publication preserves its target"),
+        b"foreign-incomplete-receipt"
+    );
+    let recovered = file_falsification(
+        publish_failure_replay,
+        &dir.join("publish-retry-staging"),
+        &dir.join("publish-retry-output"),
+        &policy,
+        &[],
+    )
+    .expect("a failed atomic publication does not poison a fresh retry")
+    .expect("the retry files the original counterexample");
+    assert!(recovered.bundle_path().is_file());
+
+    let clean_candidates = [coverage_candidate("clean", &["clean"], 1, 0x5221)];
+    let clean_identity = ExplorationBudgetIdentity::try_new(
+        ObjectId([51; 32]),
+        ObjectId([52; 32]),
+        ObjectId([53; 32]),
+        4,
+        0,
+        9,
+        ObjectId([54; 32]),
+        ObjectId([55; 32]),
+    )
+    .expect("clean identity");
+    let clean_profile = ExplorationBudgetProfile::try_new(
+        ExplorationBudgetConfig::new(0.5, 0.9).min_samples(2),
+        10,
+        MAX_EXPLORATION_ESTIMATION_WORK,
+    )
+    .expect("clean profile");
+    let mut clean_monitor = ExplorationBudgetMonitor::try_new(
+        clean_identity,
+        clean_profile,
+        ExplorationAssumptionAttestation::fully_supported(),
+    )
+    .expect("clean monitor");
+    let clean_shrink = dir.join("clean-shrink-must-not-exist");
+    let clean_output = dir.join("clean-output-must-not-exist");
+    let clean = run_prioritized_model_qualified_campaign(
+        &clean_candidates,
+        &[],
+        9,
+        1,
+        &mut clean_monitor,
+        PrioritizedCampaignConfig::new(
+            "clean-fixture-v1",
+            &clean_shrink,
+            &clean_output,
+            &policy,
+            &[],
+        ),
+        |candidate| {
+            let candidate_dir = dir.join("clean-execution");
+            std::fs::create_dir_all(&candidate_dir).expect("clean execution scratch");
+            candidate.replay.run(&candidate_dir)
+        },
+    )
+    .expect("a passing campaign remains admissible");
+    assert!(clean.filed_falsification().is_none());
+    assert!(
+        !clean_output.exists(),
+        "a passing campaign manufactured a falsification bundle"
+    );
+    assert!(
+        !clean_shrink.exists(),
+        "a passing campaign entered the shrink pipeline"
+    );
+
+    let mismatched_output = dir.join("mismatched-output-must-not-exist");
+    let mismatched_shrink = dir.join("mismatched-shrink-must-not-exist");
     let mismatched = run_prioritized_model_qualified_campaign(
         &candidates,
         &[],
         8,
         3,
-        "coverage-ranked-fixture-v1",
         &mut monitor,
+        PrioritizedCampaignConfig::new(
+            "coverage-ranked-fixture-v1",
+            &mismatched_shrink,
+            &mismatched_output,
+            &policy,
+            &[],
+        ),
         |_candidate| {
             let mismatched_dir = dir.join("mismatched-action");
             std::fs::create_dir_all(&mismatched_dir).expect("mismatched action scratch");
@@ -657,13 +949,47 @@ fn coverage_decision_card_drives_the_real_campaign_and_halts_at_its_counterexamp
             StoppingPolicyError::Sample(CampaignSampleError::ActionReplayMismatch)
         ))
     ));
+    assert!(!mismatched_output.exists());
+    assert!(!mismatched_shrink.exists());
+
+    let mutated_output = dir.join("mutated-output-must-not-exist");
+    let mutated_shrink = dir.join("mutated-shrink-must-not-exist");
+    let mutated = run_prioritized_model_qualified_campaign(
+        &candidates,
+        &[],
+        8,
+        3,
+        &mut monitor,
+        PrioritizedCampaignConfig::new(
+            "coverage-ranked-fixture-v1",
+            &mutated_shrink,
+            &mutated_output,
+            &policy,
+            &[],
+        ),
+        |candidate| {
+            let mutated_dir = dir.join("mutated-execution");
+            std::fs::create_dir_all(&mutated_dir).expect("mutated execution scratch");
+            let mut outcome = candidate.replay.run(&mutated_dir);
+            outcome.virtual_clock_epoch_nanos ^= 1;
+            outcome
+        },
+    );
+    assert!(matches!(
+        mutated,
+        Err(PrioritizedCampaignError::Stopping(
+            StoppingPolicyError::Sample(CampaignSampleError::ExecutionEvidenceMutated)
+        ))
+    ));
+    assert!(!mutated_output.exists());
+    assert!(!mutated_shrink.exists());
 }
 
 #[test]
 fn submodular_premises_card_fallback_and_campaign_execution_are_governed() {
     coverage_prioritization_refuses_invalid_premises_and_is_permutation_stable();
     finite_ci_time_prioritizes_uncovered_classes_with_a_pinned_fallback();
-    coverage_decision_card_drives_the_real_campaign_and_halts_at_its_counterexample();
+    prioritized_campaign_files_minimized_reproducer_or_nothing();
 }
 
 #[test]

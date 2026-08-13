@@ -46,7 +46,7 @@ use fgdb_calibrate::exploration::{
 
 use crate::artifact::{CONTRACT_FIELDS, FailureKind, Replay, RunOutcome};
 use crate::redaction::{Disposition, MediatedRecord, RecordClass, RedactionPolicy};
-use crate::shrink::{Shrunk, shrink};
+use crate::shrink::{Shrunk, shrink, shrink_observed};
 use crate::vfs::FaultEvent;
 
 /// What kind of claim an outcome supports. Never "verified".
@@ -244,20 +244,15 @@ pub enum StoppingPolicyError {
 /// Typed result of one actual campaign experiment. Its representation is
 /// private so a falsification sample can only be constructed from a sealed
 /// execution outcome, not caller assertions about a replay and failure kind.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct CampaignSample {
     observation: CampaignObservation,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum CampaignObservation {
-    InvariantHeld {
-        discovered_new_class: bool,
-    },
-    InvariantViolated {
-        replay: Replay,
-        failure_kind: FailureKind,
-    },
+    InvariantHeld { discovered_new_class: bool },
+    InvariantViolated { run: Box<RunOutcome> },
     Inconclusive,
 }
 
@@ -293,12 +288,9 @@ impl CampaignNoveltyTracker {
             return Err(CampaignSampleError::ExecutionEvidenceMutated);
         }
         let replay = run.replay();
-        if let Some(failure_kind) = run.failure.as_ref().map(|failure| failure.kind) {
+        if run.failure.is_some() {
             return Ok(CampaignSample {
-                observation: CampaignObservation::InvariantViolated {
-                    replay,
-                    failure_kind,
-                },
+                observation: CampaignObservation::InvariantViolated { run: Box::new(run) },
             });
         }
         let mut observed = vec![format!("scenario:{}", replay.scenario.id())];
@@ -338,7 +330,7 @@ impl CampaignSample {
 /// `outcome` exists only when the upstream conformal novelty bound says the
 /// selected target was met. Even then it is [`CampaignOutcome::NotFalsified`],
 /// never bounded completion and never a claim about the unexplored space.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct ModelQualifiedStopping {
     /// Validated model identifier; forbidden claim prose is unrepresentable.
     sampling_model: CampaignModelId,
@@ -347,6 +339,10 @@ pub struct ModelQualifiedStopping {
     evidence: ExplorationBudgetEvidence,
     /// Statistical stop result, or `None` when exploration must continue.
     outcome: Option<CampaignOutcome>,
+    /// Exact sealed execution behind a falsification outcome. Kept private so
+    /// the prioritized runner can consume it into the shrink/file pipeline
+    /// without reducing provenance to replay plus coarse failure kind.
+    falsification_source: Option<RunOutcome>,
     /// One reconstructable report line with the assumptions and decision.
     log_line: String,
 }
@@ -574,10 +570,11 @@ pub fn prioritize_coverage_candidates(
 }
 
 /// Coverage allocation plus the actual model-qualified campaign it drove.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct PrioritizedCampaignRun {
     decision_card: CoverageDecisionCard,
     stopping: ModelQualifiedStopping,
+    filed_falsification: Option<FalsificationCampaignRecord>,
 }
 
 impl PrioritizedCampaignRun {
@@ -590,6 +587,48 @@ impl PrioritizedCampaignRun {
     pub const fn stopping(&self) -> &ModelQualifiedStopping {
         &self.stopping
     }
+
+    /// Minimized, provenance-checked record filed for the campaign's detected
+    /// falsification. Passing, inconclusive, and statistically stopped
+    /// campaigns never manufacture a failure record.
+    #[must_use]
+    pub const fn filed_falsification(&self) -> Option<&FalsificationCampaignRecord> {
+        self.filed_falsification.as_ref()
+    }
+}
+
+/// Where a prioritized campaign must materialize any falsification it finds.
+///
+/// Making this a required argument closes the former disconnect where the
+/// campaign returned a typed counterexample while the finished shrink/file
+/// pipeline had no production caller. The paths are not touched unless the
+/// executed campaign actually falsifies its invariant.
+#[derive(Clone, Copy)]
+pub struct PrioritizedCampaignConfig<'a> {
+    sampling_model: &'a str,
+    shrink_root: &'a Path,
+    output_root: &'a Path,
+    redaction_policy: &'a RedactionPolicy,
+    mediated_records: &'a [MediatedRecord],
+}
+
+impl<'a> PrioritizedCampaignConfig<'a> {
+    #[must_use]
+    pub const fn new(
+        sampling_model: &'a str,
+        shrink_root: &'a Path,
+        output_root: &'a Path,
+        redaction_policy: &'a RedactionPolicy,
+        mediated_records: &'a [MediatedRecord],
+    ) -> Self {
+        Self {
+            sampling_model,
+            shrink_root,
+            output_root,
+            redaction_policy,
+            mediated_records,
+        }
+    }
 }
 
 /// Why coverage allocation could not drive a campaign honestly.
@@ -597,6 +636,15 @@ impl PrioritizedCampaignRun {
 pub enum PrioritizedCampaignError {
     Coverage(CoveragePolicyError),
     Stopping(StoppingPolicyError),
+    /// The detected replay could not be shrunk and materialized.
+    Filing(FalsificationPipelineError),
+    /// A sealed execution reported a violation, but did not produce a shrink
+    /// lineage. Returning the earlier claim without a runnable artifact would
+    /// make the verdict unauditable.
+    DetectedFalsificationDidNotReproduce,
+    /// The stopping result claimed a falsification without retaining the
+    /// sealed execution that produced it.
+    MissingFalsificationSource,
 }
 
 /// Allocate finite CI time, execute the selected campaigns in card order, and
@@ -604,14 +652,17 @@ pub enum PrioritizedCampaignError {
 ///
 /// The iterator is lazy: a counterexample or admissible model-qualified stop
 /// prevents later selections from running. This is the integration boundary
-/// that keeps the decision card from becoming unused planning output.
+/// that keeps the decision card from becoming unused planning output. A
+/// counterexample is not returned until the same replay has traversed the
+/// required shrink/file configuration; a repaired replay yields a typed error
+/// rather than an unauditable historical falsification.
 pub fn run_prioritized_model_qualified_campaign(
     candidates: &[CoverageCandidate],
     covered: &[&str],
     policy_epoch: u64,
     budget: u64,
-    sampling_model: &str,
     monitor: &mut ExplorationBudgetMonitor,
+    config: PrioritizedCampaignConfig<'_>,
     mut execute: impl FnMut(&CoverageCandidate) -> RunOutcome,
 ) -> Result<PrioritizedCampaignRun, PrioritizedCampaignError> {
     let decision_card = prioritize_coverage_candidates(candidates, covered, policy_epoch, budget)
@@ -628,11 +679,45 @@ pub fn run_prioritized_model_qualified_campaign(
         }
         novelty.observe(run)
     });
-    let stopping = run_model_qualified_campaign(sampling_model, monitor, samples)
+    let mut stopping = run_model_qualified_campaign(config.sampling_model, monitor, samples)
         .map_err(PrioritizedCampaignError::Stopping)?;
+    let detected_falsification = match stopping.outcome() {
+        Some(CampaignOutcome::Falsified {
+            replay,
+            failure_kind,
+        }) => Some((*replay, *failure_kind)),
+        Some(CampaignOutcome::NotFalsified { .. })
+        | Some(CampaignOutcome::BoundedExhausted { .. })
+        | None => None,
+    };
+    let filed_falsification = match detected_falsification {
+        Some((replay, failure_kind)) => {
+            let source = stopping
+                .falsification_source
+                .take()
+                .ok_or(PrioritizedCampaignError::MissingFalsificationSource)?;
+            if source.replay() != replay
+                || source.failure.as_ref().map(|failure| failure.kind) != Some(failure_kind)
+            {
+                return Err(PrioritizedCampaignError::MissingFalsificationSource);
+            }
+            let record = file_observed_falsification(
+                source,
+                config.shrink_root,
+                config.output_root,
+                config.redaction_policy,
+                config.mediated_records,
+            )
+            .map_err(PrioritizedCampaignError::Filing)?
+            .ok_or(PrioritizedCampaignError::DetectedFalsificationDidNotReproduce)?;
+            Some(record)
+        }
+        None => None,
+    };
     Ok(PrioritizedCampaignRun {
         decision_card,
         stopping,
+        filed_falsification,
     })
 }
 
@@ -656,6 +741,7 @@ pub fn run_model_qualified_campaign(
         .map_err(StoppingPolicyError::InvalidSamplingModel)?;
     let mut evidence = monitor.evidence();
     let mut outcome = None;
+    let mut falsification_source = None;
     for sample in samples {
         let sample = sample.map_err(StoppingPolicyError::Sample)?;
         let sequence = monitor.next_sequence().unwrap_or_else(|| {
@@ -664,14 +750,18 @@ pub fn run_model_qualified_campaign(
                 .unwrap_or(monitor.identity().last_sequence())
         });
         match sample.observation {
-            CampaignObservation::InvariantViolated {
-                replay,
-                failure_kind,
-            } => {
+            CampaignObservation::InvariantViolated { run } => {
+                let replay = run.replay();
+                let failure_kind = run
+                    .failure
+                    .as_ref()
+                    .expect("violated observations retain their failure")
+                    .kind;
                 outcome = Some(CampaignOutcome::Falsified {
                     replay,
                     failure_kind,
                 });
+                falsification_source = Some(*run);
                 break;
             }
             CampaignObservation::Inconclusive => {
@@ -737,6 +827,7 @@ pub fn run_model_qualified_campaign(
         sampling_model,
         evidence,
         outcome,
+        falsification_source,
         log_line,
     })
 }
@@ -755,12 +846,17 @@ pub enum CampaignRecordError {
     ArtifactHasUnknownFields,
     /// Shrinking changed which typed failure the artifact records.
     ReproducerChangedFailureKind,
-    /// Shrink provenance did not replay exactly as recorded.
-    OriginalReplayProvenanceMismatch,
     /// The caller's output path cannot be represented without lossy display.
     NonUtf8ReproducerPath,
     /// Scratch/reproducer/receipt materialization failed.
     MaterializationFailed(std::io::ErrorKind),
+    /// This exact sealed source execution was already filed. Immutable
+    /// evidence is never overwritten by a retry.
+    FalsificationAlreadyFiled,
+    /// The digest-named receipt path exists but its bytes are not this sealed
+    /// execution's receipt. Foreign or partial evidence is never accepted as
+    /// a completed filing.
+    FalsificationPathConflict,
     /// Never-recordable bytes reached the final serialization boundary.
     ForbiddenRecordClass,
     /// Inspectable shrink fields were changed after the shrinker sealed them.
@@ -785,6 +881,9 @@ pub enum FalsificationPipelineError {
 /// shrink work, final reproducer, and claim-typed outcome.
 #[derive(Clone, Debug)]
 pub struct FalsificationCampaignRecord {
+    source_replay: Replay,
+    source_execution_digest: String,
+    source_failure_kind: FailureKind,
     scenario_id: &'static str,
     seed: u64,
     virtual_clock_epoch_nanos: u64,
@@ -805,9 +904,10 @@ impl FalsificationCampaignRecord {
     ///
     /// # Errors
     ///
-    /// The constructor owns both replay executions. Epoch, faults, artifact,
-    /// and final path therefore come from one chain instead of arbitrary
-    /// caller arguments that merely happen to share a coarse failure kind.
+    /// The shrinker owns the sealed source execution and this constructor owns
+    /// the final replay execution. Epoch, faults, artifact, and final path
+    /// therefore come from one sealed chain instead of arbitrary caller
+    /// arguments that merely happen to share a coarse failure kind.
     pub fn materialize(
         shrunk: &Shrunk,
         output_root: &Path,
@@ -825,18 +925,60 @@ impl FalsificationCampaignRecord {
         if output_root.to_str().is_none() {
             return Err(CampaignRecordError::NonUtf8ReproducerPath);
         }
+        // Build on the destination filesystem, outside the final namespace.
+        // A hard-link claim publishes the completed receipt with create-new
+        // semantics; there is no existence-check/rename replacement race and
+        // no cross-filesystem EXDEV boundary.
         std::fs::create_dir_all(output_root)
             .map_err(|error| CampaignRecordError::MaterializationFailed(error.kind()))?;
-        let original_path = output_root.join("source-replay-validation");
-        std::fs::create_dir_all(&original_path)
-            .map_err(|error| CampaignRecordError::MaterializationFailed(error.kind()))?;
-        let original = shrunk.original_replay.run(&original_path);
-        if original.failure.as_ref() != Some(&shrunk.original_failure)
-            || original.events != shrunk.original_events
+        let staging_output_root = output_root.join(format!(
+            ".campaign-filing-{}",
+            shrunk.original_execution_digest
+        ));
+        let bundle_path = output_root.join(format!(
+            "{}.campaign-receipt.fgsc",
+            shrunk.original_execution_digest
+        ));
+        let staging_bundle_path = staging_output_root.join("campaign-receipt.fgsc");
+        if bundle_path
+            .try_exists()
+            .map_err(|error| CampaignRecordError::MaterializationFailed(error.kind()))?
         {
-            return Err(CampaignRecordError::OriginalReplayProvenanceMismatch);
+            let existing = std::fs::read(&bundle_path)
+                .map_err(|error| CampaignRecordError::MaterializationFailed(error.kind()))?;
+            let source_line = format!(
+                "campaign source_replay={} source_execution_digest={} source_failure_kind={:?}",
+                shrunk.original_replay.encode(),
+                shrunk.original_execution_digest,
+                shrunk.original_failure.kind,
+            );
+            let expected_receipt_digest =
+                std::fs::read_to_string(staging_output_root.join("campaign-receipt.digest"))
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::NotFound {
+                            CampaignRecordError::FalsificationPathConflict
+                        } else {
+                            CampaignRecordError::MaterializationFailed(error.kind())
+                        }
+                    })?;
+            let mut hasher = fgdb_crypto::Hasher::new();
+            hasher.update(&existing);
+            return if hasher.finalize().to_hex() == expected_receipt_digest
+                && std::str::from_utf8(&existing).is_ok_and(|text| text.contains(&source_line))
+            {
+                Err(CampaignRecordError::FalsificationAlreadyFiled)
+            } else {
+                Err(CampaignRecordError::FalsificationPathConflict)
+            };
         }
-        let final_reproducer_path = output_root.join("minimal-reproducer");
+        std::fs::create_dir(&staging_output_root).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                CampaignRecordError::FalsificationPathConflict
+            } else {
+                CampaignRecordError::MaterializationFailed(error.kind())
+            }
+        })?;
+        let final_reproducer_path = staging_output_root.join("minimal-reproducer");
         std::fs::create_dir_all(&final_reproducer_path)
             .map_err(|error| CampaignRecordError::MaterializationFailed(error.kind()))?;
         let final_run = shrunk.replay.run(&final_reproducer_path);
@@ -865,8 +1007,10 @@ impl FalsificationCampaignRecord {
         }
         let replay = shrunk.replay;
         let retained_records = redaction_policy.filter_records(mediated_records);
-        let bundle_path = output_root.join("campaign-receipt.fgsc");
         let record = Self {
+            source_replay: shrunk.original_replay,
+            source_execution_digest: shrunk.original_execution_digest.clone(),
+            source_failure_kind: shrunk.original_failure.kind,
             scenario_id: replay.scenario.id(),
             seed: replay.plan.seed,
             virtual_clock_epoch_nanos: final_run.virtual_clock_epoch_nanos,
@@ -890,9 +1034,56 @@ impl FalsificationCampaignRecord {
             },
         };
         let bytes = record.bundle_bytes()?;
-        std::fs::write(&bundle_path, &bytes)
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(&bytes);
+        let receipt_digest = hasher.finalize().to_hex();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_bundle_path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                file.write_all(&bytes)
+            })
             .map_err(|error| CampaignRecordError::MaterializationFailed(error.kind()))?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(staging_output_root.join("campaign-receipt.digest"))
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                file.write_all(receipt_digest.as_bytes())
+            })
+            .map_err(|error| CampaignRecordError::MaterializationFailed(error.kind()))?;
+        if let Err(error) = std::fs::hard_link(&staging_bundle_path, &bundle_path) {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(CampaignRecordError::MaterializationFailed(error.kind()));
+            }
+            let existing = std::fs::read(&bundle_path)
+                .map_err(|read| CampaignRecordError::MaterializationFailed(read.kind()))?;
+            return if existing == bytes {
+                Err(CampaignRecordError::FalsificationAlreadyFiled)
+            } else {
+                Err(CampaignRecordError::FalsificationPathConflict)
+            };
+        }
         Ok(record)
+    }
+
+    #[must_use]
+    pub const fn source_replay(&self) -> Replay {
+        self.source_replay
+    }
+
+    /// Canonical digest of the exact sealed execution that triggered filing.
+    #[must_use]
+    pub fn source_execution_digest(&self) -> &str {
+        &self.source_execution_digest
+    }
+
+    #[must_use]
+    pub const fn source_failure_kind(&self) -> FailureKind {
+        self.source_failure_kind
     }
 
     #[must_use]
@@ -948,6 +1139,12 @@ impl FalsificationCampaignRecord {
             "campaign scenario_id={} seed={:#x} virtual_clock_epoch_nanos={}",
             self.scenario_id, self.seed, self.virtual_clock_epoch_nanos
         )];
+        lines.push(format!(
+            "campaign source_replay={} source_execution_digest={} source_failure_kind={:?}",
+            self.source_replay.encode(),
+            self.source_execution_digest,
+            self.source_failure_kind,
+        ));
         for event in &self.injected_faults {
             lines.push(format!(
                 "campaign injected_fault seq={} class={} path={} detail={:?}",
@@ -1048,6 +1245,28 @@ pub fn file_falsification(
     .map_err(FalsificationPipelineError::Record)
 }
 
+fn file_observed_falsification(
+    source: RunOutcome,
+    shrink_root: &Path,
+    output_root: &Path,
+    redaction_policy: &RedactionPolicy,
+    mediated_records: &[MediatedRecord],
+) -> Result<Option<FalsificationCampaignRecord>, FalsificationPipelineError> {
+    let Some(shrunk) = shrink_observed(source, shrink_root)
+        .map_err(|error| FalsificationPipelineError::ShrinkIo(error.kind()))?
+    else {
+        return Ok(None);
+    };
+    FalsificationCampaignRecord::materialize(
+        &shrunk,
+        output_root,
+        redaction_policy,
+        mediated_records,
+    )
+    .map(Some)
+    .map_err(FalsificationPipelineError::Record)
+}
+
 #[cfg(test)]
 mod campaign_record_invariant_tests {
     use super::*;
@@ -1058,6 +1277,12 @@ mod campaign_record_invariant_tests {
     fn serialization_rechecks_the_never_recordable_class() {
         let policy = RedactionPolicy::fail_closed();
         let record = FalsificationCampaignRecord {
+            source_replay: Replay {
+                scenario: Scenario::DurableAppend,
+                plan: FaultPlan::faultless(),
+            },
+            source_execution_digest: "sealed-source-execution".to_string(),
+            source_failure_kind: FailureKind::AcknowledgedBytesLost,
             scenario_id: "durable-append",
             seed: 1,
             virtual_clock_epoch_nanos: 0,

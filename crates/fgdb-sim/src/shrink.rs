@@ -74,6 +74,10 @@ pub struct ShrinkStep {
 pub struct Shrunk {
     /// Exact replay whose failure initiated the shrink search.
     pub original_replay: Replay,
+    /// Canonical digest of the sealed execution that initiated this search.
+    /// This binds filing to the exact observed detail/events/epoch/artifact,
+    /// not merely to a replay and coarse failure class.
+    pub original_execution_digest: String,
     /// Exact typed failure produced by the initiating replay.
     pub original_failure: Failure,
     /// Normalized fault-event log produced by the initiating replay.
@@ -102,9 +106,12 @@ impl Shrunk {
     pub fn provenance_is_valid(&self) -> bool {
         self.provenance_digest
             == shrink_provenance_digest(
-                self.original_replay,
-                &self.original_failure,
-                &self.original_events,
+                OriginalExecution {
+                    replay: self.original_replay,
+                    digest: &self.original_execution_digest,
+                    failure: &self.original_failure,
+                    events: &self.original_events,
+                },
                 self.replay,
                 &self.failure,
                 &self.steps,
@@ -113,10 +120,16 @@ impl Shrunk {
     }
 }
 
+#[derive(Clone, Copy)]
+struct OriginalExecution<'a> {
+    replay: Replay,
+    digest: &'a str,
+    failure: &'a Failure,
+    events: &'a [FaultEvent],
+}
+
 fn shrink_provenance_digest(
-    original_replay: Replay,
-    original_failure: &Failure,
-    original_events: &[FaultEvent],
+    original: OriginalExecution<'_>,
     replay: Replay,
     failure: &Failure,
     steps: &[ShrinkStep],
@@ -124,9 +137,10 @@ fn shrink_provenance_digest(
 ) -> String {
     let mut hasher = Hasher::new();
     hasher.update(b"fgdb.sim.shrink.provenance.v1");
-    hasher.update(original_replay.encode().as_bytes());
-    hasher.update(format!("{original_failure:?}").as_bytes());
-    for event in original_events {
+    hasher.update(original.replay.encode().as_bytes());
+    hasher.update(original.digest.as_bytes());
+    hasher.update(format!("{:?}", original.failure).as_bytes());
+    for event in original.events {
         hasher.update(format!("{event:?}").as_bytes());
     }
     hasher.update(replay.encode().as_bytes());
@@ -317,9 +331,35 @@ fn weaken_to_single_firing(trigger: Trigger) -> Option<Trigger> {
 pub fn shrink(replay: Replay, dir: &Path) -> std::io::Result<Option<Shrunk>> {
     let mut ordinal = 0usize;
     let original_run = isolated_run(replay, dir, &mut ordinal)?;
+    shrink_observed_from_ordinal(original_run, dir, ordinal)
+}
+
+/// Minimize the exact sealed execution already observed by a campaign.
+///
+/// Unlike [`shrink`], this entrypoint does not rerun the source replay before
+/// reduction. The supplied execution is the shrink lineage root, so a valid
+/// same-replay/same-kind execution with different events, epoch, or artifact
+/// cannot be silently replaced by a later rerun.
+pub fn shrink_observed(original_run: RunOutcome, dir: &Path) -> std::io::Result<Option<Shrunk>> {
+    shrink_observed_from_ordinal(original_run, dir, 0)
+}
+
+fn shrink_observed_from_ordinal(
+    original_run: RunOutcome,
+    dir: &Path,
+    mut ordinal: usize,
+) -> std::io::Result<Option<Shrunk>> {
+    let Some(original_execution_digest) = original_run.replay_completeness_digest() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "shrink source execution seal is invalid",
+        ));
+    };
+    let replay = original_run.replay();
     let Some(original) = original_run.failure else {
         return Ok(None);
     };
+    let original_events = original_run.events;
     let target = original.kind;
 
     let mut best = replay;
@@ -354,9 +394,12 @@ pub fn shrink(replay: Replay, dir: &Path) -> std::io::Result<Option<Shrunk>> {
         "shrink returned a different failure kind than it was given"
     );
     let provenance_digest = shrink_provenance_digest(
-        replay,
-        &original,
-        &original_run.events,
+        OriginalExecution {
+            replay,
+            digest: &original_execution_digest,
+            failure: &original,
+            events: &original_events,
+        },
         best,
         &failure,
         &steps,
@@ -364,8 +407,9 @@ pub fn shrink(replay: Replay, dir: &Path) -> std::io::Result<Option<Shrunk>> {
     );
     Ok(Some(Shrunk {
         original_replay: replay,
+        original_execution_digest,
         original_failure: original,
-        original_events: original_run.events,
+        original_events,
         replay: best,
         failure,
         steps,
