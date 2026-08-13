@@ -2379,6 +2379,101 @@ fn a_post_d2_publication_failure_still_rebuilds_the_delta_index_on_reopen() {
     });
 }
 
+/// **EMPTY-NET COMMITS STILL OCCUPY THE WINDOW (fgdb-xi9y).** A second
+/// ensure of a live vertex writes no delta row, but it still consumes a
+/// commit sequence. The derived index must name that sequence — a window
+/// that skipped it would have a gap, and a reopen that dropped it would
+/// disagree with the retained handle.
+#[test]
+fn empty_net_ensure_still_occupies_the_delta_window() {
+    let dir = scratch("empty-net-delta");
+    under_lab(8210, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.ensure_vertex(VId(1), vec![], vec![]);
+        let seq1 = db.write(cx, first).await.expect("ensure-create");
+        let mut again = WriteBatch::new(KNOWS);
+        again.ensure_vertex(VId(1), vec![], vec![]);
+        let seq2 = db
+            .write(cx, again)
+            .await
+            .expect("ensure no-op still commits");
+        assert_eq!(
+            (seq1, seq2, db.delta_frontier().expect("frontier")),
+            (CommitSeq(1), CommitSeq(2), CommitSeq(2)),
+            "empty-net ensure must advance the frontier to seq 2"
+        );
+        let index = db.delta_index().expect("healthy index");
+        assert_eq!(
+            index.len(),
+            2,
+            "empty-net seq must be in the window; entries={}",
+            index.len()
+        );
+        assert!(
+            index.get(seq1).is_some() && index.get(seq2).is_some(),
+            "gap-free window must name seq1={seq1:?} and empty-net seq2={seq2:?}"
+        );
+        let seqs_and_rows: Vec<(CommitSeq, usize)> = db
+            .delta_since(CommitSeq::ORIGIN)
+            .expect("since origin")
+            .map(|batch| {
+                (
+                    batch.commit_seq(),
+                    batch
+                        .coordinate_entries()
+                        .iter()
+                        .map(|entry| entry.rows.len())
+                        .sum(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seqs_and_rows.as_slice(),
+            &[(seq1, 1), (seq2, 0)][..],
+            "create ensure emits one row; no-op ensure emits zero rows and still walks: {seqs_and_rows:?}"
+        );
+        assert!(
+            db.vertex(VId(1)).expect("reads").is_some(),
+            "the graph still has vid=1 after the empty-net commit"
+        );
+        drop(db);
+
+        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let rebuilt = reopened.delta_index().expect("rebuilt");
+        let rebuilt_rows: Vec<(CommitSeq, usize)> = reopened
+            .delta_since(CommitSeq::ORIGIN)
+            .expect("reopened since")
+            .map(|batch| {
+                (
+                    batch.commit_seq(),
+                    batch
+                        .coordinate_entries()
+                        .iter()
+                        .map(|entry| entry.rows.len())
+                        .sum(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            (
+                reopened.delta_frontier().expect("reopened frontier"),
+                rebuilt.len(),
+                rebuilt_rows.as_slice()
+            ),
+            (CommitSeq(2), 2, &[(seq1, 1), (seq2, 0)][..]),
+            "reopen must keep the empty-net seq: frontier={:?} entries={} walk={rebuilt_rows:?}",
+            reopened.delta_frontier().expect("reopened frontier"),
+            rebuilt.len()
+        );
+        assert!(
+            rebuilt.get(seq2).is_some(),
+            "rebuilt window must still name empty-net {seq2:?}"
+        );
+    });
+}
+
 /// **ENSURE IS NOT CREATE (fgdb-w5-ensure-writebatch-ac6y).** The reference
 /// already reduces `EnsureVertex` / `EnsureEdgeByTriple` to a no-op when the
 /// identity or triple is live. The engine's create path still refuses
@@ -2636,6 +2731,120 @@ fn compare_and_set_matches_aborts_and_noops() {
         assert!(
             matches!(unknown, WriteError::UnknownVertex { vid: VId(99) }),
             "missing vid=99 must be UnknownVertex, got {unknown:?}"
+        );
+    });
+}
+
+/// **EDGE COMPARE-AND-SET (fgdb-2zql).** The vertex method is witnessed
+/// above. This is the same `PendingRow` arm through
+/// [`WriteBatch::compare_and_set_edge_property`] — a broken edge path
+/// cannot hide behind the vertex tests.
+#[test]
+fn compare_and_set_edge_matches_aborts_and_noops() {
+    let dir = scratch("cas-edge");
+    under_lab(8208, move |cx| async move {
+        let cx = &cx;
+        let weight = PropertyKeyId(11);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(
+            EId(10),
+            VId(1),
+            VId(2),
+            vec![(weight, CanonicalScalar::Int(5))],
+        );
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut hit = WriteBatch::new(KNOWS);
+        hit.compare_and_set_edge_property(
+            EId(10),
+            weight,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(7),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        db.write(cx, hit).await.expect("matching edge CAS writes");
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(weight, CanonicalScalar::Int(7))],
+            "eid=10 weight expected 5->7, got {:?}",
+            db.edge(EId(10)).expect("reads").expect("live").props
+        );
+
+        let before = db.frontier().expect("frontier");
+        let mut miss = WriteBatch::new(KNOWS);
+        miss.compare_and_set_edge_property(
+            EId(10),
+            weight,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        let refusal = db
+            .write(cx, miss)
+            .await
+            .expect_err("AbortWrite mismatch must refuse before D2");
+        assert!(
+            matches!(
+                &refusal,
+                WriteError::CompareAndSetMismatch(mismatch)
+                    if mismatch.elem == ElementId::Edge(EId(10))
+                        && mismatch.name == weight
+                        && mismatch.expected == Some(CanonicalScalar::Int(5))
+                        && mismatch.actual == Some(CanonicalScalar::Int(7))
+            ),
+            "AbortWrite must name elem=eid10 expected=5 actual=7, got {refusal:?}"
+        );
+        assert_eq!(
+            db.frontier().expect("unchanged frontier"),
+            before,
+            "AbortWrite must not consume a commit sequence"
+        );
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(weight, CanonicalScalar::Int(7))],
+            "AbortWrite must leave weight at 7"
+        );
+
+        let mut noop = WriteBatch::new(KNOWS);
+        noop.compare_and_set_edge_property(
+            EId(10),
+            weight,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        noop.ensure_vertex(VId(3), vec![], vec![]);
+        db.write(cx, noop)
+            .await
+            .expect("NoOp mismatch continues the batch");
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(weight, CanonicalScalar::Int(7))],
+            "NoOp mismatch must leave weight at 7"
+        );
+        assert!(
+            db.vertex(VId(3)).expect("reads").is_some(),
+            "NoOp mismatch must still commit the sibling ensure of vid=3"
+        );
+
+        let mut ghost = WriteBatch::new(KNOWS);
+        ghost.compare_and_set_edge_property(
+            EId(99),
+            weight,
+            None,
+            CanonicalScalar::Int(1),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        let unknown = db
+            .write(cx, ghost)
+            .await
+            .expect_err("CAS of a missing edge must refuse");
+        assert!(
+            matches!(unknown, WriteError::UnknownEdge { eid: EId(99) }),
+            "missing eid=99 must be UnknownEdge, got {unknown:?}"
         );
     });
 }

@@ -1389,14 +1389,23 @@ struct GenModel {
     /// eid -> (src, dst); endpoints so a vertex delete cascades in the model
     /// exactly as the engine's writer cascades it.
     live_edges: Vec<(u128, u128, u128)>,
+    /// Retired identities, so if-present-of-spent is lawful and creates
+    /// never reuse a spent vid (`IdentitySpent`).
+    spent_vertices: Vec<u128>,
+    spent_edges: Vec<u128>,
+    /// Current value of PropertyKeyId(7) / (11), so a later CAS match
+    /// names the value the engine will actually see.
+    vertex_prop: std::collections::BTreeMap<u128, Option<CanonicalScalar>>,
+    edge_prop: std::collections::BTreeMap<u128, Option<CanonicalScalar>>,
 }
 
 /// **THE GENERATED DIFFERENTIAL: N seeded random histories of creates,
-/// deletes, cascades, label flips, and BOTH property-update families, each
+/// deletes, cascades, label flips, BOTH property-update families, and the
+/// live ensure / vertex-and-edge CAS / delete-if-present subsets, each
 /// compared against the oracle at EVERY epoch with counts closing the
-/// universe.** The hand-built seven-epoch fixture above proves the shapes it
-/// thought of; this proves the interactions nobody thought of, and a seed
-/// reproduces any disagreement exactly.
+/// universe.** The hand-built fixtures prove the shapes they thought of;
+/// this proves the interactions nobody thought of, and a seed reproduces
+/// any disagreement exactly.
 #[test]
 fn generated_histories_agree_with_the_oracle_at_every_epoch() {
     for seed in [11u64, 47, 203] {
@@ -1419,6 +1428,7 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                 .await
                 .expect("creates");
             let mut epochs = Vec::new();
+            let mut new_family_hits = 0u32;
             for round in 0..8 {
                 if round == 4 {
                     drop(db);
@@ -1459,7 +1469,7 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                 let mut touched: std::collections::BTreeSet<(u8, u128)> =
                     std::collections::BTreeSet::new();
                 for _ in 0..ops {
-                    match rng.below(8) {
+                    match rng.below(13) {
                         0 | 1 => {
                             let vid = model.next_vid;
                             model.next_vid += 1;
@@ -1473,6 +1483,9 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                             } else {
                                 vec![]
                             };
+                            model
+                                .vertex_prop
+                                .insert(vid, props.first().map(|(_, value)| value.clone()));
                             batch.create_vertex(VId(vid), labels, props);
                             model.live_vertices.push(vid);
                         }
@@ -1486,6 +1499,9 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                             } else {
                                 vec![]
                             };
+                            model
+                                .edge_prop
+                                .insert(eid, props.first().map(|(_, value)| value.clone()));
                             batch.add_edge(EId(eid), VId(src), VId(dst), props);
                             model.live_edges.push((eid, src, dst));
                         }
@@ -1495,6 +1511,8 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                                 continue; // updated this batch — deletion is order-sensitive
                             }
                             let (eid, _, _) = model.live_edges.remove(at);
+                            model.spent_edges.push(eid);
+                            model.edge_prop.remove(&eid);
                             batch.delete_edge(EId(eid));
                         }
                         4 if !model.live_vertices.is_empty() => {
@@ -1508,7 +1526,19 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                                 continue; // this batch updated it or a cascade member
                             }
                             model.live_vertices.remove(at);
+                            model.spent_vertices.push(vid);
+                            model.vertex_prop.remove(&vid);
                             batch.delete_vertex(VId(vid));
+                            let cascaded: Vec<u128> = model
+                                .live_edges
+                                .iter()
+                                .filter(|(_, s, d)| *s == vid || *d == vid)
+                                .map(|(eid, _, _)| *eid)
+                                .collect();
+                            for eid in &cascaded {
+                                model.spent_edges.push(*eid);
+                                model.edge_prop.remove(eid);
+                            }
                             model.live_edges.retain(|(_, s, d)| *s != vid && *d != vid);
                         }
                         5 if !model.live_vertices.is_empty() => {
@@ -1518,6 +1548,7 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                             }
                             let value = (rng.below(2) == 0)
                                 .then(|| CanonicalScalar::Int(rng.next() as i64 % 1000));
+                            model.vertex_prop.insert(vid, value.clone());
                             batch.set_vertex_property(VId(vid), PropertyKeyId(7), value);
                         }
                         6 if !model.live_edges.is_empty() => {
@@ -1527,6 +1558,7 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                             }
                             let value = (rng.below(2) == 0)
                                 .then(|| CanonicalScalar::Int(rng.next() as i64 % 1000));
+                            model.edge_prop.insert(eid, value.clone());
                             batch.set_edge_property(EId(eid), PropertyKeyId(11), value);
                         }
                         7 if !model.live_vertices.is_empty() => {
@@ -1537,6 +1569,149 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                             let member = rng.below(2) == 0;
                             batch.set_vertex_label(VId(vid), LabelId(3), member);
                         }
+                        8 => {
+                            if !model.live_vertices.is_empty() && rng.below(2) == 0 {
+                                let vid = model.live_vertices[rng.below(model.live_vertices.len())];
+                                batch.ensure_vertex(VId(vid), vec![], vec![]);
+                            } else {
+                                let vid = model.next_vid;
+                                model.next_vid += 1;
+                                model.vertex_prop.insert(vid, None);
+                                batch.ensure_vertex(VId(vid), vec![], vec![]);
+                                model.live_vertices.push(vid);
+                            }
+                            new_family_hits += 1;
+                        }
+                        9 if model.live_vertices.len() >= 2 => {
+                            if !model.live_edges.is_empty() && rng.below(2) == 0 {
+                                let eid = model.next_eid;
+                                model.next_eid += 1;
+                                let (_, src, dst) =
+                                    model.live_edges[rng.below(model.live_edges.len())];
+                                batch.ensure_edge_by_triple(EId(eid), VId(src), VId(dst), vec![]);
+                            } else {
+                                let eid = model.next_eid;
+                                model.next_eid += 1;
+                                let src = model.live_vertices[rng.below(model.live_vertices.len())];
+                                let dst = model.live_vertices[rng.below(model.live_vertices.len())];
+                                let exists = model
+                                    .live_edges
+                                    .iter()
+                                    .any(|(_, s, d)| *s == src && *d == dst);
+                                batch.ensure_edge_by_triple(EId(eid), VId(src), VId(dst), vec![]);
+                                if !exists {
+                                    model.edge_prop.insert(eid, None);
+                                    model.live_edges.push((eid, src, dst));
+                                }
+                            }
+                            new_family_hits += 1;
+                        }
+                        10 => {
+                            if !model.live_vertices.is_empty() && rng.below(2) == 0 {
+                                let at = rng.below(model.live_vertices.len());
+                                let vid = model.live_vertices[at];
+                                let cascade_touched = touched.contains(&(0, vid))
+                                    || model.live_edges.iter().any(|(eid, s, d)| {
+                                        (*s == vid || *d == vid) && touched.contains(&(1, *eid))
+                                    });
+                                if cascade_touched {
+                                    continue;
+                                }
+                                model.live_vertices.remove(at);
+                                model.spent_vertices.push(vid);
+                                model.vertex_prop.remove(&vid);
+                                batch.delete_vertex_if_present(VId(vid));
+                                let cascaded: Vec<u128> = model
+                                    .live_edges
+                                    .iter()
+                                    .filter(|(_, s, d)| *s == vid || *d == vid)
+                                    .map(|(eid, _, _)| *eid)
+                                    .collect();
+                                for eid in &cascaded {
+                                    model.spent_edges.push(*eid);
+                                    model.edge_prop.remove(eid);
+                                }
+                                model.live_edges.retain(|(_, s, d)| *s != vid && *d != vid);
+                                new_family_hits += 1;
+                            } else if !model.spent_vertices.is_empty() {
+                                let vid =
+                                    model.spent_vertices[rng.below(model.spent_vertices.len())];
+                                batch.delete_vertex_if_present(VId(vid));
+                                new_family_hits += 1;
+                            } else if !model.spent_edges.is_empty() {
+                                let eid = model.spent_edges[rng.below(model.spent_edges.len())];
+                                batch.delete_edge_if_present(EId(eid));
+                                new_family_hits += 1;
+                            } else if !model.live_edges.is_empty() {
+                                let at = rng.below(model.live_edges.len());
+                                if touched.contains(&(1, model.live_edges[at].0)) {
+                                    continue;
+                                }
+                                let (eid, _, _) = model.live_edges.remove(at);
+                                model.spent_edges.push(eid);
+                                model.edge_prop.remove(&eid);
+                                batch.delete_edge_if_present(EId(eid));
+                                new_family_hits += 1;
+                            } else {
+                                continue;
+                            }
+                        }
+                        11 if !model.live_vertices.is_empty() => {
+                            let vid = model.live_vertices[rng.below(model.live_vertices.len())];
+                            if !touched.insert((0, vid)) {
+                                continue;
+                            }
+                            let expected = model.vertex_prop.get(&vid).cloned().flatten();
+                            if rng.below(2) == 0 {
+                                let value = CanonicalScalar::Int(rng.next() as i64 % 1000);
+                                model.vertex_prop.insert(vid, Some(value.clone()));
+                                batch.compare_and_set_vertex_property(
+                                    VId(vid),
+                                    PropertyKeyId(7),
+                                    expected,
+                                    value,
+                                    WriteMismatchPolicy::AbortWrite,
+                                );
+                            } else {
+                                let wrong = Some(CanonicalScalar::Int(i64::MIN));
+                                batch.compare_and_set_vertex_property(
+                                    VId(vid),
+                                    PropertyKeyId(7),
+                                    wrong,
+                                    CanonicalScalar::Int(0),
+                                    WriteMismatchPolicy::NoOp,
+                                );
+                            }
+                            new_family_hits += 1;
+                        }
+                        12 if !model.live_edges.is_empty() => {
+                            let (eid, _, _) = model.live_edges[rng.below(model.live_edges.len())];
+                            if !touched.insert((1, eid)) {
+                                continue;
+                            }
+                            let expected = model.edge_prop.get(&eid).cloned().flatten();
+                            if rng.below(2) == 0 {
+                                let value = CanonicalScalar::Int(rng.next() as i64 % 1000);
+                                model.edge_prop.insert(eid, Some(value.clone()));
+                                batch.compare_and_set_edge_property(
+                                    EId(eid),
+                                    PropertyKeyId(11),
+                                    expected,
+                                    value,
+                                    WriteMismatchPolicy::AbortWrite,
+                                );
+                            } else {
+                                let wrong = Some(CanonicalScalar::Int(i64::MIN));
+                                batch.compare_and_set_edge_property(
+                                    EId(eid),
+                                    PropertyKeyId(11),
+                                    wrong,
+                                    CanonicalScalar::Int(0),
+                                    WriteMismatchPolicy::NoOp,
+                                );
+                            }
+                            new_family_hits += 1;
+                        }
                         _ => {
                             // The preferred family had no lawful target yet;
                             // create a vertex instead so the batch stays
@@ -1544,10 +1719,20 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                             // models.
                             let vid = model.next_vid;
                             model.next_vid += 1;
+                            model.vertex_prop.insert(vid, None);
                             batch.create_vertex(VId(vid), vec![], vec![]);
                             model.live_vertices.push(vid);
                         }
                     }
+                }
+                if batch.is_empty() {
+                    // Continues can empty a batch; EmptyBatch is a generator
+                    // defect, not a random-history outcome.
+                    let vid = model.next_vid;
+                    model.next_vid += 1;
+                    model.vertex_prop.insert(vid, None);
+                    batch.create_vertex(VId(vid), vec![], vec![]);
+                    model.live_vertices.push(vid);
                 }
                 let frontier = db
                     .write(cx, batch)
@@ -1555,6 +1740,10 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     .expect("every generated batch is lawful — a refusal is a generator defect");
                 epochs.push(frontier);
             }
+            assert!(
+                new_family_hits >= 1,
+                "seed {seed}: generated mix emitted no ensure/CAS/if-present ops (hits={new_family_hits})"
+            );
 
             // Gather every epoch's engine scans AND every vertex's
             // neighbours before the lease drops — the neighbour merge is its
@@ -2211,6 +2400,217 @@ fn compare_and_set_agrees_independently_with_the_reference() {
             oracle_rank,
             Some(CanonicalScalar::Int(7)),
             "oracle rank must be 7, got {oracle_rank:?}"
+        );
+        assert!(engine_v3, "engine vid=3 must exist after NoOp sibling");
+        assert!(
+            graph.vertex(VId(3)).is_some(),
+            "oracle vid=3 must exist after NoOp sibling"
+        );
+    });
+}
+
+/// Independent edge CompareAndSet: the vertex path cannot stand in for
+/// `compare_and_set_edge_property` (fgdb-2zql).
+#[test]
+fn compare_and_set_edge_agrees_independently_with_the_reference() {
+    let dir = scratch("cas-edge-independent");
+    under_lab(8209, move |cx| async move {
+        let cx = &cx;
+        let weight = PropertyKeyId(11);
+        let mut engine = Database::create(cx, &dir, engine_keys())
+            .await
+            .expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(
+            EId(10),
+            VId(1),
+            VId(2),
+            vec![(weight, CanonicalScalar::Int(5))],
+        );
+        engine.write(cx, seed).await.expect("seeds");
+        let mut hit = WriteBatch::new(KNOWS);
+        hit.compare_and_set_edge_property(
+            EId(10),
+            weight,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(7),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        engine.write(cx, hit).await.expect("edge CAS match");
+        let mut miss = WriteBatch::new(KNOWS);
+        miss.compare_and_set_edge_property(
+            EId(10),
+            weight,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        assert!(
+            matches!(
+                engine.write(cx, miss).await,
+                Err(WriteError::CompareAndSetMismatch { .. })
+            ),
+            "engine AbortWrite miss must refuse"
+        );
+        let mut noop = WriteBatch::new(KNOWS);
+        noop.compare_and_set_edge_property(
+            EId(10),
+            weight,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        noop.ensure_vertex(VId(3), vec![], vec![]);
+        engine.write(cx, noop).await.expect("NoOp miss + sibling");
+        let engine_weight = engine
+            .edge(EId(10))
+            .expect("reads")
+            .expect("live")
+            .props
+            .clone();
+        let engine_v3 = engine.vertex(VId(3)).expect("reads").is_some();
+        drop(engine);
+
+        let mut oracle = fgdb_reference::ReferenceDatabase::new();
+        let semantics = fgdb_types::ObjectId([0x11; 32]);
+        let mut txn = fgdb_reference::txn::Transaction::begin_genesis(&oracle, GRAPH, BRANCH)
+            .expect("genesis");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(1),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(2),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::AddEdge {
+                    eid: EId(10),
+                    src: VId(1),
+                    etype: KNOWS,
+                    dst: VId(2),
+                    props: vec![(weight, CanonicalScalar::Int(5))],
+                },
+            ]),
+        ])
+        .expect("oracle seed");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(1),
+            fgdb_types::LogicalCommandSeq(10),
+        )
+        .expect("oracle seed commits")
+        .committed_parts()
+        .expect("oracle seed wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[fgdb_reference::intents::Statement::new(vec![
+            fgdb_reference::intents::Intent::CompareAndSet {
+                elem: fgdb_delta_types::ElementId::Edge(EId(10)),
+                name: weight,
+                expected: Some(CanonicalScalar::Int(5)),
+                value: CanonicalScalar::Int(7),
+                mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
+            },
+        ])])
+        .expect("oracle edge CAS match");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(2),
+            fgdb_types::LogicalCommandSeq(20),
+        )
+        .expect("oracle match commits")
+        .committed_parts()
+        .expect("oracle match wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[fgdb_reference::intents::Statement::new(vec![
+            fgdb_reference::intents::Intent::CompareAndSet {
+                elem: fgdb_delta_types::ElementId::Edge(EId(10)),
+                name: weight,
+                expected: Some(CanonicalScalar::Int(5)),
+                value: CanonicalScalar::Int(9),
+                mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
+            },
+        ])])
+        .expect("oracle Abort execute");
+        let aborted = txn
+            .commit(
+                &mut oracle,
+                KNOWS,
+                semantics,
+                fgdb_types::CommitSeq(3),
+                fgdb_types::LogicalCommandSeq(30),
+            )
+            .expect("oracle abort is a verdict, not an apply error");
+        assert!(
+            matches!(aborted, fgdb_reference::txn::TxnOutcome::Aborted { .. }),
+            "oracle TxnAbort miss must abort, got {aborted:?}"
+        );
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CompareAndSet {
+                    elem: fgdb_delta_types::ElementId::Edge(EId(10)),
+                    name: weight,
+                    expected: Some(CanonicalScalar::Int(5)),
+                    value: CanonicalScalar::Int(9),
+                    mismatch: fgdb_reference::intents::MismatchPolicy::NoOp,
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::EnsureVertex {
+                    vid: VId(3),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+        ])
+        .expect("oracle NoOp + ensure");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(3),
+            fgdb_types::LogicalCommandSeq(30),
+        )
+        .expect("oracle NoOp commits")
+        .committed_parts()
+        .expect("oracle NoOp wrote");
+
+        let graph = oracle.graph(GRAPH, BRANCH).expect("oracle coordinate");
+        let oracle_weight = graph
+            .edge(EId(10))
+            .expect("e10")
+            .props
+            .get(&weight)
+            .cloned();
+        assert_eq!(
+            engine_weight,
+            vec![(weight, CanonicalScalar::Int(7))],
+            "engine weight must be 7, got {engine_weight:?}"
+        );
+        assert_eq!(
+            oracle_weight,
+            Some(CanonicalScalar::Int(7)),
+            "oracle weight must be 7, got {oracle_weight:?}"
         );
         assert!(engine_v3, "engine vid=3 must exist after NoOp sibling");
         assert!(
