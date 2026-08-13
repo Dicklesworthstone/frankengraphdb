@@ -178,6 +178,13 @@ pub enum WriteError {
 
     /// A create tried to reuse a VId admitted earlier in this stream.
     VertexIdentitySpent { vid: VId },
+    /// A `CreateEdge` named an endpoint this fold does not hold live.
+    ///
+    /// Refused rather than staged: a partition with an edge to a vertex that
+    /// does not exist is not a graph, and the oracle apply of the same row
+    /// is `ApplyError::DanglingEndpoint`. Recovery folds the stream through
+    /// this writer (fgdb-7g91).
+    DanglingEndpoint { eid: EId, endpoint: VId },
     /// Sealing produced bytes the vertex patch encoder refused, or a row's
     /// shape violated the patch format's canonical laws at fold time.
     Patch(VertexPatchError),
@@ -219,6 +226,12 @@ impl core::fmt::Display for WriteError {
             }
             Self::VertexIdentitySpent { vid } => {
                 write!(f, "vertex identity {vid:?} is permanently spent")
+            }
+            Self::DanglingEndpoint { eid, endpoint } => {
+                write!(
+                    f,
+                    "{eid:?} names endpoint {endpoint:?}, which is not live"
+                )
             }
             Self::Patch(error) => write!(f, "vertex sealing: {error}"),
             Self::EdgeProps(error) => write!(f, "edge property sealing: {error}"),
@@ -505,18 +518,26 @@ impl BlockWriter {
                 if self.spent.contains(eid) {
                     return Err(WriteError::EdgeIdentitySpent { eid: *eid });
                 }
-                self.push(
-                    keys,
-                    AdjacencyEntry {
-                        src: *src,
-                        relation: *relation,
-                        dst: *dst,
-                        eid: *eid,
-                        created_at: seq,
-                        retired_at: None,
-                    },
-                    props.clone(),
-                )?;
+                let entry = AdjacencyEntry {
+                    src: *src,
+                    relation: *relation,
+                    dst: *dst,
+                    eid: *eid,
+                    created_at: seq,
+                    retired_at: None,
+                };
+                // Format first so a seq-0 row stays CreatedAtZero even when
+                // the endpoints are also missing.
+                validate_entry(0, &entry).map_err(WriteError::Block)?;
+                for endpoint in [*src, *dst] {
+                    if !self.live_vertices.contains_key(&endpoint) {
+                        return Err(WriteError::DanglingEndpoint {
+                            eid: *eid,
+                            endpoint,
+                        });
+                    }
+                }
+                self.push(keys, entry, props.clone())?;
                 self.live.insert(
                     *eid,
                     LiveEdge {
