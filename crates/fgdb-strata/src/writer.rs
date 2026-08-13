@@ -143,6 +143,18 @@ pub enum WriteError {
     /// not a cascade the stream produced. Refused at preflight, before any
     /// member retires — a mid-loop failure would leave the writer half-applied.
     CascadeOrderViolation { previous: EId, found: EId },
+    /// A `DeleteVertex` cascade is not exactly the live incident set.
+    ///
+    /// Too few would leave a dangling edge after the vertex is gone; too
+    /// many claims a retirement that never happened. The fold verifies
+    /// equality, then retires the declared list — it does not invent a
+    /// different cascade (fgdb-17ht). The oracle's same law is
+    /// `ApplyError::CascadeImageMismatch`.
+    CascadeImageMismatch {
+        vid: VId,
+        declared: Vec<EId>,
+        actual: Vec<EId>,
+    },
     /// A `CreateEdge` named an edge this writer already holds live.
     ///
     /// Refused rather than overwritten. A re-CREATE of a live edge is the stream
@@ -208,6 +220,10 @@ impl core::fmt::Display for WriteError {
                     "cascade edges must be strictly ascending: {found:?} follows {previous:?}"
                 )
             }
+            Self::CascadeImageMismatch { vid, .. } => write!(
+                f,
+                "deletion of {vid:?} declares a cascade image that is not its incident edge set"
+            ),
             Self::EdgeAlreadyLive { eid } => {
                 write!(f, "{eid:?} is already live; a re-create is not a version")
             }
@@ -567,11 +583,20 @@ impl BlockWriter {
                     .get(vid)
                     .cloned()
                     .ok_or(WriteError::UnknownVertex { vid: *vid })?;
-                // THE CASCADE IS TAKEN FROM THE ROW, not recomputed from the live
-                // map. The row's image is checked against materialized state by the
-                // materializer that produced it; recomputing here would be a second
-                // opinion about which edges a deletion retires, and two opinions
-                // about one fact is how they drift.
+                // Verify the declared image against the live incident set,
+                // then retire THE DECLARED LIST. An undercount would leave
+                // a dangling edge; an overcount claims a retirement that
+                // never happened. Equality is the oracle's law
+                // (`CascadeImageMismatch`); we do not invent a different
+                // cascade to apply.
+                let actual = self.live_incident_edges(*vid);
+                if sorted_retired_incident_edges != &actual {
+                    return Err(WriteError::CascadeImageMismatch {
+                        vid: *vid,
+                        declared: sorted_retired_incident_edges.clone(),
+                        actual,
+                    });
+                }
                 self.preflight_retirements(sorted_retired_incident_edges, seq)?;
                 // The vertex's own retirement stages exactly like an edge's:
                 // created-and-deleted in one commit folds to NO row while the

@@ -331,8 +331,8 @@ fn a_vertex_deletion_retires_its_declared_cascade() {
     );
 }
 
-/// A cascade naming an edge the writer never saw is refused, like any other
-/// unresolvable delete — a cascade image is not a licence to skip.
+/// A cascade that is not the live incident set is refused (fgdb-17ht).
+/// An extra unknown eid is an overcount, not a licence to skip.
 #[test]
 fn a_cascade_naming_an_unknown_edge_is_refused() {
     let mut w = writer();
@@ -349,10 +349,45 @@ fn a_cascade_naming_an_unknown_edge_is_refused() {
                 sorted_retired_incident_edges: vec![EId(10), EId(77)],
             },
         ),
-        Err(WriteError::UnknownEdge { eid: EId(77) })
+        Err(WriteError::CascadeImageMismatch {
+            vid: VId(1),
+            declared: vec![EId(10), EId(77)],
+            actual: vec![EId(10)],
+        })
     );
     w.apply(keys(), CommitSeq(4), &delete(10))
         .expect("the rejected cascade must leave its earlier edge live");
+}
+
+/// An undercount would leave a dangling edge after the vertex is gone.
+#[test]
+fn a_cascade_undercount_is_refused_and_leaves_the_edge_live() {
+    let mut w = writer();
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("creates the vertex");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
+    assert_eq!(
+        w.apply(
+            keys(),
+            CommitSeq(4),
+            &DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![],
+            },
+        ),
+        Err(WriteError::CascadeImageMismatch {
+            vid: VId(1),
+            declared: vec![],
+            actual: vec![EId(10)],
+        })
+    );
+    w.apply(keys(), CommitSeq(4), &delete(10))
+        .expect("the undercount refusal left the incident edge live");
+    assert!(
+        w.is_vertex_live(VId(1)),
+        "the undercount refusal left the vertex live"
+    );
 }
 
 /// The stream contract makes cascade identities strictly ordered and unique. A
@@ -374,7 +409,11 @@ fn a_duplicate_cascade_edge_is_refused_atomically() {
                 sorted_retired_incident_edges: vec![EId(10), EId(10)],
             },
         ),
-        Err(WriteError::UnknownEdge { eid: EId(10) })
+        Err(WriteError::CascadeImageMismatch {
+            vid: VId(1),
+            declared: vec![EId(10), EId(10)],
+            actual: vec![EId(10)],
+        })
     );
     w.apply(keys(), CommitSeq(4), &delete(10))
         .expect("the duplicate refusal must leave the edge live");
@@ -640,13 +679,12 @@ fn a_same_commit_create_and_delete_folds_to_no_entry() {
     );
 }
 
-/// The cascade contract is strict ascending-unique, and the preflight enforces
-/// ALL of it: a non-adjacent duplicate or an unsorted list fails BEFORE any
-/// member retires — never mid-loop, half-applied.
+/// The cascade contract is exact equality with the live incident set
+/// (fgdb-17ht). A non-adjacent duplicate or an unsorted list is not that
+/// set and fails BEFORE any member retires.
 #[test]
 fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
-    // Non-adjacent duplicate: [10, 20, 10] is an order violation at the
-    // second 10 (20 > 10), caught at preflight.
+    // Non-adjacent duplicate: [10, 20, 10] is not the incident set [10, 20].
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
@@ -662,9 +700,10 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
                 sorted_retired_incident_edges: vec![EId(10), EId(20), EId(10)],
             },
         ),
-        Err(WriteError::CascadeOrderViolation {
-            previous: EId(20),
-            found: EId(10),
+        Err(WriteError::CascadeImageMismatch {
+            vid: VId(1),
+            declared: vec![EId(10), EId(20), EId(10)],
+            actual: vec![EId(10), EId(20)],
         })
     );
     // Atomic: both edges are still live and retirable afterward.
@@ -673,7 +712,7 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
     w.apply(keys(), CommitSeq(4), &delete(20))
         .expect("the refusal left the other edge live");
 
-    // Unsorted (no duplicate): [20, 10] is the same contract breach.
+    // Unsorted (no duplicate): [20, 10] is not the incident set [10, 20].
     let mut w2 = writer();
     w2.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
@@ -689,9 +728,10 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
                 sorted_retired_incident_edges: vec![EId(20), EId(10)],
             },
         ),
-        Err(WriteError::CascadeOrderViolation {
-            previous: EId(20),
-            found: EId(10),
+        Err(WriteError::CascadeImageMismatch {
+            vid: VId(1),
+            declared: vec![EId(20), EId(10)],
+            actual: vec![EId(10), EId(20)],
         })
     );
     w2.apply(keys(), CommitSeq(4), &delete(20))
