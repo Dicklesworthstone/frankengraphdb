@@ -44,6 +44,7 @@ use asupersync::lab::{
     TerminalOutcome, capture_obligation_balance, capture_region_close, normalize_lab_report,
 };
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace};
 use fgdb_crypto::Hasher;
 
 use crate::fixture::{FixtureConfig, FixtureSemantics, first_divergence, fixture_futures};
@@ -62,6 +63,86 @@ pub enum FixtureRuntime {
     Lab,
     /// Live asupersync runtime with a wall clock and ordinary scheduler.
     Live,
+}
+
+/// One task-dispatch decision retained from the lab runtime's replay trace.
+///
+/// This is evidence capture, not a schedule-control API. The pinned asupersync
+/// runtime can record these decisions, but does not yet expose a public driver
+/// that forces an edited decision stream back through [`LabRuntime`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskDispatchStep {
+    task_id: u64,
+    at_tick: u64,
+}
+
+impl TaskDispatchStep {
+    #[must_use]
+    pub const fn task_id(self) -> u64 {
+        self.task_id
+    }
+
+    #[must_use]
+    pub const fn at_tick(self) -> u64 {
+        self.at_tick
+    }
+}
+
+fn task_dispatch_steps(trace: &ReplayTrace) -> Vec<TaskDispatchStep> {
+    trace
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ReplayEvent::TaskScheduled { task, at_tick } => Some(TaskDispatchStep {
+                task_id: task.0,
+                at_tick: *at_tick,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn completed_task_dispatch_steps(
+    trace: &ReplayTrace,
+    expected_seed: u64,
+) -> Option<Vec<TaskDispatchStep>> {
+    if trace.metadata.seed != expected_seed {
+        return None;
+    }
+    let dispatches = task_dispatch_steps(trace);
+    if dispatches.is_empty() {
+        return None;
+    }
+    let mut task_ids: Vec<u64> = dispatches.iter().map(|step| step.task_id).collect();
+    task_ids.sort_unstable();
+    task_ids.dedup();
+    if task_ids.len() < 2 {
+        return None;
+    }
+    let every_task_completed_after_its_last_dispatch = task_ids.into_iter().all(|task_id| {
+        let last_dispatch = trace.events.iter().rposition(
+            |event| matches!(event, ReplayEvent::TaskScheduled { task, .. } if task.0 == task_id),
+        );
+        last_dispatch.is_some_and(|last_dispatch| {
+            trace.events.iter().skip(last_dispatch + 1).any(|event| {
+                matches!(
+                    event,
+                    ReplayEvent::TaskCompleted { task, outcome: 0 } if task.0 == task_id
+                )
+            })
+        })
+    });
+    every_task_completed_after_its_last_dispatch.then_some(dispatches)
+}
+
+fn replay_trace_digest(trace: &ReplayTrace) -> String {
+    let bytes = trace
+        .to_bytes()
+        .expect("a completed in-memory ReplayTrace must serialize");
+    let mut hasher = Hasher::new();
+    hasher.update(b"fgdb.sim.fixture.lab-replay-trace.v1");
+    hasher.update(&bytes);
+    hasher.finalize().to_hex()
 }
 
 impl FixtureRuntime {
@@ -87,6 +168,8 @@ pub struct FixtureRunReceipt {
     seed: u64,
     virtual_clock_epoch_nanos: Option<u64>,
     trace_digest: String,
+    lab_replay_trace_digest: Option<String>,
+    task_dispatches: Option<Vec<TaskDispatchStep>>,
     injected_faults: Vec<FaultEvent>,
     artifact_fields_asserted: Vec<&'static str>,
     shrink_iterations: usize,
@@ -99,6 +182,7 @@ impl FixtureRunReceipt {
         seed: u64,
         virtual_clock_epoch_nanos: Option<u64>,
         trace_bytes: &[u8],
+        lab_replay_trace: Option<&ReplayTrace>,
         injected_faults: Vec<FaultEvent>,
     ) -> Self {
         let mut hasher = Hasher::new();
@@ -110,6 +194,8 @@ impl FixtureRunReceipt {
             seed,
             virtual_clock_epoch_nanos,
             trace_digest: hasher.finalize().to_hex(),
+            lab_replay_trace_digest: lab_replay_trace.map(replay_trace_digest),
+            task_dispatches: lab_replay_trace.map(task_dispatch_steps),
             injected_faults,
             // The exported fixture is a passing substrate run. It neither
             // asserts a failure-artifact schema nor claims to be pre-shrunk.
@@ -144,6 +230,37 @@ impl FixtureRunReceipt {
         &self.trace_digest
     }
 
+    /// Domain-separated digest of the complete asupersync replay trace.
+    ///
+    /// Live runs return `None`: they have neither virtual time nor a lab
+    /// scheduler trace and must not synthesize either.
+    #[must_use]
+    pub fn lab_replay_trace_digest(&self) -> Option<&str> {
+        self.lab_replay_trace_digest.as_deref()
+    }
+
+    /// Exact ordered task-dispatch projection captured by the lab runtime.
+    #[must_use]
+    pub fn task_dispatches(&self) -> Option<&[TaskDispatchStep]> {
+        self.task_dispatches.as_deref()
+    }
+
+    /// Verifies that this receipt was derived from exactly `trace`.
+    ///
+    /// This binds both the complete replay bytes and the human-readable
+    /// dispatch projection. It deliberately does not claim the runtime can
+    /// force-replay an edited trace.
+    #[must_use]
+    pub fn matches_lab_replay_trace(&self, trace: &ReplayTrace) -> bool {
+        let digest = replay_trace_digest(trace);
+        let Some(dispatches) = completed_task_dispatch_steps(trace, self.seed) else {
+            return false;
+        };
+        self.runtime == FixtureRuntime::Lab
+            && self.lab_replay_trace_digest.as_deref() == Some(digest.as_str())
+            && self.task_dispatches.as_deref() == Some(dispatches.as_slice())
+    }
+
     #[must_use]
     pub fn injected_faults(&self) -> &[FaultEvent] {
         &self.injected_faults
@@ -172,13 +289,30 @@ impl FixtureRunReceipt {
             |epoch| epoch.to_string(),
         );
         let mut lines = vec![format!(
-            "fixture-run scenario_id={} runtime={} seed={:#x} virtual_clock_epoch_nanos={} trace_digest={}",
+            "fixture-run scenario_id={} runtime={} seed={:#x} virtual_clock_epoch_nanos={} trace_digest={} lab_replay_trace_digest={} task_dispatch_count={}",
             self.scenario_id,
             self.runtime.as_str(),
             self.seed,
             virtual_epoch,
             self.trace_digest,
+            self.lab_replay_trace_digest
+                .as_deref()
+                .unwrap_or("not-applicable-live"),
+            self.task_dispatches
+                .as_deref()
+                .map_or(0, |steps| steps.len()),
         )];
+        if let Some(dispatches) = &self.task_dispatches {
+            for (index, dispatch) in dispatches.iter().enumerate() {
+                lines.push(format!(
+                    "fixture-run runtime={} task_dispatch index={} task_id={} at_tick={}",
+                    self.runtime.as_str(),
+                    index,
+                    dispatch.task_id,
+                    dispatch.at_tick,
+                ));
+            }
+        }
         for event in &self.injected_faults {
             lines.push(format!(
                 "fixture-run runtime={} injected_fault seq={} class={} path={} detail={:?}",
@@ -214,6 +348,11 @@ pub struct LabFixtureRun {
     pub trace_fingerprint: u64,
     /// Schedule-certificate hash: the dispatch decisions themselves.
     pub schedule_hash: u64,
+    /// Complete canonical asupersync record of runtime decisions and events.
+    ///
+    /// Capturing this is a prerequisite for future schedule minimization; the
+    /// current adapter does not claim it can force an edited trace to replay.
+    replay_trace: ReplayTrace,
     /// Virtual nanoseconds the run consumed — proof the clock was virtual.
     pub virtual_elapsed_nanos: u64,
     /// Terminal virtual-clock epoch reported by the lab runtime.
@@ -226,6 +365,14 @@ pub struct LabFixtureRun {
     pub obligation_balance: ObligationBalanceRecord,
     /// Immutable facts retained from this exact execution.
     pub receipt: FixtureRunReceipt,
+}
+
+impl LabFixtureRun {
+    /// Exact complete replay trace captured from this lab execution.
+    #[must_use]
+    pub const fn replay_trace(&self) -> &ReplayTrace {
+        &self.replay_trace
+    }
 }
 
 /// One completed live execution of the fixture.
@@ -254,6 +401,10 @@ pub fn run_fixture_under_lab(
     mut lab_config: LabConfig,
 ) -> LabFixtureRun {
     lab_config.auto_advance_time = true;
+    // This adapter owns its evidence contract. A caller-supplied recorder may
+    // filter or truncate events, so replace it with the foundation's complete,
+    // unbounded default rather than accepting a plausible partial trace.
+    lab_config = lab_config.with_default_replay_recording();
     let mut lab = LabRuntime::new(lab_config);
     let root = lab.state.create_root_region(Budget::INFINITE);
     let (producer_fut, consumer_fut, trace) = fixture_futures(cfg, scratch_dir);
@@ -287,6 +438,26 @@ pub fn run_fixture_under_lab(
         report.invariant_violations
     );
     let (runtime_semantics, _capture_manifest) = normalize_lab_report(&report, SURFACE_SCOPE);
+    let replay_trace = lab
+        .finish_replay_trace()
+        .expect("fixture lab execution must retain its replay trace");
+    let completed_dispatches = completed_task_dispatch_steps(&replay_trace, cfg.seed)
+        .expect("fixture lab replay trace must bind both tasks through successful completion");
+    let mut observed_task_ids: Vec<u64> = completed_dispatches
+        .iter()
+        .map(|step| step.task_id)
+        .collect();
+    observed_task_ids.sort_unstable();
+    observed_task_ids.dedup();
+    let mut expected_task_ids = [
+        CompactTaskId::from(producer_task).0,
+        CompactTaskId::from(consumer_task).0,
+    ];
+    expected_task_ids.sort_unstable();
+    assert_eq!(
+        observed_task_ids, expected_task_ids,
+        "fixture lab replay trace must schedule exactly the producer and consumer tasks"
+    );
     let trace_bytes = trace.to_bytes();
     let semantics = trace.semantics();
     let receipt = FixtureRunReceipt::new(
@@ -294,12 +465,14 @@ pub fn run_fixture_under_lab(
         cfg.seed,
         Some(report.now_nanos),
         &trace_bytes,
+        Some(&replay_trace),
         trace.fault_events(),
     );
     LabFixtureRun {
         trace_bytes,
         trace_fingerprint: report.trace_fingerprint,
         schedule_hash: report.trace_certificate.schedule_hash,
+        replay_trace,
         virtual_elapsed_nanos: virtual_report.virtual_elapsed_nanos,
         virtual_clock_epoch_nanos: report.now_nanos,
         semantics,
@@ -329,6 +502,7 @@ pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> LiveFixtureR
         cfg.seed,
         None,
         &trace_bytes,
+        None,
         trace.fault_events(),
     );
     LiveFixtureRun {

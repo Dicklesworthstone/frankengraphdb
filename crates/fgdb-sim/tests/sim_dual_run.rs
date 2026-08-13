@@ -20,6 +20,8 @@ use fgdb_sim::fixture::{FixtureConfig, MAX_FIXTURE_PAYLOAD_BYTES};
 use fgdb_sim::vfs::Trigger;
 
 use asupersync::lab::LabConfig;
+use asupersync::trace::RecorderConfig;
+use asupersync::trace::replay::ReplayEvent;
 
 /// Per-test scratch root, pid-suffixed so concurrent panes cannot collide
 /// (the `neighbour-test-run` hazard), never deleted (AGENTS.md Rule 1).
@@ -232,6 +234,14 @@ fn lab_runtime_integration_covers_time_disk_network_chaos_pressure_and_lifecycle
         run.receipt.injected_faults().len(),
         usize::try_from(run.semantics.injected_faults).expect("fault count is nonnegative")
     );
+    assert!(run.receipt.matches_lab_replay_trace(run.replay_trace()));
+    assert!(
+        !run.receipt
+            .task_dispatches()
+            .expect("lab receipt carries dispatches")
+            .is_empty(),
+        "the replay recorder must observe actual task dispatches"
+    );
     assert!(
         run.receipt
             .injected_faults()
@@ -245,6 +255,9 @@ fn lab_runtime_integration_covers_time_disk_network_chaos_pressure_and_lifecycle
         "scenario_id=",
         "seed=",
         "virtual_clock_epoch_nanos=",
+        "lab_replay_trace_digest=",
+        "task_dispatch_count=",
+        "task_dispatch index=",
         "injected_fault",
         "artifact_fields_asserted=",
         "shrink_iterations=0",
@@ -269,6 +282,21 @@ fn assert_non_failure_receipt(receipt: &FixtureRunReceipt) {
     assert!(receipt.artifact_fields_asserted().is_empty());
     assert_eq!(receipt.shrink_iterations(), 0);
     assert!(receipt.final_reproducer_path().is_none());
+    match receipt.runtime() {
+        FixtureRuntime::Lab => {
+            assert!(receipt.lab_replay_trace_digest().is_some());
+            assert!(
+                !receipt
+                    .task_dispatches()
+                    .expect("lab receipt carries task dispatches")
+                    .is_empty()
+            );
+        }
+        FixtureRuntime::Live => {
+            assert_eq!(receipt.lab_replay_trace_digest(), None);
+            assert_eq!(receipt.task_dispatches(), None);
+        }
+    }
 }
 
 fn assert_failed_dual_run_log_is_lossless(outcome: &DualRunOutcome) {
@@ -423,6 +451,133 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
         trace_hasher.finalize().to_hex(),
         "the receipt digest must bind the completed execution bytes"
     );
+    let replay_bytes = raw
+        .replay_trace()
+        .to_bytes()
+        .expect("completed replay trace serializes");
+    let mut replay_hasher = Hasher::new();
+    replay_hasher.update(b"fgdb.sim.fixture.lab-replay-trace.v1");
+    replay_hasher.update(&replay_bytes);
+    assert_eq!(
+        raw.receipt
+            .lab_replay_trace_digest()
+            .expect("lab receipt carries replay digest"),
+        replay_hasher.finalize().to_hex(),
+        "the receipt digest must bind the complete foundation replay trace"
+    );
+    let expected_dispatches: Vec<(u64, u64)> = raw
+        .replay_trace()
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ReplayEvent::TaskScheduled { task, at_tick } => Some((task.0, *at_tick)),
+            _ => None,
+        })
+        .collect();
+    let retained_dispatches: Vec<(u64, u64)> = raw
+        .receipt
+        .task_dispatches()
+        .expect("lab receipt carries task dispatches")
+        .iter()
+        .map(|step| (step.task_id(), step.at_tick()))
+        .collect();
+    assert!(!expected_dispatches.is_empty());
+    let mut dispatched_task_ids: Vec<u64> = expected_dispatches
+        .iter()
+        .map(|(task_id, _)| *task_id)
+        .collect();
+    dispatched_task_ids.sort_unstable();
+    dispatched_task_ids.dedup();
+    assert_eq!(
+        dispatched_task_ids.len(),
+        2,
+        "the producer and consumer must both appear in the real schedule"
+    );
+    for task_id in dispatched_task_ids {
+        let last_dispatch = raw
+            .replay_trace()
+            .events
+            .iter()
+            .rposition(|event| {
+                matches!(event, ReplayEvent::TaskScheduled { task, .. } if task.0 == task_id)
+            })
+            .expect("scheduled task has a dispatch");
+        assert!(
+            raw.replay_trace()
+                .events
+                .iter()
+                .skip(last_dispatch + 1)
+                .any(|event| {
+                    matches!(
+                        event,
+                        ReplayEvent::TaskCompleted { task, outcome: 0 } if task.0 == task_id
+                    )
+                }),
+            "task {task_id} must complete successfully after its last dispatch"
+        );
+    }
+    assert_eq!(retained_dispatches, expected_dispatches);
+    assert_eq!(raw.replay_trace().metadata.seed, cfg.seed);
+    assert!(raw.receipt.matches_lab_replay_trace(raw.replay_trace()));
+
+    let caller_truncated = run_fixture_under_lab(
+        &cfg,
+        &lab_root.join("caller-truncated-recorder"),
+        LabConfig::new(cfg.seed)
+            .with_replay_recording(RecorderConfig::enabled().with_max_events(Some(1))),
+    );
+    assert!(
+        caller_truncated
+            .receipt
+            .matches_lab_replay_trace(caller_truncated.replay_trace()),
+        "the fixture adapter must replace a caller-truncated recorder with its complete evidence recorder"
+    );
+    assert!(
+        caller_truncated
+            .receipt
+            .task_dispatches()
+            .expect("lab receipt carries task dispatches")
+            .len()
+            > 1,
+        "a one-event caller limit must not truncate fixture evidence"
+    );
+
+    let mut mutated_replay = raw.replay_trace().clone();
+    let mutated_tick = mutated_replay
+        .events
+        .iter_mut()
+        .find_map(|event| match event {
+            ReplayEvent::TaskScheduled { at_tick, .. } => Some(at_tick),
+            _ => None,
+        })
+        .expect("fixture replay contains a dispatch decision");
+    *mutated_tick = mutated_tick
+        .checked_add(1)
+        .expect("fixture tick increments");
+    assert!(
+        !raw.receipt.matches_lab_replay_trace(&mutated_replay),
+        "a substituted dispatch decision must not match the retained execution receipt"
+    );
+
+    let repeated = run_fixture_under_lab(
+        &cfg,
+        &lab_root.join("same-seed-same-workload"),
+        LabConfig::new(cfg.seed),
+    );
+    assert_eq!(
+        raw.replay_trace()
+            .to_bytes()
+            .expect("first replay trace serializes"),
+        repeated
+            .replay_trace()
+            .to_bytes()
+            .expect("repeated replay trace serializes"),
+        "one seed and workload must reproduce the exact foundation replay trace"
+    );
+    assert_eq!(
+        raw.receipt.task_dispatches(),
+        repeated.receipt.task_dispatches()
+    );
 
     let mut changed_workload = cfg.clone();
     changed_workload.rounds += 1;
@@ -436,6 +591,20 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
         raw.receipt.trace_digest(),
         changed.receipt.trace_digest(),
         "a same-seed workload mutation must change the execution-bound digest"
+    );
+    assert_ne!(
+        raw.receipt.lab_replay_trace_digest(),
+        changed.receipt.lab_replay_trace_digest(),
+        "a same-seed workload mutation must change the captured foundation replay trace"
+    );
+    assert_ne!(
+        raw.receipt.task_dispatches(),
+        changed.receipt.task_dispatches(),
+        "a same-seed workload mutation must change the actual task-dispatch schedule"
+    );
+    assert!(
+        !raw.receipt.matches_lab_replay_trace(changed.replay_trace()),
+        "a trace from another workload must not validate this execution receipt"
     );
 
     let honest_root = scratch_root("dual-receipt-contract");
