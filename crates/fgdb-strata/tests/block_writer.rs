@@ -67,13 +67,61 @@ fn create_vertex_bare(vid: u128) -> DeltaRow {
     }
 }
 
+fn seed_vertices(w: &mut BlockWriter, seq: u64, vids: &[u128]) {
+    let seq = seq.max(1);
+    for vid in vids {
+        if !w.is_vertex_live(VId(*vid)) {
+            w.apply(keys(), CommitSeq(seq), &create_vertex_bare(*vid))
+                .expect("seed vertex");
+        }
+    }
+}
+
+fn apply_edge(
+    w: &mut BlockWriter,
+    seq: u64,
+    eid: u128,
+    src: u128,
+    dst: u128,
+) -> Result<(), WriteError> {
+    seed_vertices(w, seq, &[src, dst]);
+    w.apply(keys(), CommitSeq(seq), &create(eid, src, dst))
+}
+
+/// A CreateEdge whose endpoints the fold does not hold is refused
+/// (fgdb-7g91). Format-invalid rows still fail format first.
+#[test]
+fn a_create_edge_with_a_missing_endpoint_is_refused() {
+    let mut w = writer();
+    assert_eq!(
+        w.apply(keys(), CommitSeq(1), &create(10, 1, 2)),
+        Err(WriteError::DanglingEndpoint {
+            eid: EId(10),
+            endpoint: VId(1)
+        })
+    );
+    assert_eq!(w.pending_len(), 0, "the dangling row was never staged");
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
+        .expect("seeds src");
+    assert_eq!(
+        w.apply(keys(), CommitSeq(1), &create(10, 1, 2)),
+        Err(WriteError::DanglingEndpoint {
+            eid: EId(10),
+            endpoint: VId(2)
+        })
+    );
+    w.apply(keys(), CommitSeq(1), &create_vertex_bare(2))
+        .expect("seeds dst");
+    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
+        .expect("both endpoints live");
+}
+
 /// A creation and its retirement in one run become ONE entry with a finished
 /// interval — the block carries the whole version, so nothing is superseded.
 #[test]
 fn a_create_and_delete_in_one_run_seal_as_one_finished_entry() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
     w.apply(keys(), CommitSeq(3), &delete(10)).expect("deletes");
     assert_eq!(w.pending_len(), 1, "one key, one entry");
 
@@ -96,8 +144,7 @@ fn a_create_and_delete_in_one_run_seal_as_one_finished_entry() {
 #[test]
 fn a_retirement_after_a_seal_publishes_an_encodable_root() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
     w.seal(keys()).expect("seals the creation");
     w.apply(keys(), CommitSeq(6), &delete(10)).expect("retires");
 
@@ -143,11 +190,10 @@ fn a_retirement_after_a_seal_publishes_an_encodable_root() {
 #[test]
 fn retirement_and_a_fresh_identity_at_one_sequence_remain_rootable() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
     w.seal(keys()).expect("seals the creation");
     w.apply(keys(), CommitSeq(6), &delete(10)).expect("retires");
-    w.apply(keys(), CommitSeq(6), &create(11, 1, 2))
+    apply_edge(&mut w, 6, 11, 1, 2)
         .expect("creates a fresh identity at the same sequence");
 
     let (root, blocks, _patches) = w.publish(keys(), CommitSeq(6)).expect("publishes");
@@ -185,10 +231,8 @@ fn retirement_and_a_fresh_identity_at_one_sequence_remain_rootable() {
 #[test]
 fn fresh_parallel_identities_share_one_pending_block() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
-    w.apply(keys(), CommitSeq(3), &create(11, 1, 2))
-        .expect("creates a parallel edge");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
+    apply_edge(&mut w, 3, 11, 1, 2).expect("creates a parallel edge");
     assert_eq!(
         w.sealed().len(),
         0,
@@ -226,8 +270,7 @@ fn a_delete_of_an_unknown_edge_is_refused() {
         Err(WriteError::UnknownEdge { eid: EId(99) })
     );
     // And a double delete is the same failure: the first consumed the version.
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
     w.apply(keys(), CommitSeq(2), &delete(10)).expect("deletes");
     assert_eq!(
         w.apply(keys(), CommitSeq(3), &delete(10)),
@@ -245,7 +288,7 @@ fn a_refused_delete_does_not_advance_the_stream_frontier() {
         Err(WriteError::UnknownEdge { eid: EId(99) })
     );
     assert!(
-        w.apply(keys(), CommitSeq(4), &create(10, 1, 2)).is_ok(),
+        apply_edge(&mut w, 4, 10, 1, 2).is_ok(),
         "the refused future row must not consume sequence 5"
     );
 }
@@ -256,12 +299,9 @@ fn a_vertex_deletion_retires_its_declared_cascade() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
-    w.apply(keys(), CommitSeq(1), &create(11, 3, 1))
-        .expect("creates");
-    w.apply(keys(), CommitSeq(1), &create(12, 2, 3))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
+    apply_edge(&mut w, 1, 11, 3, 1).expect("creates");
+    apply_edge(&mut w, 1, 12, 2, 3).expect("creates");
 
     w.apply(
         keys(),
@@ -299,8 +339,7 @@ fn a_cascade_naming_an_unknown_edge_is_refused() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
     assert_eq!(
         w.apply(
             keys(),
@@ -325,8 +364,7 @@ fn a_duplicate_cascade_edge_is_refused_atomically() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
     assert_eq!(
         w.apply(
             keys(),
@@ -353,10 +391,8 @@ fn a_cascade_folds_its_same_commit_members_and_retires_the_rest() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates the earlier edge");
-    w.apply(keys(), CommitSeq(4), &create(11, 3, 1))
-        .expect("creates the same-commit edge");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates the earlier edge");
+    apply_edge(&mut w, 4, 11, 3, 1).expect("creates the same-commit edge");
 
     w.apply(
         keys(),
@@ -396,7 +432,7 @@ fn an_invalid_entry_is_refused_before_writer_mutation() {
     );
     assert_eq!(w.pending_len(), 0, "the invalid row was never staged");
     assert!(
-        w.apply(keys(), CommitSeq(1), &create(10, 1, 2)).is_ok(),
+        apply_edge(&mut w, 1, 10, 1, 2).is_ok(),
         "the refused zero sequence did not advance the frontier"
     );
 }
@@ -447,8 +483,8 @@ fn non_adjacency_rows_produce_no_entries() {
 #[test]
 fn rows_must_arrive_in_commit_order() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(5), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 5, 10, 1, 2).expect("creates");
+    seed_vertices(&mut w, 5, &[3]);
     assert_eq!(
         w.apply(keys(), CommitSeq(4), &create(11, 1, 3)),
         Err(WriteError::SequenceNotAdvancing {
@@ -457,7 +493,7 @@ fn rows_must_arrive_in_commit_order() {
         })
     );
     // The same sequence is fine: one commit carries many rows.
-    assert!(w.apply(keys(), CommitSeq(5), &create(11, 1, 3)).is_ok());
+    assert!(apply_edge(&mut w, 5, 11, 1, 3).is_ok());
 }
 
 /// `publish` is the producer boundary, so it must refuse a root whose declared
@@ -466,8 +502,7 @@ fn rows_must_arrive_in_commit_order() {
 #[test]
 fn publication_before_the_last_block_is_refused_by_the_writer() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(5), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 5, 10, 1, 2).expect("creates");
     assert_eq!(
         w.publish(keys(), CommitSeq(4)),
         Err(WriteError::Root(RootError::BlockAfterPublication {
@@ -478,9 +513,7 @@ fn publication_before_the_last_block_is_refused_by_the_writer() {
     );
 
     let mut boundary = writer();
-    boundary
-        .apply(keys(), CommitSeq(5), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut boundary, 5, 10, 1, 2).expect("creates");
     assert!(
         boundary.publish(keys(), CommitSeq(5)).is_ok(),
         "publication at the exact upper frontier is legal"
@@ -505,13 +538,10 @@ fn sealing_nothing_produces_no_block() {
 #[test]
 fn a_published_root_resolves_against_the_writers_own_blocks() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
-    w.apply(keys(), CommitSeq(2), &create(11, 1, 3))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
+    apply_edge(&mut w, 2, 11, 1, 3).expect("creates");
     w.seal(keys()).expect("seals");
-    w.apply(keys(), CommitSeq(4), &create(12, 2, 3))
-        .expect("creates");
+    apply_edge(&mut w, 4, 12, 2, 3).expect("creates");
 
     let (root, blocks, _patches) = w.publish(keys(), CommitSeq(9)).expect("publishes");
     let encoded = fgdb_strata::root::encode_root(&root).expect("the root is lawful");
@@ -538,8 +568,8 @@ fn a_published_root_resolves_against_the_writers_own_blocks() {
 #[test]
 fn a_double_create_is_refused_and_retirement_does_not_re_admit_the_eid() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
+    seed_vertices(&mut w, 1, &[3, 4]);
 
     assert_eq!(
         w.apply(keys(), CommitSeq(2), &create(10, 1, 3)),
@@ -547,8 +577,7 @@ fn a_double_create_is_refused_and_retirement_does_not_re_admit_the_eid() {
         "a second create for a live edge is not a version, it is the stream lying"
     );
     // State-atomic: the refusal moved nothing, so the fold continues undamaged.
-    w.apply(keys(), CommitSeq(3), &create(11, 1, 4))
-        .expect("the fold continues undamaged");
+    apply_edge(&mut w, 3, 11, 1, 4).expect("the fold continues undamaged");
 
     // After a retirement the identity is absent but permanently spent.
     w.apply(keys(), CommitSeq(4), &delete(10)).expect("retires");
@@ -556,8 +585,7 @@ fn a_double_create_is_refused_and_retirement_does_not_re_admit_the_eid() {
         w.apply(keys(), CommitSeq(5), &create(10, 1, 3)),
         Err(WriteError::EdgeIdentitySpent { eid: EId(10) })
     );
-    w.apply(keys(), CommitSeq(5), &create(12, 1, 3))
-        .expect("a fresh EId remains admissible");
+    apply_edge(&mut w, 5, 12, 1, 3).expect("a fresh EId remains admissible");
     let sealed = w.seal(keys()).expect("seals").expect("a block");
     let entries = decode_block(&sealed.bytes).expect("decodes");
     let live: Vec<_> = entries.iter().filter(|e| e.retired_at.is_none()).collect();
@@ -579,8 +607,7 @@ fn a_double_create_is_refused_and_retirement_does_not_re_admit_the_eid() {
 #[test]
 fn a_same_commit_create_and_delete_folds_to_no_entry() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(5), &create(10, 1, 2))
-        .expect("creates");
+    apply_edge(&mut w, 5, 10, 1, 2).expect("creates");
     w.apply(keys(), CommitSeq(5), &delete(10))
         .expect("the same-commit delete folds");
     assert_eq!(w.pending_len(), 0, "nothing remains of the folded edge");
@@ -591,10 +618,8 @@ fn a_same_commit_create_and_delete_folds_to_no_entry() {
         w.apply(keys(), CommitSeq(5), &create(10, 1, 2)),
         Err(WriteError::EdgeIdentitySpent { eid: EId(10) })
     );
-    w.apply(keys(), CommitSeq(5), &create(11, 1, 2))
-        .expect("fresh identity in the same commit");
-    w.apply(keys(), CommitSeq(6), &create(12, 2, 3))
-        .expect("creates");
+    apply_edge(&mut w, 5, 11, 1, 2).expect("fresh identity in the same commit");
+    apply_edge(&mut w, 6, 12, 2, 3).expect("creates");
     w.seal(keys())
         .expect("seals")
         .expect("at least one descriptor block");
