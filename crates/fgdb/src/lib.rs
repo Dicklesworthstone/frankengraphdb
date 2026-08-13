@@ -738,9 +738,15 @@ enum PendingRow {
     },
     DeleteEdge {
         eid: EId,
+        /// `true` is [`WriteBatch::delete_edge_if_present`]: missing is a
+        /// no-op, not [`WriteError::UnknownEdge`].
+        if_present: bool,
     },
     DeleteVertex {
         vid: VId,
+        /// `true` is [`WriteBatch::delete_vertex_if_present`]: missing is a
+        /// no-op, not [`WriteError::UnknownVertex`].
+        if_present: bool,
     },
     SetLabel {
         vid: VId,
@@ -849,7 +855,21 @@ impl WriteBatch {
     /// by the engine at commit time; deleting an edge this database does not
     /// hold refuses before anything durable happens.
     pub fn delete_edge(&mut self, eid: EId) -> &mut Self {
-        self.rows.push(PendingRow::DeleteEdge { eid });
+        self.rows.push(PendingRow::DeleteEdge {
+            eid,
+            if_present: false,
+        });
+        self
+    }
+
+    /// Delete `eid` only if it is live. A missing or already-deleted edge
+    /// is a no-op; [`WriteBatch::delete_edge`] is still
+    /// [`WriteError::UnknownEdge`].
+    pub fn delete_edge_if_present(&mut self, eid: EId) -> &mut Self {
+        self.rows.push(PendingRow::DeleteEdge {
+            eid,
+            if_present: true,
+        });
         self
     }
 
@@ -857,7 +877,21 @@ impl WriteBatch {
     /// before-image — the exact incident set, both directions, ascending —
     /// and the `before_version` are derived by the engine at commit time.
     pub fn delete_vertex(&mut self, vid: VId) -> &mut Self {
-        self.rows.push(PendingRow::DeleteVertex { vid });
+        self.rows.push(PendingRow::DeleteVertex {
+            vid,
+            if_present: false,
+        });
+        self
+    }
+
+    /// Delete `vid` only if it is live, with the same cascade as
+    /// [`WriteBatch::delete_vertex`]. A missing or already-deleted vertex
+    /// is a no-op; `delete_vertex` is still [`WriteError::UnknownVertex`].
+    pub fn delete_vertex_if_present(&mut self, vid: VId) -> &mut Self {
+        self.rows.push(PendingRow::DeleteVertex {
+            vid,
+            if_present: true,
+        });
         self
     }
 
@@ -1811,11 +1845,14 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     row
                 }
-                PendingRow::DeleteEdge { eid } => {
+                PendingRow::DeleteEdge { eid, if_present } => {
                     let live_now = !prefix_deleted_edges.contains(&eid)
                         && (prefix_edges.contains_key(&eid)
                             || self.writer.live_edge(eid).is_some());
                     if !live_now {
+                        if if_present {
+                            continue;
+                        }
                         return Err(WriteError::UnknownEdge { eid });
                     }
                     let before_version = prefix_versions
@@ -1829,11 +1866,14 @@ impl<V: Vfs + Clone> Database<V> {
                         before_version,
                     }
                 }
-                PendingRow::DeleteVertex { vid } => {
+                PendingRow::DeleteVertex { vid, if_present } => {
                     let live_now = !prefix_deleted_vertices.contains(&vid)
                         && (prefix_versions.contains_key(&ElementId::Vertex(vid))
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
+                        if if_present {
+                            continue;
+                        }
                         return Err(WriteError::UnknownVertex { vid });
                     }
                     let before_version = prefix_versions
