@@ -53,6 +53,13 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 before_version,
                 sorted_retired_incident_edges,
             } => {
+                for eid in &sorted_retired_incident_edges {
+                    absorb_edge(&mut edges, *eid);
+                }
+                let durable_cascade: Vec<EId> = sorted_retired_incident_edges
+                    .into_iter()
+                    .filter(|eid| edges.get(eid).is_none_or(|edge| !edge.cancelled))
+                    .collect();
                 let net = vertices.entry(vid).or_default();
                 if net.created.is_some() {
                     *net = VertexNet::default();
@@ -60,14 +67,11 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 } else {
                     net.deleted = Some(DeletedVertex {
                         before_version,
-                        sorted_retired_incident_edges: sorted_retired_incident_edges.clone(),
+                        sorted_retired_incident_edges: durable_cascade,
                     });
                     net.props.clear();
                     net.labels.clear();
                     net.valid_time = None;
-                }
-                for eid in sorted_retired_incident_edges {
-                    absorb_edge(&mut edges, eid);
                 }
             }
             DeltaRow::CreateEdge {
@@ -313,15 +317,17 @@ struct CreatedEdge {
 fn absorb_edge(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId) {
     let net = edges.entry(eid).or_default();
     if net.created.is_some() {
+        // Same-batch create: the identity never becomes durable. Drop it
+        // from the cascade image too (`cancelled`).
         *net = EdgeNet::default();
         net.cancelled = true;
     } else {
+        // Basis edge: the vertex delete's cascade image owns the retirement.
+        // Do not emit a standalone DeleteEdge, but keep the eid in the
+        // cascade so apply can check the durable incident set.
         net.props.clear();
         net.valid_time = None;
-        // A cascade delete of a basis edge is owned by DeleteVertex.
-        // Drop a standalone DeleteEdge if one was already recorded.
         net.deleted = None;
-        net.cancelled = true;
     }
 }
 
@@ -453,6 +459,36 @@ mod tests {
                 vid: VId(1),
                 before_version: version,
                 sorted_retired_incident_edges: vec![],
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn same_batch_edge_create_is_stripped_from_a_basis_vertex_delete_cascade() {
+        let version = ObjectId([0x33; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::CreateEdge {
+                eid: fgdb_types::EId(1000),
+                birth_ordinal: 2,
+                src: VId(1),
+                relation: crate::RelationId(1),
+                dst: VId(2),
+                canonical_key: None,
+                props: vec![],
+                valid_time: None,
+            },
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![fgdb_types::EId(1000)],
             },
         ]);
         assert_eq!(
