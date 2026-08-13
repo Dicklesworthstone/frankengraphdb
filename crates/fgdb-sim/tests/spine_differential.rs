@@ -2219,3 +2219,148 @@ fn compare_and_set_agrees_independently_with_the_reference() {
         );
     });
 }
+
+/// Independent delete-if-present agreement: engine if-present of a missing
+/// identity matches reference Delete* of a missing identity.
+#[test]
+fn delete_if_present_agrees_independently_with_the_reference() {
+    let dir = scratch("delete-if-present-independent");
+    under_lab(8207, move |cx| async move {
+        let cx = &cx;
+        let mut engine = Database::create(cx, &dir, engine_keys())
+            .await
+            .expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        engine.write(cx, seed).await.expect("seeds");
+        let mut drop_live = WriteBatch::new(KNOWS);
+        drop_live.delete_edge_if_present(EId(10));
+        drop_live.delete_vertex_if_present(VId(1));
+        engine.write(cx, drop_live).await.expect("if-present live");
+        let mut missing = WriteBatch::new(KNOWS);
+        missing.delete_edge_if_present(EId(10));
+        missing.delete_vertex_if_present(VId(1));
+        missing.ensure_vertex(VId(3), vec![], vec![]);
+        engine
+            .write(cx, missing)
+            .await
+            .expect("if-present missing + sibling");
+        let engine_v1 = engine.vertex(VId(1)).expect("reads").is_some();
+        let engine_v2 = engine.vertex(VId(2)).expect("reads").is_some();
+        let engine_v3 = engine.vertex(VId(3)).expect("reads").is_some();
+        let engine_e10 = engine.edge(EId(10)).expect("reads").is_some();
+        drop(engine);
+
+        let mut oracle = fgdb_reference::ReferenceDatabase::new();
+        let semantics = fgdb_types::ObjectId([0x11; 32]);
+        let mut txn = fgdb_reference::txn::Transaction::begin_genesis(&oracle, GRAPH, BRANCH)
+            .expect("genesis");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(1),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CreateVertex {
+                    vid: VId(2),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::AddEdge {
+                    eid: EId(10),
+                    src: VId(1),
+                    etype: KNOWS,
+                    dst: VId(2),
+                    props: vec![],
+                },
+            ]),
+        ])
+        .expect("oracle seed");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(1),
+            fgdb_types::LogicalCommandSeq(10),
+        )
+        .expect("oracle seed commits")
+        .committed_parts()
+        .expect("oracle seed wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::DeleteEdge { eid: EId(10) },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::DeleteVertex { vid: VId(1) },
+            ]),
+        ])
+        .expect("oracle live deletes");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(2),
+            fgdb_types::LogicalCommandSeq(20),
+        )
+        .expect("oracle live commits")
+        .committed_parts()
+        .expect("oracle live wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::DeleteEdge { eid: EId(10) },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::DeleteVertex { vid: VId(1) },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::EnsureVertex {
+                    vid: VId(3),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+        ])
+        .expect("oracle missing deletes + ensure");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(3),
+            fgdb_types::LogicalCommandSeq(30),
+        )
+        .expect("oracle missing commits")
+        .committed_parts()
+        .expect("oracle missing wrote");
+
+        let graph = oracle.graph(GRAPH, BRANCH).expect("oracle coordinate");
+        assert!(
+            !engine_v1 && graph.vertex(VId(1)).is_none(),
+            "vid=1 must be gone on both sides"
+        );
+        assert!(
+            engine_v2 && graph.vertex(VId(2)).is_some(),
+            "vid=2 must remain on both sides"
+        );
+        assert!(
+            engine_v3 && graph.vertex(VId(3)).is_some(),
+            "vid=3 sibling must exist on both sides"
+        );
+        assert!(
+            !engine_e10 && graph.edge(EId(10)).is_none(),
+            "eid=10 must be gone on both sides"
+        );
+    });
+}

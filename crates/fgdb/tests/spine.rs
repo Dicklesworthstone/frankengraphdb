@@ -2639,3 +2639,90 @@ fn compare_and_set_matches_aborts_and_noops() {
         );
     });
 }
+
+/// **DELETE-IF-PRESENT (fgdb-w5-delete-if-present-db8l).** The oracle's
+/// Delete* of a missing identity is a no-op. Engine `delete_*` stays
+/// Unknown*; these methods are the idempotent subset.
+#[test]
+fn delete_if_present_is_idempotent_and_delete_star_still_refuses() {
+    let dir = scratch("delete-if-present");
+    under_lab(8206, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut live = WriteBatch::new(KNOWS);
+        live.delete_edge_if_present(EId(10));
+        db.write(cx, live)
+            .await
+            .expect("if-present of a live edge deletes");
+        assert!(
+            db.edge(EId(10)).expect("reads").is_none(),
+            "eid=10 must be gone after if-present delete"
+        );
+
+        let frontier = db.frontier().expect("frontier");
+        let mut missing_edge = WriteBatch::new(KNOWS);
+        missing_edge.delete_edge_if_present(EId(10));
+        missing_edge.ensure_vertex(VId(3), vec![], vec![]);
+        db.write(cx, missing_edge)
+            .await
+            .expect("if-present of a missing edge is not UnknownEdge");
+        assert!(
+            db.vertex(VId(3)).expect("reads").is_some(),
+            "sibling ensure of vid=3 must commit beside a missing if-present edge"
+        );
+        assert_ne!(
+            db.frontier().expect("advanced"),
+            frontier,
+            "a batch with a missing if-present plus a sibling write must commit"
+        );
+
+        let mut live_v = WriteBatch::new(KNOWS);
+        live_v.delete_vertex_if_present(VId(1));
+        db.write(cx, live_v)
+            .await
+            .expect("if-present of a live vertex deletes");
+        assert!(
+            db.vertex(VId(1)).expect("reads").is_none(),
+            "vid=1 must be gone after if-present delete"
+        );
+
+        let mut missing_v = WriteBatch::new(KNOWS);
+        missing_v.delete_vertex_if_present(VId(1));
+        db.write(cx, missing_v)
+            .await
+            .expect("if-present of an already-deleted vertex is not UnknownVertex");
+
+        let still = db.frontier().expect("frontier after no-op delete");
+        let mut strict = WriteBatch::new(KNOWS);
+        strict.delete_vertex(VId(1));
+        let refusal = db
+            .write(cx, strict)
+            .await
+            .expect_err("delete_vertex of a missing vid must still refuse");
+        assert!(
+            matches!(refusal, WriteError::UnknownVertex { vid: VId(1) }),
+            "delete_vertex of missing vid=1 must be UnknownVertex, got {refusal:?}"
+        );
+        assert_eq!(
+            db.frontier().expect("unchanged"),
+            still,
+            "strict delete_vertex must consume no sequence"
+        );
+
+        let mut ghost = WriteBatch::new(KNOWS);
+        ghost.delete_edge(EId(10));
+        assert!(
+            matches!(
+                db.write(cx, ghost).await,
+                Err(WriteError::UnknownEdge { eid: EId(10) })
+            ),
+            "delete_edge of missing eid=10 must still be UnknownEdge"
+        );
+    });
+}
