@@ -2254,6 +2254,64 @@ fn ensure_intents_agree_independently_with_the_reference() {
     });
 }
 
+/// Independent dangling-endpoint refusal: engine WriteBatch and reference
+/// apply name the same missing endpoint (fgdb-r196).
+#[test]
+fn dangling_endpoint_agrees_independently_with_the_reference() {
+    let dir = scratch("dangling-independent");
+    under_lab(8212, move |cx| async move {
+        let cx = &cx;
+        let mut engine = Database::create(cx, &dir, engine_keys())
+            .await
+            .expect("creates");
+        let origin = engine.frontier().expect("origin");
+        let mut dangling = WriteBatch::new(KNOWS);
+        dangling.add_edge(EId(10), VId(1), VId(2), vec![]);
+        let engine_refusal = engine
+            .write(cx, dangling)
+            .await
+            .expect_err("engine must refuse");
+        assert!(
+            matches!(
+                engine_refusal,
+                WriteError::DanglingEndpoint {
+                    eid: EId(10),
+                    endpoint: VId(1)
+                }
+            ),
+            "engine must name src=1, got {engine_refusal:?}"
+        );
+        assert_eq!(
+            engine.frontier().expect("unchanged"),
+            origin,
+            "engine dangling refuse must not consume a sequence"
+        );
+        drop(engine);
+
+        let mut graph = fgdb_reference::ReferenceGraph::new();
+        let oracle_refusal = graph.apply_row(&fgdb_delta_types::DeltaRow::CreateEdge {
+            eid: EId(10),
+            birth_ordinal: 1,
+            src: VId(1),
+            relation: KNOWS,
+            dst: VId(2),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        });
+        assert!(
+            matches!(
+                oracle_refusal,
+                Err(fgdb_reference::ApplyError::DanglingEndpoint {
+                    eid: EId(10),
+                    endpoint: VId(1)
+                })
+            ),
+            "oracle must name src=1, got {oracle_refusal:?}"
+        );
+    });
+}
+
 /// Independent CompareAndSet agreement: engine AbortWrite is the write-batch
 /// face of reference TxnAbort; NoOp is the same word on both sides.
 #[test]

@@ -2594,6 +2594,95 @@ fn ensure_edge_by_triple_is_idempotent_even_under_a_new_eid() {
     });
 }
 
+/// **EDGES REQUIRE LIVE ENDPOINTS (fgdb-r196).** A CreateEdge the oracle
+/// cannot apply (`DanglingEndpoint`) must never become durable.
+#[test]
+fn add_edge_refuses_a_dangling_endpoint_before_d2() {
+    let dir = scratch("dangling-endpoint");
+    under_lab(8211, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let origin = db.frontier().expect("origin");
+
+        let mut both_missing = WriteBatch::new(KNOWS);
+        both_missing.add_edge(EId(10), VId(1), VId(2), vec![]);
+        let refusal = db
+            .write(cx, both_missing)
+            .await
+            .expect_err("dangling add_edge must refuse");
+        assert!(
+            matches!(
+                refusal,
+                WriteError::DanglingEndpoint {
+                    eid: EId(10),
+                    endpoint: VId(1)
+                }
+            ),
+            "both missing must name src=1, got {refusal:?}"
+        );
+        assert_eq!(
+            db.frontier().expect("unchanged"),
+            origin,
+            "dangling add_edge must not consume a sequence"
+        );
+
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        db.write(cx, seed).await.expect("seeds src");
+        let after_src = db.frontier().expect("after src");
+        let mut dst_missing = WriteBatch::new(KNOWS);
+        dst_missing.add_edge(EId(10), VId(1), VId(2), vec![]);
+        let dst_refusal = db
+            .write(cx, dst_missing)
+            .await
+            .expect_err("missing dst must refuse");
+        assert!(
+            matches!(
+                dst_refusal,
+                WriteError::DanglingEndpoint {
+                    eid: EId(10),
+                    endpoint: VId(2)
+                }
+            ),
+            "src live dst missing must name dst=2, got {dst_refusal:?}"
+        );
+        assert_eq!(
+            db.frontier().expect("still unchanged"),
+            after_src,
+            "missing dst must not consume a sequence"
+        );
+
+        let mut ensure_missing = WriteBatch::new(KNOWS);
+        ensure_missing.ensure_edge_by_triple(EId(11), VId(1), VId(2), vec![]);
+        let ensure_refusal = db
+            .write(cx, ensure_missing)
+            .await
+            .expect_err("ensure of a new dangling triple must refuse");
+        assert!(
+            matches!(
+                ensure_refusal,
+                WriteError::DanglingEndpoint {
+                    eid: EId(11),
+                    endpoint: VId(2)
+                }
+            ),
+            "ensure new triple with missing dst must name dst=2, got {ensure_refusal:?}"
+        );
+
+        let mut together = WriteBatch::new(KNOWS);
+        together.create_vertex(VId(2), vec![], vec![]);
+        together.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, together)
+            .await
+            .expect("same-batch create of dst then add_edge is lawful");
+        assert_eq!(
+            db.neighbours(VId(1), KNOWS).expect("reads"),
+            vec![VId(2)],
+            "same-batch create+edge must land the triple"
+        );
+    });
+}
+
 /// **COMPARE-AND-SET (fgdb-w5-cas-writebatch-tob2).** WriteBatch can mean
 /// NoOp or AbortWrite. It cannot mean StatementError — there is no
 /// statement boundary.
