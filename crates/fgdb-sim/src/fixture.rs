@@ -244,6 +244,75 @@ impl core::fmt::Display for FixtureWorkloadError {
 
 impl std::error::Error for FixtureWorkloadError {}
 
+/// Stable execution stage for one fixture task I/O failure.
+///
+/// This is deliberately smaller than an `io::Error`: persisted shrink
+/// decisions compare the operation and [`io::ErrorKind`], never unstable OS
+/// prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixtureTaskStage {
+    /// Make one producer payload durable through the fault VFS.
+    DurableWrite,
+    /// Send a producer frame length.
+    FrameHeaderWrite,
+    /// Send a producer frame payload.
+    FrameBodyWrite,
+    /// Send the zero-length end-of-stream marker.
+    TerminatorWrite,
+    /// Read a consumer frame length.
+    FrameHeaderRead,
+    /// Read a consumer frame payload.
+    FrameBodyRead,
+}
+
+/// Typed failure returned by an executing fixture component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixtureTaskError {
+    stage: FixtureTaskStage,
+    action: Option<u32>,
+    kind: io::ErrorKind,
+}
+
+impl FixtureTaskError {
+    const fn new(stage: FixtureTaskStage, action: Option<u32>, kind: io::ErrorKind) -> Self {
+        Self {
+            stage,
+            action,
+            kind,
+        }
+    }
+
+    /// Operation that failed.
+    #[must_use]
+    pub const fn stage(self) -> FixtureTaskStage {
+        self.stage
+    }
+
+    /// Workload action being executed, or `None` for the terminator.
+    #[must_use]
+    pub const fn action(self) -> Option<u32> {
+        self.action
+    }
+
+    /// Stable I/O category, excluding platform-specific message text.
+    #[must_use]
+    pub const fn kind(self) -> io::ErrorKind {
+        self.kind
+    }
+}
+
+impl core::fmt::Display for FixtureTaskError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "fixture {:?} failed at action {:?}: {:?}",
+            self.stage, self.action, self.kind
+        )
+    }
+}
+
+impl std::error::Error for FixtureTaskError {}
+
 /// One immutable producer action in the exported fixture workload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixtureWorkloadAction {
@@ -515,6 +584,59 @@ impl FixtureWorkload {
         hasher.update(FIXTURE_WORKLOAD_DIGEST_DOMAIN);
         hasher.update(&self.to_canonical_bytes());
         hasher.finalize().to_hex()
+    }
+
+    /// Rebuilds a canonical workload from a retained action subsequence.
+    ///
+    /// Action ordinals are identities within one encoded workload, so a
+    /// shrink candidate is re-numbered to `0..len` rather than serializing a
+    /// gap. The action fields are private; callers cannot synthesize an
+    /// unvalidated action through this seam.
+    pub(crate) fn try_from_retained_actions(
+        seed: u64,
+        retained: &[FixtureWorkloadAction],
+    ) -> Result<Self, FixtureWorkloadError> {
+        if retained.len() > MAX_FIXTURE_WORKLOAD_ACTIONS {
+            return Err(FixtureWorkloadError::ActionCountExceeded {
+                actual: retained.len(),
+                limit: MAX_FIXTURE_WORKLOAD_ACTIONS,
+            });
+        }
+        let mut total_payload_bytes = 0usize;
+        let mut total_delay_nanos = 0u64;
+        let mut actions = Vec::new();
+        actions
+            .try_reserve_exact(retained.len())
+            .map_err(|_| FixtureWorkloadError::AllocationRefused)?;
+        for (index, action) in retained.iter().enumerate() {
+            total_payload_bytes = total_payload_bytes
+                .checked_add(action.payload.len())
+                .ok_or(FixtureWorkloadError::IntegerOverflow)?;
+            if total_payload_bytes > MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES {
+                return Err(FixtureWorkloadError::PayloadBytesExceeded {
+                    actual: total_payload_bytes,
+                    limit: MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES,
+                });
+            }
+            total_delay_nanos = total_delay_nanos
+                .checked_add(action.delay_nanos)
+                .ok_or(FixtureWorkloadError::IntegerOverflow)?;
+            if total_delay_nanos > MAX_FIXTURE_WORKLOAD_DELAY_NANOS {
+                return Err(FixtureWorkloadError::TotalDelayExceeded {
+                    actual: total_delay_nanos,
+                    limit: MAX_FIXTURE_WORKLOAD_DELAY_NANOS,
+                });
+            }
+            actions.push(FixtureWorkloadAction {
+                ordinal: u32::try_from(index).map_err(|_| FixtureWorkloadError::IntegerOverflow)?,
+                delay_nanos: action.delay_nanos,
+                payload: Arc::clone(&action.payload),
+            });
+        }
+        Ok(Self {
+            seed,
+            actions: actions.into(),
+        })
     }
 
     fn validate_seed(&self, cfg: &FixtureConfig) -> Result<(), FixtureWorkloadError> {
@@ -894,7 +1016,7 @@ async fn producer(
     dir: PathBuf,
     mut net: VirtualTcpStream,
     trace: TraceHandle,
-) {
+) -> Result<(), FixtureTaskError> {
     let cx = Cx::current().expect("fixture producer runs under a runtime");
     let vfs = FaultVfs::unix_with_clock(cfg.fault_plan, cx.clone());
     let mut chain = chain_seed(workload.seed);
@@ -910,9 +1032,16 @@ async fn producer(
         let payload = action.payload();
         chain = chain_fold(&chain, payload);
 
-        write_durable(&vfs, &dir.join(format!("record-{round:04}.bin")), payload)
-            .await
-            .expect("fixture durable write");
+        if let Err(error) =
+            write_durable(&vfs, &dir.join(format!("record-{round:04}.bin")), payload).await
+        {
+            trace.record_faults(&dir, vfs.events());
+            return Err(FixtureTaskError::new(
+                FixtureTaskStage::DurableWrite,
+                Some(round),
+                error.kind(),
+            ));
+        }
         trace
             .0
             .durable_bytes
@@ -920,17 +1049,32 @@ async fn producer(
         trace.record(Component::Producer, EventKind::Durable, round, &chain);
 
         let len = u32::try_from(payload.len()).expect("payload fits u32");
-        write_all_net(&mut net, &len.to_le_bytes(), &trace)
-            .await
-            .expect("fixture frame header");
-        write_all_net(&mut net, payload, &trace)
-            .await
-            .expect("fixture frame body");
+        if let Err(error) = write_all_net(&mut net, &len.to_le_bytes(), &trace).await {
+            trace.record_faults(&dir, vfs.events());
+            return Err(FixtureTaskError::new(
+                FixtureTaskStage::FrameHeaderWrite,
+                Some(round),
+                error.kind(),
+            ));
+        }
+        if let Err(error) = write_all_net(&mut net, payload, &trace).await {
+            trace.record_faults(&dir, vfs.events());
+            return Err(FixtureTaskError::new(
+                FixtureTaskStage::FrameBodyWrite,
+                Some(round),
+                error.kind(),
+            ));
+        }
         trace.record(Component::Producer, EventKind::Sent, round, &chain);
     }
-    write_all_net(&mut net, &0u32.to_le_bytes(), &trace)
-        .await
-        .expect("fixture terminator");
+    if let Err(error) = write_all_net(&mut net, &0u32.to_le_bytes(), &trace).await {
+        trace.record_faults(&dir, vfs.events());
+        return Err(FixtureTaskError::new(
+            FixtureTaskStage::TerminatorWrite,
+            None,
+            error.kind(),
+        ));
+    }
     trace.record_faults(&dir, vfs.events());
     *trace.0.producer_chain.lock().expect("producer chain lock") = Some(chain);
     trace.record(
@@ -939,33 +1083,47 @@ async fn producer(
         u32::try_from(workload.actions.len()).expect("validated fixture action count fits u32"),
         &chain,
     );
+    Ok(())
 }
 
 /// The consumer half: read frames until the terminator, folding each payload
 /// into an independent chain.
-async fn consumer(cfg: FixtureConfig, mut net: VirtualTcpStream, trace: TraceHandle) {
+async fn consumer(
+    cfg: FixtureConfig,
+    mut net: VirtualTcpStream,
+    trace: TraceHandle,
+) -> Result<(), FixtureTaskError> {
     let _cx = Cx::current().expect("fixture consumer runs under a runtime");
     let mut chain = chain_seed(cfg.seed);
     let mut applied = 0u32;
     loop {
         let mut len_bytes = [0u8; 4];
-        read_exact_net(&mut net, &mut len_bytes)
-            .await
-            .expect("fixture frame header");
+        if let Err(error) = read_exact_net(&mut net, &mut len_bytes).await {
+            return Err(FixtureTaskError::new(
+                FixtureTaskStage::FrameHeaderRead,
+                Some(applied),
+                error.kind(),
+            ));
+        }
         let len = u32::from_le_bytes(len_bytes) as usize;
         if len == 0 {
             break;
         }
         let mut payload = vec![0u8; len];
-        read_exact_net(&mut net, &mut payload)
-            .await
-            .expect("fixture frame body");
+        if let Err(error) = read_exact_net(&mut net, &mut payload).await {
+            return Err(FixtureTaskError::new(
+                FixtureTaskStage::FrameBodyRead,
+                Some(applied),
+                error.kind(),
+            ));
+        }
         chain = chain_fold(&chain, &payload);
         trace.record(Component::Consumer, EventKind::Applied, applied, &chain);
         applied += 1;
     }
     *trace.0.consumer_chain.lock().expect("consumer chain lock") = Some(chain);
     trace.record(Component::Consumer, EventKind::Terminated, applied, &chain);
+    Ok(())
 }
 
 /// Builds one run's pair of component futures plus the trace they share.
@@ -978,8 +1136,8 @@ pub fn fixture_futures(
     cfg: &FixtureConfig,
     scratch_dir: &Path,
 ) -> (
-    impl std::future::Future<Output = ()> + Send + 'static,
-    impl std::future::Future<Output = ()> + Send + 'static,
+    impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
+    impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
     TraceHandle,
     FixtureWorkload,
 ) {
@@ -1000,8 +1158,8 @@ pub(crate) fn fixture_futures_for_workload(
     scratch_dir: &Path,
 ) -> Result<
     (
-        impl std::future::Future<Output = ()> + Send + 'static,
-        impl std::future::Future<Output = ()> + Send + 'static,
+        impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
+        impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
         TraceHandle,
         FixtureWorkload,
     ),

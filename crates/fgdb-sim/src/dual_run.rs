@@ -34,6 +34,7 @@
 //! campaign verdict can be re-read without re-running (q97e's logging
 //! acceptance).
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -48,8 +49,8 @@ use asupersync::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace};
 use fgdb_crypto::Hasher;
 
 use crate::fixture::{
-    FixtureConfig, FixtureSemantics, FixtureWorkload, FixtureWorkloadError, first_divergence,
-    fixture_futures_for_workload,
+    FixtureConfig, FixtureSemantics, FixtureTaskError, FixtureTaskStage, FixtureWorkload,
+    FixtureWorkloadError, first_divergence, fixture_futures_for_workload,
 };
 use crate::vfs::FaultEvent;
 
@@ -67,6 +68,105 @@ pub enum FixtureRuntime {
     /// Live asupersync runtime with a wall clock and ordinary scheduler.
     Live,
 }
+
+/// Stable failure identity used by real fixture-workload minimization.
+///
+/// Action ordinals are deliberately excluded: deleting an irrelevant prefix
+/// re-numbers canonical actions but does not turn a durable-write `WriteZero`
+/// into a different bug. The complete [`FixtureTaskError`] remains available
+/// on [`FixtureRunError`] for diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixtureFailureKind {
+    /// Producer-side I/O failed at this operation/category.
+    Producer {
+        /// Operation being attempted.
+        stage: FixtureTaskStage,
+        /// Stable I/O category.
+        kind: io::ErrorKind,
+    },
+    /// Consumer-side I/O failed at this operation/category.
+    Consumer {
+        /// Operation being attempted.
+        stage: FixtureTaskStage,
+        /// Stable I/O category.
+        kind: io::ErrorKind,
+    },
+}
+
+/// Typed failure from one fixture adapter execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixtureRunError {
+    /// The supplied workload was malformed or belonged to another seed.
+    Workload(FixtureWorkloadError),
+    /// The producer returned a typed I/O failure.
+    Producer(FixtureTaskError),
+    /// The consumer returned a typed I/O failure.
+    Consumer(FixtureTaskError),
+    /// A LAB task terminated without returning its typed output.
+    LabTaskTerminated { component: &'static str },
+    /// A LAB task was still incomplete after the runtime stopped.
+    LabTaskIncomplete { component: &'static str },
+    /// The LAB runtime stopped before quiescence.
+    LabNotQuiescent,
+    /// The LAB runtime reported at least one invariant violation.
+    LabInvariantViolation,
+    /// The complete runtime replay trace was not available.
+    MissingReplayTrace,
+    /// The replay trace did not prove successful completion of both tasks.
+    IncompleteReplayTrace,
+    /// The replay trace scheduled a task outside the producer/consumer pair.
+    UnexpectedTaskSet,
+    /// The live runtime could not be constructed.
+    LiveRuntimeBuild,
+}
+
+impl FixtureRunError {
+    /// Failure identity suitable for same-bug shrink comparisons.
+    #[must_use]
+    pub const fn failure_kind(&self) -> Option<FixtureFailureKind> {
+        match self {
+            Self::Producer(error) => Some(FixtureFailureKind::Producer {
+                stage: error.stage(),
+                kind: error.kind(),
+            }),
+            Self::Consumer(error) => Some(FixtureFailureKind::Consumer {
+                stage: error.stage(),
+                kind: error.kind(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl core::fmt::Display for FixtureRunError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Workload(error) => write!(f, "fixture workload refused: {error}"),
+            Self::Producer(error) => write!(f, "fixture producer failed: {error}"),
+            Self::Consumer(error) => write!(f, "fixture consumer failed: {error}"),
+            Self::LabTaskTerminated { component } => {
+                write!(f, "fixture LAB {component} task terminated")
+            }
+            Self::LabTaskIncomplete { component } => {
+                write!(f, "fixture LAB {component} task remained incomplete")
+            }
+            Self::LabNotQuiescent => f.write_str("fixture LAB run did not reach quiescence"),
+            Self::LabInvariantViolation => {
+                f.write_str("fixture LAB run reported an invariant violation")
+            }
+            Self::MissingReplayTrace => f.write_str("fixture LAB replay trace is missing"),
+            Self::IncompleteReplayTrace => {
+                f.write_str("fixture LAB replay trace lacks completed task dispatches")
+            }
+            Self::UnexpectedTaskSet => {
+                f.write_str("fixture LAB replay trace contains an unexpected task set")
+            }
+            Self::LiveRuntimeBuild => f.write_str("fixture live runtime could not be built"),
+        }
+    }
+}
+
+impl std::error::Error for FixtureRunError {}
 
 /// One task-dispatch decision retained from the lab runtime's replay trace.
 ///
@@ -476,7 +576,7 @@ pub fn run_fixture_workload_under_lab(
     workload: &FixtureWorkload,
     scratch_dir: &Path,
     mut lab_config: LabConfig,
-) -> Result<LabFixtureRun, FixtureWorkloadError> {
+) -> Result<LabFixtureRun, FixtureRunError> {
     lab_config.auto_advance_time = true;
     // This adapter owns its evidence contract. A caller-supplied recorder may
     // filter or truncate events, so replace it with the foundation's complete,
@@ -485,7 +585,8 @@ pub fn run_fixture_workload_under_lab(
     let mut lab = LabRuntime::new(lab_config);
     let root = lab.state.create_root_region(Budget::INFINITE);
     let (producer_fut, consumer_fut, trace, workload) =
-        fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)?;
+        fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)
+            .map_err(FixtureRunError::Workload)?;
     let (producer_task, mut producer_handle) = lab
         .state
         .create_task(root, Budget::INFINITE, producer_fut)
@@ -498,29 +599,36 @@ pub fn run_fixture_workload_under_lab(
     lab.scheduler.lock().schedule(consumer_task, 0);
     let virtual_report = lab.run_with_auto_advance();
     let report = lab.report();
-    assert!(
-        matches!(producer_handle.try_join(), Ok(Some(()))),
-        "fixture producer did not complete successfully"
-    );
-    assert!(
-        matches!(consumer_handle.try_join(), Ok(Some(()))),
-        "fixture consumer did not complete successfully"
-    );
-    assert!(
-        report.quiescent,
-        "fixture lab run did not reach quiescence: {report:?}"
-    );
-    assert!(
-        report.invariant_violations.is_empty(),
-        "fixture lab run violated invariants: {:?}",
-        report.invariant_violations
-    );
+    let producer_result = producer_handle
+        .try_join()
+        .map_err(|_| FixtureRunError::LabTaskTerminated {
+            component: "producer",
+        })?
+        .ok_or(FixtureRunError::LabTaskIncomplete {
+            component: "producer",
+        })?;
+    let consumer_result = consumer_handle
+        .try_join()
+        .map_err(|_| FixtureRunError::LabTaskTerminated {
+            component: "consumer",
+        })?
+        .ok_or(FixtureRunError::LabTaskIncomplete {
+            component: "consumer",
+        })?;
+    producer_result.map_err(FixtureRunError::Producer)?;
+    consumer_result.map_err(FixtureRunError::Consumer)?;
+    if !report.quiescent {
+        return Err(FixtureRunError::LabNotQuiescent);
+    }
+    if !report.invariant_violations.is_empty() {
+        return Err(FixtureRunError::LabInvariantViolation);
+    }
     let (runtime_semantics, _capture_manifest) = normalize_lab_report(&report, SURFACE_SCOPE);
     let replay_trace = lab
         .finish_replay_trace()
-        .expect("fixture lab execution must retain its replay trace");
+        .ok_or(FixtureRunError::MissingReplayTrace)?;
     let completed_dispatches = completed_task_dispatch_steps(&replay_trace, cfg.seed)
-        .expect("fixture lab replay trace must bind both tasks through successful completion");
+        .ok_or(FixtureRunError::IncompleteReplayTrace)?;
     let mut observed_task_ids: Vec<u64> = completed_dispatches
         .iter()
         .map(|step| step.task_id)
@@ -532,10 +640,9 @@ pub fn run_fixture_workload_under_lab(
         CompactTaskId::from(consumer_task).0,
     ];
     expected_task_ids.sort_unstable();
-    assert_eq!(
-        observed_task_ids, expected_task_ids,
-        "fixture lab replay trace must schedule exactly the producer and consumer tasks"
-    );
+    if observed_task_ids != expected_task_ids {
+        return Err(FixtureRunError::UnexpectedTaskSet);
+    }
     let trace_bytes = trace.to_bytes();
     let semantics = trace.semantics();
     let receipt = FixtureRunReceipt::new(
@@ -579,15 +686,17 @@ pub fn run_fixture_workload_live(
     cfg: &FixtureConfig,
     workload: &FixtureWorkload,
     scratch_dir: &Path,
-) -> Result<LiveFixtureRun, FixtureWorkloadError> {
+) -> Result<LiveFixtureRun, FixtureRunError> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
-        .expect("live runtime builds");
+        .map_err(|_| FixtureRunError::LiveRuntimeBuild)?;
     let (producer_fut, consumer_fut, trace, workload) =
-        fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)?;
-    runtime.block_on(async move {
-        join2(producer_fut, consumer_fut).await;
-    });
+        fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)
+            .map_err(FixtureRunError::Workload)?;
+    let (producer_result, consumer_result) =
+        runtime.block_on(async move { join2(producer_fut, consumer_fut).await });
+    producer_result.map_err(FixtureRunError::Producer)?;
+    consumer_result.map_err(FixtureRunError::Consumer)?;
     let trace_bytes = trace.to_bytes();
     let semantics = trace.semantics();
     let receipt = FixtureRunReceipt::new(
@@ -618,27 +727,34 @@ pub fn run_fixture_workload_live(
 /// region-spawning builder, which is more machinery than "run both halves of
 /// the fixture in this task" needs.
 async fn join2(
-    a: impl std::future::Future<Output = ()> + Send,
-    b: impl std::future::Future<Output = ()> + Send,
-) {
+    a: impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send,
+    b: impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send,
+) -> (Result<(), FixtureTaskError>, Result<(), FixtureTaskError>) {
     let mut a = Box::pin(a);
     let mut b = Box::pin(b);
-    let mut a_done = false;
-    let mut b_done = false;
+    let mut a_output = None;
+    let mut b_output = None;
     std::future::poll_fn(|cx| {
-        if !a_done && a.as_mut().poll(cx).is_ready() {
-            a_done = true;
+        if a_output.is_none()
+            && let std::task::Poll::Ready(output) = a.as_mut().poll(cx)
+        {
+            a_output = Some(output);
         }
-        if !b_done && b.as_mut().poll(cx).is_ready() {
-            b_done = true;
+        if b_output.is_none()
+            && let std::task::Poll::Ready(output) = b.as_mut().poll(cx)
+        {
+            b_output = Some(output);
         }
-        if a_done && b_done {
-            std::task::Poll::Ready(())
-        } else {
-            std::task::Poll::Pending
+        match (a_output.take(), b_output.take()) {
+            (Some(a), Some(b)) => std::task::Poll::Ready((a, b)),
+            (a, b) => {
+                a_output = a;
+                b_output = b;
+                std::task::Poll::Pending
+            }
         }
     })
-    .await;
+    .await
 }
 
 /// Where and how two same-seed runs first disagreed.
