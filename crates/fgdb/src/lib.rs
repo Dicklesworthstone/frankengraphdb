@@ -690,12 +690,18 @@ enum PendingRow {
         vid: VId,
         labels: Vec<LabelId>,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// `true` is [`WriteBatch::ensure_vertex`]: live identity is a
+        /// no-op, not [`WriteError::AlreadyLive`].
+        ensure: bool,
     },
     Edge {
         eid: EId,
         src: VId,
         dst: VId,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// `true` is [`WriteBatch::ensure_edge_by_triple`]: a live
+        /// `(src, relation, dst)` is a no-op even under a new eid.
+        ensure: bool,
     },
     DeleteEdge {
         eid: EId,
@@ -734,7 +740,31 @@ impl WriteBatch {
         labels: Vec<LabelId>,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
     ) -> &mut Self {
-        self.rows.push(PendingRow::Vertex { vid, labels, props });
+        self.rows.push(PendingRow::Vertex {
+            vid,
+            labels,
+            props,
+            ensure: false,
+        });
+        self
+    }
+
+    /// Create `vid` only if it is not already live. A second evaluation is
+    /// a no-op; a second [`WriteBatch::create_vertex`] is still
+    /// [`WriteError::AlreadyLive`]. Spent identities refuse
+    /// [`WriteError::IdentitySpent`] — ensure is not resurrection.
+    pub fn ensure_vertex(
+        &mut self,
+        vid: VId,
+        labels: Vec<LabelId>,
+        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    ) -> &mut Self {
+        self.rows.push(PendingRow::Vertex {
+            vid,
+            labels,
+            props,
+            ensure: true,
+        });
         self
     }
 
@@ -750,6 +780,27 @@ impl WriteBatch {
             src,
             dst,
             props,
+            ensure: false,
+        });
+        self
+    }
+
+    /// Create the edge only if no live `(src, this batch's relation, dst)`
+    /// exists. Named `ensure_edge_by_triple` because the constraint-keyed
+    /// `EnsureEdge` is not this method (fgdb-ensure-edge-constraint-counterfeit-xa2x).
+    pub fn ensure_edge_by_triple(
+        &mut self,
+        eid: EId,
+        src: VId,
+        dst: VId,
+        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    ) -> &mut Self {
+        self.rows.push(PendingRow::Edge {
+            eid,
+            src,
+            dst,
+            props,
+            ensure: true,
         });
         self
     }
@@ -1577,12 +1628,24 @@ impl<V: Vfs + Clone> Database<V> {
             std::collections::BTreeMap::new();
         for pending in batch.rows {
             let row = match pending {
-                PendingRow::Vertex { vid, labels, props } => {
+                PendingRow::Vertex {
+                    vid,
+                    labels,
+                    props,
+                    ensure,
+                } => {
+                    let live_now = !prefix_deleted_vertices.contains(&vid)
+                        && (prefix_versions.contains_key(&ElementId::Vertex(vid))
+                            || self.writer.is_vertex_live(vid));
+                    if ensure && live_now {
+                        continue;
+                    }
                     // The fold's refusals, preflighted (fgdb-kokz): a create
                     // that the writer would refuse AFTER the two-fsync commit
-                    // must refuse before it.
-                    if prefix_versions.contains_key(&ElementId::Vertex(vid))
-                        || self.writer.is_vertex_live(vid)
+                    // must refuse before it. Ensure is not resurrection.
+                    if !ensure
+                        && (prefix_versions.contains_key(&ElementId::Vertex(vid))
+                            || self.writer.is_vertex_live(vid))
                     {
                         return Err(WriteError::AlreadyLive {
                             elem: ElementId::Vertex(vid),
@@ -1622,7 +1685,19 @@ impl<V: Vfs + Clone> Database<V> {
                     src,
                     dst,
                     props,
+                    ensure,
                 } => {
+                    let triple_live = triple_is_live(
+                        &self.writer,
+                        &prefix_edges,
+                        &prefix_deleted_edges,
+                        src,
+                        dst,
+                        batch.relation,
+                    );
+                    if ensure && triple_live {
+                        continue;
+                    }
                     if prefix_edges.contains_key(&eid) || self.writer.live_edge(eid).is_some() {
                         return Err(WriteError::AlreadyLive {
                             elem: ElementId::Edge(eid),
@@ -3220,6 +3295,35 @@ async fn rebuild_delta_index<V: Vfs>(
         })?;
     }
     Ok(index)
+}
+
+/// Is `(src, relation, dst)` live in the batch prefix or the retained fold?
+fn triple_is_live(
+    writer: &BlockWriter,
+    prefix_edges: &std::collections::BTreeMap<EId, (VId, VId)>,
+    prefix_deleted_edges: &std::collections::BTreeSet<EId>,
+    src: VId,
+    dst: VId,
+    relation: RelationId,
+) -> bool {
+    for (eid, (prefix_src, prefix_dst)) in prefix_edges {
+        if !prefix_deleted_edges.contains(eid) && *prefix_src == src && *prefix_dst == dst {
+            return true;
+        }
+    }
+    for eid in writer.live_incident_edges(src) {
+        if prefix_deleted_edges.contains(&eid) {
+            continue;
+        }
+        if let Some((live_src, live_relation, live_dst, _)) = writer.live_edge(eid)
+            && live_src == src
+            && live_dst == dst
+            && live_relation == relation
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Fold every committed template with `commit_seq > after` into the writer,
