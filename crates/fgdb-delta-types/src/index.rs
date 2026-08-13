@@ -102,6 +102,21 @@ pub enum IndexError {
         frontier: CommitSeq,
         requested: CommitSeq,
     },
+    /// A `since` cursor past the frontier. Clamping to the frontier would
+    /// answer a question about the future with the present, and that answer
+    /// would silently change meaning the moment the next commit lands.
+    BeyondFrontier {
+        asked: CommitSeq,
+        frontier: CommitSeq,
+    },
+    /// A `since` cursor at or below a prefix the window no longer holds. The
+    /// batches between the cursor and `retained_after` are gone; pretending
+    /// the suffix is "everything since N" would emit a gapped stream.
+    CursorRetired {
+        asked: CommitSeq,
+        retained_after: CommitSeq,
+        frontier: CommitSeq,
+    },
 }
 
 impl core::fmt::Display for IndexError {
@@ -144,6 +159,18 @@ impl core::fmt::Display for IndexError {
             } => write!(
                 f,
                 "cannot retire through {requested:?}: window is ({retained_after:?}, {frontier:?}]"
+            ),
+            Self::BeyondFrontier { asked, frontier } => write!(
+                f,
+                "since cursor {asked:?} is beyond the window frontier {frontier:?}"
+            ),
+            Self::CursorRetired {
+                asked,
+                retained_after,
+                frontier,
+            } => write!(
+                f,
+                "since cursor {asked:?} was retired: window is ({retained_after:?}, {frontier:?}]"
             ),
         }
     }
@@ -237,6 +264,48 @@ impl LocalDeltaBatchIndex {
     /// Every retained batch in commit order.
     pub fn iter(&self) -> impl Iterator<Item = &LogicalDeltaBatch> {
         self.entries.values()
+    }
+
+    /// The retained batches strictly after `after`, in commit order.
+    ///
+    /// This is the frontier-stream primitive: a consumer names the last
+    /// sequence it has applied and receives the gap-free suffix, or a
+    /// refusal that names why the question is unanswerable. Filtering
+    /// [`iter`](Self::iter) by hand cannot see a retired prefix, and would
+    /// emit a gapped feed as if it were complete.
+    ///
+    /// - `after > frontier` → [`IndexError::BeyondFrontier`]
+    /// - `after < retained_after` → [`IndexError::CursorRetired`]
+    /// - `after == frontier` → empty success (the consumer is caught up)
+    /// - `after == retained_after` → the full window, including origin on a
+    ///   fresh index
+    ///
+    /// The walk uses an exclusive lower bound so a frontier of `u64::MAX`
+    /// cannot overflow into a wrapped start key.
+    pub fn since(
+        &self,
+        after: CommitSeq,
+    ) -> Result<impl Iterator<Item = &LogicalDeltaBatch>, IndexError> {
+        if after.0 > self.frontier.0 {
+            return Err(IndexError::BeyondFrontier {
+                asked: after,
+                frontier: self.frontier,
+            });
+        }
+        if after.0 < self.retained_after_commit_seq.0 {
+            return Err(IndexError::CursorRetired {
+                asked: after,
+                retained_after: self.retained_after_commit_seq,
+                frontier: self.frontier,
+            });
+        }
+        Ok(self
+            .entries
+            .range((
+                std::ops::Bound::Excluded(after.0),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(_, batch)| batch))
     }
 
     /// The sequence the next insertion must carry.

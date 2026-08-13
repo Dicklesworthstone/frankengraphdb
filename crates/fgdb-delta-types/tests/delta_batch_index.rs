@@ -550,3 +550,96 @@ fn insert_refuses_to_replace_a_batch_the_frontier_forgot() {
         );
     });
 }
+
+fn seqs_since(index: &LocalDeltaBatchIndex, after: CommitSeq) -> Result<Vec<u64>, IndexError> {
+    Ok(index
+        .since(after)?
+        .map(|batch| batch.commit_seq().0)
+        .collect())
+}
+
+/// The frontier-stream law: `since` is the window `(after, frontier]` ∩
+/// retained entries, or a refusal that names why the question has no
+/// answer. A filter over `iter` cannot see a retired prefix.
+#[test]
+fn since_yields_the_gap_free_suffix_or_refuses() {
+    with_commit_cx(0x51CE, |cx| {
+        let empty = LocalDeltaBatchIndex::new();
+        assert_eq!(
+            seqs_since(&empty, CommitSeq::ORIGIN),
+            Ok(vec![]),
+            "empty window: asked=origin frontier={:?} retained_after={:?} yielded=[]",
+            empty.frontier(),
+            empty.retained_after_commit_seq()
+        );
+        assert_eq!(
+            seqs_since(&empty, CommitSeq(1)),
+            Err(IndexError::BeyondFrontier {
+                asked: CommitSeq(1),
+                frontier: CommitSeq::ORIGIN,
+            }),
+            "future cursor on an empty window must refuse, not clamp"
+        );
+
+        let mut index = LocalDeltaBatchIndex::new();
+        for seq in 1..=3u64 {
+            index.insert(batch_at(seq, &cx)).expect("insert");
+        }
+        let settled = index.clone();
+        assert_eq!(
+            seqs_since(&index, CommitSeq::ORIGIN),
+            Ok(vec![1, 2, 3]),
+            "full window: asked=origin frontier={:?} retained_after={:?} yielded=[1,2,3]",
+            index.frontier(),
+            index.retained_after_commit_seq()
+        );
+        assert_eq!(
+            seqs_since(&index, CommitSeq(2)),
+            Ok(vec![3]),
+            "suffix: asked=2 frontier={:?} retained_after={:?} yielded=[3]",
+            index.frontier(),
+            index.retained_after_commit_seq()
+        );
+        assert_eq!(
+            seqs_since(&index, CommitSeq(3)),
+            Ok(vec![]),
+            "caught up: asked=frontier={:?} retained_after={:?} yielded=[]",
+            index.frontier(),
+            index.retained_after_commit_seq()
+        );
+        assert_eq!(
+            seqs_since(&index, CommitSeq(4)),
+            Err(IndexError::BeyondFrontier {
+                asked: CommitSeq(4),
+                frontier: CommitSeq(3),
+            }),
+            "future: asked=4 frontier={:?} retained_after={:?}",
+            index.frontier(),
+            index.retained_after_commit_seq()
+        );
+        assert_eq!(
+            index, settled,
+            "a since refusal must leave the index byte-identical"
+        );
+
+        index.retire_prefix(CommitSeq(1)).expect("retire through 1");
+        assert_eq!(
+            seqs_since(&index, CommitSeq::ORIGIN),
+            Err(IndexError::CursorRetired {
+                asked: CommitSeq::ORIGIN,
+                retained_after: CommitSeq(1),
+                frontier: CommitSeq(3),
+            }),
+            "retired cursor: asked=origin retained_after={:?} frontier={:?}",
+            index.retained_after_commit_seq(),
+            index.frontier()
+        );
+        assert_eq!(
+            seqs_since(&index, CommitSeq(1)),
+            Ok(vec![2, 3]),
+            "after retire: asked=1 frontier={:?} retained_after={:?} yielded=[2,3]",
+            index.frontier(),
+            index.retained_after_commit_seq()
+        );
+    });
+}
