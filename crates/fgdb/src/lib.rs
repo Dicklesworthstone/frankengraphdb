@@ -122,8 +122,9 @@ use fgdb_chronicle::{
 };
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
-    CanonicalError, CoordinateEntry, DeltaRow, ElementId, LabelId, LogicalDeltaTemplate,
-    PropertyKeyId, RelationId, SchemaEpoch, fold_target_disjoint,
+    CanonicalError, CommittedMarker, CoordinateEntry, DeltaRow, ElementId, IndexError, LabelId,
+    LocalDeltaBatchIndex, LogicalDeltaBatch, LogicalDeltaTemplate, PropertyKeyId, RelationId,
+    SchemaEpoch, fold_target_disjoint,
 };
 use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
@@ -140,7 +141,7 @@ pub use fgdb_strata::edge_props::EdgePropertyRow;
 pub use fgdb_strata::vertex::VertexRow;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, VId};
 use std::path::{Path, PathBuf};
 
 /// Re-exported because [`Database::write_with_crash`] takes one: a caller
@@ -304,6 +305,13 @@ pub enum RebuildError {
     /// The commit and the manifest are durable; the slot is at most one
     /// publication behind, which the next open heals.
     Slot(SlotStoreError),
+    /// The derived in-memory window refused a batch the recovered chain
+    /// committed. The stream is the source of truth; this is a derived
+    /// reconstruction failure (FG-INV-18), never a second authority.
+    Index {
+        commit_seq: u64,
+        error: IndexError,
+    },
 }
 
 /// The derived-publication stage that failed after Chronicle made a commit
@@ -536,6 +544,10 @@ impl core::fmt::Display for RebuildError {
                 f,
                 "root slot publication after a durable publish: {error} (the \
                  slot is at most one publication behind; the next open heals it)"
+            ),
+            Self::Index { commit_seq, error } => write!(
+                f,
+                "commit {commit_seq}: derived delta index refused the committed batch: {error}"
             ),
         }
     }
@@ -1008,6 +1020,11 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// `UnixVfs`. Strata's `BlockStore` does not yet accept a VFS; callers of
     /// `open_with_vfs` must not infer that its object files are faulted too.
     vfs: V,
+    /// Derived window over committed delta batches (plan:397). Never
+    /// authoritative and never persisted: every open rebuilds it from the
+    /// recovered marker chain, and a crash after D2 before the in-memory
+    /// insert heals the same way (FG-INV-18).
+    delta_index: LocalDeltaBatchIndex,
 }
 
 impl Database<UnixVfs> {
@@ -1315,6 +1332,11 @@ impl<V: Vfs + Clone> Database<V> {
                 });
             }
         };
+        // The index is derived from the FULL recovered chain, not the
+        // checkpoint suffix the writer just folded. A suffix-only rebuild
+        // would open a window starting at `published_at`, and the next
+        // insert would see a gap (plan:397, FG-INV-18).
+        let delta_index = rebuild_delta_index(cx, &coordinator).await?;
         Ok(Self {
             coordinator,
             store,
@@ -1332,6 +1354,7 @@ impl<V: Vfs + Clone> Database<V> {
             // state without a second trust-bearing constructor (fgdb-gieu).
             receipts: PublishReceipts::new(),
             vfs,
+            delta_index,
         })
     }
 
@@ -1840,6 +1863,24 @@ impl<V: Vfs + Clone> Database<V> {
         // first in-memory fold operation: a panic caught by an outer boundary
         // is no excuse to make the old handle callable again.
         self.state = DatabaseState::NeedsAuthoritativeRecovery(recovery);
+        // Plan:397 — insert the batch and advance the frontier in the same
+        // write that applied the durable commit. The index is derived: a
+        // refusal here is CommittedNeedsRecovery, not an uncommitted write,
+        // and a crash before this line heals on reopen from the chain.
+        let batch = LogicalDeltaBatch::order(
+            &template,
+            capsule.template_digest.0,
+            CommittedMarker::attest(marker_ref, cx),
+        );
+        self.delta_index
+            .insert(batch)
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::Index {
+                    commit_seq: frontier.0,
+                    error,
+                }),
+            })?;
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut folded = self.writer.clone();
         let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
@@ -2302,6 +2343,26 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn frontier(&self) -> Result<CommitSeq, ReadError> {
         self.ensure_readable()?;
         Ok(self.snapshot.frontier)
+    }
+
+    /// The derived window over committed delta batches.
+    ///
+    /// Reads check `Healthy` like every other graph read: a fenced handle
+    /// must not present a window that may have been inserted after D2 while
+    /// the retained snapshot is still one commit behind.
+    pub fn delta_index(&self) -> Result<&LocalDeltaBatchIndex, ReadError> {
+        self.ensure_readable()?;
+        Ok(&self.delta_index)
+    }
+
+    /// How far the derived delta window reaches. After a successful write
+    /// this equals the new [`CommitSeq`]; after a fresh create it is the
+    /// origin. Distinct from [`Database::frontier`] only in name — both
+    /// report the same sequence on a healthy handle — so Ripple/CDC can
+    /// ask for the window without importing the snapshot's vocabulary.
+    pub fn delta_frontier(&self) -> Result<CommitSeq, ReadError> {
+        self.ensure_readable()?;
+        Ok(self.delta_index.frontier())
     }
 
     /// Consolidate the partition's durable history: fewer blocks, the SAME
@@ -3047,6 +3108,68 @@ async fn rebuild<V: Vfs>(
         next_birth_ordinal,
         published_chain_hash,
     )
+}
+
+/// Rebuild the derived delta window from the FULL recovered marker chain.
+///
+/// Checkpoint-selected open folds only the suffix into the writer. The
+/// index must still cover `(0, frontier]`: a suffix-only window would
+/// start at `published_at` and the next [`LocalDeltaBatchIndex::insert`]
+/// would refuse as a gap. The index is never a second source of truth
+/// (FG-INV-18); every open reconstructs it from capsules the markers name.
+async fn rebuild_delta_index<V: Vfs>(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator<V>,
+) -> Result<LocalDeltaBatchIndex, RebuildError> {
+    let mut index = LocalDeltaBatchIndex::new();
+    for entry in coordinator.chain().entries() {
+        let commit_seq = CommitSeq(entry.marker.commit_seq);
+        let EffectSource::Local {
+            capsule_ref,
+            logical_delta_template_digest,
+        } = &entry.marker.effect_source;
+
+        if !coordinator.capsule_exists(cx, *capsule_ref).await {
+            return Err(RebuildError::MissingCapsule {
+                commit_seq: commit_seq.0,
+                capsule_oid: *capsule_ref,
+            });
+        }
+        let bytes = coordinator.read_capsule(cx, *capsule_ref).await?;
+        let recomputed = template_digest(&bytes);
+        // The annotation must sit on the line immediately above the
+        // comparison: UBS anchors it to the next line.
+        // ubs:ignore -- non-secret content digest over local capsule bytes, not authentication material.
+        if recomputed != *logical_delta_template_digest {
+            return Err(RebuildError::TemplateDigestMismatch {
+                commit_seq: commit_seq.0,
+                declared: *logical_delta_template_digest,
+                recomputed,
+            });
+        }
+        let template = LogicalDeltaTemplate::decode_canonical(&bytes).map_err(|error| {
+            RebuildError::Decode {
+                commit_seq: commit_seq.0,
+                error,
+            }
+        })?;
+        let batch = LogicalDeltaBatch::order(
+            &template,
+            logical_delta_template_digest.0,
+            CommittedMarker::attest(
+                MarkerRef {
+                    marker_oid: entry.marker_oid,
+                    commit_seq,
+                },
+                cx,
+            ),
+        );
+        index.insert(batch).map_err(|error| RebuildError::Index {
+            commit_seq: commit_seq.0,
+            error,
+        })?;
+    }
+    Ok(index)
 }
 
 /// Fold every committed template with `commit_seq > after` into the writer,

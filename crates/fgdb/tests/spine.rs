@@ -2189,3 +2189,157 @@ fn a_slot_ahead_of_its_own_recovered_chain_is_refused() {
         assert_eq!(db.frontier().expect("healthy frontier").0, 3);
     });
 }
+
+/// **THE ENGINE DELTA WINDOW (fgdb-og6n-engine-delta-index-ltji).** After a
+/// write returns, the derived `LocalDeltaBatchIndex` has that commit; two
+/// writes are a gap-free window of length 2; drop + open reconstructs the
+/// same frontier and the same number of entries. The index is derived: it
+/// is never persisted, and a crash after D2 heals by walking the chain.
+#[test]
+fn delta_index_is_maintained_on_write_and_rebuilt_at_open() {
+    let dir = scratch("delta-index-window");
+    under_lab(8196, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let empty = db.delta_index().expect("healthy empty index");
+        assert_eq!(
+            (
+                db.delta_frontier().expect("healthy empty frontier"),
+                empty.len()
+            ),
+            (CommitSeq::ORIGIN, 0),
+            "empty create: seq=origin frontier={:?} entries={}",
+            db.delta_frontier().expect("healthy empty frontier"),
+            empty.len()
+        );
+
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        let seq1 = db.write(cx, first).await.expect("first write");
+        let after_first = db.delta_index().expect("healthy index after first");
+        assert_eq!(
+            (
+                seq1,
+                db.delta_frontier().expect("frontier after first"),
+                after_first.len()
+            ),
+            (CommitSeq(1), CommitSeq(1), 1),
+            "after first write: seq={seq1:?} frontier={:?} entries={}",
+            db.delta_frontier().expect("frontier after first"),
+            after_first.len()
+        );
+        assert!(
+            after_first.get(seq1).is_some(),
+            "after first write: seq={seq1:?} must be present; frontier={:?} entries={}",
+            db.delta_frontier().expect("frontier after first"),
+            after_first.len()
+        );
+
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(2), vec![], vec![]);
+        let seq2 = db.write(cx, second).await.expect("second write");
+        let after_second = db.delta_index().expect("healthy index after second");
+        assert_eq!(
+            (
+                seq2,
+                db.delta_frontier().expect("frontier after second"),
+                after_second.len()
+            ),
+            (CommitSeq(2), CommitSeq(2), 2),
+            "after second write: seq={seq2:?} frontier={:?} entries={}",
+            db.delta_frontier().expect("frontier after second"),
+            after_second.len()
+        );
+        assert!(
+            after_second.get(seq1).is_some() && after_second.get(seq2).is_some(),
+            "two writes are a gap-free window: seq1={seq1:?} seq2={seq2:?} \
+             frontier={:?} entries={}",
+            db.delta_frontier().expect("frontier after second"),
+            after_second.len()
+        );
+        assert_eq!(
+            after_second
+                .next_commit_seq()
+                .expect("successor of the second"),
+            CommitSeq(3),
+            "next_commit_seq is the successor of seq={seq2:?}; frontier={:?} entries={}",
+            db.delta_frontier().expect("frontier after second"),
+            after_second.len()
+        );
+        let before_drop_frontier = db.delta_frontier().expect("pre-drop frontier");
+        let before_drop_len = after_second.len();
+        drop(db);
+
+        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let rebuilt = reopened.delta_index().expect("rebuilt index");
+        assert_eq!(
+            (
+                reopened.delta_frontier().expect("reopened frontier"),
+                rebuilt.len()
+            ),
+            (before_drop_frontier, before_drop_len),
+            "reopen reconstructs seq window: frontier={:?} entries={}",
+            reopened.delta_frontier().expect("reopened frontier"),
+            rebuilt.len()
+        );
+        assert!(
+            rebuilt.get(seq1).is_some() && rebuilt.get(seq2).is_some(),
+            "reopened window still names seq1={seq1:?} seq2={seq2:?}; \
+             frontier={:?} entries={}",
+            reopened.delta_frontier().expect("reopened frontier"),
+            rebuilt.len()
+        );
+    });
+}
+
+/// A write that reaches D2 and then fails derived publication still rebuilds
+/// the committed batch on reopen — the index is derived from the chain, not
+/// from the in-memory insert that never completed (or that the fenced handle
+/// dropped).
+#[test]
+fn a_post_d2_publication_failure_still_rebuilds_the_delta_index_on_reopen() {
+    let dir = scratch("delta-index-post-d2");
+    under_lab(8197, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        let seq1 = db.write(cx, first).await.expect("first write publishes");
+
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(2), vec![], vec![]);
+        let write_error = db
+            .write_with_publication_failure(
+                cx,
+                second,
+                fgdb::DerivedPublicationStage::FoldCommittedTemplate,
+            )
+            .await
+            .expect_err("injected fold failure after D2");
+        assert!(
+            matches!(
+                &write_error,
+                WriteError::CommittedNeedsRecovery { recovery, .. }
+                    if recovery.durable_frontier == CommitSeq(2)
+            ),
+            "D2 made seq 2 durable before the injected fold failure: {write_error:?}"
+        );
+        drop(db);
+
+        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let rebuilt = reopened.delta_index().expect("rebuilt after post-D2 fail");
+        let frontier = reopened.delta_frontier().expect("reopened frontier");
+        assert_eq!(
+            (frontier, rebuilt.len()),
+            (CommitSeq(2), 2),
+            "reopen after post-D2 failure: seq=2 frontier={frontier:?} entries={}",
+            rebuilt.len()
+        );
+        assert!(
+            rebuilt.get(seq1).is_some() && rebuilt.get(CommitSeq(2)).is_some(),
+            "reopen after post-D2 failure still names seq1={seq1:?} seq2=2; \
+             frontier={frontier:?} entries={}",
+            rebuilt.len()
+        );
+    });
+}
