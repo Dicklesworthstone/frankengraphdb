@@ -970,6 +970,11 @@ pub fn coverage_statement() -> Result<String, RegistryValidationError> {
 // Successful trace -> minimal fault hypotheses -> executable FaultPlan
 // ---------------------------------------------------------------------------
 
+use crate::artifact::{Failure, FailureKind, Replay, RunOutcome, Scenario};
+use crate::campaign::{
+    FalsificationCampaignRecord, FalsificationPipelineError, file_observed_falsification,
+};
+use crate::redaction::{MediatedRecord, RedactionPolicy};
 use crate::vfs::{FAULT_POINT_TRACE_PREFIX, FaultPlan, Trigger};
 use asupersync::lab::ldfi::{
     FaultEventId, HittingSetBudget, HittingSetResult, LdfiExperimentBudget,
@@ -978,6 +983,7 @@ use asupersync::lab::ldfi::{
 use asupersync::lab::ldfi_trace::{TraceLineageConfig, build_causal_lineage};
 use asupersync::trace::{TraceData, TraceEvent};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// One fault class that the current [`FaultPlan`] can target by eligible
 /// operation ordinal.
@@ -1128,6 +1134,28 @@ pub struct TraceLdfi {
     pub fault_point_count: usize,
     /// Number of events that independently asserted the requested outcome.
     pub outcome_count: usize,
+    /// Immutable derivation authority captured before this result was exposed
+    /// for inspection. The executable adapter refuses any public-field drift.
+    derivation_authority: TraceLdfiDerivationAuthority,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TraceLdfiDerivationAuthority {
+    search: HittingSetResult,
+    hypotheses: Vec<FaultHypothesis>,
+    source_event_count: usize,
+    fault_point_count: usize,
+    outcome_count: usize,
+}
+
+impl TraceLdfiDerivationAuthority {
+    fn matches(&self, candidate: &TraceLdfi) -> bool {
+        self.search == candidate.search
+            && self.hypotheses == candidate.hypotheses
+            && self.source_event_count == candidate.source_event_count
+            && self.fault_point_count == candidate.fault_point_count
+            && self.outcome_count == candidate.outcome_count
+    }
 }
 
 impl TraceLdfi {
@@ -1149,6 +1177,320 @@ impl TraceLdfi {
                 .expect("TraceLdfi hypotheses are a total enrichment of the upstream result");
             experiment(hypothesis)
         })
+    }
+
+    /// Execute built-in replay hypotheses and require an exact observed
+    /// violation to shrink and file before returning it.
+    ///
+    /// Every hypothesis is mapped before any experiment directory is created,
+    /// so an unrepresentable causal set cannot leave partial campaign output.
+    /// Each admitted experiment executes once. The sealed [`RunOutcome`] that
+    /// caused `FoundViolation` becomes the shrink lineage root; it is never
+    /// replaced by a coarse same-kind rerun. A target violation that cannot
+    /// produce a structured immutable filing is a typed error, not a useful
+    /// campaign result.
+    pub fn run_and_file_replay_experiments(
+        &self,
+        config: &TraceLdfiReplayCampaignConfig<'_>,
+    ) -> Result<TraceLdfiCampaignRun, TraceLdfiCampaignError> {
+        if !self.derivation_authority.matches(self) {
+            return Err(TraceLdfiCampaignError::HypothesisRegistryMismatch);
+        }
+
+        let mut replays = Vec::with_capacity(self.hypotheses.len());
+        for (index, hypothesis) in self.hypotheses.iter().enumerate() {
+            let ordinal = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or(TraceLdfiCampaignError::ExperimentSeedOverflow { index })?;
+            let seed = config
+                .experiment_seed_base
+                .checked_add(ordinal)
+                .ok_or(TraceLdfiCampaignError::ExperimentSeedOverflow { index })?;
+            let plan = hypothesis
+                .to_plan(seed, config.latency_micros)
+                .map_err(|source| TraceLdfiCampaignError::PlanMapping { index, source })?;
+            replays.push(Replay {
+                scenario: config.contract.scenario(),
+                plan,
+            });
+        }
+
+        std::fs::create_dir(config.experiment_root)
+            .map_err(|error| TraceLdfiCampaignError::ExperimentIo { kind: error.kind() })?;
+
+        let mut violation: Option<(usize, String, RunOutcome)> = None;
+        let mut campaign_error = None;
+        let report = self.run_experiments(config.budget, |hypothesis| {
+            let index = self
+                .hypotheses
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, hypothesis))
+                .expect("run_experiments yields a hypothesis borrowed from this registry");
+            let experiment_dir = config
+                .experiment_root
+                .join(format!("hypothesis-{index:04}"));
+            if let Err(error) = std::fs::create_dir(&experiment_dir) {
+                campaign_error = Some(TraceLdfiCampaignError::ExperimentIo { kind: error.kind() });
+                return LdfiExperimentObservation::InvariantViolated;
+            }
+            let outcome = replays[index].run(&experiment_dir);
+            let failure_kind = outcome.failure.as_ref().map(|failure| failure.kind);
+            match failure_kind.map(|kind| config.contract.disposition(kind)) {
+                Some(TraceLdfiFailureDisposition::Violation) => {
+                    let Some(execution_digest) = outcome.replay_completeness_digest() else {
+                        campaign_error =
+                            Some(TraceLdfiCampaignError::InvalidExecutionSeal { index });
+                        return LdfiExperimentObservation::InvariantViolated;
+                    };
+                    if outcome.artifact.is_none() {
+                        campaign_error = Some(TraceLdfiCampaignError::MissingFailureArtifact {
+                            index,
+                            target: config.contract.violation_kind(),
+                        });
+                    } else {
+                        violation = Some((index, execution_digest, outcome));
+                    }
+                    LdfiExperimentObservation::InvariantViolated
+                }
+                None | Some(TraceLdfiFailureDisposition::AdmissibleNonViolation) => {
+                    LdfiExperimentObservation::InvariantHeld
+                }
+                Some(TraceLdfiFailureDisposition::Inconclusive) => {
+                    campaign_error = Some(TraceLdfiCampaignError::UnexpectedFailure {
+                        index,
+                        failure: outcome
+                            .failure
+                            .expect("failure kind came from this exact outcome"),
+                    });
+                    LdfiExperimentObservation::InvariantViolated
+                }
+            }
+        });
+
+        if let Some(error) = campaign_error {
+            return Err(error);
+        }
+        match &report.status {
+            asupersync::lab::ldfi::LdfiExperimentStatus::FoundViolation { hypothesis } => {
+                let Some((index, observed_digest, observed)) = violation else {
+                    return Err(TraceLdfiCampaignError::ExperimentReportMismatch);
+                };
+                if &self.hypotheses[index].events != hypothesis {
+                    return Err(TraceLdfiCampaignError::ExperimentReportMismatch);
+                }
+                let filed = file_observed_falsification(
+                    observed,
+                    &observed_digest,
+                    config.shrink_root,
+                    config.output_root,
+                    config.redaction_policy,
+                    config.mediated_records,
+                )
+                .map_err(TraceLdfiCampaignError::Filing)?
+                .ok_or(TraceLdfiCampaignError::ViolationDidNotFile)?;
+                Ok(TraceLdfiCampaignRun {
+                    experiment_report: report,
+                    filed_falsification: Some(filed),
+                })
+            }
+            asupersync::lab::ldfi::LdfiExperimentStatus::RefutedUpToDepth { .. }
+            | asupersync::lab::ldfi::LdfiExperimentStatus::ExperimentBudgetExhausted { .. }
+            | asupersync::lab::ldfi::LdfiExperimentStatus::HypothesisSearchTruncated => {
+                if violation.is_some() {
+                    return Err(TraceLdfiCampaignError::ExperimentReportMismatch);
+                }
+                Ok(TraceLdfiCampaignRun {
+                    experiment_report: report,
+                    filed_falsification: None,
+                })
+            }
+        }
+    }
+}
+
+/// Closed interpretation of replay failures for one named LDFI invariant.
+///
+/// The contract owns the scenario, violation class, and legal operation
+/// refusals together. Callers cannot relabel a real violation as admissible or
+/// select a target that the scenario can never emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceLdfiReplayContract {
+    /// A successful `DurableAppend` acknowledgement must survive process loss.
+    DurableAppendDurability,
+}
+
+impl TraceLdfiReplayContract {
+    /// Built-in replay scenario fixed by this contract.
+    #[must_use]
+    pub const fn scenario(self) -> Scenario {
+        match self {
+            Self::DurableAppendDurability => Scenario::DurableAppend,
+        }
+    }
+
+    /// Sole typed failure that falsifies this contract.
+    #[must_use]
+    pub const fn violation_kind(self) -> FailureKind {
+        match self {
+            Self::DurableAppendDurability => FailureKind::AcknowledgedBytesLost,
+        }
+    }
+
+    /// Closed classification of every failure kind under this contract.
+    #[must_use]
+    pub const fn disposition(self, failure: FailureKind) -> TraceLdfiFailureDisposition {
+        match self {
+            Self::DurableAppendDurability => match failure {
+                FailureKind::AcknowledgedBytesLost => TraceLdfiFailureDisposition::Violation,
+                FailureKind::SyncRefused | FailureKind::WriteRefused => {
+                    TraceLdfiFailureDisposition::AdmissibleNonViolation
+                }
+                FailureKind::UnexpectedSurvival
+                | FailureKind::IoFailed
+                | FailureKind::CommittedNeedsRecovery
+                | FailureKind::RecoveryProtocolDrift
+                | FailureKind::AcknowledgedCommitLost => TraceLdfiFailureDisposition::Inconclusive,
+            },
+        }
+    }
+}
+
+/// How a closed LDFI replay contract interprets one actual failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceLdfiFailureDisposition {
+    /// The named invariant was falsified.
+    Violation,
+    /// The injected operation was refused before the invariant's premise held.
+    AdmissibleNonViolation,
+    /// Harness, scenario, or unrelated product failure: no verdict is licensed.
+    Inconclusive,
+}
+
+/// Configuration for one built-in trace-derived replay campaign.
+pub struct TraceLdfiReplayCampaignConfig<'a> {
+    /// Closed scenario/violation/disposition contract.
+    pub contract: TraceLdfiReplayContract,
+    /// Maximum number of generated hypotheses to execute.
+    pub budget: LdfiExperimentBudget,
+    /// Seed base; one-based hypothesis ordinals are added with overflow checks.
+    pub experiment_seed_base: u64,
+    /// Deterministic delay installed for any trace-derived latency point.
+    pub latency_micros: u64,
+    /// Fresh root receiving exactly one directory per executed hypothesis.
+    pub experiment_root: &'a Path,
+    /// Root for isolated shrink attempts, touched only after a violation.
+    pub shrink_root: &'a Path,
+    /// Root receiving the immutable filed receipt, touched only after a violation.
+    pub output_root: &'a Path,
+    /// Fail-closed mediation policy applied at the final serialization boundary.
+    pub redaction_policy: &'a RedactionPolicy,
+    /// Mediated records eligible for inclusion under `redaction_policy`.
+    pub mediated_records: &'a [MediatedRecord],
+}
+
+/// Result of a production trace-derived replay campaign.
+pub struct TraceLdfiCampaignRun {
+    /// Upstream deterministic search/experiment report.
+    pub experiment_report: LdfiExperimentReport,
+    /// Exact minimized immutable filing for `FoundViolation`, absent otherwise.
+    pub filed_falsification: Option<FalsificationCampaignRecord>,
+}
+
+/// Why a trace-derived replay campaign could not produce an honest verdict.
+#[derive(Debug)]
+pub enum TraceLdfiCampaignError {
+    /// Enriched hypotheses no longer exactly match the generated search rows.
+    HypothesisRegistryMismatch,
+    /// The deterministic per-hypothesis seed could not be represented.
+    ExperimentSeedOverflow {
+        /// Zero-based hypothesis index.
+        index: usize,
+    },
+    /// A generated hypothesis could not map exactly to `FaultPlan`.
+    PlanMapping {
+        /// Zero-based hypothesis index.
+        index: usize,
+        /// Exact mapping refusal.
+        source: PlanMappingError,
+    },
+    /// A fresh experiment directory could not be created.
+    ExperimentIo {
+        /// Filesystem error class.
+        kind: std::io::ErrorKind,
+    },
+    /// A replay's immutable execution-root seal did not validate.
+    InvalidExecutionSeal {
+        /// Zero-based hypothesis index.
+        index: usize,
+    },
+    /// The target failure did not emit its mandatory structured artifact.
+    MissingFailureArtifact {
+        /// Zero-based hypothesis index.
+        index: usize,
+        /// Target class observed.
+        target: FailureKind,
+    },
+    /// A failure outside the target and explicit admissible set occurred.
+    UnexpectedFailure {
+        /// Zero-based hypothesis index.
+        index: usize,
+        /// Exact unexpected failure.
+        failure: Failure,
+    },
+    /// The upstream report and exact retained execution disagreed.
+    ExperimentReportMismatch,
+    /// The exact violation ceased to reproduce or could not be filed.
+    Filing(FalsificationPipelineError),
+    /// A reported target violation produced no minimized filing.
+    ViolationDidNotFile,
+}
+
+impl std::fmt::Display for TraceLdfiCampaignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HypothesisRegistryMismatch => {
+                f.write_str("enriched hypotheses do not exactly match the generated search rows")
+            }
+            Self::ExperimentSeedOverflow { index } => {
+                write!(f, "experiment seed overflow at hypothesis {index}")
+            }
+            Self::PlanMapping { index, source } => {
+                write!(f, "hypothesis {index} cannot map exactly: {source}")
+            }
+            Self::ExperimentIo { kind } => {
+                write!(f, "experiment namespace I/O failed with {kind:?}")
+            }
+            Self::InvalidExecutionSeal { index } => {
+                write!(f, "hypothesis {index} emitted an invalid execution seal")
+            }
+            Self::MissingFailureArtifact { index, target } => write!(
+                f,
+                "hypothesis {index} emitted target failure {target:?} without an artifact"
+            ),
+            Self::UnexpectedFailure { index, failure } => {
+                write!(
+                    f,
+                    "hypothesis {index} emitted unexpected failure {failure:?}"
+                )
+            }
+            Self::ExperimentReportMismatch => {
+                f.write_str("experiment report disagreed with the retained execution")
+            }
+            Self::Filing(source) => write!(f, "falsification filing failed: {source:?}"),
+            Self::ViolationDidNotFile => {
+                f.write_str("reported violation produced no falsification filing")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TraceLdfiCampaignError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PlanMapping { source, .. } => Some(source),
+            _ => None,
+        }
     }
 }
 
@@ -1292,7 +1634,7 @@ pub fn derive_fault_hypotheses(
 
     let graph = SupportGraph::from_causal_cones(&lineage, outcomes.iter().copied());
     let search = graph.minimal_hitting_sets(budget);
-    let hypotheses = search
+    let hypotheses: Vec<FaultHypothesis> = search
         .hypotheses
         .iter()
         .map(|events| FaultHypothesis {
@@ -1308,11 +1650,19 @@ pub fn derive_fault_hypotheses(
         })
         .collect();
 
+    let derivation_authority = TraceLdfiDerivationAuthority {
+        search: search.clone(),
+        hypotheses: hypotheses.clone(),
+        source_event_count: events.len(),
+        fault_point_count: points.len(),
+        outcome_count: outcomes.len(),
+    };
     Ok(TraceLdfi {
         search,
         hypotheses,
         source_event_count: events.len(),
         fault_point_count: points.len(),
         outcome_count: outcomes.len(),
+        derivation_authority,
     })
 }

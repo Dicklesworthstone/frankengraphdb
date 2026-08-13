@@ -701,8 +701,12 @@ pub fn run_prioritized_model_qualified_campaign(
             {
                 return Err(PrioritizedCampaignError::MissingFalsificationSource);
             }
+            let source_digest = source
+                .replay_completeness_digest()
+                .ok_or(PrioritizedCampaignError::MissingFalsificationSource)?;
             let record = file_observed_falsification(
                 source,
+                &source_digest,
                 config.shrink_root,
                 config.output_root,
                 config.redaction_policy,
@@ -868,6 +872,8 @@ pub enum CampaignRecordError {
 /// Why the automatic replay-to-filed-falsification pipeline stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FalsificationPipelineError {
+    /// The caller's retained execution identity no longer matches the sealed run.
+    SourceExecutionMismatch,
     /// The shrinker could not create an isolated attempt directory.
     ShrinkIo(std::io::ErrorKind),
     /// The minimized run could not be provenance-checked or materialized.
@@ -1245,13 +1251,17 @@ pub fn file_falsification(
     .map_err(FalsificationPipelineError::Record)
 }
 
-fn file_observed_falsification(
+pub(crate) fn file_observed_falsification(
     source: RunOutcome,
+    expected_source_digest: &str,
     shrink_root: &Path,
     output_root: &Path,
     redaction_policy: &RedactionPolicy,
     mediated_records: &[MediatedRecord],
 ) -> Result<Option<FalsificationCampaignRecord>, FalsificationPipelineError> {
+    if source.replay_completeness_digest().as_deref() != Some(expected_source_digest) {
+        return Err(FalsificationPipelineError::SourceExecutionMismatch);
+    }
     let Some(shrunk) = shrink_observed(source, shrink_root)
         .map_err(|error| FalsificationPipelineError::ShrinkIo(error.kind()))?
     else {

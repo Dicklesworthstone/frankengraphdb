@@ -588,7 +588,8 @@ fn reachable_targets_are_exactly_the_witnessed_ones() {
 use asupersync::fs::{OpenOptions, Vfs, VfsFile};
 use asupersync::io::AsyncWrite;
 use asupersync::lab::ldfi::{
-    HittingSetBudget, LdfiExperimentBudget, LdfiExperimentObservation, LdfiExperimentStatus,
+    FaultEventId, HittingSetBudget, LdfiExperimentBudget, LdfiExperimentObservation,
+    LdfiExperimentStatus,
 };
 use asupersync::lab::{AutoAdvanceTermination, LabConfig, LabRuntime, run_async_under_lab};
 use asupersync::trace::{TraceData, TraceEvent};
@@ -597,9 +598,13 @@ use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, RootSlot};
 use fgdb_chronicle::store::{ContinuityAuthority, ContinuityHead, RootStore, StoreError};
 use fgdb_delta_types::RelationId;
-use fgdb_sim::artifact::{Failure, FailureKind, Replay, Scenario};
-use fgdb_sim::campaign::{CampaignRecordError, ClaimClass, FalsificationCampaignRecord};
-use fgdb_sim::ldfi::{InjectableFaultClass, TraceLdfiError, derive_fault_hypotheses};
+use fgdb_sim::artifact::{FailureKind, Replay, Scenario};
+use fgdb_sim::campaign::{CampaignOutcome, ClaimClass};
+use fgdb_sim::ldfi::{
+    InjectableFaultClass, TraceLdfiCampaignError, TraceLdfiError, TraceLdfiFailureDisposition,
+    TraceLdfiReplayCampaignConfig, TraceLdfiReplayContract, TracedFaultPoint,
+    derive_fault_hypotheses,
+};
 use fgdb_sim::redaction::{MediatedRecord, RecordClass, RedactionPolicy};
 use fgdb_sim::shrink::shrink;
 use fgdb_sim::vfs::{FAULT_POINT_TRACE_PREFIX, FaultKind, FaultPlan, FaultVfs, Trigger};
@@ -1474,48 +1479,41 @@ fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
         "the tiny trace search must exhaust"
     );
 
-    let mut experiment_ordinal = 0usize;
-    let mut unexpected_failures: Vec<(usize, Failure)> = Vec::new();
-    let report = derived.run_experiments(
-        LdfiExperimentBudget {
-            max_experiments: 64,
+    let policy = RedactionPolicy::fail_closed()
+        .retain(RecordClass::FaultInjection)
+        .expect("fault injection is retainable")
+        .retain(RecordClass::UserPayload)
+        .expect("user payload is retainable");
+    let mediated_records = [
+        MediatedRecord {
+            class: RecordClass::UserPayload,
+            payload: b"retained-workload-record".to_vec(),
         },
-        |hypothesis| {
-            experiment_ordinal += 1;
-            let replay = Replay {
-                scenario: Scenario::DurableAppend,
-                plan: hypothesis
-                    .to_plan(0x1df1_0000 + experiment_ordinal as u64, 100)
-                    .expect("this one-sync corpus maps exactly"),
-            };
-            let outcome = replay.run(&scratch_dir(&format!(
-                "lineage-append-experiment-{experiment_ordinal}"
-            )));
-            // This campaign falsifies the acknowledged-durability law. A
-            // planned write refusal is an exercised fault point but a legal
-            // operation error, not a counterexample to that law; treating
-            // every scenario error as the same invariant violation would make
-            // the first newly registered fault class steal this campaign.
-            match outcome.failure {
-                Some(failure) if failure.kind == FailureKind::AcknowledgedBytesLost => {
-                    LdfiExperimentObservation::InvariantViolated
-                }
-                None
-                | Some(Failure {
-                    kind: FailureKind::SyncRefused | FailureKind::WriteRefused,
-                    ..
-                }) => LdfiExperimentObservation::InvariantHeld,
-                Some(failure) => {
-                    unexpected_failures.push((experiment_ordinal, failure));
-                    LdfiExperimentObservation::InvariantHeld
-                }
-            }
+        MediatedRecord {
+            class: RecordClass::CryptoEntropy,
+            payload: b"crypto-entropy-secret-material".to_vec(),
         },
-    );
-    assert!(
-        unexpected_failures.is_empty(),
-        "an unexpected harness/product failure is inconclusive-red, never evidence that the invariant held: {unexpected_failures:#?}"
-    );
+    ];
+    let campaign_parent = scratch_dir("lineage-append-production-campaign");
+    let experiment_root = campaign_parent.join("experiments");
+    let shrink_root = campaign_parent.join("shrink");
+    let output_root = campaign_parent.join("filed");
+    let run = derived
+        .run_and_file_replay_experiments(&TraceLdfiReplayCampaignConfig {
+            contract: TraceLdfiReplayContract::DurableAppendDurability,
+            budget: LdfiExperimentBudget {
+                max_experiments: 64,
+            },
+            experiment_seed_base: 0x1df1_0000,
+            latency_micros: 100,
+            experiment_root: &experiment_root,
+            shrink_root: &shrink_root,
+            output_root: &output_root,
+            redaction_policy: &policy,
+            mediated_records: &mediated_records,
+        })
+        .expect("the production LDFI adapter must file its exact observed violation");
+    let report = &run.experiment_report;
     assert!(
         matches!(report.status, LdfiExperimentStatus::FoundViolation { .. }),
         "the trace-derived fsync lie must be found: {:?}",
@@ -1533,63 +1531,63 @@ fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
         .expect("reported event set came from the derived hypotheses");
     assert_eq!(fault.points.len(), 1, "the found hypothesis is minimal");
     assert_eq!(fault.points[0].class, InjectableFaultClass::FsyncLie);
-    let replay = Replay {
-        scenario: Scenario::DurableAppend,
-        plan: fault
-            .to_plan(0x1df1_ffff, 100)
-            .expect("found hypothesis maps exactly"),
+    let record = run
+        .filed_falsification
+        .as_ref()
+        .expect("FoundViolation must carry its immutable filed record");
+    let source_replay = record.source_replay();
+    assert_eq!(source_replay.scenario, Scenario::DurableAppend);
+    assert_eq!(
+        source_replay.plan,
+        fault
+            .to_plan(source_replay.plan.seed, 100)
+            .expect("found hypothesis maps exactly at its executed seed"),
+        "the filed source must be the exact generated hypothesis execution"
+    );
+    assert_eq!(
+        record.source_failure_kind(),
+        FailureKind::AcknowledgedBytesLost
+    );
+    assert!(!record.source_execution_digest().is_empty());
+    let mut shrink_attempts: Vec<String> = std::fs::read_dir(&shrink_root)
+        .expect("inspect exact observed-run shrink lineage")
+        .map(|entry| {
+            entry
+                .expect("read shrink lineage entry")
+                .file_name()
+                .into_string()
+                .expect("shrink attempt names are ASCII")
+        })
+        .collect();
+    shrink_attempts.sort();
+    assert_eq!(
+        shrink_attempts,
+        ["shrink-attempt-0000"],
+        "the exact observed execution is the lineage root; a hidden rerun would shift the sole candidate attempt"
+    );
+    assert!(matches!(
+        record.outcome(),
+        CampaignOutcome::Falsified { .. }
+    ));
+    let CampaignOutcome::Falsified {
+        replay: minimized,
+        failure_kind: minimized_failure,
+    } = record.outcome()
+    else {
+        return;
     };
-    let reproduced = replay.run(&scratch_dir("lineage-append-artifact"));
+    assert_eq!(*minimized_failure, FailureKind::AcknowledgedBytesLost);
     assert_eq!(
-        reproduced.failure.as_ref().map(|failure| failure.kind),
-        Some(FailureKind::AcknowledgedBytesLost),
-        "the planted trace-derived fault did not reproduce"
+        *minimized, source_replay,
+        "the one-point causal hypothesis is already the exact minimal replay"
     );
-    assert!(
-        reproduced.artifact.is_some(),
-        "the reproduced fault skipped the structured artifact boundary"
-    );
-    let mut shrunk = shrink(replay, &scratch_dir("lineage-append-shrink"))
-        .expect("isolated shrink attempts are created")
-        .expect("the trace-derived failure reproduces for the shrinker");
-    assert_eq!(shrunk.failure.kind, FailureKind::AcknowledgedBytesLost);
     assert_eq!(
-        shrunk.replay.plan.fsync_lie,
+        minimized.plan.fsync_lie,
         Trigger::At(1),
         "shrinking must retain the one event that caused the failure"
     );
-    let policy = RedactionPolicy::fail_closed()
-        .retain(RecordClass::FaultInjection)
-        .expect("fault injection is retainable")
-        .retain(RecordClass::UserPayload)
-        .expect("user payload is retainable");
-    let mediated_records = [
-        MediatedRecord {
-            class: RecordClass::UserPayload,
-            payload: b"retained-workload-record".to_vec(),
-        },
-        MediatedRecord {
-            class: RecordClass::CryptoEntropy,
-            payload: b"crypto-entropy-secret-material".to_vec(),
-        },
-    ];
-    let record = FalsificationCampaignRecord::materialize(
-        &shrunk,
-        &scratch_dir("lineage-append-campaign-record"),
-        &policy,
-        &mediated_records,
-    )
-    .expect("the artifact and minimized replay form one campaign record");
     assert_eq!(record.scenario_id(), "durable-append");
-    assert_eq!(record.seed(), 0x1df1_ffff);
-    assert_eq!(
-        record.virtual_clock_epoch_nanos(),
-        shrunk
-            .replay
-            .run(&scratch_dir("lineage-append-epoch-control"))
-            .virtual_clock_epoch_nanos,
-        "the record epoch must come from the minimized replay, not unrelated trace input"
-    );
+    assert_eq!(record.seed(), source_replay.plan.seed);
     assert!(!record.injected_faults().is_empty());
     assert_eq!(
         record.artifact_fields_asserted(),
@@ -1644,17 +1642,228 @@ fn trace_derived_forensics_emits_artifact_and_shrinks_a_planted_fault() {
             .any(|window| window == forbidden.as_slice()), // ubs:ignore -- public fixture-byte absence scan, not authentication.
         "never-recordable crypto entropy escaped into the bundle"
     );
-
-    shrunk.rejected = usize::MAX;
+    // A latency-only hypothesis is genuinely nonviolating under the *same*
+    // durability contract. This is the bounded-refutation control: it cannot
+    // relabel an acknowledged loss or select an impossible target.
+    let latency_prefix = format!("{FAULT_POINT_TRACE_PREFIX}latency:");
+    let latency_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.data,
+                TraceData::Message(message)
+                    if message.starts_with(&latency_prefix) || message == DURABLE_APPEND_OUTCOME
+            )
+        })
+        .cloned()
+        .collect();
+    let latency_only = derive_fault_hypotheses(
+        &latency_events,
+        DURABLE_APPEND_OUTCOME,
+        HittingSetBudget {
+            max_depth: 1,
+            max_hypotheses: 8,
+        },
+    )
+    .expect("the latency-only trace derives a compatible hypothesis");
+    assert_eq!(latency_only.hypotheses.len(), 1);
+    assert_eq!(latency_only.hypotheses[0].points.len(), 1);
+    assert_eq!(
+        latency_only.hypotheses[0].points[0].class,
+        InjectableFaultClass::Latency
+    );
+    let clean_parent = scratch_dir("lineage-append-clean-campaign");
+    let clean_shrink = clean_parent.join("shrink");
+    let clean_output = clean_parent.join("filed");
+    let clean = latency_only
+        .run_and_file_replay_experiments(&TraceLdfiReplayCampaignConfig {
+            contract: TraceLdfiReplayContract::DurableAppendDurability,
+            budget: LdfiExperimentBudget {
+                max_experiments: 64,
+            },
+            experiment_seed_base: 0x1df1_1000,
+            latency_micros: 100,
+            experiment_root: &clean_parent.join("experiments"),
+            shrink_root: &clean_shrink,
+            output_root: &clean_output,
+            redaction_policy: &policy,
+            mediated_records: &mediated_records,
+        })
+        .expect("the clean campaign completes without filing");
     assert!(matches!(
-        FalsificationCampaignRecord::materialize(
-            &shrunk,
-            &scratch_dir("lineage-mutated-shrink-refusal"),
-            &policy,
-            &mediated_records,
-        ),
-        Err(CampaignRecordError::ShrinkProvenanceMismatch)
+        clean.experiment_report.status,
+        LdfiExperimentStatus::RefutedUpToDepth { max_depth: 1 }
     ));
+    assert!(clean.filed_falsification.is_none());
+    assert!(
+        !clean_shrink
+            .try_exists()
+            .expect("inspect clean shrink root")
+    );
+    assert!(
+        !clean_output
+            .try_exists()
+            .expect("inspect clean output root")
+    );
+
+    // Failure meaning is contract-owned and exhaustive. A durability loss can
+    // never be caller-laundered into a held observation, while generic I/O can
+    // never mint either a refutation or a falsification.
+    let contract = TraceLdfiReplayContract::DurableAppendDurability;
+    assert_eq!(contract.scenario(), Scenario::DurableAppend);
+    assert_eq!(
+        contract.violation_kind(),
+        FailureKind::AcknowledgedBytesLost
+    );
+    for (failure, expected) in [
+        (
+            FailureKind::AcknowledgedBytesLost,
+            TraceLdfiFailureDisposition::Violation,
+        ),
+        (
+            FailureKind::SyncRefused,
+            TraceLdfiFailureDisposition::AdmissibleNonViolation,
+        ),
+        (
+            FailureKind::WriteRefused,
+            TraceLdfiFailureDisposition::AdmissibleNonViolation,
+        ),
+        (
+            FailureKind::UnexpectedSurvival,
+            TraceLdfiFailureDisposition::Inconclusive,
+        ),
+        (
+            FailureKind::IoFailed,
+            TraceLdfiFailureDisposition::Inconclusive,
+        ),
+        (
+            FailureKind::CommittedNeedsRecovery,
+            TraceLdfiFailureDisposition::Inconclusive,
+        ),
+        (
+            FailureKind::RecoveryProtocolDrift,
+            TraceLdfiFailureDisposition::Inconclusive,
+        ),
+        (
+            FailureKind::AcknowledgedCommitLost,
+            TraceLdfiFailureDisposition::Inconclusive,
+        ),
+    ] {
+        assert_eq!(contract.disposition(failure), expected, "{failure:?}");
+    }
+
+    // Public-field tampering cannot manufacture an unrepresentable repeated
+    // class: the sealed derivation rejects it before plan mapping or I/O.
+    let mut unrepresentable = derived.clone();
+    let first_point = unrepresentable.hypotheses[0].points[0];
+    let extra_event = FaultEventId::new(u64::MAX);
+    unrepresentable.hypotheses[0].points.push(TracedFaultPoint {
+        event: extra_event,
+        ordinal: first_point.ordinal + 1,
+        ..first_point
+    });
+    unrepresentable.hypotheses[0].events.insert(extra_event);
+    unrepresentable.search.hypotheses[0] = unrepresentable.hypotheses[0].events.clone();
+    let invalid_parent = scratch_dir("lineage-append-invalid-mapping");
+    let invalid_experiments = invalid_parent.join("experiments");
+    let invalid = unrepresentable.run_and_file_replay_experiments(&TraceLdfiReplayCampaignConfig {
+        contract: TraceLdfiReplayContract::DurableAppendDurability,
+        budget: LdfiExperimentBudget {
+            max_experiments: 64,
+        },
+        experiment_seed_base: 0x1df1_3000,
+        latency_micros: 100,
+        experiment_root: &invalid_experiments,
+        shrink_root: &invalid_parent.join("shrink"),
+        output_root: &invalid_parent.join("filed"),
+        redaction_policy: &policy,
+        mediated_records: &mediated_records,
+    });
+    assert!(matches!(
+        invalid,
+        Err(TraceLdfiCampaignError::HypothesisRegistryMismatch)
+    ));
+    assert!(
+        !invalid_experiments
+            .try_exists()
+            .expect("inspect invalid experiment root")
+    );
+
+    // The public report/enrichment structure cannot be desynchronised into a
+    // panic or an experiment over a hypothesis the upstream search never made.
+    let mut disconnected = derived.clone();
+    disconnected.hypotheses[0].events.clear();
+    let disconnected_parent = scratch_dir("lineage-append-disconnected-registry");
+    let disconnected_experiments = disconnected_parent.join("experiments");
+    let disconnected_result =
+        disconnected.run_and_file_replay_experiments(&TraceLdfiReplayCampaignConfig {
+            contract: TraceLdfiReplayContract::DurableAppendDurability,
+            budget: LdfiExperimentBudget { max_experiments: 1 },
+            experiment_seed_base: 0x1df1_4000,
+            latency_micros: 100,
+            experiment_root: &disconnected_experiments,
+            shrink_root: &disconnected_parent.join("shrink"),
+            output_root: &disconnected_parent.join("filed"),
+            redaction_policy: &policy,
+            mediated_records: &mediated_records,
+        });
+    assert!(matches!(
+        disconnected_result,
+        Err(TraceLdfiCampaignError::HypothesisRegistryMismatch)
+    ));
+    assert!(
+        !disconnected_experiments
+            .try_exists()
+            .expect("inspect disconnected experiment root")
+    );
+
+    // The derivation authority seals more than event-set membership. Rebinding
+    // the same event to a different injector coordinate, strengthening the
+    // upstream coverage status, or changing any census must all fail before a
+    // replay can execute or a bounded claim can be returned.
+    let mut changed_class = derived.clone();
+    changed_class.hypotheses[0].points[0].class = InjectableFaultClass::BitFlip;
+    let mut changed_ordinal = derived.clone();
+    changed_ordinal.hypotheses[0].points[0].ordinal += 1;
+    let mut changed_exhaustion = derived.clone();
+    changed_exhaustion.search.exhausted = !changed_exhaustion.search.exhausted;
+    let mut changed_depth = derived.clone();
+    changed_depth.search.max_depth += 1;
+    let mut changed_counts = derived.clone();
+    changed_counts.source_event_count += 1;
+    changed_counts.fault_point_count += 1;
+    changed_counts.outcome_count += 1;
+    for (name, mutated) in [
+        ("class", changed_class),
+        ("ordinal", changed_ordinal),
+        ("exhaustion", changed_exhaustion),
+        ("depth", changed_depth),
+        ("counts", changed_counts),
+    ] {
+        let parent = scratch_dir(&format!("lineage-append-mutated-authority-{name}"));
+        let experiments = parent.join("experiments");
+        let result = mutated.run_and_file_replay_experiments(&TraceLdfiReplayCampaignConfig {
+            contract: TraceLdfiReplayContract::DurableAppendDurability,
+            budget: LdfiExperimentBudget { max_experiments: 1 },
+            experiment_seed_base: 0x1df1_5000,
+            latency_micros: 100,
+            experiment_root: &experiments,
+            shrink_root: &parent.join("shrink"),
+            output_root: &parent.join("filed"),
+            redaction_policy: &policy,
+            mediated_records: &mediated_records,
+        });
+        assert!(matches!(
+            result,
+            Err(TraceLdfiCampaignError::HypothesisRegistryMismatch)
+        ));
+        assert!(
+            !experiments
+                .try_exists()
+                .expect("inspect mutated-authority experiment root"),
+            "{name}: mutated derivation reached filesystem execution"
+        );
+    }
 }
 
 #[test]
