@@ -228,10 +228,7 @@ impl core::fmt::Display for WriteError {
                 write!(f, "vertex identity {vid:?} is permanently spent")
             }
             Self::DanglingEndpoint { eid, endpoint } => {
-                write!(
-                    f,
-                    "{eid:?} names endpoint {endpoint:?}, which is not live"
-                )
+                write!(f, "{eid:?} names endpoint {endpoint:?}, which is not live")
             }
             Self::Patch(error) => write!(f, "vertex sealing: {error}"),
             Self::EdgeProps(error) => write!(f, "edge property sealing: {error}"),
