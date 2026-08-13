@@ -38,8 +38,9 @@ use fgdb_calibrate::{
     log::{
         StatisticalDecisionLog, StatisticalEvidenceIdentityError,
         StatisticalEvidenceIdentityIssuer, StatisticalEvidenceIdentityVerifier,
-        StatisticalEvidenceRegistration, StatisticalLogDecodeLimits, StatisticalLogRecord,
-        StatisticalMonitorKind, StatisticalStatistic,
+        StatisticalEvidenceRegistration, StatisticalLogCodecError, StatisticalLogDecodeLimits,
+        StatisticalLogRecord, StatisticalLogRecordError, StatisticalMonitorKind,
+        StatisticalStatistic,
     },
     no_regret::{
         NoRegretActionSpace, NoRegretAssumptions, NoRegretController, NoRegretDecisionReceipt,
@@ -57,6 +58,7 @@ use fgdb_calibrate::{
     },
     policy_epoch::{
         DecisionPolicyEpoch, DecisionPolicyEpochError, DecisionPolicyScope, LogicalEffectClass,
+        TierMigrationGuardReceipt,
     },
     progress::{
         DrainProgressEvidence, DrainProgressIdentity, DrainProgressMonitor, DrainProgressProfile,
@@ -70,6 +72,10 @@ use fgdb_calibrate::{
         RegimePolicySelection, RegimeSequenceWindow, RegimeSignalEvidence, RegimeSignalIdentity,
         RegimeSignalMonitor, RegimeSignalProfile, RegimeSignalStatus, RuntimeMetricSeries,
         SequencedBocpdSrObservation,
+    },
+    sprt::{
+        SPRT_LIKELIHOOD_INFINITY, SPRT_SCALE, SprtDecision, SprtDecodeLimits, SprtEvidence,
+        SprtIdentity, SprtObservation, SprtProfile, SprtSequenceWindow, SprtTrial,
     },
 };
 use fgdb_claim::{EvidenceClaim, StatisticalErrorControl};
@@ -175,6 +181,11 @@ fn oid(fill: u8) -> ObjectId {
 #[derive(Clone, Copy)]
 struct FixtureOnlyIdentityAuthority;
 
+/// Test-only verifier used to isolate semantic record validation from keyed
+/// identity verification in planted canonical mutations.
+#[derive(Clone, Copy)]
+struct AcceptAllStatisticalIdentityVerifier;
+
 const FIXTURE_IDENTITY_AUTHORITY: FixtureOnlyIdentityAuthority = FixtureOnlyIdentityAuthority;
 const FIXTURE_K_OID: [u8; 32] = [0xa7; 32];
 const FIXTURE_SECURITY_NAMESPACE: fgdb_types::DatabaseSecurityNamespaceId =
@@ -236,6 +247,16 @@ impl StatisticalEvidenceIdentityVerifier for FixtureOnlyIdentityAuthority {
         } else {
             Err(StatisticalEvidenceIdentityError::Rejected)
         }
+    }
+}
+
+impl StatisticalEvidenceIdentityVerifier for AcceptAllStatisticalIdentityVerifier {
+    fn verify_statistical_evidence_oid(
+        &self,
+        _canonical_evidence_body: &[u8],
+        _evidence_oid: ObjectId,
+    ) -> Result<(), StatisticalEvidenceIdentityError> {
+        Ok(())
     }
 }
 
@@ -2196,6 +2217,11 @@ fn expected_substantive_assumptions(record: StatisticalLogRecord) -> TestResult<
             "the declared null and filtration make the e-value a nonnegative supermartingale"
                 .to_owned(),
         ],
+        StatisticalMonitorKind::SequentialProbabilityRatio => vec![
+            "type-I and type-II bounds are conservative only for the named simple Bernoulli hypotheses and authenticated filtration; outward rounding and a sticky positive-infinity upper endpoint can delay a decision but cannot strengthen acceptance".to_owned(),
+            "the input is already projected to a registered binary stream; this monitor does not validate a raw-metric projection".to_owned(),
+            "accepting the alternative is insufficient for migration without hard dwell and benefit-over-conversion-cost-plus-uncertainty guards".to_owned(),
+        ],
         StatisticalMonitorKind::DrainProgress => vec![
             "alpha does not apply to this bounded progress certificate".to_owned(),
             "the registered potential and maximum-step bound cover the complete prefix".to_owned(),
@@ -2246,12 +2272,23 @@ fn expected_substantive_assumptions(record: StatisticalLogRecord) -> TestResult<
 fn sextant_assumption_registration_is_complete_and_fail_closed() -> TestResult {
     let fixture = run_fixture()?;
     assert_eq!(fixture.statistical_log.len(), 28);
+    let sprt = sprt_evidence(
+        oid(40),
+        oid(90),
+        oid(125),
+        &[SprtObservation::One, SprtObservation::One],
+    )?;
+    let sprt = StatisticalLogRecord::try_from_sprt(&FIXTURE_IDENTITY_AUTHORITY, &sprt)?;
+    let mut records = fixture.statistical_log.records().to_vec();
+    records.push(sprt);
+    assert_eq!(records.len(), 29);
     let mut registrations = Vec::<StatisticalEvidenceRegistration>::new();
     let mut monitor_registrations = Vec::<(StatisticalMonitorKind, &'static str)>::new();
-    for record in fixture.statistical_log.records() {
+    for record in &records {
         let registration = record.evidence_registration();
         let expected_registry_id = match record.monitor_kind() {
             StatisticalMonitorKind::EProcess
+            | StatisticalMonitorKind::SequentialProbabilityRatio
             | StatisticalMonitorKind::ExplorationBudget
             | StatisticalMonitorKind::DrainProgress
             | StatisticalMonitorKind::RegimeChange => "FG-CAL-01",
@@ -2344,6 +2381,10 @@ fn sextant_assumption_registration_is_complete_and_fail_closed() -> TestResult {
             (StatisticalMonitorKind::RegimeChange, "FG-CAL-01"),
             (StatisticalMonitorKind::OffPolicyEvaluation, "FG-EVID-01"),
             (StatisticalMonitorKind::AnnRecall, "FG-CAL-03"),
+            (
+                StatisticalMonitorKind::SequentialProbabilityRatio,
+                "FG-CAL-01"
+            ),
         ]
     );
     assert_eq!(
@@ -2577,7 +2618,8 @@ fn sextant_evidence_promotes_then_stickily_reverts_on_regime_shift() -> TestResu
             StatisticalMonitorKind::OffPolicyEvaluation => None,
             StatisticalMonitorKind::DrainProgress
             | StatisticalMonitorKind::RegimeChange
-            | StatisticalMonitorKind::AnnRecall => {
+            | StatisticalMonitorKind::AnnRecall
+            | StatisticalMonitorKind::SequentialProbabilityRatio => {
                 return Err(
                     io::Error::other("unexpected monitor in promotion envelope inventory").into(),
                 );
@@ -3036,7 +3078,7 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
     let terminal_record =
         StatisticalLogRecord::try_from_bocpd_sr_regime(&FIXTURE_IDENTITY_AUTHORITY, &terminal)?;
     let terminal_record_bytes = terminal_record.encode_canonical()?;
-    assert_eq!(&terminal_record_bytes[..8], b"FGDBSLR5");
+    assert_eq!(&terminal_record_bytes[..8], b"FGDBSLR6");
     assert_eq!(
         StatisticalLogRecord::decode_canonical(
             &terminal_record_bytes,
@@ -3337,5 +3379,510 @@ fn bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound() -> TestRe
         )?;
         assert_eq!(record.selected_policy_oid(), oid(40));
     }
+    Ok(())
+}
+
+fn sprt_evidence(
+    candidate_oid: ObjectId,
+    fallback_oid: ObjectId,
+    decision_card_oid: ObjectId,
+    observations: &[SprtObservation],
+) -> TestResult<SprtEvidence> {
+    let identity = SprtIdentity::try_new(
+        oid(120),
+        oid(121),
+        oid(122),
+        decision_card_oid,
+        SprtSequenceWindow::try_new(700, 710)?,
+        REGIME_EPOCH,
+        candidate_oid,
+        fallback_oid,
+    )?;
+    let profile = SprtProfile::try_new(
+        oid(123),
+        400_000_000,
+        600_000_000,
+        500_000_000,
+        500_000_000,
+        500_000_000,
+        2_000_000_000,
+        16_000_000_000,
+        11,
+    )?;
+    let mut trial = SprtTrial::try_new(identity, profile)?;
+    for (offset, observation) in observations.iter().copied().enumerate() {
+        trial.observe(700 + u64::try_from(offset)?, observation)?;
+    }
+    Ok(trial.evidence())
+}
+
+#[test]
+fn sprt_migration_hard_guards_dominate_statistical_evidence() -> TestResult {
+    let candidate_oid = oid(40);
+    let fallback_oid = oid(90);
+    let root = DecisionPolicyEpoch::try_root(
+        "tier-migration",
+        0,
+        DecisionPolicyScope::new(oid(124)),
+        LogicalEffectClass::AnswerPreservingPhysical,
+        fallback_oid,
+        fallback_oid,
+    )?;
+    let root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&root)?;
+    let guards = TierMigrationGuardReceipt::try_new(
+        &FIXTURE_IDENTITY_AUTHORITY,
+        &root,
+        root_oid,
+        REGIME_EPOCH,
+        candidate_oid,
+        oid(125),
+        8,
+        8,
+        16,
+        10,
+        5,
+    )?;
+    let evidence = sprt_evidence(
+        candidate_oid,
+        fallback_oid,
+        guards.decision_card_oid(),
+        &[SprtObservation::One, SprtObservation::One],
+    )?;
+    assert_eq!(evidence.decision(), SprtDecision::AcceptAlternative);
+    assert_eq!(evidence.likelihood_ratio(), 2_250_000_000);
+    assert_eq!(evidence.selected_policy_oid(), candidate_oid);
+
+    // Mutation control for the finite-cap boundary: the exact likelihood
+    // ratio crosses A on the final observation, while accumulated outward
+    // rounding keeps the lower endpoint below A. The upper endpoint must
+    // become explicit positive infinity, never a finite value below the exact
+    // ratio. Delayed acceptance is conservative; truncating the upper bound is
+    // not.
+    let cap_boundary = 1_499_925_004;
+    let cap_identity = SprtIdentity::try_new(
+        oid(127),
+        oid(128),
+        oid(129),
+        guards.decision_card_oid(),
+        SprtSequenceWindow::try_new(0, 1_000_000)?,
+        REGIME_EPOCH,
+        candidate_oid,
+        fallback_oid,
+    )?;
+    let cap_profile = SprtProfile::try_new(
+        oid(130),
+        400_000_001,
+        599_999_999,
+        666_700_000,
+        500_000_000,
+        500_000_000,
+        cap_boundary,
+        cap_boundary,
+        1_000_001,
+    )?;
+    let mut cap_trial = SprtTrial::try_new(cap_identity, cap_profile)?;
+    for pair in 0..500_000_u64 {
+        cap_trial.observe(pair * 2, SprtObservation::Zero)?;
+        cap_trial.observe(pair * 2 + 1, SprtObservation::One)?;
+    }
+    assert_eq!(
+        cap_trial.observe(1_000_000, SprtObservation::One)?,
+        SprtDecision::Continue
+    );
+    let cap_evidence = cap_trial.evidence();
+    assert_eq!(cap_evidence.likelihood_ratio(), 1_498_874_993);
+    assert_eq!(
+        cap_evidence.likelihood_ratio_upper(),
+        SPRT_LIKELIHOOD_INFINITY
+    );
+    assert!(
+        SPRT_SCALE * 599_999_999_u128 > cap_boundary * 400_000_001_u128,
+        "independent exact oracle must cross the declared alternative boundary"
+    );
+    let cap_record =
+        StatisticalLogRecord::try_from_sprt(&FIXTURE_IDENTITY_AUTHORITY, &cap_evidence)?;
+    let cap_record_bytes = cap_record.encode_canonical()?;
+    let decoded_cap_record =
+        StatisticalLogRecord::decode_canonical(&cap_record_bytes, &FIXTURE_IDENTITY_AUTHORITY)?;
+    assert_eq!(decoded_cap_record.encode_canonical()?, cap_record_bytes);
+    let StatisticalStatistic::SequentialProbabilityRatio {
+        likelihood_ratio_lower,
+        likelihood_ratio_upper,
+        ..
+    } = decoded_cap_record.statistic()
+    else {
+        return Err(io::Error::other("SPRT record changed statistic family").into());
+    };
+    assert_eq!(likelihood_ratio_lower, 1_498_874_993);
+    assert_eq!(likelihood_ratio_upper, SPRT_LIKELIHOOD_INFINITY);
+
+    // The payload ends with lower:u128, upper:u128, observations:u64, and
+    // decision:u8. A verifier that accepts every identity isolates the record
+    // semantic check: even authenticated-looking bytes cannot use the infinity
+    // upper sentinel to hide a lower endpoint beyond the finite profile cap.
+    let mut impossible_lower = cap_record_bytes.clone();
+    let lower_offset = impossible_lower
+        .len()
+        .checked_sub(16 + 16 + 8 + 1)
+        .ok_or_else(|| io::Error::other("SPRT record was shorter than its fixed tail"))?;
+    impossible_lower[lower_offset..lower_offset + 16].copy_from_slice(&u128::MAX.to_le_bytes());
+    *impossible_lower
+        .last_mut()
+        .ok_or_else(|| io::Error::other("SPRT record had no decision byte"))? =
+        SprtDecision::AcceptAlternative as u8;
+    assert!(matches!(
+        StatisticalLogRecord::decode_canonical(
+            &impossible_lower,
+            &AcceptAllStatisticalIdentityVerifier,
+        ),
+        Err(StatisticalLogCodecError::InvalidRecord(
+            StatisticalLogRecordError::InvalidSprtStatistic
+        ))
+    ));
+
+    let evidence_bytes = evidence.try_to_canonical_bytes()?;
+    let decoded_evidence = SprtEvidence::try_from_canonical_bytes(
+        &evidence_bytes,
+        SprtDecodeLimits::new(evidence_bytes.len(), 2),
+    )?;
+    assert_eq!(decoded_evidence, evidence);
+    assert_eq!(decoded_evidence.try_to_canonical_bytes()?, evidence_bytes);
+    let record =
+        StatisticalLogRecord::try_from_sprt(&FIXTURE_IDENTITY_AUTHORITY, &decoded_evidence)?;
+    assert_eq!(
+        record.monitor_kind(),
+        StatisticalMonitorKind::SequentialProbabilityRatio
+    );
+    assert_eq!(record.evidence_registration().registry_id(), "FG-CAL-01");
+    assert_eq!(
+        record.evidence_registration().binds_to(),
+        ["DecisionPolicyEpoch", "StatisticalDecisionLog"]
+    );
+    let envelope = record.try_to_evidence_envelope()?;
+    assert_eq!(envelope.selection_policy_oid(), candidate_oid);
+    let EvidenceClaim::StatisticalClaim {
+        assumptions,
+        error_control,
+        ..
+    } = envelope.claim()
+    else {
+        return Err(io::Error::other("SPRT record projected a stronger claim").into());
+    };
+    assert_eq!(*error_control, StatisticalErrorControl::try_alpha(0.5)?);
+    assert!(assumptions.iter().any(|assumption| {
+        assumption.contains("hard dwell and benefit-over-conversion-cost-plus-uncertainty")
+    }));
+    assert_eq!(
+        expected_substantive_assumptions(record)?,
+        assumptions
+            .iter()
+            .filter(|assumption| !assumption.starts_with("registry-disclosure:"))
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+
+    let record_bytes = record.encode_canonical()?;
+    assert_eq!(&record_bytes[..8], b"FGDBSLR6");
+    let mut record_log = StatisticalDecisionLog::try_new(1)?;
+    record_log.append(record)?;
+    let log_bytes = record_log.encode_canonical()?;
+    assert_eq!(&log_bytes[..8], b"FGDBSLL6");
+    let decoded_log = read_statistical_log(&log_bytes, 1)?;
+    assert_eq!(decoded_log.records(), &[record]);
+    let mut old_version = log_bytes.clone();
+    old_version[8..10].copy_from_slice(&5_u16.to_le_bytes());
+    assert!(read_statistical_log(&old_version, 1).is_err());
+
+    assert_eq!(
+        DecisionPolicyEpoch::try_promote_from_statistical_records(
+            &root,
+            root_oid,
+            candidate_oid,
+            &[record],
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationRequiresHardGuards)
+    );
+    let eprocess = run_eprocess(candidate_oid, fallback_oid)?;
+    let generic_record = StatisticalLogRecord::try_from_eprocess(
+        &FIXTURE_IDENTITY_AUTHORITY,
+        eprocess
+            .last()
+            .ok_or_else(|| io::Error::other("missing e-process evidence"))?,
+    )?;
+    assert_eq!(generic_record.selected_policy_oid(), candidate_oid);
+    assert_eq!(
+        DecisionPolicyEpoch::try_promote_from_statistical_records(
+            &root,
+            root_oid,
+            candidate_oid,
+            &[generic_record],
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationRequiresHardGuards)
+    );
+    assert_eq!(
+        DecisionPolicyEpoch::try_promoted_from_canonical_bytes_from_statistical_records(
+            &record_bytes,
+            &root,
+            root_oid,
+            &[generic_record],
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationRequiresHardGuards)
+    );
+
+    let unrelated_guards = TierMigrationGuardReceipt::try_new(
+        &FIXTURE_IDENTITY_AUTHORITY,
+        &root,
+        root_oid,
+        REGIME_EPOCH,
+        candidate_oid,
+        oid(126),
+        8,
+        8,
+        16,
+        10,
+        5,
+    )?;
+    assert_eq!(
+        DecisionPolicyEpoch::try_promote_tier_migration_from_sprt_record(
+            &root,
+            root_oid,
+            candidate_oid,
+            record,
+            &unrelated_guards,
+        ),
+        Err(
+            DecisionPolicyEpochError::TierMigrationDecisionCardMismatch {
+                expected: guards.decision_card_oid(),
+                actual: unrelated_guards.decision_card_oid(),
+            }
+        )
+    );
+    let later_root = DecisionPolicyEpoch::try_root(
+        "tier-migration",
+        1,
+        DecisionPolicyScope::new(oid(124)),
+        LogicalEffectClass::AnswerPreservingPhysical,
+        fallback_oid,
+        fallback_oid,
+    )?;
+    let later_root_oid = FixtureOnlyIdentityAuthority::epoch_oid(&later_root)?;
+    assert_ne!(later_root_oid, root_oid);
+    assert_eq!(
+        DecisionPolicyEpoch::try_promote_tier_migration_from_sprt_record(
+            &later_root,
+            later_root_oid,
+            candidate_oid,
+            record,
+            &guards,
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationGuardContextMismatch)
+    );
+    let later_guards = TierMigrationGuardReceipt::try_new(
+        &FIXTURE_IDENTITY_AUTHORITY,
+        &later_root,
+        later_root_oid,
+        REGIME_EPOCH,
+        candidate_oid,
+        oid(125),
+        8,
+        8,
+        16,
+        10,
+        5,
+    )?;
+    assert_ne!(later_guards.decision_card_oid(), guards.decision_card_oid());
+    let promoted = DecisionPolicyEpoch::try_promote_tier_migration_from_sprt_record(
+        &root,
+        root_oid,
+        candidate_oid,
+        record,
+        &guards,
+    )?;
+    assert_eq!(promoted.version(), 1);
+    assert_eq!(promoted.pinned_table_oid(), candidate_oid);
+    assert_eq!(promoted.evidence_refs(), &[record.evidence_oid()]);
+    let promoted_bytes = promoted.try_to_canonical_bytes()?;
+    assert_eq!(
+        DecisionPolicyEpoch::try_promoted_tier_migration_from_canonical_bytes(
+            &promoted_bytes,
+            &root,
+            root_oid,
+            record,
+            &guards,
+        )?,
+        promoted
+    );
+    assert!(matches!(
+        DecisionPolicyEpoch::try_promoted_tier_migration_from_canonical_bytes(
+            &promoted_bytes,
+            &root,
+            root_oid,
+            record,
+            &unrelated_guards,
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationDecisionCardMismatch { .. })
+    ));
+    let substituted_benefit = TierMigrationGuardReceipt::try_new(
+        &FIXTURE_IDENTITY_AUTHORITY,
+        &root,
+        root_oid,
+        REGIME_EPOCH,
+        candidate_oid,
+        oid(125),
+        8,
+        8,
+        17,
+        10,
+        5,
+    )?;
+    assert_ne!(
+        substituted_benefit.decision_card_oid(),
+        guards.decision_card_oid()
+    );
+    assert!(matches!(
+        DecisionPolicyEpoch::try_promoted_tier_migration_from_canonical_bytes(
+            &promoted_bytes,
+            &root,
+            root_oid,
+            record,
+            &substituted_benefit,
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationDecisionCardMismatch { .. })
+    ));
+
+    assert_eq!(
+        TierMigrationGuardReceipt::try_new(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            &root,
+            root_oid,
+            REGIME_EPOCH,
+            candidate_oid,
+            oid(125),
+            8,
+            7,
+            16,
+            10,
+            5,
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationDwellUnsatisfied {
+            required: 8,
+            observed: 7,
+        })
+    );
+    let equal_economics = TierMigrationGuardReceipt::try_new(
+        &FIXTURE_IDENTITY_AUTHORITY,
+        &root,
+        root_oid,
+        REGIME_EPOCH,
+        candidate_oid,
+        oid(125),
+        8,
+        8,
+        15,
+        10,
+        5,
+    );
+    assert_eq!(
+        equal_economics,
+        Err(
+            DecisionPolicyEpochError::TierMigrationEconomicsUnsatisfied {
+                benefit_lower_bound: 15,
+                conversion_cost: 10,
+                uncertainty: 5,
+            }
+        )
+    );
+    assert_eq!(
+        TierMigrationGuardReceipt::try_new(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            &root,
+            root_oid,
+            REGIME_EPOCH,
+            candidate_oid,
+            oid(125),
+            8,
+            8,
+            u128::MAX,
+            u128::MAX,
+            1,
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationEconomicsOverflow)
+    );
+    assert_eq!(
+        TierMigrationGuardReceipt::try_new(
+            &FIXTURE_IDENTITY_AUTHORITY,
+            &root,
+            root_oid,
+            REGIME_EPOCH,
+            candidate_oid,
+            oid(125),
+            0,
+            0,
+            1,
+            0,
+            0,
+        ),
+        Err(DecisionPolicyEpochError::InvalidTierMigrationDecisionCard)
+    );
+
+    for evidence in [
+        sprt_evidence(
+            candidate_oid,
+            fallback_oid,
+            guards.decision_card_oid(),
+            &[SprtObservation::One],
+        )?,
+        sprt_evidence(
+            candidate_oid,
+            fallback_oid,
+            guards.decision_card_oid(),
+            &[SprtObservation::Zero, SprtObservation::Zero],
+        )?,
+    ] {
+        let actual = evidence.decision();
+        let record = StatisticalLogRecord::try_from_sprt(&FIXTURE_IDENTITY_AUTHORITY, &evidence)?;
+        assert_eq!(record.selected_policy_oid(), fallback_oid);
+        assert_eq!(
+            DecisionPolicyEpoch::try_promote_tier_migration_from_sprt_record(
+                &root,
+                root_oid,
+                candidate_oid,
+                record,
+                &guards,
+            ),
+            Err(DecisionPolicyEpochError::TierMigrationSprtDidNotAcceptAlternative { actual })
+        );
+    }
+
+    let substituted = sprt_evidence(
+        oid(41),
+        fallback_oid,
+        guards.decision_card_oid(),
+        &[SprtObservation::One, SprtObservation::One],
+    )?;
+    let substituted =
+        StatisticalLogRecord::try_from_sprt(&FIXTURE_IDENTITY_AUTHORITY, &substituted)?;
+    assert!(matches!(
+        DecisionPolicyEpoch::try_promote_tier_migration_from_sprt_record(
+            &root,
+            root_oid,
+            candidate_oid,
+            substituted,
+            &guards,
+        ),
+        Err(DecisionPolicyEpochError::TierMigrationGuardContextMismatch)
+    ));
+
+    let empty = sprt_evidence(candidate_oid, fallback_oid, guards.decision_card_oid(), &[])?;
+    let mut noncanonical_absent = empty.try_to_canonical_bytes()?;
+    let through_offset = noncanonical_absent.len() - 1 - 16 - 16 - 8;
+    noncanonical_absent[through_offset] = 1;
+    assert_eq!(
+        SprtEvidence::try_from_canonical_bytes(
+            &noncanonical_absent,
+            SprtDecodeLimits::new(noncanonical_absent.len(), 0),
+        ),
+        Err(fgdb_calibrate::sprt::SprtError::NonCanonicalAbsentThroughSequence { actual: 1 })
+    );
     Ok(())
 }
