@@ -26,7 +26,7 @@ fn scratch_dir(name: &str) -> PathBuf {
 fn schedule_and_workload_shrink_together_to_a_standalone_reproducer() {
     // Failure requires the commit decision and the conflicting write. Every
     // other decision/action is deliberately irrelevant blame.
-    let reproduces = |schedule: &[u8], workload: &[u8]| {
+    let reproduces = |schedule: &[u8], workload: &[u8]| -> ShrinkTrial {
         if schedule.contains(&3) && workload.contains(&12) {
             ShrinkTrial::Reproduced
         } else {
@@ -59,7 +59,7 @@ fn schedule_and_workload_shrink_together_to_a_standalone_reproducer() {
 #[test]
 fn a_nonreproducing_schedule_workload_pair_cannot_be_filed_as_minimal() {
     assert!(
-        shrink_schedule_and_workload(vec![1u8], vec![2u8], |schedule, workload| {
+        shrink_schedule_and_workload(vec![1u8], vec![2u8], |schedule, workload| -> ShrinkTrial {
             if schedule.contains(&9) && workload.contains(&9) {
                 ShrinkTrial::Reproduced
             } else {
