@@ -1909,16 +1909,17 @@ impl<V: Vfs + Clone> Database<V> {
                         .or_else(|| self.snapshot.versions.get(&ElementId::Vertex(vid)))
                         .copied()
                         .expect("a live vertex always has a version chain head");
-                    // The cascade image: every live incident edge at THIS
-                    // point in the batch — the fold's live set, minus the
-                    // prefix's deletions, plus the prefix's incident
-                    // creations, in ascending-EId order (the reference
-                    // semantics, both directions).
+                    // The cascade image is the incident set the FOLD will
+                    // see when it applies this DeleteVertex. NENF emits
+                    // vertices before edges (fgdb-17ht), so a prefix
+                    // DeleteEdge of an incident eid is absorbed into this
+                    // cascade rather than stripped from it — stripping
+                    // produced an empty image that applied while the edge
+                    // was still live.
                     let mut cascade: std::collections::BTreeSet<EId> =
                         self.writer.live_incident_edges(vid).into_iter().collect();
-                    cascade.retain(|eid| !prefix_deleted_edges.contains(eid));
                     for (eid, (src, dst)) in &prefix_edges {
-                        if !prefix_deleted_edges.contains(eid) && (*src == vid || *dst == vid) {
+                        if *src == vid || *dst == vid {
                             cascade.insert(*eid);
                         }
                     }
