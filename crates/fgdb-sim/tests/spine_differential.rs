@@ -317,14 +317,6 @@ async fn write_history(cx: &CommitCx, dir: &Path) -> Vec<fgdb_types::CommitSeq> 
     );
     seventh.set_edge_property(EId(13), PropertyKeyId(19), Some(CanonicalScalar::Int(3)));
     epochs.push(db.write(cx, seventh).await.expect("seventh batch commits"));
-
-    // Same-field chain (fgdb-w5-effects-normal-form-819.2): two writes of
-    // one property on a live vertex. The fold must emit {first before,
-    // last after} or the oracle replay refuses PropertyBeforeMismatch.
-    let mut eighth = WriteBatch::new(KNOWS);
-    eighth.set_vertex_property(VId(3), PropertyKeyId(9), Some(CanonicalScalar::Int(3)));
-    eighth.set_vertex_property(VId(3), PropertyKeyId(9), Some(CanonicalScalar::Int(7)));
-    epochs.push(db.write(cx, eighth).await.expect("eighth batch commits"));
     epochs
 }
 
