@@ -357,13 +357,16 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         Ok(_) => panic!("injected LAB write refusal must be typed"),
         Err(error) => error,
     };
-    assert!(matches!(
-        lab_failure,
-        FixtureRunError::Producer(error)
-            if error.stage() == FixtureTaskStage::DurableWrite
+    assert!(
+        matches!(
+            &lab_failure,
+            FixtureRunError::Producer(error)
+                if error.stage() == FixtureTaskStage::DurableWrite
                 && error.action() == Some(0)
-                && error.kind() == std::io::ErrorKind::WriteZero
-    ), "unexpected LAB failure: {lab_failure:?}");
+                && error.kind() == std::io::ErrorKind::StorageFull
+        ),
+        "unexpected LAB failure: {lab_failure:?}"
+    );
     let live_failure = match run_fixture_workload_live(
         &faulting,
         &faulting_workload,
@@ -376,7 +379,7 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         live_failure.failure_kind(),
         Some(FixtureFailureKind::Producer {
             stage: FixtureTaskStage::DurableWrite,
-            kind: std::io::ErrorKind::WriteZero,
+            kind: std::io::ErrorKind::StorageFull,
         })
     );
 
@@ -398,7 +401,7 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         shrunk.failure(),
         FixtureFailureKind::Producer {
             stage: FixtureTaskStage::DurableWrite,
-            kind: std::io::ErrorKind::WriteZero,
+            kind: std::io::ErrorKind::StorageFull,
         }
     );
     assert!(shrunk.attempts() > 1);
