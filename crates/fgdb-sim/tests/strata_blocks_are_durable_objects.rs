@@ -77,10 +77,26 @@ fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
 /// Built by the writer rather than hand-assembled so the bytes under test are the
 /// bytes the tier actually produces — sealing a fixture would prove the pipeline
 /// works on something no partition contains.
+fn vertex(vid: u128) -> DeltaRow {
+    DeltaRow::CreateVertex {
+        vid: VId(vid),
+        birth_ordinal: 900 + vid as u64,
+        labels: vec![],
+        props: vec![],
+        valid_time: None,
+    }
+}
+
 fn block_bytes() -> (Vec<u8>, ObjectId) {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, 0);
     let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+    writer
+        .apply(strata_keys, CommitSeq(1), &vertex(1))
+        .expect("seeds src");
     for i in 0..400u128 {
+        writer
+            .apply(strata_keys, CommitSeq(i as u64 + 1), &vertex(i + 2))
+            .expect("seeds dst");
         writer
             .apply(strata_keys, CommitSeq(i as u64 + 1), &edge(i + 1, 1, i + 2))
             .expect("the writer accepts the row");

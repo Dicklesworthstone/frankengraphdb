@@ -493,6 +493,26 @@ fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
     }
 }
 
+fn create_vertex(vid: u128) -> DeltaRow {
+    DeltaRow::CreateVertex {
+        vid: VId(vid),
+        birth_ordinal: 900 + vid as u64,
+        labels: vec![],
+        props: vec![],
+        valid_time: None,
+    }
+}
+
+fn seed_triangle(writer: &mut BlockWriter, keys: (&[u8; 32], DatabaseSecurityNamespaceId)) {
+    for vid in [1u128, 2, 3] {
+        if !writer.is_vertex_live(VId(vid)) {
+            writer
+                .apply(keys, CommitSeq(1), &create_vertex(vid))
+                .expect("seed vertex");
+        }
+    }
+}
+
 fn assert_identity_conflict<T>(
     result: Result<T, StoreError>,
     eid: EId,
@@ -702,6 +722,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
     under_lab(41, move |cx| {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates");
@@ -712,7 +733,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
         writer
             .apply(strata_keys, CommitSeq(4), &create(12, 2, 3))
             .expect("creates");
-        let (root, blocks, _patches) = writer
+        let (root, blocks, patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
         assert!(blocks.len() >= 2, "the fixture spans more than one block");
@@ -721,6 +742,11 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
             let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
             for block in &blocks {
                 store.put(cx, &block.bytes).expect("stores a block");
+            }
+            for patch in &patches {
+                store
+                    .put_patch(cx, &patch.bytes)
+                    .expect("stores a vertex patch");
             }
             store.put_root(cx, &root).expect("stores the root")
         };
@@ -759,6 +785,7 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
     under_lab(47, move |cx| {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates the first block");
@@ -766,7 +793,7 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
         writer
             .apply(strata_keys, CommitSeq(7), &create(11, 1, 3))
             .expect("creates the future block");
-        let (root, blocks, _patches) = writer
+        let (root, blocks, patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs one skippable block");
@@ -774,6 +801,11 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         for block in &blocks {
             store.put(cx, &block.bytes).expect("stores block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(cx, &patch.bytes)
+                .expect("stores a vertex patch");
         }
         let root_id = store.put_root(cx, &root).expect("stores root");
 
@@ -835,6 +867,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
     under_lab(48, move |cx| {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates the first block");
@@ -842,7 +875,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
         writer
             .apply(strata_keys, CommitSeq(7), &create(11, 1, 3))
             .expect("creates the future block");
-        let (root, blocks, _patches) = writer
+        let (root, blocks, patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs one future block");
@@ -850,6 +883,11 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         for block in &blocks {
             store.put(cx, &block.bytes).expect("stores block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(cx, &patch.bytes)
+                .expect("stores a vertex patch");
         }
         let root_id = store.put_root(cx, &root).expect("stores root");
         let admitted = store.admit_root(cx, root_id).expect("admits every range");
@@ -886,6 +924,7 @@ fn reopening_with_a_missing_block_is_refused() {
     under_lab(42, move |cx| {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates");
@@ -950,6 +989,7 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
         let receipted = BlockStore::open(cx, &dir_receipted, K_OID, NAMESPACE).expect("opens");
         let mut receipts = PublishReceipts::new();
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
 
         let rows: [DeltaRow; 4] = [
             create(10, 1, 2),
@@ -965,11 +1005,14 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
                 // ACROSS blocks, the case the cumulative validator must accept.
                 writer.seal(strata_keys).expect("seals");
             }
-            let (root, blocks, _patches) =
+            let (root, blocks, patches) =
                 writer.clone().publish(strata_keys, seq).expect("publishes");
 
             for block in &blocks {
                 plain.put(cx, &block.bytes).expect("plain put");
+            }
+            for patch in &patches {
+                plain.put_patch(cx, &patch.bytes).expect("plain put_patch");
             }
             let plain_root = plain.put_root(cx, &root).expect("plain put_root");
 
@@ -977,6 +1020,11 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
                 receipted
                     .put_verified(cx, &block.bytes, None, &mut receipts)
                     .expect("put_verified");
+            }
+            for patch in &patches {
+                receipted
+                    .put_patch_verified(cx, &patch.bytes, &mut receipts)
+                    .expect("put_patch_verified");
             }
             let receipted_root = receipted
                 .put_root_verified(cx, &root, &mut receipts)
@@ -1090,6 +1138,7 @@ fn fresh_receipts_fall_back_to_full_disk_admission() {
     under_lab(54, move |cx| {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates");
@@ -1097,7 +1146,7 @@ fn fresh_receipts_fall_back_to_full_disk_admission() {
         writer
             .apply(strata_keys, CommitSeq(4), &create(11, 1, 3))
             .expect("creates");
-        let (root, blocks, _patches) = writer
+        let (root, blocks, patches) = writer
             .publish(strata_keys, CommitSeq(4))
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs a sealed prefix");
@@ -1105,6 +1154,9 @@ fn fresh_receipts_fall_back_to_full_disk_admission() {
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         for block in &blocks {
             store.put(cx, &block.bytes).expect("plain put");
+        }
+        for patch in &patches {
+            store.put_patch(cx, &patch.bytes).expect("plain put_patch");
         }
         let expected = store.put_root(cx, &root).expect("plain put_root");
 
@@ -1161,16 +1213,22 @@ fn a_root_at_the_wrong_identity_is_refused() {
     under_lab(43, move |cx| {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
         writer
             .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
             .expect("creates");
-        let (root, blocks, _patches) = writer
+        let (root, blocks, patches) = writer
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 
         let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        for block in blocks {
+        for block in &blocks {
             store.put(cx, &block.bytes).expect("stores block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(cx, &patch.bytes)
+                .expect("stores a vertex patch");
         }
         let root_id = store.put_root(cx, &root).expect("stores");
 

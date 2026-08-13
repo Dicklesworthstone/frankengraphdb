@@ -193,8 +193,7 @@ fn retirement_and_a_fresh_identity_at_one_sequence_remain_rootable() {
     apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
     w.seal(keys()).expect("seals the creation");
     w.apply(keys(), CommitSeq(6), &delete(10)).expect("retires");
-    apply_edge(&mut w, 6, 11, 1, 2)
-        .expect("creates a fresh identity at the same sequence");
+    apply_edge(&mut w, 6, 11, 1, 2).expect("creates a fresh identity at the same sequence");
 
     let (root, blocks, _patches) = w.publish(keys(), CommitSeq(6)).expect("publishes");
     assert_eq!(
@@ -651,10 +650,8 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
     let mut w = writer();
     w.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
-    w.apply(keys(), CommitSeq(2), &create(20, 1, 3))
-        .expect("creates");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("creates");
+    apply_edge(&mut w, 2, 20, 1, 3).expect("creates");
     assert_eq!(
         w.apply(
             keys(),
@@ -680,10 +677,8 @@ fn a_non_adjacent_duplicate_or_unsorted_cascade_fails_before_any_mutation() {
     let mut w2 = writer();
     w2.apply(keys(), CommitSeq(1), &create_vertex_bare(1))
         .expect("creates the vertex");
-    w2.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("creates");
-    w2.apply(keys(), CommitSeq(2), &create(20, 1, 3))
-        .expect("creates");
+    apply_edge(&mut w2, 1, 10, 1, 2).expect("creates");
+    apply_edge(&mut w2, 2, 20, 1, 3).expect("creates");
     assert_eq!(
         w2.apply(
             keys(),
@@ -805,8 +800,7 @@ fn a_same_commit_vertex_create_and_delete_folds_to_no_row() {
 #[test]
 fn deleting_an_unknown_vertex_is_refused_before_any_edge_retires() {
     let mut w = writer();
-    w.apply(keys(), CommitSeq(1), &create(10, 1, 2))
-        .expect("an unrelated live edge");
+    apply_edge(&mut w, 1, 10, 1, 2).expect("an unrelated live edge");
     assert_eq!(
         w.apply(keys(), CommitSeq(2), &delete_vertex_row(9, vec![EId(10)])),
         Err(WriteError::UnknownVertex { vid: VId(9) })
