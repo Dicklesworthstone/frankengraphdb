@@ -47,7 +47,10 @@ use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace};
 use fgdb_crypto::Hasher;
 
-use crate::fixture::{FixtureConfig, FixtureSemantics, first_divergence, fixture_futures};
+use crate::fixture::{
+    FixtureConfig, FixtureSemantics, FixtureWorkload, FixtureWorkloadError, first_divergence,
+    fixture_futures_for_workload,
+};
 use crate::vfs::FaultEvent;
 
 /// Scope name for the fixture's semantic counters.
@@ -168,6 +171,9 @@ pub struct FixtureRunReceipt {
     seed: u64,
     virtual_clock_epoch_nanos: Option<u64>,
     trace_digest: String,
+    workload_digest: String,
+    workload_bytes: Vec<u8>,
+    workload_action_count: usize,
     lab_replay_trace_digest: Option<String>,
     task_dispatches: Option<Vec<TaskDispatchStep>>,
     injected_faults: Vec<FaultEvent>,
@@ -182,18 +188,23 @@ impl FixtureRunReceipt {
         seed: u64,
         virtual_clock_epoch_nanos: Option<u64>,
         trace_bytes: &[u8],
+        workload: &FixtureWorkload,
         lab_replay_trace: Option<&ReplayTrace>,
         injected_faults: Vec<FaultEvent>,
     ) -> Self {
         let mut hasher = Hasher::new();
         hasher.update(b"fgdb.sim.fixture.trace.v1");
         hasher.update(trace_bytes);
+        let workload_bytes = workload.to_canonical_bytes();
         Self {
             scenario_id: FIXTURE_SCENARIO_ID,
             runtime,
             seed,
             virtual_clock_epoch_nanos,
             trace_digest: hasher.finalize().to_hex(),
+            workload_digest: workload.canonical_digest_hex(),
+            workload_action_count: workload.actions().len(),
+            workload_bytes,
             lab_replay_trace_digest: lab_replay_trace.map(replay_trace_digest),
             task_dispatches: lab_replay_trace.map(task_dispatch_steps),
             injected_faults,
@@ -228,6 +239,34 @@ impl FixtureRunReceipt {
     #[must_use]
     pub fn trace_digest(&self) -> &str {
         &self.trace_digest
+    }
+
+    /// Domain-separated digest of the exact canonical workload bytes.
+    #[must_use]
+    pub fn workload_digest(&self) -> &str {
+        &self.workload_digest
+    }
+
+    /// Exact versioned workload bytes consumed by this execution.
+    #[must_use]
+    pub fn workload_bytes(&self) -> &[u8] {
+        &self.workload_bytes
+    }
+
+    /// Number of explicit actions in the retained workload.
+    #[must_use]
+    pub const fn workload_action_count(&self) -> usize {
+        self.workload_action_count
+    }
+
+    /// Verifies exact canonical workload identity, not only its seed.
+    #[must_use]
+    pub fn matches_workload(&self, workload: &FixtureWorkload) -> bool {
+        let bytes = workload.to_canonical_bytes();
+        self.seed == workload.seed()
+            && self.workload_action_count == workload.actions().len()
+            && self.workload_digest == workload.canonical_digest_hex()
+            && self.workload_bytes == bytes
     }
 
     /// Domain-separated digest of the complete asupersync replay trace.
@@ -289,12 +328,15 @@ impl FixtureRunReceipt {
             |epoch| epoch.to_string(),
         );
         let mut lines = vec![format!(
-            "fixture-run scenario_id={} runtime={} seed={:#x} virtual_clock_epoch_nanos={} trace_digest={} lab_replay_trace_digest={} task_dispatch_count={}",
+            "fixture-run scenario_id={} runtime={} seed={:#x} virtual_clock_epoch_nanos={} trace_digest={} workload_digest={} workload_bytes={} workload_action_count={} lab_replay_trace_digest={} task_dispatch_count={}",
             self.scenario_id,
             self.runtime.as_str(),
             self.seed,
             virtual_epoch,
             self.trace_digest,
+            self.workload_digest,
+            self.workload_bytes.len(),
+            self.workload_action_count,
             self.lab_replay_trace_digest
                 .as_deref()
                 .unwrap_or("not-applicable-live"),
@@ -353,6 +395,8 @@ pub struct LabFixtureRun {
     /// Capturing this is a prerequisite for future schedule minimization; the
     /// current adapter does not claim it can force an edited trace to replay.
     replay_trace: ReplayTrace,
+    /// Exact versioned workload consumed by the producer.
+    workload: FixtureWorkload,
     /// Virtual nanoseconds the run consumed — proof the clock was virtual.
     pub virtual_elapsed_nanos: u64,
     /// Terminal virtual-clock epoch reported by the lab runtime.
@@ -373,10 +417,18 @@ impl LabFixtureRun {
     pub const fn replay_trace(&self) -> &ReplayTrace {
         &self.replay_trace
     }
+
+    /// Exact immutable workload consumed by this execution.
+    #[must_use]
+    pub const fn workload(&self) -> &FixtureWorkload {
+        &self.workload
+    }
 }
 
 /// One completed live execution of the fixture.
 pub struct LiveFixtureRun {
+    /// Exact versioned workload consumed by the producer.
+    workload: FixtureWorkload,
     /// Clock-free semantic projection.
     pub semantics: FixtureSemantics,
     /// Region-close evidence derived from joining both fixture futures.
@@ -385,6 +437,14 @@ pub struct LiveFixtureRun {
     pub obligation_balance: ObligationBalanceRecord,
     /// Immutable facts retained from this exact execution.
     pub receipt: FixtureRunReceipt,
+}
+
+impl LiveFixtureRun {
+    /// Exact immutable workload consumed by this execution.
+    #[must_use]
+    pub const fn workload(&self) -> &FixtureWorkload {
+        &self.workload
+    }
 }
 
 /// Runs the fixture once under the lab runtime with auto-advancing virtual
@@ -398,8 +458,25 @@ pub struct LiveFixtureRun {
 pub fn run_fixture_under_lab(
     cfg: &FixtureConfig,
     scratch_dir: &Path,
-    mut lab_config: LabConfig,
+    lab_config: LabConfig,
 ) -> LabFixtureRun {
+    let workload = FixtureWorkload::try_from_config(cfg)
+        .expect("fixture configuration must materialize a bounded workload");
+    run_fixture_workload_under_lab(cfg, &workload, scratch_dir, lab_config)
+        .expect("generated fixture workload must match its configuration")
+}
+
+/// Runs one already-materialized workload under the lab runtime.
+///
+/// This is the execution seam future workload minimization can call. It does
+/// not force an edited scheduler trace; schedule control remains a separate
+/// foundation capability.
+pub fn run_fixture_workload_under_lab(
+    cfg: &FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_dir: &Path,
+    mut lab_config: LabConfig,
+) -> Result<LabFixtureRun, FixtureWorkloadError> {
     lab_config.auto_advance_time = true;
     // This adapter owns its evidence contract. A caller-supplied recorder may
     // filter or truncate events, so replace it with the foundation's complete,
@@ -407,7 +484,8 @@ pub fn run_fixture_under_lab(
     lab_config = lab_config.with_default_replay_recording();
     let mut lab = LabRuntime::new(lab_config);
     let root = lab.state.create_root_region(Budget::INFINITE);
-    let (producer_fut, consumer_fut, trace) = fixture_futures(cfg, scratch_dir);
+    let (producer_fut, consumer_fut, trace, workload) =
+        fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)?;
     let (producer_task, mut producer_handle) = lab
         .state
         .create_task(root, Budget::INFINITE, producer_fut)
@@ -465,21 +543,23 @@ pub fn run_fixture_under_lab(
         cfg.seed,
         Some(report.now_nanos),
         &trace_bytes,
+        &workload,
         Some(&replay_trace),
         trace.fault_events(),
     );
-    LabFixtureRun {
+    Ok(LabFixtureRun {
         trace_bytes,
         trace_fingerprint: report.trace_fingerprint,
         schedule_hash: report.trace_certificate.schedule_hash,
         replay_trace,
+        workload,
         virtual_elapsed_nanos: virtual_report.virtual_elapsed_nanos,
         virtual_clock_epoch_nanos: report.now_nanos,
         semantics,
         region_close: runtime_semantics.region_close,
         obligation_balance: runtime_semantics.obligation_balance,
         receipt,
-    }
+    })
 }
 
 /// Runs the fixture once under the LIVE runtime: real clock, real scheduler,
@@ -488,10 +568,23 @@ pub fn run_fixture_under_lab(
 /// differ from the lab's; only semantics must survive.
 #[must_use]
 pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> LiveFixtureRun {
+    let workload = FixtureWorkload::try_from_config(cfg)
+        .expect("fixture configuration must materialize a bounded workload");
+    run_fixture_workload_live(cfg, &workload, scratch_dir)
+        .expect("generated fixture workload must match its configuration")
+}
+
+/// Runs one already-materialized workload under the live runtime.
+pub fn run_fixture_workload_live(
+    cfg: &FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_dir: &Path,
+) -> Result<LiveFixtureRun, FixtureWorkloadError> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
         .expect("live runtime builds");
-    let (producer_fut, consumer_fut, trace) = fixture_futures(cfg, scratch_dir);
+    let (producer_fut, consumer_fut, trace, workload) =
+        fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)?;
     runtime.block_on(async move {
         join2(producer_fut, consumer_fut).await;
     });
@@ -502,10 +595,12 @@ pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> LiveFixtureR
         cfg.seed,
         None,
         &trace_bytes,
+        &workload,
         None,
         trace.fault_events(),
     );
-    LiveFixtureRun {
+    Ok(LiveFixtureRun {
+        workload,
         semantics,
         // Returning from `join2` is the live adapter's direct witness that
         // both fixture children completed. The fixture creates no finalizers.
@@ -515,7 +610,7 @@ pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> LiveFixtureR
         // the witness rather than inheriting an unexplained constant.
         obligation_balance: capture_obligation_balance(0, 0, 0),
         receipt,
-    }
+    })
 }
 
 /// Polls two independent futures to completion within one task. Local and

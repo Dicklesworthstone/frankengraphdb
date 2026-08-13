@@ -59,6 +59,27 @@ const CHAIN_DOMAIN: &[u8] = b"fgdb.sim.fixture.chain.v1";
 /// writes/backpressure without making an accidental configuration an OOM.
 pub const MAX_FIXTURE_PAYLOAD_BYTES: usize = 1024 * 1024;
 
+/// Maximum number of actions in one exported fixture workload.
+///
+/// The fixture is verification infrastructure, not a bulk-ingest API. A
+/// fixed bound keeps canonical decoding and later workload minimization
+/// finite even when bytes originate in a persisted failure artifact.
+pub const MAX_FIXTURE_WORKLOAD_ACTIONS: usize = 4_096;
+
+/// Maximum aggregate payload bytes in one exported fixture workload.
+pub const MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum pacing delay encoded by one fixture action (60 seconds).
+pub const MAX_FIXTURE_ACTION_DELAY_NANOS: u64 = 60 * 1_000_000_000;
+
+/// Maximum aggregate pacing delay in one fixture workload (one hour).
+pub const MAX_FIXTURE_WORKLOAD_DELAY_NANOS: u64 = 60 * MAX_FIXTURE_ACTION_DELAY_NANOS;
+
+const FIXTURE_WORKLOAD_MAGIC: &[u8; 8] = b"FGDBFWL1";
+const FIXTURE_WORKLOAD_DIGEST_DOMAIN: &[u8] = b"fgdb.sim.fixture.workload.v1";
+const FIXTURE_WORKLOAD_HEADER_BYTES: usize = 8 + 8 + 4;
+const FIXTURE_ACTION_HEADER_BYTES: usize = 4 + 8 + 4;
+
 /// Process-global tick used by [`FixtureConfig::entropy_probe`]. Each fixture
 /// run that has the probe enabled consumes one tick, so two same-seed runs in
 /// one process observe different values — a nondeterminism source the
@@ -71,9 +92,11 @@ static ENTROPY_PROBE_TICKS: AtomicU64 = AtomicU64::new(0);
 pub struct FixtureConfig {
     /// Seed for the payload stream (and, at the driver layer, the scheduler).
     pub seed: u64,
-    /// How many records the producer emits.
+    /// How many records the producer emits. Must not exceed
+    /// [`MAX_FIXTURE_WORKLOAD_ACTIONS`].
     pub rounds: u32,
-    /// Producer pacing between records; virtual under the lab.
+    /// Producer pacing between records; virtual under the lab. One action and
+    /// the aggregate workload must remain within the exported delay bounds.
     pub tick: Duration,
     /// Deliberately mix process-global state into the first payload so the
     /// run is NOT deterministic. Exists so tests can prove the determinism
@@ -83,7 +106,8 @@ pub struct FixtureConfig {
     pub fault_plan: FaultPlan,
     /// Bytes per record. Values above the virtual-TCP window exercise real
     /// partial-write/backpressure behavior. Must be in
-    /// `1..=MAX_FIXTURE_PAYLOAD_BYTES`.
+    /// `1..=MAX_FIXTURE_PAYLOAD_BYTES`; `rounds * payload_bytes` must not
+    /// exceed [`MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES`].
     pub payload_bytes: usize,
 }
 
@@ -103,6 +127,434 @@ impl FixtureConfig {
             payload_bytes: 24,
         }
     }
+}
+
+/// Caller-owned admission limits for a canonical fixture workload.
+///
+/// These limits are checked before allocation and while reading payloads. A
+/// persisted artifact must not choose the amount of decoder work it receives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixtureWorkloadDecodeLimits {
+    /// Maximum complete encoded byte length.
+    pub max_encoded_bytes: usize,
+    /// Maximum number of actions.
+    pub max_actions: usize,
+    /// Maximum aggregate payload bytes.
+    pub max_payload_bytes: usize,
+    /// Maximum pacing delay for one action.
+    pub max_action_delay_nanos: u64,
+    /// Maximum checked sum of every action delay.
+    pub max_total_delay_nanos: u64,
+}
+
+impl Default for FixtureWorkloadDecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_encoded_bytes: FIXTURE_WORKLOAD_HEADER_BYTES
+                + MAX_FIXTURE_WORKLOAD_ACTIONS * FIXTURE_ACTION_HEADER_BYTES
+                + MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES,
+            max_actions: MAX_FIXTURE_WORKLOAD_ACTIONS,
+            max_payload_bytes: MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES,
+            max_action_delay_nanos: MAX_FIXTURE_ACTION_DELAY_NANOS,
+            max_total_delay_nanos: MAX_FIXTURE_WORKLOAD_DELAY_NANOS,
+        }
+    }
+}
+
+/// Why fixture workload construction or canonical decoding failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixtureWorkloadError {
+    /// The magic/version prefix is not the one codec this build accepts.
+    WrongMagic,
+    /// The byte stream ended before a declared field or payload did.
+    Truncated,
+    /// Canonical bytes had data after the declared action sequence.
+    TrailingBytes,
+    /// The complete byte string exceeds the caller's admission limit.
+    EncodedBytesExceeded { actual: usize, limit: usize },
+    /// The action count exceeds either the fixture or caller bound.
+    ActionCountExceeded { actual: usize, limit: usize },
+    /// Aggregate payload bytes exceed either the fixture or caller bound.
+    PayloadBytesExceeded { actual: usize, limit: usize },
+    /// One action's pacing delay exceeds either the fixture or caller bound.
+    ActionDelayExceeded {
+        action: u32,
+        actual: u64,
+        limit: u64,
+    },
+    /// The checked sum of action delays exceeds the admitted bound.
+    TotalDelayExceeded { actual: u64, limit: u64 },
+    /// An action payload is empty or exceeds the per-action fixture bound.
+    InvalidPayloadLength { action: u32, length: usize },
+    /// Action ordinals must be exactly `0..count`, without gaps or reorder.
+    NonContiguousAction { expected: u32, actual: u32 },
+    /// A duration or size cannot be represented by the stable codec.
+    IntegerOverflow,
+    /// The decoder could not reserve its bounded action inventory.
+    AllocationRefused,
+    /// An explicit workload was paired with a different fixture seed.
+    SeedMismatch { config: u64, workload: u64 },
+}
+
+impl core::fmt::Display for FixtureWorkloadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WrongMagic => f.write_str("wrong fixture workload magic/version"),
+            Self::Truncated => f.write_str("truncated fixture workload"),
+            Self::TrailingBytes => f.write_str("trailing fixture workload bytes"),
+            Self::EncodedBytesExceeded { actual, limit } => {
+                write!(f, "fixture workload bytes {actual} exceed limit {limit}")
+            }
+            Self::ActionCountExceeded { actual, limit } => {
+                write!(f, "fixture action count {actual} exceeds limit {limit}")
+            }
+            Self::PayloadBytesExceeded { actual, limit } => {
+                write!(f, "fixture payload bytes {actual} exceed limit {limit}")
+            }
+            Self::ActionDelayExceeded {
+                action,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "fixture action {action} delay {actual}ns exceeds limit {limit}ns"
+            ),
+            Self::TotalDelayExceeded { actual, limit } => {
+                write!(f, "fixture total delay {actual}ns exceeds limit {limit}ns")
+            }
+            Self::InvalidPayloadLength { action, length } => {
+                write!(
+                    f,
+                    "fixture action {action} has invalid payload length {length}"
+                )
+            }
+            Self::NonContiguousAction { expected, actual } => write!(
+                f,
+                "fixture action ordinal {actual} does not match expected {expected}"
+            ),
+            Self::IntegerOverflow => f.write_str("fixture workload integer overflow"),
+            Self::AllocationRefused => f.write_str("fixture workload allocation refused"),
+            Self::SeedMismatch { config, workload } => write!(
+                f,
+                "fixture config seed {config:#x} does not match workload seed {workload:#x}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FixtureWorkloadError {}
+
+/// One immutable producer action in the exported fixture workload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureWorkloadAction {
+    ordinal: u32,
+    delay_nanos: u64,
+    payload: Arc<[u8]>,
+}
+
+impl FixtureWorkloadAction {
+    /// Stable zero-based action ordinal.
+    #[must_use]
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Pacing delay before this action executes.
+    #[must_use]
+    pub const fn delay_nanos(&self) -> u64 {
+        self.delay_nanos
+    }
+
+    /// Exact payload made durable and sent by this action.
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+/// Versioned, canonical workload executed by the exported fixture.
+///
+/// Payload generation happens once, before either runtime starts. The
+/// producer consumes these exact actions; it does not regenerate equivalent-
+/// looking data from configuration while it runs. This makes workload
+/// identity retainable and provides a real input for future minimization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureWorkload {
+    seed: u64,
+    actions: Arc<[FixtureWorkloadAction]>,
+}
+
+impl FixtureWorkload {
+    /// Materializes the deterministic action stream described by `cfg`.
+    pub fn try_from_config(cfg: &FixtureConfig) -> Result<Self, FixtureWorkloadError> {
+        let action_count =
+            usize::try_from(cfg.rounds).map_err(|_| FixtureWorkloadError::IntegerOverflow)?;
+        if action_count > MAX_FIXTURE_WORKLOAD_ACTIONS {
+            return Err(FixtureWorkloadError::ActionCountExceeded {
+                actual: action_count,
+                limit: MAX_FIXTURE_WORKLOAD_ACTIONS,
+            });
+        }
+        if !(1..=MAX_FIXTURE_PAYLOAD_BYTES).contains(&cfg.payload_bytes) {
+            return Err(FixtureWorkloadError::InvalidPayloadLength {
+                action: 0,
+                length: cfg.payload_bytes,
+            });
+        }
+        let total_payload_bytes = action_count
+            .checked_mul(cfg.payload_bytes)
+            .ok_or(FixtureWorkloadError::IntegerOverflow)?;
+        if total_payload_bytes > MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES {
+            return Err(FixtureWorkloadError::PayloadBytesExceeded {
+                actual: total_payload_bytes,
+                limit: MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES,
+            });
+        }
+        let delay_nanos = u64::try_from(cfg.tick.as_nanos())
+            .map_err(|_| FixtureWorkloadError::IntegerOverflow)?;
+        if delay_nanos > MAX_FIXTURE_ACTION_DELAY_NANOS {
+            return Err(FixtureWorkloadError::ActionDelayExceeded {
+                action: 0,
+                actual: delay_nanos,
+                limit: MAX_FIXTURE_ACTION_DELAY_NANOS,
+            });
+        }
+        let total_delay_nanos = delay_nanos
+            .checked_mul(u64::from(cfg.rounds))
+            .ok_or(FixtureWorkloadError::IntegerOverflow)?;
+        if total_delay_nanos > MAX_FIXTURE_WORKLOAD_DELAY_NANOS {
+            return Err(FixtureWorkloadError::TotalDelayExceeded {
+                actual: total_delay_nanos,
+                limit: MAX_FIXTURE_WORKLOAD_DELAY_NANOS,
+            });
+        }
+        let mut actions = Vec::new();
+        actions
+            .try_reserve_exact(action_count)
+            .map_err(|_| FixtureWorkloadError::AllocationRefused)?;
+        let mut rng = cfg.seed;
+        for ordinal in 0..cfg.rounds {
+            let mut payload = Vec::new();
+            payload
+                .try_reserve_exact(cfg.payload_bytes)
+                .map_err(|_| FixtureWorkloadError::AllocationRefused)?;
+            payload.resize(cfg.payload_bytes, 0);
+            for (chunk_index, chunk) in payload.chunks_mut(8).enumerate() {
+                let mut value = split_mix_next(&mut rng);
+                if cfg.entropy_probe && ordinal == 0 && chunk_index == 0 {
+                    value ^= ENTROPY_PROBE_TICKS
+                        .fetch_add(1, Ordering::SeqCst)
+                        .wrapping_add(1);
+                }
+                let bytes = value.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            actions.push(FixtureWorkloadAction {
+                ordinal,
+                delay_nanos,
+                payload: payload.into(),
+            });
+        }
+        Ok(Self {
+            seed: cfg.seed,
+            actions: actions.into(),
+        })
+    }
+
+    /// Strictly decodes one canonical version-1 workload under caller limits.
+    pub fn try_from_canonical_bytes(
+        bytes: &[u8],
+        limits: FixtureWorkloadDecodeLimits,
+    ) -> Result<Self, FixtureWorkloadError> {
+        if bytes.len() > limits.max_encoded_bytes {
+            return Err(FixtureWorkloadError::EncodedBytesExceeded {
+                actual: bytes.len(),
+                limit: limits.max_encoded_bytes,
+            });
+        }
+        let mut cursor = 0usize;
+        let magic = take_workload_bytes(bytes, &mut cursor, FIXTURE_WORKLOAD_MAGIC.len())?;
+        if magic != FIXTURE_WORKLOAD_MAGIC {
+            return Err(FixtureWorkloadError::WrongMagic);
+        }
+        let seed = read_workload_u64(bytes, &mut cursor)?;
+        let action_count = usize::try_from(read_workload_u32(bytes, &mut cursor)?)
+            .map_err(|_| FixtureWorkloadError::IntegerOverflow)?;
+        let action_limit = limits.max_actions.min(MAX_FIXTURE_WORKLOAD_ACTIONS);
+        if action_count > action_limit {
+            return Err(FixtureWorkloadError::ActionCountExceeded {
+                actual: action_count,
+                limit: action_limit,
+            });
+        }
+        let payload_limit = limits
+            .max_payload_bytes
+            .min(MAX_FIXTURE_WORKLOAD_PAYLOAD_BYTES);
+        let action_delay_limit = limits
+            .max_action_delay_nanos
+            .min(MAX_FIXTURE_ACTION_DELAY_NANOS);
+        let total_delay_limit = limits
+            .max_total_delay_nanos
+            .min(MAX_FIXTURE_WORKLOAD_DELAY_NANOS);
+        let mut actions = Vec::new();
+        actions
+            .try_reserve_exact(action_count)
+            .map_err(|_| FixtureWorkloadError::AllocationRefused)?;
+        let mut total_payload_bytes = 0usize;
+        let mut total_delay_nanos = 0u64;
+        for expected_index in 0..action_count {
+            let expected =
+                u32::try_from(expected_index).map_err(|_| FixtureWorkloadError::IntegerOverflow)?;
+            let actual = read_workload_u32(bytes, &mut cursor)?;
+            if actual != expected {
+                return Err(FixtureWorkloadError::NonContiguousAction { expected, actual });
+            }
+            let delay_nanos = read_workload_u64(bytes, &mut cursor)?;
+            if delay_nanos > action_delay_limit {
+                return Err(FixtureWorkloadError::ActionDelayExceeded {
+                    action: actual,
+                    actual: delay_nanos,
+                    limit: action_delay_limit,
+                });
+            }
+            total_delay_nanos = total_delay_nanos
+                .checked_add(delay_nanos)
+                .ok_or(FixtureWorkloadError::IntegerOverflow)?;
+            if total_delay_nanos > total_delay_limit {
+                return Err(FixtureWorkloadError::TotalDelayExceeded {
+                    actual: total_delay_nanos,
+                    limit: total_delay_limit,
+                });
+            }
+            let payload_len = usize::try_from(read_workload_u32(bytes, &mut cursor)?)
+                .map_err(|_| FixtureWorkloadError::IntegerOverflow)?;
+            if !(1..=MAX_FIXTURE_PAYLOAD_BYTES).contains(&payload_len) {
+                return Err(FixtureWorkloadError::InvalidPayloadLength {
+                    action: actual,
+                    length: payload_len,
+                });
+            }
+            total_payload_bytes = total_payload_bytes
+                .checked_add(payload_len)
+                .ok_or(FixtureWorkloadError::IntegerOverflow)?;
+            if total_payload_bytes > payload_limit {
+                return Err(FixtureWorkloadError::PayloadBytesExceeded {
+                    actual: total_payload_bytes,
+                    limit: payload_limit,
+                });
+            }
+            let payload_bytes = take_workload_bytes(bytes, &mut cursor, payload_len)?;
+            let mut payload = Vec::new();
+            payload
+                .try_reserve_exact(payload_len)
+                .map_err(|_| FixtureWorkloadError::AllocationRefused)?;
+            payload.extend_from_slice(payload_bytes);
+            actions.push(FixtureWorkloadAction {
+                ordinal: actual,
+                delay_nanos,
+                payload: payload.into(),
+            });
+        }
+        if cursor != bytes.len() {
+            return Err(FixtureWorkloadError::TrailingBytes);
+        }
+        Ok(Self {
+            seed,
+            actions: actions.into(),
+        })
+    }
+
+    /// Stable seed that initializes both producer and consumer digest chains.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Exact ordered action sequence.
+    #[must_use]
+    pub fn actions(&self) -> &[FixtureWorkloadAction] {
+        &self.actions
+    }
+
+    /// Strict canonical version-1 bytes.
+    #[must_use]
+    pub fn to_canonical_bytes(&self) -> Vec<u8> {
+        let payload_bytes = self
+            .actions
+            .iter()
+            .map(|action| action.payload.len())
+            .sum::<usize>();
+        let capacity = FIXTURE_WORKLOAD_HEADER_BYTES
+            + self.actions.len() * FIXTURE_ACTION_HEADER_BYTES
+            + payload_bytes;
+        let mut out = Vec::with_capacity(capacity);
+        out.extend_from_slice(FIXTURE_WORKLOAD_MAGIC);
+        out.extend_from_slice(&self.seed.to_le_bytes());
+        out.extend_from_slice(
+            &u32::try_from(self.actions.len())
+                .expect("validated fixture action count fits u32")
+                .to_le_bytes(),
+        );
+        for action in self.actions.iter() {
+            out.extend_from_slice(&action.ordinal.to_le_bytes());
+            out.extend_from_slice(&action.delay_nanos.to_le_bytes());
+            out.extend_from_slice(
+                &u32::try_from(action.payload.len())
+                    .expect("validated fixture payload length fits u32")
+                    .to_le_bytes(),
+            );
+            out.extend_from_slice(&action.payload);
+        }
+        out
+    }
+
+    /// Domain-separated digest of the strict canonical bytes.
+    #[must_use]
+    pub fn canonical_digest_hex(&self) -> String {
+        let mut hasher = Hasher::new();
+        hasher.update(FIXTURE_WORKLOAD_DIGEST_DOMAIN);
+        hasher.update(&self.to_canonical_bytes());
+        hasher.finalize().to_hex()
+    }
+
+    fn validate_seed(&self, cfg: &FixtureConfig) -> Result<(), FixtureWorkloadError> {
+        if self.seed != cfg.seed {
+            return Err(FixtureWorkloadError::SeedMismatch {
+                config: cfg.seed,
+                workload: self.seed,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn take_workload_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    length: usize,
+) -> Result<&'a [u8], FixtureWorkloadError> {
+    let end = cursor
+        .checked_add(length)
+        .ok_or(FixtureWorkloadError::IntegerOverflow)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(FixtureWorkloadError::Truncated)?;
+    *cursor = end;
+    Ok(value)
+}
+
+fn read_workload_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, FixtureWorkloadError> {
+    let raw: [u8; 4] = take_workload_bytes(bytes, cursor, 4)?
+        .try_into()
+        .map_err(|_| FixtureWorkloadError::Truncated)?;
+    Ok(u32::from_le_bytes(raw))
+}
+
+fn read_workload_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, FixtureWorkloadError> {
+    let raw: [u8; 8] = take_workload_bytes(bytes, cursor, 8)?
+        .try_into()
+        .map_err(|_| FixtureWorkloadError::Truncated)?;
+    Ok(u64::from_le_bytes(raw))
 }
 
 /// Which component recorded an event.
@@ -434,31 +886,31 @@ async fn write_durable<V: Vfs>(vfs: &FaultVfs<V>, path: &Path, bytes: &[u8]) -> 
     VfsFile::sync_all(&file).await
 }
 
-/// The producer half: per round, sleep one tick, derive the payload, make it
-/// durable, frame it onto the network; then send the zero-length terminator.
-async fn producer(cfg: FixtureConfig, dir: PathBuf, mut net: VirtualTcpStream, trace: TraceHandle) {
+/// The producer half: execute each explicit workload action, then send the
+/// zero-length terminator.
+async fn producer(
+    cfg: FixtureConfig,
+    workload: FixtureWorkload,
+    dir: PathBuf,
+    mut net: VirtualTcpStream,
+    trace: TraceHandle,
+) {
     let cx = Cx::current().expect("fixture producer runs under a runtime");
     let vfs = FaultVfs::unix_with_clock(cfg.fault_plan, cx.clone());
-    let mut rng = cfg.seed;
-    let mut chain = chain_seed(cfg.seed);
-    for round in 0..cfg.rounds {
-        sleep(cx.now_for_observability(), cfg.tick).await;
+    let mut chain = chain_seed(workload.seed);
+    for action in workload.actions() {
+        let round = action.ordinal;
+        sleep(
+            cx.now_for_observability(),
+            Duration::from_nanos(action.delay_nanos),
+        )
+        .await;
         trace.record(Component::Producer, EventKind::Slept, round, &chain);
 
-        let mut payload = vec![0u8; cfg.payload_bytes];
-        for (i, chunk) in payload.chunks_mut(8).enumerate() {
-            let mut value = split_mix_next(&mut rng);
-            if cfg.entropy_probe && round == 0 && i == 0 {
-                value ^= ENTROPY_PROBE_TICKS
-                    .fetch_add(1, Ordering::SeqCst)
-                    .wrapping_add(1);
-            }
-            let bytes = value.to_le_bytes();
-            chunk.copy_from_slice(&bytes[..chunk.len()]);
-        }
-        chain = chain_fold(&chain, &payload);
+        let payload = action.payload();
+        chain = chain_fold(&chain, payload);
 
-        write_durable(&vfs, &dir.join(format!("record-{round:04}.bin")), &payload)
+        write_durable(&vfs, &dir.join(format!("record-{round:04}.bin")), payload)
             .await
             .expect("fixture durable write");
         trace
@@ -471,7 +923,7 @@ async fn producer(cfg: FixtureConfig, dir: PathBuf, mut net: VirtualTcpStream, t
         write_all_net(&mut net, &len.to_le_bytes(), &trace)
             .await
             .expect("fixture frame header");
-        write_all_net(&mut net, &payload, &trace)
+        write_all_net(&mut net, payload, &trace)
             .await
             .expect("fixture frame body");
         trace.record(Component::Producer, EventKind::Sent, round, &chain);
@@ -484,7 +936,7 @@ async fn producer(cfg: FixtureConfig, dir: PathBuf, mut net: VirtualTcpStream, t
     trace.record(
         Component::Producer,
         EventKind::Terminated,
-        cfg.rounds,
+        u32::try_from(workload.actions.len()).expect("validated fixture action count fits u32"),
         &chain,
     );
 }
@@ -529,12 +981,33 @@ pub fn fixture_futures(
     impl std::future::Future<Output = ()> + Send + 'static,
     impl std::future::Future<Output = ()> + Send + 'static,
     TraceHandle,
+    FixtureWorkload,
 ) {
-    assert!(
-        (1..=MAX_FIXTURE_PAYLOAD_BYTES).contains(&cfg.payload_bytes),
-        "fixture payload_bytes must be in 1..={MAX_FIXTURE_PAYLOAD_BYTES}, got {}",
-        cfg.payload_bytes
-    );
+    let workload = FixtureWorkload::try_from_config(cfg)
+        .expect("fixture configuration must materialize a bounded workload");
+    fixture_futures_for_workload(cfg, workload, scratch_dir)
+        .expect("generated fixture workload must match its configuration")
+}
+
+/// Builds the fixture futures from an already materialized workload.
+///
+/// This is the real execution seam used by the dual-run adapter and future
+/// workload minimization. The producer consumes `workload` directly; it does
+/// not consult `rounds`, `tick`, `payload_bytes`, or `entropy_probe` again.
+pub(crate) fn fixture_futures_for_workload(
+    cfg: &FixtureConfig,
+    workload: FixtureWorkload,
+    scratch_dir: &Path,
+) -> Result<
+    (
+        impl std::future::Future<Output = ()> + Send + 'static,
+        impl std::future::Future<Output = ()> + Send + 'static,
+        TraceHandle,
+        FixtureWorkload,
+    ),
+    FixtureWorkloadError,
+> {
+    workload.validate_seed(cfg)?;
     std::fs::create_dir_all(scratch_dir).expect("fixture scratch dir");
     let trace = TraceHandle::new(cfg.seed);
     let (producer_end, consumer_end) = VirtualTcpStream::pair(
@@ -543,10 +1016,11 @@ pub fn fixture_futures(
     );
     let producer_fut = producer(
         cfg.clone(),
+        workload.clone(),
         scratch_dir.to_path_buf(),
         producer_end,
         trace.clone(),
     );
     let consumer_fut = consumer(cfg.clone(), consumer_end, trace.clone());
-    (producer_fut, consumer_fut, trace)
+    Ok((producer_fut, consumer_fut, trace, workload))
 }

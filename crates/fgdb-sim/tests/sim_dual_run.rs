@@ -14,9 +14,12 @@ use std::path::PathBuf;
 use fgdb_crypto::Hasher;
 use fgdb_sim::dual_run::{
     DualRunOutcome, FixtureRunReceipt, FixtureRuntime, determinism_gate, dual_run_fixture,
-    dual_run_verdict_log_lines, run_fixture_under_lab,
+    dual_run_verdict_log_lines, run_fixture_under_lab, run_fixture_workload_under_lab,
 };
-use fgdb_sim::fixture::{FixtureConfig, MAX_FIXTURE_PAYLOAD_BYTES};
+use fgdb_sim::fixture::{
+    FixtureConfig, FixtureWorkload, FixtureWorkloadDecodeLimits, FixtureWorkloadError,
+    MAX_FIXTURE_PAYLOAD_BYTES,
+};
 use fgdb_sim::vfs::Trigger;
 
 use asupersync::lab::LabConfig;
@@ -443,6 +446,227 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
     let cfg = FixtureConfig::new(0xD0A3);
     let lab_root = scratch_root("raw-receipt-trace-binding");
     let raw = run_fixture_under_lab(&cfg, &lab_root, LabConfig::new(cfg.seed));
+    let expected_workload =
+        FixtureWorkload::try_from_config(&cfg).expect("fixture config materializes");
+    let workload_bytes = expected_workload.to_canonical_bytes();
+    let mut workload_hasher = Hasher::new();
+    workload_hasher.update(b"fgdb.sim.fixture.workload.v1");
+    workload_hasher.update(&workload_bytes);
+    assert_eq!(raw.workload(), &expected_workload);
+    assert_eq!(raw.receipt.workload_bytes(), workload_bytes);
+    assert_eq!(
+        raw.receipt.workload_digest(),
+        workload_hasher.finalize().to_hex(),
+        "the receipt must bind the exact versioned workload bytes"
+    );
+    assert_eq!(
+        raw.receipt.workload_action_count(),
+        usize::try_from(cfg.rounds).expect("rounds fit usize")
+    );
+    assert!(raw.receipt.matches_workload(&expected_workload));
+    assert_eq!(
+        expected_workload
+            .actions()
+            .iter()
+            .map(|action| action.ordinal())
+            .collect::<Vec<_>>(),
+        (0..cfg.rounds).collect::<Vec<_>>()
+    );
+    assert!(expected_workload.actions().iter().all(|action| {
+        action.delay_nanos() == u64::try_from(cfg.tick.as_nanos()).expect("fixture tick fits u64")
+            && action.payload().len() == cfg.payload_bytes
+    }));
+
+    let decoded = FixtureWorkload::try_from_canonical_bytes(
+        &workload_bytes,
+        FixtureWorkloadDecodeLimits::default(),
+    )
+    .expect("canonical workload decodes");
+    assert_eq!(decoded, expected_workload);
+    assert_eq!(decoded.to_canonical_bytes(), workload_bytes);
+    let decoded_run = run_fixture_workload_under_lab(
+        &cfg,
+        &decoded,
+        &lab_root.join("decoded-workload"),
+        LabConfig::new(cfg.seed),
+    )
+    .expect("decoded workload executes");
+    assert_eq!(decoded_run.trace_bytes, raw.trace_bytes);
+    assert!(decoded_run.receipt.matches_workload(&decoded));
+
+    // Version-1 layout: magic(8), seed(8), count(4), then the first action's
+    // ordinal(4), delay(8), payload length(4), and payload. Mutating the
+    // payload remains a valid workload but must change the actual execution.
+    let first_action_offset = 8 + 8 + 4;
+    let first_delay_offset = first_action_offset + 4;
+    let first_payload_offset = first_action_offset + 4 + 8 + 4;
+    let mut substituted_bytes = workload_bytes.clone();
+    substituted_bytes[first_payload_offset] ^= 0x80;
+    let substituted = FixtureWorkload::try_from_canonical_bytes(
+        &substituted_bytes,
+        FixtureWorkloadDecodeLimits::default(),
+    )
+    .expect("payload substitution remains structurally valid");
+    assert!(!raw.receipt.matches_workload(&substituted));
+    let substituted_run = run_fixture_workload_under_lab(
+        &cfg,
+        &substituted,
+        &lab_root.join("substituted-workload"),
+        LabConfig::new(cfg.seed),
+    )
+    .expect("substituted workload executes");
+    assert_ne!(
+        substituted_run.semantics.producer_digest_hex, raw.semantics.producer_digest_hex,
+        "the explicit runner must execute supplied payloads rather than regenerate config inputs"
+    );
+    assert!(substituted_run.receipt.matches_workload(&substituted));
+
+    let delay_delta = 1_000_000u64;
+    let mut delayed_bytes = workload_bytes.clone();
+    let delayed_first = expected_workload.actions()[0]
+        .delay_nanos()
+        .checked_add(delay_delta)
+        .expect("small delay mutation fits");
+    delayed_bytes[first_delay_offset..first_delay_offset + 8]
+        .copy_from_slice(&delayed_first.to_le_bytes());
+    let delayed = FixtureWorkload::try_from_canonical_bytes(
+        &delayed_bytes,
+        FixtureWorkloadDecodeLimits::default(),
+    )
+    .expect("bounded delay substitution remains structurally valid");
+    let delayed_run = run_fixture_workload_under_lab(
+        &cfg,
+        &delayed,
+        &lab_root.join("delayed-workload"),
+        LabConfig::new(cfg.seed),
+    )
+    .expect("bounded delayed workload executes");
+    assert_eq!(
+        delayed_run.virtual_elapsed_nanos,
+        raw.virtual_elapsed_nanos + delay_delta,
+        "the explicit runner must execute the supplied per-action delay"
+    );
+    assert_eq!(
+        delayed_run.semantics.producer_digest_hex, raw.semantics.producer_digest_hex,
+        "a timing-only workload mutation must preserve payload semantics"
+    );
+    assert!(!raw.receipt.matches_workload(&delayed));
+
+    let mut wrong_magic = workload_bytes.clone();
+    wrong_magic[0] ^= 1;
+    assert_eq!(
+        FixtureWorkload::try_from_canonical_bytes(
+            &wrong_magic,
+            FixtureWorkloadDecodeLimits::default()
+        ),
+        Err(FixtureWorkloadError::WrongMagic)
+    );
+    let mut wrong_ordinal = workload_bytes.clone();
+    wrong_ordinal[first_action_offset..first_action_offset + 4]
+        .copy_from_slice(&1u32.to_le_bytes());
+    assert_eq!(
+        FixtureWorkload::try_from_canonical_bytes(
+            &wrong_ordinal,
+            FixtureWorkloadDecodeLimits::default()
+        ),
+        Err(FixtureWorkloadError::NonContiguousAction {
+            expected: 0,
+            actual: 1,
+        })
+    );
+    assert!(matches!(
+        FixtureWorkload::try_from_canonical_bytes(
+            &workload_bytes[..workload_bytes.len() - 1],
+            FixtureWorkloadDecodeLimits::default()
+        ),
+        Err(FixtureWorkloadError::Truncated)
+    ));
+    let mut trailing = workload_bytes.clone();
+    trailing.push(0);
+    assert_eq!(
+        FixtureWorkload::try_from_canonical_bytes(
+            &trailing,
+            FixtureWorkloadDecodeLimits::default()
+        ),
+        Err(FixtureWorkloadError::TrailingBytes)
+    );
+    let action_limited = FixtureWorkloadDecodeLimits {
+        max_actions: expected_workload.actions().len() - 1,
+        ..FixtureWorkloadDecodeLimits::default()
+    };
+    assert!(matches!(
+        FixtureWorkload::try_from_canonical_bytes(&workload_bytes, action_limited),
+        Err(FixtureWorkloadError::ActionCountExceeded { .. })
+    ));
+    let total_payload_bytes = expected_workload
+        .actions()
+        .iter()
+        .map(|action| action.payload().len())
+        .sum::<usize>();
+    let payload_limited = FixtureWorkloadDecodeLimits {
+        max_payload_bytes: total_payload_bytes - 1,
+        ..FixtureWorkloadDecodeLimits::default()
+    };
+    assert!(matches!(
+        FixtureWorkload::try_from_canonical_bytes(&workload_bytes, payload_limited),
+        Err(FixtureWorkloadError::PayloadBytesExceeded { .. })
+    ));
+    let action_delay_limited = FixtureWorkloadDecodeLimits {
+        max_action_delay_nanos: expected_workload.actions()[0].delay_nanos() - 1,
+        ..FixtureWorkloadDecodeLimits::default()
+    };
+    assert!(matches!(
+        FixtureWorkload::try_from_canonical_bytes(&workload_bytes, action_delay_limited),
+        Err(FixtureWorkloadError::ActionDelayExceeded { action: 0, .. })
+    ));
+    let total_delay = expected_workload
+        .actions()
+        .iter()
+        .map(|action| action.delay_nanos())
+        .sum::<u64>();
+    let total_delay_limited = FixtureWorkloadDecodeLimits {
+        max_total_delay_nanos: total_delay - 1,
+        ..FixtureWorkloadDecodeLimits::default()
+    };
+    assert!(matches!(
+        FixtureWorkload::try_from_canonical_bytes(&workload_bytes, total_delay_limited),
+        Err(FixtureWorkloadError::TotalDelayExceeded { .. })
+    ));
+    let mut centuries_delay = workload_bytes.clone();
+    centuries_delay[first_delay_offset..first_delay_offset + 8]
+        .copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(matches!(
+        FixtureWorkload::try_from_canonical_bytes(
+            &centuries_delay,
+            FixtureWorkloadDecodeLimits::default()
+        ),
+        Err(FixtureWorkloadError::ActionDelayExceeded { action: 0, .. })
+    ));
+    let byte_limited = FixtureWorkloadDecodeLimits {
+        max_encoded_bytes: workload_bytes.len() - 1,
+        ..FixtureWorkloadDecodeLimits::default()
+    };
+    assert!(matches!(
+        FixtureWorkload::try_from_canonical_bytes(&workload_bytes, byte_limited),
+        Err(FixtureWorkloadError::EncodedBytesExceeded { .. })
+    ));
+    let mut wrong_seed_cfg = cfg.clone();
+    wrong_seed_cfg.seed ^= 1;
+    let wrong_seed_root = lab_root.join("wrong-seed-refusal");
+    assert!(matches!(
+        run_fixture_workload_under_lab(
+            &wrong_seed_cfg,
+            &expected_workload,
+            &wrong_seed_root,
+            LabConfig::new(wrong_seed_cfg.seed)
+        ),
+        Err(FixtureWorkloadError::SeedMismatch { .. })
+    ));
+    assert!(
+        !wrong_seed_root.exists(),
+        "seed mismatch must refuse before fixture filesystem side effects"
+    );
+
     let mut trace_hasher = Hasher::new();
     trace_hasher.update(b"fgdb.sim.fixture.trace.v1");
     trace_hasher.update(&raw.trace_bytes);
@@ -588,6 +812,12 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
     );
     assert_eq!(raw.receipt.seed(), changed.receipt.seed());
     assert_ne!(
+        raw.receipt.workload_digest(),
+        changed.receipt.workload_digest(),
+        "a same-seed workload mutation must change canonical workload identity"
+    );
+    assert!(!raw.receipt.matches_workload(changed.workload()));
+    assert_ne!(
         raw.receipt.trace_digest(),
         changed.receipt.trace_digest(),
         "a same-seed workload mutation must change the execution-bound digest"
@@ -614,6 +844,11 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
     assert_non_failure_receipt(&honest.live_receipt);
     assert_eq!(honest.lab_receipt.seed(), cfg.seed);
     assert_eq!(honest.live_receipt.seed(), cfg.seed);
+    assert_eq!(
+        honest.lab_receipt.workload_bytes(),
+        honest.live_receipt.workload_bytes(),
+        "dual-run runtimes must consume one exact canonical workload"
+    );
     assert!(honest.lab_receipt.virtual_clock_epoch_nanos().is_some());
     assert_eq!(honest.live_receipt.virtual_clock_epoch_nanos(), None);
 
@@ -623,6 +858,8 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
         "runtime=live",
         "virtual_clock_epoch_nanos=",
         "virtual_clock_epoch_nanos=not-applicable-live",
+        "workload_digest=",
+        "workload_action_count=",
         "lab_trace_digest=",
         "live_trace_digest=",
         "artifact_fields_asserted=",
