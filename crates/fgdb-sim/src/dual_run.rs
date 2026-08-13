@@ -72,7 +72,7 @@ pub enum FixtureRuntime {
 /// Stable failure identity used by real fixture-workload minimization.
 ///
 /// Action ordinals are deliberately excluded: deleting an irrelevant prefix
-/// re-numbers canonical actions but does not turn a durable-write `WriteZero`
+/// re-numbers canonical actions but does not turn a durable-write `StorageFull`
 /// into a different bug. The complete [`FixtureTaskError`] remains available
 /// on [`FixtureRunError`] for diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +93,161 @@ pub enum FixtureFailureKind {
     },
 }
 
+/// Immutable execution-root evidence for one typed fixture task failure.
+///
+/// A component error without this receipt is not a falsification: it would let
+/// a stub return the expected `io::ErrorKind` without executing the workload,
+/// fault plan, or LAB schedule. All fields are private and the digest binds the
+/// exact completed evidence captured before the adapter returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureFailureEvidence {
+    runtime: FixtureRuntime,
+    seed: u64,
+    virtual_clock_epoch_nanos: Option<u64>,
+    trace_digest: String,
+    workload_digest: String,
+    workload_bytes: Vec<u8>,
+    lab_replay_trace_digest: Option<String>,
+    task_dispatches: Option<Vec<TaskDispatchStep>>,
+    injected_faults: Vec<FaultEvent>,
+    task_error: FixtureTaskError,
+    execution_digest: String,
+}
+
+struct FixtureFailureCapture<'a> {
+    runtime: FixtureRuntime,
+    seed: u64,
+    virtual_clock_epoch_nanos: Option<u64>,
+    trace_bytes: &'a [u8],
+    workload: &'a FixtureWorkload,
+    lab_replay_trace: Option<&'a ReplayTrace>,
+    injected_faults: Vec<FaultEvent>,
+}
+
+impl FixtureFailureEvidence {
+    fn new(capture: FixtureFailureCapture<'_>, task_error: FixtureTaskError) -> Self {
+        let FixtureFailureCapture {
+            runtime,
+            seed,
+            virtual_clock_epoch_nanos,
+            trace_bytes,
+            workload,
+            lab_replay_trace,
+            injected_faults,
+        } = capture;
+        let mut trace_hasher = Hasher::new();
+        trace_hasher.update(b"fgdb.sim.fixture.trace.v1");
+        trace_hasher.update(trace_bytes);
+        let trace_digest = trace_hasher.finalize().to_hex();
+        let workload_bytes = workload.to_canonical_bytes();
+        let workload_digest = workload.canonical_digest_hex();
+        let lab_replay_trace_digest = lab_replay_trace.map(replay_trace_digest);
+        let task_dispatches = lab_replay_trace.map(task_dispatch_steps);
+        let mut execution_hasher = Hasher::new();
+        execution_hasher.update(b"fgdb.sim.fixture.failure-execution.v1");
+        execution_hasher.update(runtime.as_str().as_bytes());
+        execution_hasher.update(&seed.to_le_bytes());
+        execution_hasher.update(&virtual_clock_epoch_nanos.unwrap_or(u64::MAX).to_le_bytes());
+        execution_hasher.update(trace_digest.as_bytes());
+        execution_hasher.update(&workload_bytes);
+        if let Some(digest) = &lab_replay_trace_digest {
+            execution_hasher.update(digest.as_bytes());
+        }
+        if let Some(dispatches) = &task_dispatches {
+            for dispatch in dispatches {
+                execution_hasher.update(&dispatch.task_id.to_le_bytes());
+                execution_hasher.update(&dispatch.at_tick.to_le_bytes());
+            }
+        }
+        for fault in &injected_faults {
+            execution_hasher.update(format!("{fault:?}").as_bytes());
+        }
+        execution_hasher.update(format!("{task_error:?}").as_bytes());
+        let execution_digest = execution_hasher.finalize().to_hex();
+        Self {
+            runtime,
+            seed,
+            virtual_clock_epoch_nanos,
+            trace_digest,
+            workload_digest,
+            workload_bytes,
+            lab_replay_trace_digest,
+            task_dispatches,
+            injected_faults,
+            task_error,
+            execution_digest,
+        }
+    }
+
+    /// Runtime posture that observed the failure.
+    #[must_use]
+    pub const fn runtime(&self) -> FixtureRuntime {
+        self.runtime
+    }
+
+    /// Seed bound by both the workload and runtime adapter.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Terminal LAB epoch, or `None` for a live execution.
+    #[must_use]
+    pub const fn virtual_clock_epoch_nanos(&self) -> Option<u64> {
+        self.virtual_clock_epoch_nanos
+    }
+
+    /// Domain-separated digest of the component trace bytes.
+    #[must_use]
+    pub fn trace_digest(&self) -> &str {
+        &self.trace_digest
+    }
+
+    /// Domain-separated digest of the exact workload bytes.
+    #[must_use]
+    pub fn workload_digest(&self) -> &str {
+        &self.workload_digest
+    }
+
+    /// Whether the receipt binds exactly this canonical workload.
+    #[must_use]
+    pub fn matches_workload(&self, workload: &FixtureWorkload) -> bool {
+        self.seed == workload.seed()
+            && self.workload_digest == workload.canonical_digest_hex()
+            && self.workload_bytes == workload.to_canonical_bytes()
+    }
+
+    /// LAB replay-trace digest, absent under the live runtime.
+    #[must_use]
+    pub fn lab_replay_trace_digest(&self) -> Option<&str> {
+        self.lab_replay_trace_digest.as_deref()
+    }
+
+    /// Exact ordered LAB task dispatches, absent under the live runtime.
+    #[must_use]
+    pub fn task_dispatches(&self) -> Option<&[TaskDispatchStep]> {
+        self.task_dispatches.as_deref()
+    }
+
+    /// Faults actually injected before the component returned its error.
+    #[must_use]
+    pub fn injected_faults(&self) -> &[FaultEvent] {
+        &self.injected_faults
+    }
+
+    /// Typed component error bound by this receipt.
+    #[must_use]
+    pub const fn task_error(&self) -> FixtureTaskError {
+        self.task_error
+    }
+
+    /// Seal over every retained execution-root field.
+    #[must_use]
+    pub fn execution_digest(&self) -> &str {
+        &self.execution_digest
+    }
+}
+
 /// Typed failure from one fixture adapter execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FixtureRunError {
@@ -100,10 +255,10 @@ pub enum FixtureRunError {
     Workload(FixtureWorkloadError),
     /// The run's isolated scratch directory could not be created.
     ScratchIo(io::ErrorKind),
-    /// The producer returned a typed I/O failure.
-    Producer(FixtureTaskError),
-    /// The consumer returned a typed I/O failure.
-    Consumer(FixtureTaskError),
+    /// The producer returned a typed I/O failure with exact execution evidence.
+    Producer(Box<FixtureFailureEvidence>),
+    /// The consumer returned a typed I/O failure with exact execution evidence.
+    Consumer(Box<FixtureFailureEvidence>),
     /// A LAB task terminated without returning its typed output.
     LabTaskTerminated { component: &'static str },
     /// A LAB task could not be admitted to the runtime.
@@ -129,14 +284,23 @@ impl FixtureRunError {
     #[must_use]
     pub const fn failure_kind(&self) -> Option<FixtureFailureKind> {
         match self {
-            Self::Producer(error) => Some(FixtureFailureKind::Producer {
-                stage: error.stage(),
-                kind: error.kind(),
+            Self::Producer(evidence) => Some(FixtureFailureKind::Producer {
+                stage: evidence.task_error().stage(),
+                kind: evidence.task_error().kind(),
             }),
-            Self::Consumer(error) => Some(FixtureFailureKind::Consumer {
-                stage: error.stage(),
-                kind: error.kind(),
+            Self::Consumer(evidence) => Some(FixtureFailureKind::Consumer {
+                stage: evidence.task_error().stage(),
+                kind: evidence.task_error().kind(),
             }),
+            _ => None,
+        }
+    }
+
+    /// Immutable execution receipt for a component failure.
+    #[must_use]
+    pub fn failure_evidence(&self) -> Option<&FixtureFailureEvidence> {
+        match self {
+            Self::Producer(evidence) | Self::Consumer(evidence) => Some(evidence.as_ref()),
             _ => None,
         }
     }
@@ -147,8 +311,12 @@ impl core::fmt::Display for FixtureRunError {
         match self {
             Self::Workload(error) => write!(f, "fixture workload refused: {error}"),
             Self::ScratchIo(kind) => write!(f, "fixture scratch I/O failed: {kind:?}"),
-            Self::Producer(error) => write!(f, "fixture producer failed: {error}"),
-            Self::Consumer(error) => write!(f, "fixture consumer failed: {error}"),
+            Self::Producer(evidence) => {
+                write!(f, "fixture producer failed: {}", evidence.task_error())
+            }
+            Self::Consumer(evidence) => {
+                write!(f, "fixture consumer failed: {}", evidence.task_error())
+            }
             Self::LabTaskTerminated { component } => {
                 write!(f, "fixture LAB {component} task terminated")
             }
@@ -629,8 +797,6 @@ pub fn run_fixture_workload_under_lab(
         .ok_or(FixtureRunError::LabTaskIncomplete {
             component: "consumer",
         })?;
-    producer_result.map_err(FixtureRunError::Producer)?;
-    consumer_result.map_err(FixtureRunError::Consumer)?;
     if !report.quiescent {
         return Err(FixtureRunError::LabNotQuiescent);
     }
@@ -658,6 +824,39 @@ pub fn run_fixture_workload_under_lab(
         return Err(FixtureRunError::UnexpectedTaskSet);
     }
     let trace_bytes = trace.to_bytes();
+    let injected_faults = trace.fault_events();
+    if let Err(error) = producer_result {
+        return Err(FixtureRunError::Producer(Box::new(
+            FixtureFailureEvidence::new(
+                FixtureFailureCapture {
+                    runtime: FixtureRuntime::Lab,
+                    seed: cfg.seed,
+                    virtual_clock_epoch_nanos: Some(report.now_nanos),
+                    trace_bytes: &trace_bytes,
+                    workload: &workload,
+                    lab_replay_trace: Some(&replay_trace),
+                    injected_faults,
+                },
+                error,
+            ),
+        )));
+    }
+    if let Err(error) = consumer_result {
+        return Err(FixtureRunError::Consumer(Box::new(
+            FixtureFailureEvidence::new(
+                FixtureFailureCapture {
+                    runtime: FixtureRuntime::Lab,
+                    seed: cfg.seed,
+                    virtual_clock_epoch_nanos: Some(report.now_nanos),
+                    trace_bytes: &trace_bytes,
+                    workload: &workload,
+                    lab_replay_trace: Some(&replay_trace),
+                    injected_faults,
+                },
+                error,
+            ),
+        )));
+    }
     let semantics = trace.semantics();
     let receipt = FixtureRunReceipt::new(
         FixtureRuntime::Lab,
@@ -666,7 +865,7 @@ pub fn run_fixture_workload_under_lab(
         &trace_bytes,
         &workload,
         Some(&replay_trace),
-        trace.fault_events(),
+        injected_faults,
     );
     Ok(LabFixtureRun {
         trace_bytes,
@@ -711,9 +910,40 @@ pub fn run_fixture_workload_live(
         .map_err(|error| FixtureRunError::ScratchIo(error.kind()))?;
     let (producer_result, consumer_result) =
         runtime.block_on(async move { join2(producer_fut, consumer_fut).await });
-    producer_result.map_err(FixtureRunError::Producer)?;
-    consumer_result.map_err(FixtureRunError::Consumer)?;
     let trace_bytes = trace.to_bytes();
+    let injected_faults = trace.fault_events();
+    if let Err(error) = producer_result {
+        return Err(FixtureRunError::Producer(Box::new(
+            FixtureFailureEvidence::new(
+                FixtureFailureCapture {
+                    runtime: FixtureRuntime::Live,
+                    seed: cfg.seed,
+                    virtual_clock_epoch_nanos: None,
+                    trace_bytes: &trace_bytes,
+                    workload: &workload,
+                    lab_replay_trace: None,
+                    injected_faults,
+                },
+                error,
+            ),
+        )));
+    }
+    if let Err(error) = consumer_result {
+        return Err(FixtureRunError::Consumer(Box::new(
+            FixtureFailureEvidence::new(
+                FixtureFailureCapture {
+                    runtime: FixtureRuntime::Live,
+                    seed: cfg.seed,
+                    virtual_clock_epoch_nanos: None,
+                    trace_bytes: &trace_bytes,
+                    workload: &workload,
+                    lab_replay_trace: None,
+                    injected_faults,
+                },
+                error,
+            ),
+        )));
+    }
     let semantics = trace.semantics();
     let receipt = FixtureRunReceipt::new(
         FixtureRuntime::Live,
@@ -722,7 +952,7 @@ pub fn run_fixture_workload_live(
         &trace_bytes,
         &workload,
         None,
-        trace.fault_events(),
+        injected_faults,
     );
     Ok(LiveFixtureRun {
         workload,

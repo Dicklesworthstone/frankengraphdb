@@ -652,7 +652,9 @@ where
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixtureWorkloadShrunk {
     original_workload_digest: String,
+    original_execution_digest: String,
     workload: FixtureWorkload,
+    minimal_execution_digest: String,
     failure: FixtureFailureKind,
     attempts: usize,
     accepted: usize,
@@ -666,10 +668,22 @@ impl FixtureWorkloadShrunk {
         &self.original_workload_digest
     }
 
+    /// Execution-root seal of the complete workload's observed failure.
+    #[must_use]
+    pub fn original_execution_digest(&self) -> &str {
+        &self.original_execution_digest
+    }
+
     /// Canonical one-minimal workload.
     #[must_use]
     pub const fn workload(&self) -> &FixtureWorkload {
         &self.workload
+    }
+
+    /// Execution-root seal of the retained one-minimal failure.
+    #[must_use]
+    pub fn minimal_execution_digest(&self) -> &str {
+        &self.minimal_execution_digest
     }
 
     /// Exact component/operation/I/O category retained by every reduction.
@@ -746,6 +760,8 @@ pub fn shrink_fixture_workload_under_lab(
 ) -> Result<Option<FixtureWorkloadShrunk>, FixtureWorkloadShrinkError> {
     let original_workload_digest = workload.canonical_digest_hex();
     let mut target = None;
+    let mut original_execution_digest = None;
+    let mut minimal_execution_digest = None;
     let mut fatal = None;
     let mut ordinal = 0usize;
     let shrunk = {
@@ -768,17 +784,30 @@ pub fn shrink_fixture_workload_under_lab(
             }
             match run_fixture_workload_under_lab(cfg, &candidate, &attempt, lab_config.clone()) {
                 Ok(_) => ShrinkTrial::DidNotReproduce,
-                Err(error) => match error.failure_kind() {
-                    Some(kind) if target.is_none() || target == Some(kind) => {
-                        target.get_or_insert(kind);
-                        ShrinkTrial::Reproduced
+                Err(error) => {
+                    let execution_digest = error
+                        .failure_evidence()
+                        .map(|evidence| evidence.execution_digest().to_string());
+                    match error.failure_kind() {
+                        Some(kind) if target.is_none() || target == Some(kind) => {
+                            let Some(execution_digest) = execution_digest else {
+                                fatal = Some(FixtureWorkloadShrinkError::Harness(error));
+                                return ShrinkTrial::DidNotReproduce;
+                            };
+                            if original_execution_digest.is_none() {
+                                original_execution_digest = Some(execution_digest.clone());
+                            }
+                            minimal_execution_digest = Some(execution_digest);
+                            target.get_or_insert(kind);
+                            ShrinkTrial::Reproduced
+                        }
+                        Some(kind) => ShrinkTrial::DifferentFailure(kind),
+                        None => {
+                            fatal = Some(FixtureWorkloadShrinkError::Harness(error));
+                            ShrinkTrial::DidNotReproduce
+                        }
                     }
-                    Some(kind) => ShrinkTrial::DifferentFailure(kind),
-                    None => {
-                        fatal = Some(FixtureWorkloadShrinkError::Harness(error));
-                        ShrinkTrial::DidNotReproduce
-                    }
-                },
+                }
             }
         };
         shrink_schedule_and_workload(
@@ -796,11 +825,18 @@ pub fn shrink_fixture_workload_under_lab(
     let Some(failure) = target else {
         return Err(FixtureWorkloadShrinkError::MissingFailureIdentity);
     };
+    let (Some(original_execution_digest), Some(minimal_execution_digest)) =
+        (original_execution_digest, minimal_execution_digest)
+    else {
+        return Err(FixtureWorkloadShrinkError::MissingFailureIdentity);
+    };
     let workload = FixtureWorkload::try_from_retained_actions(cfg.seed, &shrunk.workload)
         .map_err(FixtureWorkloadShrinkError::Workload)?;
     Ok(Some(FixtureWorkloadShrunk {
         original_workload_digest,
+        original_execution_digest,
         workload,
+        minimal_execution_digest,
         failure,
         attempts: shrunk.attempts,
         accepted: shrunk.accepted,

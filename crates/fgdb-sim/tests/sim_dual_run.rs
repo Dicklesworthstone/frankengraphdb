@@ -363,16 +363,40 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
     } else {
         return;
     };
+    let lab_evidence = lab_failure
+        .failure_evidence()
+        .expect("component failure carries execution evidence");
+    assert_eq!(lab_evidence.runtime(), FixtureRuntime::Lab);
+    assert_eq!(lab_evidence.seed(), faulting.seed);
+    assert!(lab_evidence.virtual_clock_epoch_nanos().is_some());
+    assert!(lab_evidence.matches_workload(&faulting_workload));
+    assert!(!lab_evidence.trace_digest().is_empty());
+    assert!(lab_evidence.lab_replay_trace_digest().is_some());
     assert!(
-        matches!(
-            &lab_failure,
-            FixtureRunError::Producer(error)
-                if error.stage() == FixtureTaskStage::DurableWrite
-                && error.action() == Some(0)
-                && error.kind() == std::io::ErrorKind::StorageFull
-        ),
-        "unexpected LAB failure: {lab_failure:?}"
+        !lab_evidence
+            .task_dispatches()
+            .expect("LAB failure carries dispatches")
+            .is_empty()
     );
+    assert_eq!(
+        lab_evidence.task_error().stage(),
+        FixtureTaskStage::DurableWrite
+    );
+    assert_eq!(lab_evidence.task_error().action(), Some(0));
+    assert_eq!(
+        lab_evidence.task_error().kind(),
+        std::io::ErrorKind::StorageFull
+    );
+    assert_eq!(lab_evidence.injected_faults().len(), 1);
+    assert!(matches!(
+        lab_evidence.injected_faults()[0].kind,
+        fgdb_sim::vfs::FaultKind::WriteEnospc { requested } if requested > 0
+    ));
+    assert_eq!(
+        lab_evidence.injected_faults()[0].path.to_string_lossy(),
+        "record-0000.bin"
+    );
+    assert!(!lab_evidence.execution_digest().is_empty());
     let live_result = run_fixture_workload_live(
         &faulting,
         &faulting_workload,
@@ -394,6 +418,20 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
             kind: std::io::ErrorKind::StorageFull,
         })
     );
+    let live_evidence = live_failure
+        .failure_evidence()
+        .expect("live component failure carries execution evidence");
+    assert_eq!(live_evidence.runtime(), FixtureRuntime::Live);
+    assert_eq!(live_evidence.virtual_clock_epoch_nanos(), None);
+    assert!(live_evidence.lab_replay_trace_digest().is_none());
+    assert!(live_evidence.task_dispatches().is_none());
+    assert!(live_evidence.matches_workload(&faulting_workload));
+    assert_eq!(live_evidence.injected_faults().len(), 1);
+    assert_ne!(
+        live_evidence.execution_digest(),
+        lab_evidence.execution_digest(),
+        "runtime posture is part of the failure execution seal"
+    );
 
     let shrunk = shrink_fixture_workload_under_lab(
         &faulting,
@@ -407,6 +445,10 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         shrunk.original_workload_digest(),
         faulting_workload.canonical_digest_hex()
     );
+    assert_eq!(
+        shrunk.original_execution_digest(),
+        lab_evidence.execution_digest()
+    );
     assert_eq!(shrunk.workload().actions().len(), 1);
     assert_eq!(shrunk.workload().actions()[0].ordinal(), 0);
     assert_eq!(
@@ -419,15 +461,30 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
     assert!(shrunk.attempts() > 1);
     assert!(shrunk.accepted() > 0);
     assert_eq!(shrunk.rejected_different_failure(), 0);
+    let minimal_result = run_fixture_workload_under_lab(
+        &faulting,
+        shrunk.workload(),
+        &faulting_root.join("minimal-replay"),
+        LabConfig::new(faulting.seed),
+    );
     assert!(matches!(
-        run_fixture_workload_under_lab(
-            &faulting,
-            shrunk.workload(),
-            &faulting_root.join("minimal-replay"),
-            LabConfig::new(faulting.seed),
-        ),
+        &minimal_result,
         Err(error) if error.failure_kind() == Some(shrunk.failure())
     ));
+    let minimal_evidence = minimal_result
+        .as_ref()
+        .err()
+        .and_then(FixtureRunError::failure_evidence)
+        .expect("minimal failure carries execution evidence");
+    assert_eq!(
+        minimal_evidence.execution_digest(),
+        shrunk.minimal_execution_digest()
+    );
+    assert_ne!(
+        shrunk.original_execution_digest(),
+        shrunk.minimal_execution_digest(),
+        "removing actions must change the sealed execution"
+    );
 
     let blocked_scratch_root = scratch_root("typed-scratch-io-control");
     let blocking_file = blocked_scratch_root.join("ordinary-file");
