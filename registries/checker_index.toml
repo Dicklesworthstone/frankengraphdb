@@ -317,6 +317,13 @@ status = "live"
 unit = "artifact"
 
 [[checker]]
+symbol = "cargo-test:sprt-migration-hard-guards"
+kind = "cargo-test"
+artifact = "crates/fgdb-calibrate/tests/sextant_e2e.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
 symbol = "cargo-test:ope-support-firewall"
 kind = "cargo-test"
 artifact = "crates/fgdb-calibrate/tests/sextant_e2e.rs"

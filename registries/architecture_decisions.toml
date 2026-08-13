@@ -3156,7 +3156,7 @@ affected_evidence = ["FG-CAL-01"]
 affected_slos = []
 affected_cost_rows = ["reserved:decision-card"]
 affected_format_rows = ["reserved:decision-card"]
-verification_entrypoints = ["cargo-test:architecture_decisions", "cargo-test:regime-signal-fallback"]
+verification_entrypoints = ["cargo-test:architecture_decisions", "cargo-test:regime-signal-fallback", "cargo-test:sprt-migration-hard-guards"]
 checker_ids = ["architecture_source_coverage", "architecture_owner_closure"]
 evidence_ids = ["FG-CAL-01"]
 status = "frozen"
@@ -8440,6 +8440,16 @@ package = "fgdb-calibrate"
 target = "sextant_e2e"
 selector = "bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound"
 command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "bocpd_sr_regime_signal_is_versioned_replayable_and_fallback_bound", "--", "--exact"]
+
+[[verification_entrypoint]]
+entrypoint = "cargo-test:sprt-migration-hard-guards"
+status = "live"
+evidence_scope = "implementation"
+checker_id = "cargo-test:sprt-migration-hard-guards"
+package = "fgdb-calibrate"
+target = "sextant_e2e"
+selector = "sprt_migration_hard_guards_dominate_statistical_evidence"
+command_argv = ["cargo", "test", "-p", "fgdb-calibrate", "--test", "sextant_e2e", "sprt_migration_hard_guards_dominate_statistical_evidence", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:estimator-risk-evidence"
