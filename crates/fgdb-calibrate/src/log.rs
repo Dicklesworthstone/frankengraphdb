@@ -87,13 +87,14 @@ use crate::{
     },
     progress::DrainProgressEvidence,
     regime::{BOCPD_SR_SCALE, BocpdSrEvidence, RegimeSignalEvidence},
+    sprt::{SPRT_SCALE, SprtDecision, SprtEvidence},
 };
 
 /// Canonical record encoding version.
-pub const STATISTICAL_LOG_RECORD_VERSION: u16 = 5;
+pub const STATISTICAL_LOG_RECORD_VERSION: u16 = 6;
 
 /// Canonical bounded-log encoding version.
-pub const STATISTICAL_LOG_VERSION: u16 = 5;
+pub const STATISTICAL_LOG_VERSION: u16 = 6;
 
 /// Absolute record-count ceiling for one in-memory log.
 pub const MAX_STATISTICAL_LOG_RECORDS: usize = 1_048_576;
@@ -121,10 +122,10 @@ impl StatisticalLogDecodeLimits {
     }
 }
 
-const RECORD_MAGIC: [u8; 8] = *b"FGDBSLR5";
-const LOG_MAGIC: [u8; 8] = *b"FGDBSLL5";
-const MONITOR_IDENTITY_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:monitor-identity:v5";
-const EVIDENCE_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:evidence-body:v5";
+const RECORD_MAGIC: [u8; 8] = *b"FGDBSLR6";
+const LOG_MAGIC: [u8; 8] = *b"FGDBSLL6";
+const MONITOR_IDENTITY_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:monitor-identity:v6";
+const EVIDENCE_BODY_DOMAIN: &[u8] = b"fgdb:statistical-log-record:evidence-body:v6";
 const OPE_SUPPORT_EXCLUSIONS_DOMAIN: &[u8] =
     b"fgdb:statistical-log-record:ope-support-exclusions:v1";
 const RECORD_TAG: u8 = 1;
@@ -295,6 +296,8 @@ pub enum StatisticalMonitorKind {
     OffPolicyEvaluation = 6,
     /// Terminal approximate-nearest-neighbor recall assessment.
     AnnRecall = 7,
+    /// Wald sequential probability-ratio migration evidence.
+    SequentialProbabilityRatio = 8,
 }
 
 impl StatisticalMonitorKind {
@@ -311,6 +314,7 @@ impl StatisticalMonitorKind {
             5 => Ok(Self::RegimeChange),
             6 => Ok(Self::OffPolicyEvaluation),
             7 => Ok(Self::AnnRecall),
+            8 => Ok(Self::SequentialProbabilityRatio),
             _ => Err(StatisticalLogCodecError::UnknownMonitorKind { tag }),
         }
     }
@@ -656,6 +660,40 @@ pub enum StatisticalStatistic {
         /// Deterministic explanation for the terminal action.
         action_reason: AnnRecallActionReason,
     },
+    /// Model-qualified Wald simple-hypothesis likelihood-ratio receipt.
+    SequentialProbabilityRatio {
+        /// Immutable hypothesis and boundary profile.
+        profile_oid: ObjectId,
+        /// Identity of the authenticated pre-projected binary input contract.
+        binary_input_contract_oid: ObjectId,
+        /// Identity of the decision card whose hard guards govern migration.
+        decision_card_oid: ObjectId,
+        /// Null probability of a one, over [`SPRT_SCALE`].
+        null_one_probability: u64,
+        /// Alternative probability of a one, over [`SPRT_SCALE`].
+        alternative_one_probability: u64,
+        /// Conservative model-conditional type-I error bound.
+        type_i_error_bound_units: u64,
+        /// Conservative model-conditional type-II error bound.
+        type_ii_error_bound_units: u64,
+        /// Lower likelihood-ratio boundary.
+        accept_null_ratio: u128,
+        /// Strict upper likelihood-ratio boundary.
+        accept_alternative_ratio: u128,
+        /// Finite lower-endpoint cap; the upper endpoint uses `u128::MAX` as
+        /// a canonical positive-infinity sentinel after exceeding it.
+        likelihood_ratio_cap: u128,
+        /// Maximum observations admitted by the profile.
+        maximum_observations: u64,
+        /// Conservative lower endpoint of the exact likelihood ratio.
+        likelihood_ratio_lower: u128,
+        /// Conservative upper endpoint or canonical positive infinity.
+        likelihood_ratio_upper: u128,
+        /// Accepted observations.
+        observations: u64,
+        /// Continuing, accepted-null, or accepted-alternative verdict.
+        decision: SprtDecision,
+    },
 }
 
 impl StatisticalStatistic {
@@ -669,6 +707,7 @@ impl StatisticalStatistic {
             Self::BocpdSrRegimeChange { .. } => 8,
             Self::OffPolicyEvaluation { .. } => 6,
             Self::AnnRecall { .. } => 7,
+            Self::SequentialProbabilityRatio { .. } => 9,
         }
     }
 
@@ -682,6 +721,7 @@ impl StatisticalStatistic {
             Self::BocpdSrRegimeChange { .. } => 205,
             Self::OffPolicyEvaluation { .. } => 390,
             Self::AnnRecall { .. } => 402,
+            Self::SequentialProbabilityRatio { .. } => 225,
         }
     }
 
@@ -842,6 +882,70 @@ impl StatisticalStatistic {
                     return Err(StatisticalLogRecordError::InvalidBocpdSrStatistic);
                 }
                 Ok(())
+            }
+            Self::SequentialProbabilityRatio {
+                null_one_probability,
+                alternative_one_probability,
+                type_i_error_bound_units,
+                type_ii_error_bound_units,
+                accept_null_ratio,
+                accept_alternative_ratio,
+                likelihood_ratio_cap,
+                maximum_observations,
+                likelihood_ratio_lower,
+                likelihood_ratio_upper,
+                observations,
+                decision,
+                ..
+            } => {
+                let scale = u64::try_from(SPRT_SCALE)
+                    .map_err(|_| StatisticalLogRecordError::InvalidSprtStatistic)?;
+                let alpha = u128::from(type_i_error_bound_units);
+                let error_numerator = SPRT_SCALE * SPRT_SCALE;
+                let minimum_alternative_ratio = match error_numerator.checked_div(alpha) {
+                    Some(quotient) => quotient + u128::from(!error_numerator.is_multiple_of(alpha)),
+                    None => u128::MAX,
+                };
+                if null_one_probability == 0
+                    || null_one_probability >= scale
+                    || alternative_one_probability == 0
+                    || alternative_one_probability >= scale
+                    || null_one_probability == alternative_one_probability
+                    || type_i_error_bound_units == 0
+                    || type_i_error_bound_units >= scale
+                    || type_ii_error_bound_units == 0
+                    || type_ii_error_bound_units >= scale
+                    || accept_null_ratio == 0
+                    || accept_null_ratio >= SPRT_SCALE
+                    || accept_null_ratio > u128::from(type_ii_error_bound_units)
+                    || accept_alternative_ratio <= SPRT_SCALE
+                    || accept_alternative_ratio < minimum_alternative_ratio
+                    || likelihood_ratio_cap < accept_alternative_ratio
+                    || likelihood_ratio_lower > likelihood_ratio_cap
+                    || likelihood_ratio_lower > likelihood_ratio_upper
+                    || (likelihood_ratio_upper > likelihood_ratio_cap
+                        && likelihood_ratio_upper != u128::MAX)
+                    || maximum_observations == 0
+                    || observations == 0
+                    || observations > maximum_observations
+                {
+                    return Err(StatisticalLogRecordError::InvalidSprtStatistic);
+                }
+                let consistent = match decision {
+                    SprtDecision::Continue => {
+                        likelihood_ratio_upper > accept_null_ratio
+                            && likelihood_ratio_lower < accept_alternative_ratio
+                    }
+                    SprtDecision::AcceptNull => likelihood_ratio_upper <= accept_null_ratio,
+                    SprtDecision::AcceptAlternative => {
+                        likelihood_ratio_lower >= accept_alternative_ratio
+                    }
+                };
+                if consistent {
+                    Ok(())
+                } else {
+                    Err(StatisticalLogRecordError::InvalidSprtStatistic)
+                }
             }
             Self::OffPolicyEvaluation {
                 clipping_weight_units,
@@ -1112,6 +1216,64 @@ impl StatisticalLogRecord {
                 rejection_threshold_bits: evidence.rejection_threshold_bits(),
                 observations: evidence.observations(),
                 one_observations: evidence.one_observations(),
+            },
+        )
+    }
+
+    /// Constructs a record from an identity-bound SPRT prefix.
+    pub fn try_from_sprt(
+        identity_issuer: &impl StatisticalEvidenceIdentityIssuer,
+        evidence: &SprtEvidence,
+    ) -> Result<Self, StatisticalLogRecordError> {
+        let identity = evidence.identity();
+        let profile = evidence.profile();
+        let observations = u64::try_from(evidence.observations().len()).map_err(|_| {
+            StatisticalLogRecordError::EvidenceCounterUnrepresentable {
+                monitor: StatisticalMonitorKind::SequentialProbabilityRatio,
+                field: StatisticField::SprtObservations,
+            }
+        })?;
+        let through_sequence = evidence.through_sequence().ok_or(
+            StatisticalLogRecordError::EvidenceHasNoObservations {
+                monitor: StatisticalMonitorKind::SequentialProbabilityRatio,
+            },
+        )?;
+        let identity_window =
+            StatisticalBatchRange::try_new(identity.window().first(), identity.window().last())?;
+        let batch = singleton_batch_from_cumulative_evidence(
+            StatisticalMonitorKind::SequentialProbabilityRatio,
+            identity.window().first(),
+            identity.window().last(),
+            Some(through_sequence),
+            observations,
+        )?;
+        Self::try_from_bound_parts(
+            identity_issuer,
+            StatisticalMonitorKind::SequentialProbabilityRatio,
+            identity.monitor_oid(),
+            identity.filtration_oid(),
+            identity_window,
+            batch,
+            identity.regime_epoch(),
+            identity.candidate_policy_oid(),
+            identity.pinned_fallback_oid(),
+            evidence.selected_policy_oid(),
+            StatisticalStatistic::SequentialProbabilityRatio {
+                profile_oid: profile.profile_oid(),
+                binary_input_contract_oid: identity.binary_input_contract_oid(),
+                decision_card_oid: identity.decision_card_oid(),
+                null_one_probability: profile.null_one_probability(),
+                alternative_one_probability: profile.alternative_one_probability(),
+                type_i_error_bound_units: profile.type_i_error_bound_units(),
+                type_ii_error_bound_units: profile.type_ii_error_bound_units(),
+                accept_null_ratio: profile.accept_null_ratio(),
+                accept_alternative_ratio: profile.accept_alternative_ratio(),
+                likelihood_ratio_cap: profile.likelihood_ratio_cap(),
+                maximum_observations: profile.maximum_observations(),
+                likelihood_ratio_lower: evidence.likelihood_ratio(),
+                likelihood_ratio_upper: evidence.likelihood_ratio_upper(),
+                observations,
+                decision: evidence.decision(),
             },
         )
     }
@@ -1813,6 +1975,7 @@ impl StatisticalLogRecord {
     pub const fn evidence_registration(self) -> StatisticalEvidenceRegistration {
         match self.monitor_kind {
             StatisticalMonitorKind::EProcess
+            | StatisticalMonitorKind::SequentialProbabilityRatio
             | StatisticalMonitorKind::ExplorationBudget
             | StatisticalMonitorKind::DrainProgress
             | StatisticalMonitorKind::RegimeChange => StatisticalEvidenceRegistration {
@@ -1983,6 +2146,45 @@ impl StatisticalLogRecord {
                 StrataIdentity::NotApplicable,
                 PropensitySupportIdentity::NotApplicable,
             ),
+            StatisticalStatistic::SequentialProbabilityRatio {
+                profile_oid,
+                binary_input_contract_oid,
+                decision_card_oid,
+                null_one_probability,
+                alternative_one_probability,
+                type_i_error_bound_units,
+                type_ii_error_bound_units,
+                accept_null_ratio,
+                accept_alternative_ratio,
+                likelihood_ratio_cap,
+                maximum_observations,
+                likelihood_ratio_lower,
+                likelihood_ratio_upper,
+                observations,
+                decision,
+            } => (
+                StatisticalErrorControl::try_alpha(
+                    type_i_error_bound_units as f64 / SPRT_SCALE as f64,
+                )?,
+                format!("binary-filtration:{filtration_or_window}"),
+                format!(
+                    "authenticated pre-projected binary stream:{}",
+                    object_id_hex(binary_input_contract_oid)
+                ),
+                format!(
+                    "error_control=model-qualified;profile_oid={};decision_card_oid={};p0_one={null_one_probability}/{SPRT_SCALE};p1_one={alternative_one_probability}/{SPRT_SCALE};type_i_bound={type_i_error_bound_units}/{SPRT_SCALE};type_ii_bound={type_ii_error_bound_units}/{SPRT_SCALE};ratio_interval=[{likelihood_ratio_lower},{likelihood_ratio_upper}]/{SPRT_SCALE};accept_null={accept_null_ratio};accept_alternative={accept_alternative_ratio};cap={likelihood_ratio_cap};observations={observations}/{maximum_observations};decision={decision:?}",
+                    object_id_hex(profile_oid),
+                    object_id_hex(decision_card_oid),
+                ),
+                vec![
+                    "type-I and type-II bounds are conservative only for the named simple Bernoulli hypotheses and authenticated filtration; outward rounding and a sticky positive-infinity upper endpoint can delay a decision but cannot strengthen acceptance".to_owned(),
+                    "the input is already projected to a registered binary stream; this monitor does not validate a raw-metric projection".to_owned(),
+                    "accepting the alternative is insufficient for migration without hard dwell and benefit-over-conversion-cost-plus-uncertainty guards".to_owned(),
+                    format!("monitor_oid={monitor_oid}"),
+                ],
+                StrataIdentity::NotApplicable,
+                PropensitySupportIdentity::NotApplicable,
+            ),
             StatisticalStatistic::DrainProgress {
                 current_potential_bits,
                 confidence_bound_bits,
@@ -2140,7 +2342,7 @@ impl StatisticalLogRecord {
         ))
     }
 
-    /// Encodes this record under the strict version-5 canonical format.
+    /// Encodes this record under the strict version-6 canonical format.
     pub fn encode_canonical(self) -> Result<Vec<u8>, StatisticalLogCodecError> {
         let capacity = RECORD_FIXED_BYTES
             .checked_add(self.statistic.payload_len())
@@ -2178,7 +2380,7 @@ impl StatisticalLogRecord {
         Ok(bytes)
     }
 
-    /// Decodes exactly one strict version-5 canonical record.
+    /// Decodes exactly one strict version-6 canonical record.
     pub fn decode_canonical(
         bytes: &[u8],
         identity_verifier: &impl StatisticalEvidenceIdentityVerifier,
@@ -2426,7 +2628,7 @@ impl StatisticalDecisionLog {
         Ok(())
     }
 
-    /// Encodes the bound and every record under the strict version-5 format.
+    /// Encodes the bound and every record under the strict version-6 format.
     pub fn encode_canonical(&self) -> Result<Vec<u8>, StatisticalLogCodecError> {
         let mut encoded_records = Vec::new();
         encoded_records
@@ -2470,7 +2672,7 @@ impl StatisticalDecisionLog {
         Ok(bytes)
     }
 
-    /// Decodes a complete strict version-5 log and replays its append checks.
+    /// Decodes a complete strict version-6 log and replays its append checks.
     pub fn decode_canonical(
         bytes: &[u8],
         expected_maximum_records: usize,
@@ -2617,6 +2819,7 @@ pub enum StatisticField {
     AnnIntervalRadius,
     AnnIntervalConfidenceExponent,
     AnnIntervalQueryObservations,
+    SprtObservations,
 }
 
 impl fmt::Display for StatisticField {
@@ -2663,6 +2866,7 @@ impl fmt::Display for StatisticField {
             Self::AnnIntervalRadius => "ANN interval radius",
             Self::AnnIntervalConfidenceExponent => "ANN interval confidence exponent",
             Self::AnnIntervalQueryObservations => "ANN interval query observations",
+            Self::SprtObservations => "SPRT observations",
         })
     }
 }
@@ -2709,6 +2913,7 @@ pub enum StatisticalLogRecordError {
     MissingRegimeDetectorSnapshot,
     BocpdSrEvidenceEncodingFailed,
     InvalidBocpdSrStatistic,
+    InvalidSprtStatistic,
     EvidenceIdentityLengthOverflow,
     EvidenceIdentityAllocationFailed {
         requested: usize,
@@ -2946,6 +3151,9 @@ impl fmt::Display for StatisticalLogRecordError {
             }
             Self::InvalidBocpdSrStatistic => {
                 formatter.write_str("BOCPD+SR statistical record is internally inconsistent")
+            }
+            Self::InvalidSprtStatistic => {
+                formatter.write_str("SPRT statistical record is internally inconsistent")
             }
             Self::EvidenceIdentityLengthOverflow => {
                 formatter.write_str("canonical evidence identity length overflowed")
@@ -3366,6 +3574,9 @@ pub enum StatisticalLogCodecError {
     UnknownAnnActionReason {
         tag: u8,
     },
+    UnknownSprtDecision {
+        tag: u8,
+    },
     InvalidBooleanTag {
         statistic_tag: u8,
         field: &'static str,
@@ -3503,6 +3714,9 @@ impl fmt::Display for StatisticalLogCodecError {
                     formatter,
                     "canonical ANN action-reason tag {tag} is unknown"
                 )
+            }
+            Self::UnknownSprtDecision { tag } => {
+                write!(formatter, "canonical SPRT decision tag {tag} is unknown")
             }
             Self::InvalidBooleanTag {
                 statistic_tag,
@@ -3789,6 +4003,9 @@ fn validate_record_parts(
             (
                 StatisticalMonitorKind::RegimeChange,
                 StatisticalStatistic::BocpdSrRegimeChange { .. }
+            ) | (
+                StatisticalMonitorKind::SequentialProbabilityRatio,
+                StatisticalStatistic::SequentialProbabilityRatio { .. }
             )
         );
     if !monitor_matches_statistic {
@@ -4275,6 +4492,7 @@ const fn stable_statistic_identity_len(statistic: StatisticalStatistic) -> usize
         StatisticalStatistic::BocpdSrRegimeChange { .. } => 112,
         StatisticalStatistic::OffPolicyEvaluation { .. } => 202,
         StatisticalStatistic::AnnRecall { .. } => 301,
+        StatisticalStatistic::SequentialProbabilityRatio { .. } => 184,
     }
 }
 
@@ -4404,6 +4622,32 @@ fn encode_stable_statistic_identity(bytes: &mut Vec<u8>, statistic: StatisticalS
             bytes.push(u8::from(exact_baseline_complete));
             bytes.push(u8::from(authorization_domain_fixed));
             bytes.push(u8::from(candidate_policy_fixed));
+        }
+        StatisticalStatistic::SequentialProbabilityRatio {
+            profile_oid,
+            binary_input_contract_oid,
+            decision_card_oid,
+            null_one_probability,
+            alternative_one_probability,
+            type_i_error_bound_units,
+            type_ii_error_bound_units,
+            accept_null_ratio,
+            accept_alternative_ratio,
+            likelihood_ratio_cap,
+            maximum_observations,
+            ..
+        } => {
+            push_oid(bytes, profile_oid);
+            push_oid(bytes, binary_input_contract_oid);
+            push_oid(bytes, decision_card_oid);
+            push_u64(bytes, null_one_probability);
+            push_u64(bytes, alternative_one_probability);
+            push_u64(bytes, type_i_error_bound_units);
+            push_u64(bytes, type_ii_error_bound_units);
+            push_u128(bytes, accept_null_ratio);
+            push_u128(bytes, accept_alternative_ratio);
+            push_u128(bytes, likelihood_ratio_cap);
+            push_u64(bytes, maximum_observations);
         }
     }
 }
@@ -4843,6 +5087,39 @@ fn encode_statistic(bytes: &mut Vec<u8>, statistic: StatisticalStatistic) {
             bytes.push(action as u8);
             bytes.push(action_reason as u8);
         }
+        StatisticalStatistic::SequentialProbabilityRatio {
+            profile_oid,
+            binary_input_contract_oid,
+            decision_card_oid,
+            null_one_probability,
+            alternative_one_probability,
+            type_i_error_bound_units,
+            type_ii_error_bound_units,
+            accept_null_ratio,
+            accept_alternative_ratio,
+            likelihood_ratio_cap,
+            maximum_observations,
+            likelihood_ratio_lower,
+            likelihood_ratio_upper,
+            observations,
+            decision,
+        } => {
+            push_oid(bytes, profile_oid);
+            push_oid(bytes, binary_input_contract_oid);
+            push_oid(bytes, decision_card_oid);
+            push_u64(bytes, null_one_probability);
+            push_u64(bytes, alternative_one_probability);
+            push_u64(bytes, type_i_error_bound_units);
+            push_u64(bytes, type_ii_error_bound_units);
+            push_u128(bytes, accept_null_ratio);
+            push_u128(bytes, accept_alternative_ratio);
+            push_u128(bytes, likelihood_ratio_cap);
+            push_u64(bytes, maximum_observations);
+            push_u128(bytes, likelihood_ratio_lower);
+            push_u128(bytes, likelihood_ratio_upper);
+            push_u64(bytes, observations);
+            bytes.push(decision as u8);
+        }
     }
 }
 
@@ -4859,6 +5136,7 @@ fn decode_statistic(
         6 => 390,
         7 => 402,
         8 => 205,
+        9 => 225,
         _ => return Err(StatisticalLogCodecError::UnknownStatisticKind { tag }),
     };
     if payload.len() != expected {
@@ -5000,6 +5278,23 @@ fn decode_statistic(
             successor_regime_epoch: decoder.read_u64()?,
             successor_effective_sequence: decoder.read_u64()?,
         },
+        9 => StatisticalStatistic::SequentialProbabilityRatio {
+            profile_oid: decoder.read_oid()?,
+            binary_input_contract_oid: decoder.read_oid()?,
+            decision_card_oid: decoder.read_oid()?,
+            null_one_probability: decoder.read_u64()?,
+            alternative_one_probability: decoder.read_u64()?,
+            type_i_error_bound_units: decoder.read_u64()?,
+            type_ii_error_bound_units: decoder.read_u64()?,
+            accept_null_ratio: decoder.read_u128()?,
+            accept_alternative_ratio: decoder.read_u128()?,
+            likelihood_ratio_cap: decoder.read_u128()?,
+            maximum_observations: decoder.read_u64()?,
+            likelihood_ratio_lower: decoder.read_u128()?,
+            likelihood_ratio_upper: decoder.read_u128()?,
+            observations: decoder.read_u64()?,
+            decision: decode_sprt_decision(decoder.read_u8()?)?,
+        },
         _ => return Err(StatisticalLogCodecError::UnknownStatisticKind { tag }),
     };
     decoder.finish()?;
@@ -5059,6 +5354,15 @@ fn decode_ann_action_reason(tag: u8) -> Result<AnnRecallActionReason, Statistica
         4 => Ok(AnnRecallActionReason::CandidateRecallSatisfied),
         5 => Ok(AnnRecallActionReason::RecallDriftDetected),
         _ => Err(StatisticalLogCodecError::UnknownAnnActionReason { tag }),
+    }
+}
+
+fn decode_sprt_decision(tag: u8) -> Result<SprtDecision, StatisticalLogCodecError> {
+    match tag {
+        0 => Ok(SprtDecision::Continue),
+        1 => Ok(SprtDecision::AcceptNull),
+        2 => Ok(SprtDecision::AcceptAlternative),
+        _ => Err(StatisticalLogCodecError::UnknownSprtDecision { tag }),
     }
 }
 
@@ -5455,13 +5759,28 @@ mod tests {
             (5, StatisticalMonitorKind::RegimeChange),
             (6, StatisticalMonitorKind::OffPolicyEvaluation),
             (7, StatisticalMonitorKind::AnnRecall),
+            (8, StatisticalMonitorKind::SequentialProbabilityRatio),
         ] {
             assert_eq!(StatisticalMonitorKind::try_from_tag(tag), Ok(expected));
         }
-        for tag in [0_u8, 8, 255] {
+        for tag in [0_u8, 9, 255] {
             assert_eq!(
                 StatisticalMonitorKind::try_from_tag(tag),
                 Err(StatisticalLogCodecError::UnknownMonitorKind { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (0_u8, SprtDecision::Continue),
+            (1, SprtDecision::AcceptNull),
+            (2, SprtDecision::AcceptAlternative),
+        ] {
+            assert_eq!(decode_sprt_decision(tag), Ok(expected));
+        }
+        for tag in [3_u8, 4, 255] {
+            assert_eq!(
+                decode_sprt_decision(tag),
+                Err(StatisticalLogCodecError::UnknownSprtDecision { tag })
             );
         }
 
@@ -5552,6 +5871,31 @@ mod tests {
                 Err(StatisticalLogCodecError::UnknownAnnActionReason { tag })
             );
         }
+    }
+
+    #[test]
+    fn sprt_infinity_sentinel_cannot_hide_an_impossible_lower_endpoint() {
+        let impossible = StatisticalStatistic::SequentialProbabilityRatio {
+            profile_oid: oid(1),
+            binary_input_contract_oid: oid(2),
+            decision_card_oid: oid(3),
+            null_one_probability: 400_000_000,
+            alternative_one_probability: 600_000_000,
+            type_i_error_bound_units: 500_000_000,
+            type_ii_error_bound_units: 500_000_000,
+            accept_null_ratio: 500_000_000,
+            accept_alternative_ratio: 2_000_000_000,
+            likelihood_ratio_cap: 16_000_000_000,
+            maximum_observations: 32,
+            likelihood_ratio_lower: u128::MAX,
+            likelihood_ratio_upper: u128::MAX,
+            observations: 2,
+            decision: SprtDecision::AcceptAlternative,
+        };
+        assert_eq!(
+            impossible.validate(),
+            Err(StatisticalLogRecordError::InvalidSprtStatistic)
+        );
     }
 
     #[test]

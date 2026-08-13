@@ -9,8 +9,12 @@
 use std::fmt;
 
 use crate::{
-    log::{StatisticalLogRecord, StatisticalMonitorKind, StatisticalStatistic},
+    log::{
+        StatisticalEvidenceIdentityIssuer, StatisticalLogRecord, StatisticalMonitorKind,
+        StatisticalStatistic,
+    },
     regime::{RegimePolicySelection, RegimeSignalEvidence, RegimeSignalStatus},
+    sprt::SprtDecision,
 };
 use fgdb_claim::EvidenceClaim;
 use fgdb_evidence::{EvidenceEnvelope, FallbackBehavior};
@@ -31,6 +35,11 @@ pub const MAX_POLICY_ID_BYTES: usize = 256;
 /// The fixed limit keeps construction, validation, and canonical encoding
 /// memory-bounded while leaving ample room for independent evidence streams.
 pub const MAX_EVIDENCE_REFS: usize = 4_096;
+
+/// Canonical policy identity whose promotions require tier-migration guards.
+pub const TIER_MIGRATION_POLICY_ID: &str = "tier-migration";
+
+const TIER_MIGRATION_DECISION_CARD_DOMAIN: &[u8] = b"fgdb:tier-migration-decision-card:v1";
 
 const RECORD_TAG: u8 = 0x01;
 const FIELD_COUNT: u16 = 8;
@@ -90,6 +99,209 @@ impl DecisionPolicyScope {
     #[must_use]
     pub const fn scope_oid(self) -> ObjectId {
         self.scope_oid
+    }
+}
+
+/// Immutable deterministic guards accompanying one tier-migration decision
+/// card. Statistical evidence cannot weaken any field in this receipt, and
+/// the card cannot be reused after its exact predecessor epoch changes.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TierMigrationGuardReceipt {
+    decision_card_oid: ObjectId,
+    predecessor_epoch_oid: ObjectId,
+    policy_id: String,
+    scope_oid: ObjectId,
+    regime_epoch: u64,
+    candidate_policy_oid: ObjectId,
+    fallback_policy_oid: ObjectId,
+    descriptor_oid: ObjectId,
+    required_dwell: u64,
+    observed_dwell: u64,
+    benefit_lower_bound: u128,
+    conversion_cost: u128,
+    uncertainty: u128,
+}
+
+impl TierMigrationGuardReceipt {
+    /// Constructs an identity-authenticated complete hard-guard receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        identity_issuer: &impl StatisticalEvidenceIdentityIssuer,
+        predecessor: &DecisionPolicyEpoch,
+        predecessor_epoch_oid: ObjectId,
+        regime_epoch: u64,
+        candidate_policy_oid: ObjectId,
+        descriptor_oid: ObjectId,
+        required_dwell: u64,
+        observed_dwell: u64,
+        benefit_lower_bound: u128,
+        conversion_cost: u128,
+        uncertainty: u128,
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        if predecessor.policy_id() != TIER_MIGRATION_POLICY_ID
+            || required_dwell == 0
+            || candidate_policy_oid == predecessor.fallback_oid()
+        {
+            return Err(DecisionPolicyEpochError::InvalidTierMigrationDecisionCard);
+        }
+        if observed_dwell < required_dwell {
+            return Err(DecisionPolicyEpochError::TierMigrationDwellUnsatisfied {
+                required: required_dwell,
+                observed: observed_dwell,
+            });
+        }
+        let required_benefit = conversion_cost
+            .checked_add(uncertainty)
+            .ok_or(DecisionPolicyEpochError::TierMigrationEconomicsOverflow)?;
+        if benefit_lower_bound <= required_benefit {
+            return Err(
+                DecisionPolicyEpochError::TierMigrationEconomicsUnsatisfied {
+                    benefit_lower_bound,
+                    conversion_cost,
+                    uncertainty,
+                },
+            );
+        }
+        let mut policy_id = String::new();
+        policy_id
+            .try_reserve_exact(predecessor.policy_id().len())
+            .map_err(|_| DecisionPolicyEpochError::TierMigrationDecisionCardAllocationFailed)?;
+        policy_id.push_str(predecessor.policy_id());
+        let scope_oid = predecessor.scope().scope_oid();
+        let fallback_policy_oid = predecessor.fallback_oid();
+        let mut canonical_body = Vec::new();
+        let requested = TIER_MIGRATION_DECISION_CARD_DOMAIN
+            .len()
+            .checked_add(policy_id.len())
+            .and_then(|length| length.checked_add(32 * 5 + 8 * 3 + 16 * 3 + 2))
+            .ok_or(DecisionPolicyEpochError::TierMigrationDecisionCardLengthOverflow)?;
+        canonical_body
+            .try_reserve_exact(requested)
+            .map_err(|_| DecisionPolicyEpochError::TierMigrationDecisionCardAllocationFailed)?;
+        canonical_body.extend_from_slice(TIER_MIGRATION_DECISION_CARD_DOMAIN);
+        canonical_body.extend_from_slice(
+            &u16::try_from(policy_id.len())
+                .map_err(|_| DecisionPolicyEpochError::TierMigrationDecisionCardLengthOverflow)?
+                .to_le_bytes(),
+        );
+        canonical_body.extend_from_slice(policy_id.as_bytes());
+        canonical_body.extend_from_slice(predecessor_epoch_oid.as_bytes());
+        canonical_body.extend_from_slice(scope_oid.as_bytes());
+        canonical_body.extend_from_slice(&regime_epoch.to_le_bytes());
+        canonical_body.extend_from_slice(candidate_policy_oid.as_bytes());
+        canonical_body.extend_from_slice(fallback_policy_oid.as_bytes());
+        canonical_body.extend_from_slice(descriptor_oid.as_bytes());
+        canonical_body.extend_from_slice(&required_dwell.to_le_bytes());
+        canonical_body.extend_from_slice(&observed_dwell.to_le_bytes());
+        canonical_body.extend_from_slice(&benefit_lower_bound.to_le_bytes());
+        canonical_body.extend_from_slice(&conversion_cost.to_le_bytes());
+        canonical_body.extend_from_slice(&uncertainty.to_le_bytes());
+        let decision_card_oid = identity_issuer
+            .issue_statistical_evidence_oid(&canonical_body)
+            .map_err(|_| DecisionPolicyEpochError::TierMigrationDecisionCardIdentityUnavailable)?;
+        let receipt = Self {
+            decision_card_oid,
+            predecessor_epoch_oid,
+            policy_id,
+            scope_oid,
+            regime_epoch,
+            candidate_policy_oid,
+            fallback_policy_oid,
+            descriptor_oid,
+            required_dwell,
+            observed_dwell,
+            benefit_lower_bound,
+            conversion_cost,
+            uncertainty,
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    /// Named decision-card identity.
+    #[must_use]
+    pub const fn decision_card_oid(&self) -> ObjectId {
+        self.decision_card_oid
+    }
+
+    /// Descriptor whose residence and conversion economics were measured.
+    #[must_use]
+    pub const fn descriptor_oid(&self) -> ObjectId {
+        self.descriptor_oid
+    }
+
+    /// Required minimum dwell.
+    #[must_use]
+    pub const fn required_dwell(&self) -> u64 {
+        self.required_dwell
+    }
+
+    /// Observed dwell under the same descriptor and policy epoch.
+    #[must_use]
+    pub const fn observed_dwell(&self) -> u64 {
+        self.observed_dwell
+    }
+
+    /// Conservative expected-benefit lower bound.
+    #[must_use]
+    pub const fn benefit_lower_bound(&self) -> u128 {
+        self.benefit_lower_bound
+    }
+
+    /// Deterministic representation-conversion cost.
+    #[must_use]
+    pub const fn conversion_cost(&self) -> u128 {
+        self.conversion_cost
+    }
+
+    /// Pinned uncertainty margin.
+    #[must_use]
+    pub const fn uncertainty(&self) -> u128 {
+        self.uncertainty
+    }
+
+    fn validate(&self) -> Result<(), DecisionPolicyEpochError> {
+        if self.observed_dwell < self.required_dwell {
+            return Err(DecisionPolicyEpochError::TierMigrationDwellUnsatisfied {
+                required: self.required_dwell,
+                observed: self.observed_dwell,
+            });
+        }
+        let required_benefit = self
+            .conversion_cost
+            .checked_add(self.uncertainty)
+            .ok_or(DecisionPolicyEpochError::TierMigrationEconomicsOverflow)?;
+        if self.benefit_lower_bound <= required_benefit {
+            return Err(
+                DecisionPolicyEpochError::TierMigrationEconomicsUnsatisfied {
+                    benefit_lower_bound: self.benefit_lower_bound,
+                    conversion_cost: self.conversion_cost,
+                    uncertainty: self.uncertainty,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_context(
+        &self,
+        predecessor: &DecisionPolicyEpoch,
+        predecessor_epoch_oid: ObjectId,
+        record: StatisticalLogRecord,
+        candidate_policy_oid: ObjectId,
+    ) -> Result<(), DecisionPolicyEpochError> {
+        if self.predecessor_epoch_oid != predecessor_epoch_oid
+            || self.policy_id != predecessor.policy_id()
+            || self.scope_oid != predecessor.scope().scope_oid()
+            || self.regime_epoch != record.regime_epoch()
+            || self.candidate_policy_oid != candidate_policy_oid
+            || self.candidate_policy_oid != record.candidate_decision_oid()
+            || self.fallback_policy_oid != predecessor.fallback_oid()
+            || self.fallback_policy_oid != record.pinned_fallback_oid()
+        {
+            return Err(DecisionPolicyEpochError::TierMigrationGuardContextMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -184,6 +396,45 @@ pub enum DecisionPolicyEpochError {
     RegimeEvidenceCannotPromoteCandidate { evidence_oid: ObjectId },
     /// A typed promotion record could not project its canonical envelope.
     PromotionRecordEnvelopeProjectionFailed { evidence_oid: ObjectId },
+    /// SPRT evidence may change tier state only through the hard-guarded
+    /// migration admission API.
+    SprtRequiresTierMigrationGuards { evidence_oid: ObjectId },
+    /// The canonical tier-migration policy may not use generic promotion.
+    TierMigrationRequiresHardGuards,
+    /// A decision card had no meaningful dwell or aliased candidate/fallback.
+    InvalidTierMigrationDecisionCard,
+    /// Decision-card canonical length arithmetic overflowed.
+    TierMigrationDecisionCardLengthOverflow,
+    /// Decision-card allocation failed before identity issuance.
+    TierMigrationDecisionCardAllocationFailed,
+    /// The namespace-aware decision-card identity authority was unavailable.
+    TierMigrationDecisionCardIdentityUnavailable,
+    /// A decision card described a different policy, scope, regime, candidate,
+    /// or fallback than the guarded transition.
+    TierMigrationGuardContextMismatch,
+    /// A guarded tier-migration transition did not carry SPRT evidence.
+    TierMigrationRecordMustBeSprt,
+    /// The SPRT did not accept the registered alternative hypothesis.
+    TierMigrationSprtDidNotAcceptAlternative { actual: SprtDecision },
+    /// The hard-guard receipt belonged to a different decision card than the
+    /// one authenticated by the SPRT evidence.
+    TierMigrationDecisionCardMismatch {
+        expected: ObjectId,
+        actual: ObjectId,
+    },
+    /// The deterministic minimum-dwell guard was not satisfied.
+    TierMigrationDwellUnsatisfied { required: u64, observed: u64 },
+    /// Benefit did not strictly exceed conversion cost plus uncertainty.
+    TierMigrationEconomicsUnsatisfied {
+        benefit_lower_bound: u128,
+        conversion_cost: u128,
+        uncertainty: u128,
+    },
+    /// Conversion cost plus uncertainty overflowed.
+    TierMigrationEconomicsOverflow,
+    /// Canonical replay did not equal the uniquely constructed guarded
+    /// successor.
+    TierMigrationReplayMismatch,
     /// Page-Hinkley/CUSUM evidence is retained for diagnostics but is not the
     /// versioned regime clock authorized to change policy state.
     LegacyRegimeEvidenceIsDiagnosticOnly,
@@ -429,6 +680,54 @@ impl fmt::Display for DecisionPolicyEpochError {
                 formatter,
                 "promotion record {evidence_oid:?} could not derive its canonical envelope"
             ),
+            Self::SprtRequiresTierMigrationGuards { evidence_oid } => write!(
+                formatter,
+                "SPRT evidence {evidence_oid:?} requires hard-guarded tier-migration admission"
+            ),
+            Self::TierMigrationRequiresHardGuards => formatter.write_str(
+                "the canonical tier-migration policy requires hard-guarded SPRT admission",
+            ),
+            Self::InvalidTierMigrationDecisionCard => formatter.write_str(
+                "tier-migration decision card has the wrong policy, zero dwell, or aliased candidate and fallback",
+            ),
+            Self::TierMigrationDecisionCardLengthOverflow => {
+                formatter.write_str("tier-migration decision-card length overflowed")
+            }
+            Self::TierMigrationDecisionCardAllocationFailed => {
+                formatter.write_str("tier-migration decision-card allocation failed")
+            }
+            Self::TierMigrationDecisionCardIdentityUnavailable => formatter.write_str(
+                "tier-migration decision-card identity authority was unavailable",
+            ),
+            Self::TierMigrationGuardContextMismatch => formatter.write_str(
+                "tier-migration decision card does not bind this policy, scope, regime, candidate, and fallback",
+            ),
+            Self::TierMigrationRecordMustBeSprt => formatter
+                .write_str("guarded tier-migration admission requires one typed SPRT record"),
+            Self::TierMigrationSprtDidNotAcceptAlternative { actual } => write!(
+                formatter,
+                "tier-migration SPRT decision {actual:?} did not accept the alternative"
+            ),
+            Self::TierMigrationDecisionCardMismatch { expected, actual } => write!(
+                formatter,
+                "tier-migration guard decision card {actual:?} differs from SPRT-bound card {expected:?}"
+            ),
+            Self::TierMigrationDwellUnsatisfied { required, observed } => write!(
+                formatter,
+                "tier-migration dwell {observed} is below required dwell {required}"
+            ),
+            Self::TierMigrationEconomicsUnsatisfied {
+                benefit_lower_bound,
+                conversion_cost,
+                uncertainty,
+            } => write!(
+                formatter,
+                "tier-migration benefit lower bound {benefit_lower_bound} does not strictly exceed conversion cost {conversion_cost} plus uncertainty {uncertainty}"
+            ),
+            Self::TierMigrationEconomicsOverflow => formatter
+                .write_str("tier-migration conversion cost plus uncertainty overflowed"),
+            Self::TierMigrationReplayMismatch => formatter
+                .write_str("canonical tier-migration successor differs from guarded replay"),
             Self::LegacyRegimeEvidenceIsDiagnosticOnly => formatter.write_str(
                 "Page-Hinkley/CUSUM evidence is diagnostic-only; policy fallback requires a BOCPD+SR record",
             ),
@@ -721,6 +1020,9 @@ impl DecisionPolicyEpoch {
         pinned_table_oid: ObjectId,
         records: &[StatisticalLogRecord],
     ) -> Result<Self, DecisionPolicyEpochError> {
+        if predecessor.policy_id() == TIER_MIGRATION_POLICY_ID {
+            return Err(DecisionPolicyEpochError::TierMigrationRequiresHardGuards);
+        }
         let (evidence_refs, envelopes) = Self::bind_promotion_records(records)?;
         Self::try_promote(
             predecessor,
@@ -728,6 +1030,60 @@ impl DecisionPolicyEpoch {
             pinned_table_oid,
             &evidence_refs,
             &envelopes,
+        )
+    }
+
+    /// Constructs one tier-migration successor only when both the typed SPRT
+    /// and every deterministic anti-thrash guard authorize it.
+    ///
+    /// The receipt is immutable and namespace-authenticated over the exact
+    /// predecessor epoch, policy, scope, regime, descriptor, and guard body.
+    /// This crate does not claim that a W3 controller already persists or
+    /// consumes the seam.
+    pub fn try_promote_tier_migration_from_sprt_record(
+        predecessor: &Self,
+        predecessor_oid: ObjectId,
+        pinned_table_oid: ObjectId,
+        record: StatisticalLogRecord,
+        guards: &TierMigrationGuardReceipt,
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        let (decision, decision_card_oid) = match record.statistic() {
+            StatisticalStatistic::SequentialProbabilityRatio {
+                decision,
+                decision_card_oid,
+                ..
+            } if record.monitor_kind() == StatisticalMonitorKind::SequentialProbabilityRatio => {
+                (decision, decision_card_oid)
+            }
+            _ => return Err(DecisionPolicyEpochError::TierMigrationRecordMustBeSprt),
+        };
+        if decision != SprtDecision::AcceptAlternative {
+            return Err(
+                DecisionPolicyEpochError::TierMigrationSprtDidNotAcceptAlternative {
+                    actual: decision,
+                },
+            );
+        }
+        guards.validate()?;
+        guards.validate_context(predecessor, predecessor_oid, record, pinned_table_oid)?;
+        if guards.decision_card_oid() != decision_card_oid {
+            return Err(
+                DecisionPolicyEpochError::TierMigrationDecisionCardMismatch {
+                    expected: decision_card_oid,
+                    actual: guards.decision_card_oid(),
+                },
+            );
+        }
+        let evidence_oid = record.evidence_oid();
+        let envelope = record.try_to_evidence_envelope().map_err(|_| {
+            DecisionPolicyEpochError::PromotionRecordEnvelopeProjectionFailed { evidence_oid }
+        })?;
+        Self::try_promote(
+            predecessor,
+            predecessor_oid,
+            pinned_table_oid,
+            &[evidence_oid],
+            &[envelope],
         )
     }
 
@@ -742,6 +1098,11 @@ impl DecisionPolicyEpoch {
         })?;
         for record in records {
             let evidence_oid = record.evidence_oid();
+            if record.monitor_kind() == StatisticalMonitorKind::SequentialProbabilityRatio {
+                return Err(DecisionPolicyEpochError::SprtRequiresTierMigrationGuards {
+                    evidence_oid,
+                });
+            }
             if record.monitor_kind() == StatisticalMonitorKind::RegimeChange {
                 return Err(
                     DecisionPolicyEpochError::RegimeEvidenceCannotPromoteCandidate { evidence_oid },
@@ -871,10 +1232,42 @@ impl DecisionPolicyEpoch {
         predecessor_oid: ObjectId,
         records: &[StatisticalLogRecord],
     ) -> Result<Self, DecisionPolicyEpochError> {
+        if predecessor.policy_id() == TIER_MIGRATION_POLICY_ID {
+            return Err(DecisionPolicyEpochError::TierMigrationRequiresHardGuards);
+        }
         let (_, envelopes) = Self::bind_promotion_records(records)?;
         let epoch = Self::decode_canonical_bytes(encoded)?;
         epoch.validate_promotion_from(predecessor, predecessor_oid, &envelopes)?;
         Ok(epoch)
+    }
+
+    /// Replays a guarded tier-migration successor from canonical epoch bytes.
+    pub fn try_promoted_tier_migration_from_canonical_bytes(
+        encoded: &[u8],
+        predecessor: &Self,
+        predecessor_oid: ObjectId,
+        record: StatisticalLogRecord,
+        guards: &TierMigrationGuardReceipt,
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        let expected = Self::try_promote_tier_migration_from_sprt_record(
+            predecessor,
+            predecessor_oid,
+            record.selected_policy_oid(),
+            record,
+            guards,
+        )?;
+        let decoded = Self::decode_canonical_bytes(encoded)?;
+        if decoded == expected {
+            Ok(decoded)
+        } else {
+            let envelope = record.try_to_evidence_envelope().map_err(|_| {
+                DecisionPolicyEpochError::PromotionRecordEnvelopeProjectionFailed {
+                    evidence_oid: record.evidence_oid(),
+                }
+            })?;
+            decoded.validate_promotion_from(predecessor, predecessor_oid, &[envelope])?;
+            Err(DecisionPolicyEpochError::TierMigrationReplayMismatch)
+        }
     }
 
     /// Refuses canonical replay through the diagnostic-only legacy detector.
