@@ -2593,6 +2593,8 @@ struct TxnCoverage {
     conflicts: usize,
     aborts_after_writes: usize,
     read_closes: usize,
+    zero_net_commits: usize,
+    commits_after_zero_net: usize,
     histories_with_structures: usize,
 }
 
@@ -2608,6 +2610,8 @@ impl TxnCoverage {
         self.conflicts += next.conflicts;
         self.aborts_after_writes += next.aborts_after_writes;
         self.read_closes += next.read_closes;
+        self.zero_net_commits += next.zero_net_commits;
+        self.commits_after_zero_net += next.commits_after_zero_net;
         self.histories_with_structures += next.histories_with_structures;
     }
 }
@@ -2621,10 +2625,16 @@ struct TxnGenerated {
 #[derive(Clone, Debug)]
 struct NaiveTransaction {
     snapshot_high: u64,
+    /// Snapshot basis retained independently from the mutable workspace so
+    /// commit can derive the same basis-to-after-image net rows as production.
+    basis: BTreeMap<u128, i64>,
     workspace: BTreeMap<u128, i64>,
     reads: BTreeSet<ConflictKey>,
     write_vertices: BTreeSet<u128>,
-    effect_count: usize,
+    /// Effects published by successful statements into this transaction's
+    /// workspace. This is deliberately not the committed effect count: commit
+    /// folds multiple writes to one logical target into NetEffectNormalForm.
+    published_effect_count: usize,
     statement_failures: usize,
     next_statement: usize,
     mutation_capable: bool,
@@ -2699,14 +2709,16 @@ impl NaiveTxnDatabase {
                     return Err(format!("transaction {tx} began more than once"));
                 }
                 self.started.insert(tx);
+                let basis = self.committed.clone();
                 self.active.insert(
                     tx,
                     NaiveTransaction {
                         snapshot_high: self.frontier,
-                        workspace: self.committed.clone(),
+                        workspace: basis.clone(),
+                        basis,
                         reads: BTreeSet::new(),
                         write_vertices: BTreeSet::new(),
-                        effect_count: 0,
+                        published_effect_count: 0,
                         statement_failures: 0,
                         next_statement: 0,
                         mutation_capable: false,
@@ -2761,7 +2773,7 @@ impl NaiveTxnDatabase {
                 if before != value {
                     transaction.workspace.insert(vid, value);
                     transaction.write_vertices.insert(vid);
-                    transaction.effect_count += 1;
+                    transaction.published_effect_count += 1;
                 }
                 Ok(TxnModelEvent::Executed)
             }
@@ -2821,6 +2833,13 @@ impl NaiveTxnDatabase {
             }
 
             if conflicts.is_empty() {
+                let net_write_vertices = transaction
+                    .write_vertices
+                    .iter()
+                    .filter(|vid| transaction.workspace.get(vid) != transaction.basis.get(vid))
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let net_effect_count = net_write_vertices.len();
                 let commit_seq = self
                     .frontier
                     .checked_add(1)
@@ -2834,12 +2853,11 @@ impl NaiveTxnDatabase {
                     self.committed.insert(*vid, value);
                 }
                 self.frontier = commit_seq;
-                self.committed_writes
-                    .push((commit_seq, transaction.write_vertices.clone()));
+                self.committed_writes.push((commit_seq, net_write_vertices));
                 trace.commit_seq = Some(commit_seq);
                 TxnOutcome::WriteCommitted {
                     commit_seq: CommitSeq(commit_seq),
-                    effects: transaction.effect_count,
+                    effects: net_effect_count,
                     statement_failures: transaction.statement_failures,
                 }
             } else {
@@ -3009,11 +3027,11 @@ fn compare_transaction_state(
                 "state|{context}: transaction {tx} abort state differs"
             ));
         }
-        if subject.effects().len() != modeled.effect_count {
+        if subject.effects().len() != modeled.published_effect_count {
             return Err(format!(
                 "state|{context}: transaction {tx} effect count differs: {} != {}",
                 subject.effects().len(),
-                modeled.effect_count
+                modeled.published_effect_count
             ));
         }
         if subject.statement_failures() != modeled.statement_failures {
@@ -3244,6 +3262,12 @@ fn transaction_coverage(actions: &[TxnAction]) -> Result<TxnCoverage, String> {
         let active_before = model.active.len();
         let transaction_before = model.active.get(&action.transaction()).cloned();
         let frontier_before = model.frontier;
+        let prior_zero_net_after_snapshot =
+            transaction_before.as_ref().is_some_and(|transaction| {
+                model.committed_writes.iter().any(|(sequence, writes)| {
+                    *sequence > transaction.snapshot_high && writes.is_empty()
+                })
+            });
         let event = model.apply(action)?;
         match action {
             TxnAction::Begin { .. } => {
@@ -3268,7 +3292,14 @@ fn transaction_coverage(actions: &[TxnAction]) -> Result<TxnCoverage, String> {
                 );
             }
             TxnAction::Commit { .. } => match event {
-                TxnModelEvent::Terminal(TxnOutcome::WriteCommitted { .. }) => {
+                TxnModelEvent::Terminal(TxnOutcome::WriteCommitted { effects, .. }) => {
+                    coverage.zero_net_commits += usize::from(
+                        effects == 0
+                            && transaction_before
+                                .as_ref()
+                                .is_some_and(|transaction| transaction.mutation_capable),
+                    );
+                    coverage.commits_after_zero_net += usize::from(prior_zero_net_after_snapshot);
                     coverage.disjoint_commits +=
                         usize::from(transaction_before.as_ref().is_some_and(|transaction| {
                             !transaction.write_vertices.is_empty()
@@ -3298,7 +3329,7 @@ fn generate_transaction_history(seed: u64, budget: usize) -> Result<TxnGenerated
     let mut model = NaiveTxnDatabase::seeded();
     let mut actions = Vec::new();
 
-    let prefix = match seed % 4 {
+    let prefix = match seed % 5 {
         0 => vec![
             TxnAction::Begin { tx: 1 },
             TxnAction::Begin { tx: 2 },
@@ -3357,7 +3388,7 @@ fn generate_transaction_history(seed: u64, budget: usize) -> Result<TxnGenerated
             TxnAction::Read { tx: 2, vid: 1 },
             TxnAction::Commit { tx: 2 },
         ],
-        _ => vec![
+        3 => vec![
             TxnAction::Begin { tx: 1 },
             TxnAction::Begin { tx: 2 },
             TxnAction::Write {
@@ -3370,6 +3401,27 @@ fn generate_transaction_history(seed: u64, budget: usize) -> Result<TxnGenerated
                 tx: 2,
                 vid: 2,
                 value: 3,
+            },
+            TxnAction::Commit { tx: 1 },
+            TxnAction::Commit { tx: 2 },
+        ],
+        _ => vec![
+            TxnAction::Begin { tx: 1 },
+            TxnAction::Begin { tx: 2 },
+            TxnAction::Write {
+                tx: 1,
+                vid: 2,
+                value: 3,
+            },
+            TxnAction::Write {
+                tx: 1,
+                vid: 2,
+                value: 1,
+            },
+            TxnAction::Write {
+                tx: 2,
+                vid: 2,
+                value: 4,
             },
             TxnAction::Commit { tx: 1 },
             TxnAction::Commit { tx: 2 },
@@ -3572,10 +3624,122 @@ fn generated_transaction_histories_match_the_independent_model() -> Result<(), S
         "no read-only closes: {coverage:?}"
     );
     assert!(
+        coverage.zero_net_commits > 0,
+        "no basis-restoring zero-net commits: {coverage:?}"
+    );
+    assert!(
+        coverage.commits_after_zero_net > 0,
+        "no concurrent commits after a zero-net commit: {coverage:?}"
+    );
+    assert!(
         coverage.histories_with_structures > 0,
         "no dependency structures: {coverage:?}"
     );
     Ok(())
+}
+
+#[test]
+fn transaction_oracle_distinguishes_statement_effects_from_committed_net_effects()
+-> Result<(), String> {
+    for (values, expected_net_effects) in [([3_i64, 4_i64], 1_usize), ([3, 1], 0)] {
+        let actions = vec![
+            TxnAction::Begin { tx: 3 },
+            TxnAction::Write {
+                tx: 3,
+                vid: 2,
+                value: values[0],
+            },
+            TxnAction::Write {
+                tx: 3,
+                vid: 2,
+                value: values[1],
+            },
+            TxnAction::Commit { tx: 3 },
+        ];
+        let mut model = NaiveTxnDatabase::seeded();
+        for action in actions.iter().take(3).copied() {
+            model.apply(action)?;
+        }
+        assert_eq!(
+            model
+                .active
+                .get(&3)
+                .ok_or_else(|| "model lost the active transaction".to_string())?
+                .published_effect_count,
+            2,
+            "both successful statements must remain visible before commit"
+        );
+        assert_eq!(
+            model.apply(TxnAction::Commit { tx: 3 })?,
+            TxnModelEvent::Terminal(TxnOutcome::WriteCommitted {
+                commit_seq: CommitSeq(2),
+                effects: expected_net_effects,
+                statement_failures: 0,
+            }),
+            "commit must report the basis-to-workspace state diff, not the statement count"
+        );
+
+        run_transaction_history(&TxnGenerated {
+            actions,
+            coverage: TxnCoverage::default(),
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn restored_basis_publishes_no_phantom_conflict_for_a_concurrent_writer() -> Result<(), String> {
+    let actions = vec![
+        TxnAction::Begin { tx: 1 },
+        TxnAction::Begin { tx: 2 },
+        TxnAction::Write {
+            tx: 1,
+            vid: 2,
+            value: 3,
+        },
+        TxnAction::Write {
+            tx: 1,
+            vid: 2,
+            value: 1,
+        },
+        TxnAction::Write {
+            tx: 2,
+            vid: 2,
+            value: 4,
+        },
+        TxnAction::Commit { tx: 1 },
+        TxnAction::Commit { tx: 2 },
+    ];
+    let mut model = NaiveTxnDatabase::seeded();
+    for action in actions.iter().take(5).copied() {
+        model.apply(action)?;
+    }
+    assert_eq!(
+        model.apply(TxnAction::Commit { tx: 1 })?,
+        TxnModelEvent::Terminal(TxnOutcome::WriteCommitted {
+            commit_seq: CommitSeq(2),
+            effects: 0,
+            statement_failures: 0,
+        })
+    );
+    assert_eq!(
+        model.committed_writes.last(),
+        Some(&(2, BTreeSet::new())),
+        "a zero-row commit must not fabricate a future write/write conflict"
+    );
+    assert_eq!(
+        model.apply(TxnAction::Commit { tx: 2 })?,
+        TxnModelEvent::Terminal(TxnOutcome::WriteCommitted {
+            commit_seq: CommitSeq(3),
+            effects: 1,
+            statement_failures: 0,
+        })
+    );
+
+    run_transaction_history(&TxnGenerated {
+        actions,
+        coverage: TxnCoverage::default(),
+    })
 }
 
 #[test]
