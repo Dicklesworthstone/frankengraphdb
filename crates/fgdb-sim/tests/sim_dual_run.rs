@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use fgdb_crypto::Hasher;
 use fgdb_sim::dual_run::{
-    FixtureRunReceipt, FixtureRuntime, determinism_gate, dual_run_fixture, run_fixture_under_lab,
+    DualRunOutcome, FixtureRunReceipt, FixtureRuntime, determinism_gate, dual_run_fixture,
+    dual_run_verdict_log_lines, run_fixture_under_lab,
 };
 use fgdb_sim::fixture::{FixtureConfig, MAX_FIXTURE_PAYLOAD_BYTES};
 use fgdb_sim::vfs::Trigger;
@@ -270,6 +271,43 @@ fn assert_non_failure_receipt(receipt: &FixtureRunReceipt) {
     assert!(receipt.final_reproducer_path().is_none());
 }
 
+fn assert_failed_dual_run_log_is_lossless(outcome: &DualRunOutcome) {
+    let detail_lines = dual_run_verdict_log_lines(&outcome.result);
+    assert_eq!(
+        detail_lines.len(),
+        outcome.result.verdict.mismatches.len(),
+        "this control has semantic mismatches and no invariant violations"
+    );
+    for (index, mismatch) in outcome.result.verdict.mismatches.iter().enumerate() {
+        let expected = format!(
+            "dual-run mismatch index={index} field={:?} description={:?} lab_value={:?} live_value={:?}",
+            mismatch.field, mismatch.description, mismatch.lab_value, mismatch.live_value,
+        );
+        assert_eq!(detail_lines[index], expected);
+        assert!(
+            outcome.log_lines.contains(&expected),
+            "the retained verdict log omitted mismatch {index}: {expected}"
+        );
+    }
+
+    let mut invariant_control = outcome.result.clone();
+    invariant_control
+        .lab_invariant_violations
+        .push("planted lab invariant detail".to_string());
+    invariant_control
+        .live_invariant_violations
+        .push("planted live invariant detail".to_string());
+    let invariant_lines = dual_run_verdict_log_lines(&invariant_control);
+    assert!(invariant_lines.contains(
+        &"dual-run invariant_violation runtime=lab index=0 detail=\"planted lab invariant detail\""
+            .to_string()
+    ));
+    assert!(invariant_lines.contains(
+        &"dual-run invariant_violation runtime=live index=0 detail=\"planted live invariant detail\""
+            .to_string()
+    ));
+}
+
 #[test]
 fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
     let mut faulting = FixtureConfig::new(0x00FA_11ED);
@@ -368,6 +406,8 @@ fn the_dual_run_detects_a_semantic_mutation() {
         outcome.live_receipt.trace_digest(),
         "the live receipt must bind the mutated execution rather than the caller's base seed"
     );
+
+    assert_failed_dual_run_log_is_lossless(&outcome);
 }
 
 #[test]
@@ -444,4 +484,5 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
             .any(|line| line.contains(&format!("seed={live_seed:#x}"))),
         "the receipt must name the execution that actually ran, not the base request"
     );
+    assert_failed_dual_run_log_is_lossless(&mutated);
 }

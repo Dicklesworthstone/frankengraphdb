@@ -527,6 +527,33 @@ pub struct DualRunOutcome {
     pub log_lines: Vec<String>,
 }
 
+/// Project every failed comparison fact into structured log lines.
+///
+/// The foundation result remains the typed authority. This lossless textual
+/// projection exists so a stored verdict can be reconstructed without
+/// rerunning: a count alone cannot identify which value diverged.
+#[must_use]
+pub fn dual_run_verdict_log_lines(result: &DualRunResult) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (index, mismatch) in result.verdict.mismatches.iter().enumerate() {
+        lines.push(format!(
+            "dual-run mismatch index={index} field={:?} description={:?} lab_value={:?} live_value={:?}",
+            mismatch.field, mismatch.description, mismatch.lab_value, mismatch.live_value,
+        ));
+    }
+    for (runtime, violations) in [
+        ("lab", &result.lab_invariant_violations),
+        ("live", &result.live_invariant_violations),
+    ] {
+        for (index, violation) in violations.iter().enumerate() {
+            lines.push(format!(
+                "dual-run invariant_violation runtime={runtime} index={index} detail={violation:?}"
+            ));
+        }
+    }
+    lines
+}
+
 /// Runs the fixture under the lab AND under the live runtime at one seed via
 /// asupersync's [`DualRunHarness`], comparing the clock-free semantics.
 ///
@@ -594,7 +621,6 @@ pub fn dual_run_fixture(
         .expect("dual-run live receipt slot")
         .take()
         .expect("dual-run harness executed its live side");
-
     let lab_digest = result
         .lab
         .semantics
@@ -611,6 +637,7 @@ pub fn dual_run_fixture(
         .unwrap_or_default();
     let mut log_lines = lab_receipt.log_lines();
     log_lines.extend(live_receipt.log_lines());
+    log_lines.extend(dual_run_verdict_log_lines(&result));
     log_lines.extend([
         format!(
             "dual-run seed={:#x} lab_digest={lab_digest} live_digest={live_digest}",
