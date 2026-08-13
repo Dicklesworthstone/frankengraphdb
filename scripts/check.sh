@@ -1092,8 +1092,22 @@ run_ubs() {
 # exact. The partition closes at 133+164+122+2 = 421 = the reported Critical
 # total. Same tool version as the baseline-setting run, so this is not detector
 # drift.
+# MOVED 2026-08-12 (fgdb-verif-sextant-ss83): timing-safe 164 -> 183, +19,
+# and it is TREE MOVEMENT introduced by f292858's bounded BOCPD+SR evidence
+# implementation. ATTRIBUTED BY EXACT FILE DIFFERENTIAL with the gate's UBS
+# v5.3.8 invocation: regime.rs reports 19 at f292858^, 38 at f292858, 38 at
+# 3d0098c, and 38 at 23a1ac7. A stable whole-tree scan at 23a1ac7 over 241
+# tracked Rust sources closed at 133+183+122+2 = 440.
+#
+# The added matches compare canonical encoding domains, public detector/profile
+# ObjectIds, evidence counters/status/thresholds, and replay state. They are not
+# bearer tokens, credentials, HMACs, signatures, nonces, or other secrets, and
+# there is no remote timing oracle. Constant-time equality would be semantically
+# inapplicable; the scanner's suggested crypto dependencies are also forbidden
+# by Doctrine #1. Keep the findings visible and equality-pinned here instead of
+# suppressing them locally: any future increase OR decrease still fails closed.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=164"
+  "Secret/token comparisons without timing-safe equality=183"
   "panic!/unreachable!/todo!/unimplemented!=133"
   "JWT decode, validation bypass, or missing claim binding=122"
   "Security-sensitive non-crypto randomness=2"
