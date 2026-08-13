@@ -220,6 +220,44 @@ pub enum Trigger {
     PerMille(u32),
 }
 
+fn encode_replay_trigger(trigger: Trigger) -> String {
+    match trigger {
+        Trigger::Never => "never".to_string(),
+        Trigger::Always => "always".to_string(),
+        Trigger::Nth(n) => format!("nth{n}"),
+        Trigger::At(n) => format!("at{n}"),
+        Trigger::PerMille(p) => format!("pm{p}"),
+    }
+}
+
+fn decode_replay_trigger(text: &str) -> Result<Trigger, String> {
+    if text == "never" {
+        return Ok(Trigger::Never);
+    }
+    if text == "always" {
+        return Ok(Trigger::Always);
+    }
+    if let Some(rest) = text.strip_prefix("nth") {
+        return rest
+            .parse()
+            .map(Trigger::Nth)
+            .map_err(|_| format!("bad Nth trigger {text:?}"));
+    }
+    if let Some(rest) = text.strip_prefix("at") {
+        return rest
+            .parse()
+            .map(Trigger::At)
+            .map_err(|_| format!("bad At trigger {text:?}"));
+    }
+    if let Some(rest) = text.strip_prefix("pm") {
+        return rest
+            .parse()
+            .map(Trigger::PerMille)
+            .map_err(|_| format!("bad PerMille trigger {text:?}"));
+    }
+    Err(format!("unknown trigger {text:?}"))
+}
+
 /// A declarative, seeded fault model.
 ///
 /// `Eq` is load-bearing, not a convenience: a replay descriptor round-trips a
@@ -286,6 +324,138 @@ impl FaultPlan {
             latency_micros: 0,
             space_budget: None,
         }
+    }
+
+    /// Canonical fields shared by every executable replay descriptor.
+    ///
+    /// Kept crate-private because this is an artifact transport detail, not a
+    /// general user-facing parser. The built-in and exported-fixture replay
+    /// values must nevertheless share one authority for trigger ordering.
+    pub(crate) fn encode_replay_fields(self) -> String {
+        let budget = match self.space_budget {
+            Some(bytes) => bytes.to_string(),
+            None => "none".to_string(),
+        };
+        format!(
+            "{:#x}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            self.seed,
+            self.sector_bytes,
+            encode_replay_trigger(self.fsync_lie),
+            encode_replay_trigger(self.write_enospc),
+            encode_replay_trigger(self.torn_write),
+            encode_replay_trigger(self.bit_flip),
+            encode_replay_trigger(self.dirent_lie),
+            encode_replay_trigger(self.dirent_loss),
+            encode_replay_trigger(self.latency),
+            self.latency_micros,
+            budget,
+        )
+    }
+
+    /// Parses [`FaultPlan::encode_replay_fields`], including the already-filed
+    /// legacy form from before `write_enospc` became an independent class.
+    pub(crate) fn decode_replay_fields(text: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = text.split(':').collect();
+        let (
+            seed,
+            sector,
+            lie,
+            write_enospc,
+            torn,
+            flip,
+            dirent_lie,
+            dirent_loss,
+            latency,
+            latency_micros,
+            budget,
+        ) = match parts.as_slice() {
+            [
+                seed,
+                sector,
+                lie,
+                write_enospc,
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ] => (
+                seed,
+                sector,
+                lie,
+                Some(*write_enospc),
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ),
+            [
+                seed,
+                sector,
+                lie,
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ] => (
+                seed,
+                sector,
+                lie,
+                None,
+                torn,
+                flip,
+                dirent_lie,
+                dirent_loss,
+                latency,
+                latency_micros,
+                budget,
+            ),
+            _ => {
+                return Err(format!(
+                    "expected 10 or 11 colon-separated fault-plan fields, got {}",
+                    parts.len()
+                ));
+            }
+        };
+        let seed = seed
+            .strip_prefix("0x")
+            .ok_or_else(|| format!("seed {seed:?} is not 0x-prefixed"))
+            .and_then(|hex| {
+                u64::from_str_radix(hex, 16).map_err(|_| format!("bad seed {seed:?}"))
+            })?;
+        Ok(Self {
+            seed,
+            sector_bytes: sector
+                .parse()
+                .map_err(|_| format!("bad sector_bytes {sector:?}"))?,
+            fsync_lie: decode_replay_trigger(lie)?,
+            write_enospc: write_enospc.map_or(Ok(Trigger::Never), decode_replay_trigger)?,
+            torn_write: decode_replay_trigger(torn)?,
+            bit_flip: decode_replay_trigger(flip)?,
+            dirent_lie: decode_replay_trigger(dirent_lie)?,
+            dirent_loss: decode_replay_trigger(dirent_loss)?,
+            latency: decode_replay_trigger(latency)?,
+            latency_micros: latency_micros
+                .parse()
+                .map_err(|_| format!("bad latency_micros {latency_micros:?}"))?,
+            space_budget: if *budget == "none" {
+                None
+            } else {
+                Some(
+                    budget
+                        .parse()
+                        .map_err(|_| format!("bad space_budget {budget:?}"))?,
+                )
+            },
+        })
     }
 
     fn sector_bytes(&self) -> u64 {

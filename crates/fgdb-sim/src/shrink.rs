@@ -51,10 +51,12 @@
 //! either. Stated rather than implied.
 
 use crate::artifact::{Failure, FailureKind, Replay, RunOutcome};
-use crate::dual_run::{FixtureFailureKind, FixtureRunError, run_fixture_workload_under_lab};
+use crate::dual_run::{
+    FixtureFailureEvidence, FixtureFailureKind, FixtureReplay, FixtureReplayError, FixtureRunError,
+    run_fixture_workload_under_lab,
+};
 use crate::fixture::{FixtureWorkload, FixtureWorkloadAction, FixtureWorkloadError};
 use crate::vfs::{FaultEvent, FaultPlan, Trigger};
-use asupersync::lab::LabConfig;
 use fgdb_crypto::Hasher;
 use std::io;
 use std::path::Path;
@@ -653,8 +655,8 @@ where
 pub struct FixtureWorkloadShrunk {
     original_workload_digest: String,
     original_execution_digest: String,
-    workload: FixtureWorkload,
-    minimal_execution_digest: String,
+    replay: FixtureReplay,
+    minimal_evidence: FixtureFailureEvidence,
     failure: FixtureFailureKind,
     attempts: usize,
     accepted: usize,
@@ -677,13 +679,34 @@ impl FixtureWorkloadShrunk {
     /// Canonical one-minimal workload.
     #[must_use]
     pub const fn workload(&self) -> &FixtureWorkload {
-        &self.workload
+        self.replay.workload()
+    }
+
+    /// Self-contained replay value for the retained one-minimal workload.
+    #[must_use]
+    pub const fn replay(&self) -> &FixtureReplay {
+        &self.replay
     }
 
     /// Execution-root seal of the retained one-minimal failure.
     #[must_use]
     pub fn minimal_execution_digest(&self) -> &str {
-        &self.minimal_execution_digest
+        self.minimal_evidence.execution_digest()
+    }
+
+    /// Immutable LAB evidence emitted by the retained one-minimal failure.
+    #[must_use]
+    pub const fn minimal_evidence(&self) -> &FixtureFailureEvidence {
+        &self.minimal_evidence
+    }
+
+    /// Real fresh-process replay command bound to the minimized execution.
+    ///
+    /// # Errors
+    ///
+    /// Refuses if any replay/evidence identity diverged after construction.
+    pub fn replay_command(&self) -> Result<String, FixtureReplayError> {
+        self.replay.command_for(&self.minimal_evidence)
     }
 
     /// Exact component/operation/I/O category retained by every reduction.
@@ -756,12 +779,12 @@ pub fn shrink_fixture_workload_under_lab(
     cfg: &crate::fixture::FixtureConfig,
     workload: &FixtureWorkload,
     scratch_root: &Path,
-    lab_config: LabConfig,
+    scheduler_seed: u64,
 ) -> Result<Option<FixtureWorkloadShrunk>, FixtureWorkloadShrinkError> {
     let original_workload_digest = workload.canonical_digest_hex();
     let mut target = None;
     let mut original_execution_digest = None;
-    let mut minimal_execution_digest = None;
+    let mut minimal_evidence = None;
     let mut fatal = None;
     let mut ordinal = 0usize;
     let shrunk = {
@@ -782,22 +805,26 @@ pub fn shrink_fixture_workload_under_lab(
                 fatal = Some(FixtureWorkloadShrinkError::AttemptIo(error.kind()));
                 return ShrinkTrial::DidNotReproduce;
             }
-            match run_fixture_workload_under_lab(cfg, &candidate, &attempt, lab_config.clone()) {
+            match run_fixture_workload_under_lab(
+                cfg,
+                &candidate,
+                &attempt,
+                asupersync::lab::LabConfig::new(scheduler_seed),
+            ) {
                 Ok(_) => ShrinkTrial::DidNotReproduce,
                 Err(error) => {
-                    let execution_digest = error
-                        .failure_evidence()
-                        .map(|evidence| evidence.execution_digest().to_string());
+                    let evidence = error.failure_evidence().cloned();
                     match error.failure_kind() {
                         Some(kind) if target.is_none() || target == Some(kind) => {
-                            let Some(execution_digest) = execution_digest else {
+                            let Some(evidence) = evidence else {
                                 fatal = Some(FixtureWorkloadShrinkError::Harness(error));
                                 return ShrinkTrial::DidNotReproduce;
                             };
                             if original_execution_digest.is_none() {
-                                original_execution_digest = Some(execution_digest.clone());
+                                original_execution_digest =
+                                    Some(evidence.execution_digest().to_string());
                             }
-                            minimal_execution_digest = Some(execution_digest);
+                            minimal_evidence = Some(evidence);
                             target.get_or_insert(kind);
                             ShrinkTrial::Reproduced
                         }
@@ -825,8 +852,8 @@ pub fn shrink_fixture_workload_under_lab(
     let Some(failure) = target else {
         return Err(FixtureWorkloadShrinkError::MissingFailureIdentity);
     };
-    let (Some(original_execution_digest), Some(minimal_execution_digest)) =
-        (original_execution_digest, minimal_execution_digest)
+    let (Some(original_execution_digest), Some(minimal_evidence)) =
+        (original_execution_digest, minimal_evidence)
     else {
         return Err(FixtureWorkloadShrinkError::MissingFailureIdentity);
     };
@@ -835,8 +862,8 @@ pub fn shrink_fixture_workload_under_lab(
     Ok(Some(FixtureWorkloadShrunk {
         original_workload_digest,
         original_execution_digest,
-        workload,
-        minimal_execution_digest,
+        replay: FixtureReplay::new(workload, cfg.fault_plan, scheduler_seed),
+        minimal_evidence,
         failure,
         attempts: shrunk.attempts,
         accepted: shrunk.accepted,

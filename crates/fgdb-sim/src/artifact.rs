@@ -54,7 +54,7 @@
 //! command or decoder for an arbitrary downstream function pointer. Those
 //! owners must provide and test that executable boundary themselves.
 
-use crate::vfs::{FaultEvent, FaultPlan, FaultVfs, Trigger};
+use crate::vfs::{FaultEvent, FaultPlan, FaultVfs};
 use asupersync::fs::{OpenOptions, Vfs, VfsFile};
 use asupersync::io::AsyncWrite;
 use asupersync::lab::{LabConfig, LabRuntime};
@@ -616,44 +616,6 @@ pub struct Replay {
     pub plan: FaultPlan,
 }
 
-fn encode_trigger(trigger: Trigger) -> String {
-    match trigger {
-        Trigger::Never => "never".to_string(),
-        Trigger::Always => "always".to_string(),
-        Trigger::Nth(n) => format!("nth{n}"),
-        Trigger::At(n) => format!("at{n}"),
-        Trigger::PerMille(p) => format!("pm{p}"),
-    }
-}
-
-fn decode_trigger(text: &str) -> Result<Trigger, String> {
-    if text == "never" {
-        return Ok(Trigger::Never);
-    }
-    if text == "always" {
-        return Ok(Trigger::Always);
-    }
-    if let Some(rest) = text.strip_prefix("nth") {
-        return rest
-            .parse()
-            .map(Trigger::Nth)
-            .map_err(|_| format!("bad Nth trigger {text:?}"));
-    }
-    if let Some(rest) = text.strip_prefix("at") {
-        return rest
-            .parse()
-            .map(Trigger::At)
-            .map_err(|_| format!("bad At trigger {text:?}"));
-    }
-    if let Some(rest) = text.strip_prefix("pm") {
-        return rest
-            .parse()
-            .map(Trigger::PerMille)
-            .map_err(|_| format!("bad PerMille trigger {text:?}"));
-    }
-    Err(format!("unknown trigger {text:?}"))
-}
-
 impl Replay {
     /// The replay's arguments, as one field-ordered string.
     ///
@@ -662,24 +624,10 @@ impl Replay {
     /// produce a command that runs *a* scenario rather than *the* failure.
     #[must_use]
     pub fn encode(&self) -> String {
-        let budget = match self.plan.space_budget {
-            Some(bytes) => bytes.to_string(),
-            None => "none".to_string(),
-        };
         format!(
-            "{}:{:#x}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}",
             self.scenario.id(),
-            self.plan.seed,
-            self.plan.sector_bytes,
-            encode_trigger(self.plan.fsync_lie),
-            encode_trigger(self.plan.write_enospc),
-            encode_trigger(self.plan.torn_write),
-            encode_trigger(self.plan.bit_flip),
-            encode_trigger(self.plan.dirent_lie),
-            encode_trigger(self.plan.dirent_loss),
-            encode_trigger(self.plan.latency),
-            self.plan.latency_micros,
-            budget,
+            self.plan.encode_replay_fields()
         )
     }
 
@@ -704,114 +652,12 @@ impl Replay {
     // scanner's substring match would cost more than the waiver.
     // ubs:ignore
     pub fn decode(text: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = text.split(':').collect();
-        let (
-            scenario,
-            seed,
-            sector,
-            lie,
-            write_enospc,
-            torn,
-            flip,
-            dirent_lie,
-            dirent_loss,
-            latency,
-            latency_micros,
-            budget,
-        ) = match parts.as_slice() {
-            [
-                scenario,
-                seed,
-                sector,
-                lie,
-                write_enospc,
-                torn,
-                flip,
-                dirent_lie,
-                dirent_loss,
-                latency,
-                latency_micros,
-                budget,
-            ] => (
-                scenario,
-                seed,
-                sector,
-                lie,
-                Some(*write_enospc),
-                torn,
-                flip,
-                dirent_lie,
-                dirent_loss,
-                latency,
-                latency_micros,
-                budget,
-            ),
-            [
-                scenario,
-                seed,
-                sector,
-                lie,
-                torn,
-                flip,
-                dirent_lie,
-                dirent_loss,
-                latency,
-                latency_micros,
-                budget,
-            ] => (
-                scenario,
-                seed,
-                sector,
-                lie,
-                None,
-                torn,
-                flip,
-                dirent_lie,
-                dirent_loss,
-                latency,
-                latency_micros,
-                budget,
-            ),
-            _ => {
-                return Err(format!(
-                    "expected 11 or 12 colon-separated fields, got {}",
-                    parts.len()
-                ));
-            }
-        };
-        let seed = seed
-            .strip_prefix("0x")
-            .ok_or_else(|| format!("seed {seed:?} is not 0x-prefixed"))
-            .and_then(|hex| {
-                u64::from_str_radix(hex, 16).map_err(|_| format!("bad seed {seed:?}"))
-            })?;
+        let (scenario, plan) = text
+            .split_once(':')
+            .ok_or_else(|| "replay descriptor is missing its fault plan".to_string())?;
         Ok(Self {
             scenario: Scenario::parse(scenario)?,
-            plan: FaultPlan {
-                seed,
-                sector_bytes: sector
-                    .parse()
-                    .map_err(|_| format!("bad sector_bytes {sector:?}"))?,
-                fsync_lie: decode_trigger(lie)?,
-                write_enospc: write_enospc.map_or(Ok(Trigger::Never), decode_trigger)?,
-                torn_write: decode_trigger(torn)?,
-                bit_flip: decode_trigger(flip)?,
-                dirent_lie: decode_trigger(dirent_lie)?,
-                dirent_loss: decode_trigger(dirent_loss)?,
-                latency: decode_trigger(latency)?,
-                latency_micros: latency_micros
-                    .parse()
-                    .map_err(|_| format!("bad latency_micros {latency_micros:?}"))?,
-                space_budget: if *budget == "none" {
-                    None
-                } else {
-                    Some(
-                        budget
-                            .parse()
-                            .map_err(|_| format!("bad space_budget {budget:?}"))?,
-                    )
-                },
-            },
+            plan: FaultPlan::decode_replay_fields(plan)?,
         })
     }
 

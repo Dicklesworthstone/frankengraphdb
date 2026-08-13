@@ -50,15 +50,26 @@ use fgdb_crypto::Hasher;
 
 use crate::fixture::{
     FixtureConfig, FixtureSemantics, FixtureTaskError, FixtureTaskStage, FixtureWorkload,
-    FixtureWorkloadError, first_divergence, fixture_futures_for_workload,
+    FixtureWorkloadDecodeLimits, FixtureWorkloadError, first_divergence,
+    fixture_futures_for_workload,
 };
-use crate::vfs::FaultEvent;
+use crate::vfs::{FaultEvent, FaultPlan};
 
 /// Scope name for the fixture's semantic counters.
 const SURFACE_SCOPE: &str = "fgdb.sim.fixture";
 
 /// Stable scenario identity shared by the fixture's lab and live executions.
 const FIXTURE_SCENARIO_ID: &str = "fgdb.sim.fixture.producer_consumer";
+
+/// Environment variable carrying one strict exported-fixture replay value.
+pub const FIXTURE_REPLAY_ENV: &str = "FGDB_SIM_FIXTURE_REPLAY";
+
+/// Environment variable carrying the exact failure-execution seal expected
+/// from [`FIXTURE_REPLAY_ENV`].
+pub const FIXTURE_REPLAY_EXPECTED_DIGEST_ENV: &str = "FGDB_SIM_EXPECTED_FIXTURE_EXECUTION_DIGEST";
+
+const FIXTURE_REPLAY_MAGIC: &str = "FGDBFIX1";
+const MAX_FIXTURE_REPLAY_PLAN_BYTES: usize = 1_024;
 
 /// Runtime posture that produced a fixture receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +114,8 @@ pub enum FixtureFailureKind {
 pub struct FixtureFailureEvidence {
     runtime: FixtureRuntime,
     seed: u64,
+    scheduler_seed: Option<u64>,
+    fault_plan: crate::vfs::FaultPlan,
     virtual_clock_epoch_nanos: Option<u64>,
     trace_digest: String,
     workload_digest: String,
@@ -114,9 +127,274 @@ pub struct FixtureFailureEvidence {
     execution_digest: String,
 }
 
+/// A complete replay value for the exported producer/consumer fixture.
+///
+/// This replays the exact canonical workload under the exact fault plan and a
+/// fresh [`LabConfig::new`] built from the recorded scheduler seed. It does
+/// not claim to force the recorded task-dispatch schedule: the pinned
+/// foundation exposes schedule recording but no public schedule-driving API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureReplay {
+    workload: FixtureWorkload,
+    fault_plan: FaultPlan,
+    scheduler_seed: u64,
+}
+
+impl FixtureReplay {
+    /// Constructs a replay from already-validated values.
+    #[must_use]
+    pub const fn new(
+        workload: FixtureWorkload,
+        fault_plan: FaultPlan,
+        scheduler_seed: u64,
+    ) -> Self {
+        Self {
+            workload,
+            fault_plan,
+            scheduler_seed,
+        }
+    }
+
+    /// Exact canonical workload this replay executes.
+    #[must_use]
+    pub const fn workload(&self) -> &FixtureWorkload {
+        &self.workload
+    }
+
+    /// Exact injected fault plan.
+    #[must_use]
+    pub const fn fault_plan(&self) -> FaultPlan {
+        self.fault_plan
+    }
+
+    /// Seed supplied to the deterministic LAB scheduler.
+    #[must_use]
+    pub const fn scheduler_seed(&self) -> u64 {
+        self.scheduler_seed
+    }
+
+    /// Strict, versioned, self-contained descriptor.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        format!(
+            "{FIXTURE_REPLAY_MAGIC}:{:#018x}:{}:{}",
+            self.scheduler_seed,
+            encode_hex(self.fault_plan.encode_replay_fields().as_bytes()),
+            encode_hex(&self.workload.to_canonical_bytes()),
+        )
+    }
+
+    /// Decodes one descriptor under caller-owned workload admission limits.
+    ///
+    /// # Errors
+    ///
+    /// Refuses malformed, non-canonical, oversized, or resource-unbounded
+    /// descriptors before executing any fixture or touching its scratch path.
+    pub fn parse(
+        text: &str,
+        limits: FixtureWorkloadDecodeLimits,
+    ) -> Result<Self, FixtureReplayError> {
+        let max_descriptor_bytes = limits
+            .max_encoded_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(MAX_FIXTURE_REPLAY_PLAN_BYTES * 2 + 64))
+            .ok_or(FixtureReplayError::DecodeLimitOverflow)?;
+        if text.len() > max_descriptor_bytes {
+            return Err(FixtureReplayError::DescriptorBytesExceeded {
+                actual: text.len(),
+                limit: max_descriptor_bytes,
+            });
+        }
+        let mut fields = text.split(':');
+        let magic = fields.next().ok_or(FixtureReplayError::WrongFieldCount)?;
+        let scheduler_seed = fields.next().ok_or(FixtureReplayError::WrongFieldCount)?;
+        let plan_hex = fields.next().ok_or(FixtureReplayError::WrongFieldCount)?;
+        let workload_hex = fields.next().ok_or(FixtureReplayError::WrongFieldCount)?;
+        if fields.next().is_some() {
+            return Err(FixtureReplayError::WrongFieldCount);
+        }
+        if magic != FIXTURE_REPLAY_MAGIC {
+            return Err(FixtureReplayError::WrongMagic);
+        }
+        let scheduler_seed = scheduler_seed
+            .strip_prefix("0x")
+            .ok_or(FixtureReplayError::InvalidSchedulerSeed)
+            .and_then(|hex| {
+                u64::from_str_radix(hex, 16).map_err(|_| FixtureReplayError::InvalidSchedulerSeed)
+            })?;
+        let plan_bytes = decode_hex(plan_hex, "fault plan", MAX_FIXTURE_REPLAY_PLAN_BYTES)?;
+        let plan_text = core::str::from_utf8(&plan_bytes)
+            .map_err(|_| FixtureReplayError::InvalidFaultPlanText)?;
+        let fault_plan =
+            FaultPlan::decode_replay_fields(plan_text).map_err(FixtureReplayError::FaultPlan)?;
+        let workload_bytes = decode_hex(workload_hex, "workload", limits.max_encoded_bytes)?;
+        let workload = FixtureWorkload::try_from_canonical_bytes(&workload_bytes, limits)
+            .map_err(FixtureReplayError::Workload)?;
+        let replay = Self::new(workload, fault_plan, scheduler_seed);
+        if replay.encode() != text {
+            return Err(FixtureReplayError::NonCanonical);
+        }
+        Ok(replay)
+    }
+
+    /// Executes this replay in a caller-selected isolated scratch directory.
+    pub fn run(&self, scratch_dir: &Path) -> Result<LabFixtureRun, FixtureRunError> {
+        let mut config = FixtureConfig::new(self.workload.seed());
+        config.fault_plan = self.fault_plan;
+        run_fixture_workload_under_lab(
+            &config,
+            &self.workload,
+            scratch_dir,
+            LabConfig::new(self.scheduler_seed),
+        )
+    }
+
+    /// Renders the real fresh-process consumer command for this exact failure.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an evidence receipt from a different runtime, workload, fault
+    /// plan, or scheduler seed instead of emitting a plausible wrong command.
+    pub fn command_for(
+        &self,
+        evidence: &FixtureFailureEvidence,
+    ) -> Result<String, FixtureReplayError> {
+        if evidence.runtime() != FixtureRuntime::Lab
+            || evidence.scheduler_seed() != Some(self.scheduler_seed)
+            || evidence.fault_plan() != self.fault_plan
+            || !evidence.matches_workload(&self.workload)
+        {
+            return Err(FixtureReplayError::EvidenceMismatch);
+        }
+        Ok(format!(
+            "{FIXTURE_REPLAY_ENV}={} {FIXTURE_REPLAY_EXPECTED_DIGEST_ENV}={} cargo test -p fgdb-sim --test sim_dual_run -- --ignored fixture_replay_from_env",
+            self.encode(),
+            evidence.execution_digest(),
+        ))
+    }
+}
+
+/// Why an exported-fixture replay descriptor was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixtureReplayError {
+    WrongMagic,
+    WrongFieldCount,
+    InvalidSchedulerSeed,
+    DecodeLimitOverflow,
+    DescriptorBytesExceeded {
+        actual: usize,
+        limit: usize,
+    },
+    HexBytesExceeded {
+        field: &'static str,
+        actual: usize,
+        limit: usize,
+    },
+    OddHexLength {
+        field: &'static str,
+    },
+    InvalidHex {
+        field: &'static str,
+    },
+    InvalidFaultPlanText,
+    FaultPlan(String),
+    Workload(FixtureWorkloadError),
+    NonCanonical,
+    EvidenceMismatch,
+}
+
+impl core::fmt::Display for FixtureReplayError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WrongMagic => f.write_str("wrong fixture replay magic/version"),
+            Self::WrongFieldCount => f.write_str("wrong fixture replay field count"),
+            Self::InvalidSchedulerSeed => f.write_str("invalid fixture replay scheduler seed"),
+            Self::DecodeLimitOverflow => f.write_str("fixture replay decode limit overflow"),
+            Self::DescriptorBytesExceeded { actual, limit } => {
+                write!(f, "fixture replay bytes {actual} exceed limit {limit}")
+            }
+            Self::HexBytesExceeded {
+                field,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "fixture replay {field} bytes {actual} exceed limit {limit}"
+            ),
+            Self::OddHexLength { field } => {
+                write!(f, "fixture replay {field} has odd hex length")
+            }
+            Self::InvalidHex { field } => write!(f, "fixture replay {field} is not lowercase hex"),
+            Self::InvalidFaultPlanText => f.write_str("fixture replay fault plan is not UTF-8"),
+            Self::FaultPlan(error) => write!(f, "fixture replay fault plan refused: {error}"),
+            Self::Workload(error) => write!(f, "fixture replay workload refused: {error}"),
+            Self::NonCanonical => f.write_str("fixture replay descriptor is non-canonical"),
+            Self::EvidenceMismatch => {
+                f.write_str("fixture replay does not match the supplied failure evidence")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FixtureReplayError {}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_hex(
+    text: &str,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, FixtureReplayError> {
+    if !text.len().is_multiple_of(2) {
+        return Err(FixtureReplayError::OddHexLength { field });
+    }
+    let byte_count = text.len() / 2;
+    if byte_count > max_bytes {
+        return Err(FixtureReplayError::HexBytesExceeded {
+            field,
+            actual: byte_count,
+            limit: max_bytes,
+        });
+    }
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(byte_count)
+        .map_err(|_| FixtureReplayError::HexBytesExceeded {
+            field,
+            actual: byte_count,
+            limit: max_bytes,
+        })?;
+    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty(), "odd hex was refused above");
+    for pair in pairs {
+        let high = decode_hex_digit(pair[0]).ok_or(FixtureReplayError::InvalidHex { field })?;
+        let low = decode_hex_digit(pair[1]).ok_or(FixtureReplayError::InvalidHex { field })?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+const fn decode_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
 struct FixtureFailureCapture<'a> {
     runtime: FixtureRuntime,
     seed: u64,
+    scheduler_seed: Option<u64>,
+    fault_plan: crate::vfs::FaultPlan,
     virtual_clock_epoch_nanos: Option<u64>,
     trace_bytes: &'a [u8],
     workload: &'a FixtureWorkload,
@@ -129,6 +407,8 @@ impl FixtureFailureEvidence {
         let FixtureFailureCapture {
             runtime,
             seed,
+            scheduler_seed,
+            fault_plan,
             virtual_clock_epoch_nanos,
             trace_bytes,
             workload,
@@ -147,6 +427,8 @@ impl FixtureFailureEvidence {
         execution_hasher.update(b"fgdb.sim.fixture.failure-execution.v1");
         execution_hasher.update(runtime.as_str().as_bytes());
         execution_hasher.update(&seed.to_le_bytes());
+        execution_hasher.update(&scheduler_seed.unwrap_or(u64::MAX).to_le_bytes());
+        execution_hasher.update(fault_plan.encode_replay_fields().as_bytes());
         execution_hasher.update(&virtual_clock_epoch_nanos.unwrap_or(u64::MAX).to_le_bytes());
         execution_hasher.update(trace_digest.as_bytes());
         execution_hasher.update(&workload_bytes);
@@ -167,6 +449,8 @@ impl FixtureFailureEvidence {
         Self {
             runtime,
             seed,
+            scheduler_seed,
+            fault_plan,
             virtual_clock_epoch_nanos,
             trace_digest,
             workload_digest,
@@ -189,6 +473,18 @@ impl FixtureFailureEvidence {
     #[must_use]
     pub const fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// LAB scheduler seed, or `None` for a live execution.
+    #[must_use]
+    pub const fn scheduler_seed(&self) -> Option<u64> {
+        self.scheduler_seed
+    }
+
+    /// Exact fault plan installed for this execution.
+    #[must_use]
+    pub const fn fault_plan(&self) -> crate::vfs::FaultPlan {
+        self.fault_plan
     }
 
     /// Terminal LAB epoch, or `None` for a live execution.
@@ -753,6 +1049,7 @@ pub fn run_fixture_workload_under_lab(
     scratch_dir: &Path,
     mut lab_config: LabConfig,
 ) -> Result<LabFixtureRun, FixtureRunError> {
+    let scheduler_seed = lab_config.seed;
     lab_config.auto_advance_time = true;
     // This adapter owns its evidence contract. A caller-supplied recorder may
     // filter or truncate events, so replace it with the foundation's complete,
@@ -831,6 +1128,8 @@ pub fn run_fixture_workload_under_lab(
                 FixtureFailureCapture {
                     runtime: FixtureRuntime::Lab,
                     seed: cfg.seed,
+                    scheduler_seed: Some(scheduler_seed),
+                    fault_plan: cfg.fault_plan,
                     virtual_clock_epoch_nanos: Some(report.now_nanos),
                     trace_bytes: &trace_bytes,
                     workload: &workload,
@@ -847,6 +1146,8 @@ pub fn run_fixture_workload_under_lab(
                 FixtureFailureCapture {
                     runtime: FixtureRuntime::Lab,
                     seed: cfg.seed,
+                    scheduler_seed: Some(scheduler_seed),
+                    fault_plan: cfg.fault_plan,
                     virtual_clock_epoch_nanos: Some(report.now_nanos),
                     trace_bytes: &trace_bytes,
                     workload: &workload,
@@ -918,6 +1219,8 @@ pub fn run_fixture_workload_live(
                 FixtureFailureCapture {
                     runtime: FixtureRuntime::Live,
                     seed: cfg.seed,
+                    scheduler_seed: None,
+                    fault_plan: cfg.fault_plan,
                     virtual_clock_epoch_nanos: None,
                     trace_bytes: &trace_bytes,
                     workload: &workload,
@@ -934,6 +1237,8 @@ pub fn run_fixture_workload_live(
                 FixtureFailureCapture {
                     runtime: FixtureRuntime::Live,
                     seed: cfg.seed,
+                    scheduler_seed: None,
+                    fault_plan: cfg.fault_plan,
                     virtual_clock_epoch_nanos: None,
                     trace_bytes: &trace_bytes,
                     workload: &workload,

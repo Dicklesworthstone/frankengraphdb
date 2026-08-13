@@ -10,10 +10,12 @@
 //! `sourcing-bash-gate-functions-into-zsh-fakes-green` — same law, Rust shape).
 
 use std::path::PathBuf;
+use std::process::{Command, Output};
 
 use fgdb_crypto::Hasher;
 use fgdb_sim::dual_run::{
-    DualRunOutcome, FixtureFailureKind, FixtureRunError, FixtureRunReceipt, FixtureRuntime,
+    DualRunOutcome, FIXTURE_REPLAY_ENV, FIXTURE_REPLAY_EXPECTED_DIGEST_ENV, FixtureFailureKind,
+    FixtureReplay, FixtureReplayError, FixtureRunError, FixtureRunReceipt, FixtureRuntime,
     determinism_gate, dual_run_fixture, dual_run_verdict_log_lines, run_fixture_under_lab,
     run_fixture_workload_live, run_fixture_workload_under_lab,
 };
@@ -34,6 +36,33 @@ fn scratch_root(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-sim-dual-run-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch root");
     dir
+}
+
+fn replay_command_env<'a>(command: &'a str, name: &str) -> Option<&'a str> {
+    let prefix = format!("{name}=");
+    command
+        .split_ascii_whitespace()
+        .find_map(|word| word.strip_prefix(&prefix))
+}
+
+fn execute_fixture_replay_consumer(command: &str, expected_digest: &str) -> Output {
+    assert!(
+        command.ends_with(
+            "cargo test -p fgdb-sim --test sim_dual_run -- --ignored fixture_replay_from_env"
+        ),
+        "the command no longer selects its fresh-process consumer: {command}"
+    );
+    let encoded = replay_command_env(command, FIXTURE_REPLAY_ENV)
+        .expect("the fixture replay command carries its descriptor");
+    let executable = std::env::current_exe().expect("current test executable is discoverable");
+    Command::new("timeout")
+        .arg("30s")
+        .arg(executable)
+        .args(["--ignored", "--exact", "fixture_replay_from_env"])
+        .env(FIXTURE_REPLAY_ENV, encoded)
+        .env(FIXTURE_REPLAY_EXPECTED_DIGEST_ENV, expected_digest)
+        .output()
+        .expect("fresh-process fixture replay consumer launches")
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +466,7 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         &faulting,
         &faulting_workload,
         &faulting_root.join("shrink"),
-        LabConfig::new(faulting.seed),
+        faulting.seed,
     )
     .expect("fixture shrink infrastructure succeeds")
     .expect("the injected producer failure reproduces");
@@ -485,6 +514,102 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         shrunk.minimal_execution_digest(),
         "removing actions must change the sealed execution"
     );
+    assert_eq!(
+        shrunk.minimal_evidence().scheduler_seed(),
+        Some(faulting.seed)
+    );
+    assert_eq!(shrunk.minimal_evidence().fault_plan(), faulting.fault_plan);
+    assert!(
+        shrunk
+            .minimal_evidence()
+            .matches_workload(shrunk.workload())
+    );
+
+    // The minimized workload is a real replay value, not only an inspectable
+    // Vec of actions. Its strict descriptor survives a fresh process and must
+    // reproduce the complete sealed execution, not merely the coarse I/O kind.
+    let encoded_replay = shrunk.replay().encode();
+    let decoded_replay =
+        FixtureReplay::parse(&encoded_replay, FixtureWorkloadDecodeLimits::default())
+            .expect("minimized fixture replay descriptor round-trips");
+    assert_eq!(&decoded_replay, shrunk.replay());
+    let decoded_result = decoded_replay.run(&faulting_root.join("decoded-minimal-replay"));
+    let decoded_evidence = decoded_result
+        .as_ref()
+        .err()
+        .and_then(FixtureRunError::failure_evidence)
+        .expect("decoded replay reproduces the typed failure");
+    assert_eq!(
+        decoded_evidence.execution_digest(),
+        shrunk.minimal_execution_digest(),
+        "descriptor replay must reproduce every execution-root field"
+    );
+    let replay_command = shrunk
+        .replay_command()
+        .expect("the retained replay and minimized evidence agree");
+    assert_eq!(
+        replay_command_env(&replay_command, FIXTURE_REPLAY_ENV),
+        Some(encoded_replay.as_str())
+    );
+    assert_eq!(
+        replay_command_env(&replay_command, FIXTURE_REPLAY_EXPECTED_DIGEST_ENV),
+        Some(shrunk.minimal_execution_digest())
+    );
+    let fresh = execute_fixture_replay_consumer(&replay_command, shrunk.minimal_execution_digest());
+    assert!(
+        fresh.status.success(),
+        "fresh-process fixture replay failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&fresh.stdout).contains("test fixture_replay_from_env ... ok"),
+        "fresh-process consumer did not execute its ignored test: {}",
+        String::from_utf8_lossy(&fresh.stdout)
+    );
+    let wrong_digest = execute_fixture_replay_consumer(&replay_command, "wrong-execution-seal");
+    assert!(
+        !wrong_digest.status.success(),
+        "fresh-process consumer accepted a substituted execution seal"
+    );
+
+    let wrong_seed_replay = FixtureReplay::new(
+        shrunk.workload().clone(),
+        faulting.fault_plan,
+        faulting.seed ^ 1,
+    );
+    assert_eq!(
+        wrong_seed_replay.command_for(shrunk.minimal_evidence()),
+        Err(FixtureReplayError::EvidenceMismatch),
+        "a different scheduler seed must not borrow the original evidence"
+    );
+    let wrong_plan_replay = FixtureReplay::new(
+        shrunk.workload().clone(),
+        fgdb_sim::vfs::FaultPlan::faultless(),
+        faulting.seed,
+    );
+    assert_eq!(
+        wrong_plan_replay.command_for(shrunk.minimal_evidence()),
+        Err(FixtureReplayError::EvidenceMismatch),
+        "a different fault plan must not borrow the original evidence"
+    );
+    let mut wrong_magic = encoded_replay.clone();
+    wrong_magic.replace_range(..8, "BADMAGIC");
+    assert_eq!(
+        FixtureReplay::parse(&wrong_magic, FixtureWorkloadDecodeLimits::default()),
+        Err(FixtureReplayError::WrongMagic)
+    );
+    let workload_limited = FixtureWorkloadDecodeLimits {
+        max_encoded_bytes: shrunk.workload().to_canonical_bytes().len() - 1,
+        ..FixtureWorkloadDecodeLimits::default()
+    };
+    assert!(matches!(
+        FixtureReplay::parse(&encoded_replay, workload_limited),
+        Err(FixtureReplayError::HexBytesExceeded {
+            field: "workload",
+            ..
+        })
+    ));
 
     let blocked_scratch_root = scratch_root("typed-scratch-io-control");
     let blocking_file = blocked_scratch_root.join("ordinary-file");
@@ -1069,4 +1194,33 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
         "the receipt must name the execution that actually ran, not the base request"
     );
     assert_failed_dual_run_log_is_lossless(&mutated);
+}
+
+/// Fresh-process consumer selected by [`FixtureReplay::command_for`].
+#[test]
+#[ignore = "driven by FGDB_SIM_FIXTURE_REPLAY; run via the command a minimized replay emits"]
+fn fixture_replay_from_env() {
+    let encoded = std::env::var(FIXTURE_REPLAY_ENV).unwrap_or_default();
+    assert!(
+        !encoded.is_empty(),
+        "{FIXTURE_REPLAY_ENV} is unset; run a minimized fixture replay command"
+    );
+    let replay = FixtureReplay::parse(&encoded, FixtureWorkloadDecodeLimits::default())
+        .expect("fixture replay descriptor decodes under default admission limits");
+    let expected = std::env::var(FIXTURE_REPLAY_EXPECTED_DIGEST_ENV).unwrap_or_default();
+    assert!(
+        !expected.is_empty(),
+        "{FIXTURE_REPLAY_EXPECTED_DIGEST_ENV} is unset; the command must bind exact evidence"
+    );
+    let result = replay.run(&scratch_root("fixture-replay-from-env"));
+    let evidence = result
+        .as_ref()
+        .err()
+        .and_then(FixtureRunError::failure_evidence)
+        .expect("fixture replay did not reproduce a typed component failure");
+    assert_eq!(
+        evidence.execution_digest(),
+        expected,
+        "fresh-process fixture replay reached different execution-root evidence"
+    );
 }
