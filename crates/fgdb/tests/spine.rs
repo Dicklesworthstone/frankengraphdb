@@ -23,8 +23,10 @@
 //!   vertex, and both must come back empty.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb::{
+    CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError, WriteMismatchPolicy,
+};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
@@ -2373,6 +2375,267 @@ fn a_post_d2_publication_failure_still_rebuilds_the_delta_index_on_reopen() {
             "reopen after post-D2 failure still names seq1={seq1:?} seq2=2; \
              frontier={frontier:?} entries={}",
             rebuilt.len()
+        );
+    });
+}
+
+/// **ENSURE IS NOT CREATE (fgdb-w5-ensure-writebatch-ac6y).** The reference
+/// already reduces `EnsureVertex` / `EnsureEdgeByTriple` to a no-op when the
+/// identity or triple is live. The engine's create path still refuses
+/// `AlreadyLive`; these methods are the idempotent subset.
+#[test]
+fn ensure_vertex_creates_once_and_is_not_already_live() {
+    let dir = scratch("ensure-vertex");
+    under_lab(8201, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.ensure_vertex(VId(1), vec![], vec![]);
+        db.write(cx, first)
+            .await
+            .expect("ensure of an absent vertex creates");
+        assert!(
+            db.vertex(VId(1)).expect("reads").is_some(),
+            "vid=1 must be live after the first ensure"
+        );
+
+        let mut second = WriteBatch::new(KNOWS);
+        second.ensure_vertex(VId(1), vec![], vec![]);
+        db.write(cx, second)
+            .await
+            .expect("a second ensure is a no-op, not AlreadyLive");
+        assert!(
+            db.vertex(VId(1)).expect("reads").is_some(),
+            "vid=1 still live after the second ensure"
+        );
+
+        let mut create = WriteBatch::new(KNOWS);
+        create.create_vertex(VId(1), vec![], vec![]);
+        let refusal = db
+            .write(cx, create)
+            .await
+            .expect_err("bare create of a live vid must still refuse");
+        assert!(
+            matches!(
+                refusal,
+                WriteError::AlreadyLive {
+                    elem: ElementId::Vertex(VId(1))
+                }
+            ),
+            "create of live vid=1 must be AlreadyLive, got {refusal:?}"
+        );
+
+        let mut del = WriteBatch::new(KNOWS);
+        del.delete_vertex(VId(1));
+        db.write(cx, del).await.expect("deletes vid=1");
+        let mut resurrect = WriteBatch::new(KNOWS);
+        resurrect.ensure_vertex(VId(1), vec![], vec![]);
+        let spent = db
+            .write(cx, resurrect)
+            .await
+            .expect_err("ensure must not resurrect a spent identity");
+        assert!(
+            matches!(
+                spent,
+                WriteError::IdentitySpent {
+                    elem: ElementId::Vertex(VId(1))
+                }
+            ),
+            "ensure of spent vid=1 must be IdentitySpent, got {spent:?}"
+        );
+    });
+}
+
+#[test]
+fn ensure_edge_by_triple_is_idempotent_even_under_a_new_eid() {
+    let dir = scratch("ensure-edge-triple");
+    under_lab(8202, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.create_vertex(VId(3), vec![], vec![]);
+        db.write(cx, seed).await.expect("seeds vertices");
+
+        let mut first = WriteBatch::new(KNOWS);
+        first.ensure_edge_by_triple(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, first)
+            .await
+            .expect("ensure of a new triple creates");
+        assert_eq!(
+            db.neighbours(VId(1), KNOWS).expect("reads"),
+            vec![VId(2)],
+            "triple (1, KNOWS, 2) must exist after the first ensure"
+        );
+
+        let mut again = WriteBatch::new(KNOWS);
+        again.ensure_edge_by_triple(EId(11), VId(1), VId(2), vec![]);
+        db.write(cx, again)
+            .await
+            .expect("a second ensure of the same triple is a no-op even with eid=11");
+        assert_eq!(
+            db.neighbours(VId(1), KNOWS).expect("reads"),
+            vec![VId(2)],
+            "triple (1, KNOWS, 2) must not grow a second edge; neighbours={:?}",
+            db.neighbours(VId(1), KNOWS).expect("reads")
+        );
+        assert!(
+            db.edge(EId(11)).expect("reads").is_none(),
+            "eid=11 must not have been created; the triple already existed as eid=10"
+        );
+
+        let mut other = WriteBatch::new(KNOWS);
+        other.ensure_edge_by_triple(EId(12), VId(1), VId(3), vec![]);
+        db.write(cx, other)
+            .await
+            .expect("a new triple still creates");
+        assert_eq!(
+            db.neighbours(VId(1), KNOWS).expect("reads"),
+            vec![VId(2), VId(3)],
+            "new triple (1, KNOWS, 3) must appear; neighbours={:?}",
+            db.neighbours(VId(1), KNOWS).expect("reads")
+        );
+    });
+}
+
+/// **COMPARE-AND-SET (fgdb-w5-cas-writebatch-tob2).** WriteBatch can mean
+/// NoOp or AbortWrite. It cannot mean StatementError — there is no
+/// statement boundary.
+#[test]
+fn compare_and_set_matches_aborts_and_noops() {
+    let dir = scratch("cas-vertex");
+    under_lab(8204, move |cx| async move {
+        let cx = &cx;
+        let rank = PropertyKeyId(100);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![(rank, CanonicalScalar::Int(5))]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut hit = WriteBatch::new(KNOWS);
+        hit.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(7),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        db.write(cx, hit).await.expect("matching CAS writes");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(7))],
+            "vid=1 rank expected 5->7, got {:?}",
+            db.vertex(VId(1)).expect("reads").expect("live").props
+        );
+
+        let mut same = WriteBatch::new(KNOWS);
+        same.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(7)),
+            CanonicalScalar::Int(7),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        db.write(cx, same)
+            .await
+            .expect("same-value CAS is a successful no-op");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(7))]
+        );
+
+        let before = db.frontier().expect("frontier");
+        let mut miss = WriteBatch::new(KNOWS);
+        miss.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        let refusal = db
+            .write(cx, miss)
+            .await
+            .expect_err("AbortWrite mismatch must refuse before D2");
+        assert!(
+            matches!(
+                &refusal,
+                WriteError::CompareAndSetMismatch(mismatch)
+                    if mismatch.elem == ElementId::Vertex(VId(1))
+                        && mismatch.name == rank
+                        && mismatch.expected == Some(CanonicalScalar::Int(5))
+                        && mismatch.actual == Some(CanonicalScalar::Int(7))
+            ),
+            "AbortWrite must name elem=vid1 expected=5 actual=7, got {refusal:?}"
+        );
+        assert_eq!(
+            db.frontier().expect("unchanged frontier"),
+            before,
+            "AbortWrite must not consume a commit sequence"
+        );
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(7))],
+            "AbortWrite must leave rank at 7"
+        );
+
+        let mut noop = WriteBatch::new(KNOWS);
+        noop.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        noop.ensure_vertex(VId(3), vec![], vec![]);
+        db.write(cx, noop)
+            .await
+            .expect("NoOp mismatch continues the batch");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(7))],
+            "NoOp mismatch must leave rank at 7"
+        );
+        assert!(
+            db.vertex(VId(3)).expect("reads").is_some(),
+            "NoOp mismatch must still commit the sibling ensure of vid=3"
+        );
+
+        let mut ryw = WriteBatch::new(KNOWS);
+        ryw.set_vertex_property(VId(1), rank, Some(CanonicalScalar::Int(4)));
+        ryw.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(4)),
+            CanonicalScalar::Int(6),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        db.write(cx, ryw)
+            .await
+            .expect("CAS must see the same-batch set");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(6))],
+            "same-batch set-then-CAS must land 6"
+        );
+
+        let mut ghost = WriteBatch::new(KNOWS);
+        ghost.compare_and_set_vertex_property(
+            VId(99),
+            rank,
+            None,
+            CanonicalScalar::Int(1),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        let unknown = db
+            .write(cx, ghost)
+            .await
+            .expect_err("CAS of a missing vertex must refuse");
+        assert!(
+            matches!(unknown, WriteError::UnknownVertex { vid: VId(99) }),
+            "missing vid=99 must be UnknownVertex, got {unknown:?}"
         );
     });
 }

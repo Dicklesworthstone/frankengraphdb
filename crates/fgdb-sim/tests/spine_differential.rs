@@ -30,7 +30,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     BlockStoreCrashPoint, CAPSULE_OBJECT_KIND, Database, DatabaseKeys, DatabaseState,
-    DerivedPublicationStage, ReadError, RebuildError, WriteBatch, WriteError,
+    DerivedPublicationStage, ReadError, RebuildError, WriteBatch, WriteError, WriteMismatchPolicy,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
@@ -1900,5 +1900,322 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
         assert!(graph.vertex(VId(8)).is_none());
         assert!(graph.vertex(VId(9)).is_none());
         assert!(graph.vertex(VId(2)).is_some());
+    });
+}
+
+/// Independent Ensure* agreement: the engine's new write-path subset must
+/// match the reference reductions the oracle has had all along.
+#[test]
+fn ensure_intents_agree_independently_with_the_reference() {
+    let dir = scratch("ensure-independent");
+    under_lab(8203, move |cx| async move {
+        let cx = &cx;
+        let mut engine = Database::create(cx, &dir, engine_keys())
+            .await
+            .expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.ensure_vertex(VId(1), vec![], vec![]);
+        seed.ensure_vertex(VId(2), vec![], vec![]);
+        engine
+            .write(cx, seed)
+            .await
+            .expect("ensure-creates vertices");
+        let mut again = WriteBatch::new(KNOWS);
+        again.ensure_vertex(VId(1), vec![], vec![]);
+        again.ensure_edge_by_triple(EId(10), VId(1), VId(2), vec![]);
+        engine
+            .write(cx, again)
+            .await
+            .expect("ensure vertex no-op + new triple");
+        let mut triple_again = WriteBatch::new(KNOWS);
+        triple_again.ensure_edge_by_triple(EId(11), VId(1), VId(2), vec![]);
+        engine
+            .write(cx, triple_again)
+            .await
+            .expect("ensure of the live triple is a no-op");
+        let engine_neighbours = engine.neighbours(VId(1), KNOWS).expect("reads");
+        assert_eq!(
+            engine_neighbours,
+            vec![VId(2)],
+            "engine neighbours of vid=1 must be [2], got {engine_neighbours:?}"
+        );
+        drop(engine);
+
+        let mut oracle = fgdb_reference::ReferenceDatabase::new();
+        let semantics = fgdb_types::ObjectId([0x11; 32]);
+        let mut txn = fgdb_reference::txn::Transaction::begin_genesis(&oracle, GRAPH, BRANCH)
+            .expect("genesis");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::EnsureVertex {
+                    vid: VId(1),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::EnsureVertex {
+                    vid: VId(2),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+        ])
+        .expect("oracle ensure-creates");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(1),
+            fgdb_types::LogicalCommandSeq(10),
+        )
+        .expect("oracle seed commits")
+        .committed_parts()
+        .expect("oracle seed wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::EnsureVertex {
+                    vid: VId(1),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::EnsureEdgeByTriple {
+                    eid: EId(10),
+                    src: VId(1),
+                    etype: KNOWS,
+                    dst: VId(2),
+                    props: vec![],
+                },
+            ]),
+        ])
+        .expect("oracle ensure no-op + triple");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(2),
+            fgdb_types::LogicalCommandSeq(20),
+        )
+        .expect("oracle second commit")
+        .committed_parts()
+        .expect("oracle second wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[fgdb_reference::intents::Statement::new(vec![
+            fgdb_reference::intents::Intent::EnsureEdgeByTriple {
+                eid: EId(11),
+                src: VId(1),
+                etype: KNOWS,
+                dst: VId(2),
+                props: vec![],
+            },
+        ])])
+        .expect("oracle triple again");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(3),
+            fgdb_types::LogicalCommandSeq(30),
+        )
+        .expect("oracle third commit")
+        .committed_parts()
+        .expect("oracle third wrote");
+
+        let graph = oracle.graph(GRAPH, BRANCH).expect("oracle coordinate");
+        assert_eq!(
+            graph.neighbours(VId(1), KNOWS),
+            engine_neighbours,
+            "engine and oracle must agree about vid=1's KNOWS neighbours"
+        );
+        assert!(graph.vertex(VId(1)).is_some() && graph.vertex(VId(2)).is_some());
+        assert!(graph.edge(EId(11)).is_none());
+    });
+}
+
+/// Independent CompareAndSet agreement: engine AbortWrite is the write-batch
+/// face of reference TxnAbort; NoOp is the same word on both sides.
+#[test]
+fn compare_and_set_agrees_independently_with_the_reference() {
+    let dir = scratch("cas-independent");
+    under_lab(8205, move |cx| async move {
+        let cx = &cx;
+        let rank = PropertyKeyId(100);
+        let mut engine = Database::create(cx, &dir, engine_keys())
+            .await
+            .expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![(rank, CanonicalScalar::Int(5))]);
+        engine.write(cx, seed).await.expect("seeds");
+        let mut hit = WriteBatch::new(KNOWS);
+        hit.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(7),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        engine.write(cx, hit).await.expect("CAS match");
+        let mut miss = WriteBatch::new(KNOWS);
+        miss.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        assert!(
+            matches!(
+                engine.write(cx, miss).await,
+                Err(WriteError::CompareAndSetMismatch { .. })
+            ),
+            "engine AbortWrite miss must refuse"
+        );
+        let mut noop = WriteBatch::new(KNOWS);
+        noop.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        noop.ensure_vertex(VId(3), vec![], vec![]);
+        engine.write(cx, noop).await.expect("NoOp miss + sibling");
+        let engine_rank = engine
+            .vertex(VId(1))
+            .expect("reads")
+            .expect("live")
+            .props
+            .clone();
+        let engine_v3 = engine.vertex(VId(3)).expect("reads").is_some();
+        drop(engine);
+
+        let mut oracle = fgdb_reference::ReferenceDatabase::new();
+        let semantics = fgdb_types::ObjectId([0x11; 32]);
+        let mut txn = fgdb_reference::txn::Transaction::begin_genesis(&oracle, GRAPH, BRANCH)
+            .expect("genesis");
+        txn.execute(&[fgdb_reference::intents::Statement::new(vec![
+            fgdb_reference::intents::Intent::CreateVertex {
+                vid: VId(1),
+                labels: vec![],
+                props: vec![(rank, CanonicalScalar::Int(5))],
+            },
+        ])])
+        .expect("oracle seed");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(1),
+            fgdb_types::LogicalCommandSeq(10),
+        )
+        .expect("oracle seed commits")
+        .committed_parts()
+        .expect("oracle seed wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[fgdb_reference::intents::Statement::new(vec![
+            fgdb_reference::intents::Intent::CompareAndSet {
+                elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
+                name: rank,
+                expected: Some(CanonicalScalar::Int(5)),
+                value: CanonicalScalar::Int(7),
+                mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
+            },
+        ])])
+        .expect("oracle CAS match");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(2),
+            fgdb_types::LogicalCommandSeq(20),
+        )
+        .expect("oracle match commits")
+        .committed_parts()
+        .expect("oracle match wrote");
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[fgdb_reference::intents::Statement::new(vec![
+            fgdb_reference::intents::Intent::CompareAndSet {
+                elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
+                name: rank,
+                expected: Some(CanonicalScalar::Int(5)),
+                value: CanonicalScalar::Int(9),
+                mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
+            },
+        ])])
+        .expect("oracle Abort execute");
+        let aborted = txn
+            .commit(
+                &mut oracle,
+                KNOWS,
+                semantics,
+                fgdb_types::CommitSeq(3),
+                fgdb_types::LogicalCommandSeq(30),
+            )
+            .expect("oracle abort is a verdict, not an apply error");
+        assert!(
+            matches!(aborted, fgdb_reference::txn::TxnOutcome::Aborted { .. }),
+            "oracle TxnAbort miss must abort, got {aborted:?}"
+        );
+
+        let mut txn =
+            fgdb_reference::txn::Transaction::begin(&oracle, GRAPH, BRANCH).expect("oracle begin");
+        txn.execute(&[
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::CompareAndSet {
+                    elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
+                    name: rank,
+                    expected: Some(CanonicalScalar::Int(5)),
+                    value: CanonicalScalar::Int(9),
+                    mismatch: fgdb_reference::intents::MismatchPolicy::NoOp,
+                },
+            ]),
+            fgdb_reference::intents::Statement::new(vec![
+                fgdb_reference::intents::Intent::EnsureVertex {
+                    vid: VId(3),
+                    labels: vec![],
+                    props: vec![],
+                },
+            ]),
+        ])
+        .expect("oracle NoOp + ensure");
+        txn.commit(
+            &mut oracle,
+            KNOWS,
+            semantics,
+            fgdb_types::CommitSeq(3),
+            fgdb_types::LogicalCommandSeq(30),
+        )
+        .expect("oracle NoOp commits")
+        .committed_parts()
+        .expect("oracle NoOp wrote");
+
+        let graph = oracle.graph(GRAPH, BRANCH).expect("oracle coordinate");
+        let oracle_rank = graph.vertex(VId(1)).expect("v1").props.get(&rank).cloned();
+        assert_eq!(
+            engine_rank,
+            vec![(rank, CanonicalScalar::Int(7))],
+            "engine rank must be 7, got {engine_rank:?}"
+        );
+        assert_eq!(
+            oracle_rank,
+            Some(CanonicalScalar::Int(7)),
+            "oracle rank must be 7, got {oracle_rank:?}"
+        );
+        assert!(engine_v3, "engine vid=3 must exist after NoOp sibling");
+        assert!(
+            graph.vertex(VId(3)).is_some(),
+            "oracle vid=3 must exist after NoOp sibling"
+        );
     });
 }
