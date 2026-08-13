@@ -1431,10 +1431,17 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
             let mut new_family_hits = 0u32;
             for round in 0..8 {
                 if round == 4 {
+                    let incremental_index = db.delta_index().expect("reads").clone();
                     drop(db);
                     db = Database::open(cx, &dir, engine_keys())
                         .await
                         .expect("a mid-history reopen rebuilds and continues");
+                    assert_eq!(
+                        db.delta_index().expect("reads"),
+                        &incremental_index,
+                        "seed {seed}: mid-history incremental delta window \
+                         diverged from rebuild"
+                    );
                     // The v3 head witness (GoldBarn, thread fgdb-l96k): the
                     // checkpoint-derived element-version heads must equal the
                     // full fold's on every generated shape — graph answers
@@ -1780,6 +1787,7 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
             // derivation a shorter chain than the fold's. The round-4 witness
             // above never sees a compacted partition.
             let retained = db.element_versions().expect("reads").clone();
+            let retained_index = db.delta_index().expect("reads").clone();
             drop(db);
             let reopened = Database::open(cx, &dir, engine_keys())
                 .await
@@ -1790,6 +1798,12 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                 "seed {seed}: post-compaction checkpoint-derived v3 heads \
                  diverged from the retained session's"
             );
+            assert_eq!(
+                reopened.delta_index().expect("reads"),
+                &retained_index,
+                "seed {seed}: post-compaction incremental delta window \
+                 diverged from checkpoint rebuild"
+            );
             drop(reopened);
             let control = Database::open_rebuilding(cx, &dir, engine_keys())
                 .await
@@ -1799,6 +1813,12 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                 &retained,
                 "seed {seed}: the full fold's v3 heads diverged from the \
                  retained session's"
+            );
+            assert_eq!(
+                control.delta_index().expect("reads"),
+                &retained_index,
+                "seed {seed}: post-compaction incremental delta window \
+                 diverged from the full rebuild"
             );
             drop(control);
 
@@ -1896,6 +1916,12 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     );
                 }
             }
+            let replayed = replay(cx, &coordinator).await.expect("full stream replays");
+            assert_eq!(
+                replayed.index, retained_index,
+                "seed {seed}: independent replay delta window diverged from \
+                 the incremental index"
+            );
         });
     }
 }

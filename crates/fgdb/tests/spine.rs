@@ -2830,6 +2830,24 @@ fn compare_and_set_edge_matches_aborts_and_noops() {
             "NoOp mismatch must still commit the sibling ensure of vid=3"
         );
 
+        let mut ryw = WriteBatch::new(KNOWS);
+        ryw.set_edge_property(EId(10), weight, Some(CanonicalScalar::Int(4)));
+        ryw.compare_and_set_edge_property(
+            EId(10),
+            weight,
+            Some(CanonicalScalar::Int(4)),
+            CanonicalScalar::Int(6),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        db.write(cx, ryw)
+            .await
+            .expect("edge CAS must see the same-batch set");
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(weight, CanonicalScalar::Int(6))],
+            "same-batch set-then-CAS must land 6"
+        );
+
         let mut ghost = WriteBatch::new(KNOWS);
         ghost.compare_and_set_edge_property(
             EId(99),
