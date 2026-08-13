@@ -348,14 +348,20 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
     let faulting_workload =
         FixtureWorkload::try_from_config(&faulting).expect("faulting workload materializes");
     let faulting_root = scratch_root("task-failure-control");
-    let lab_failure = match run_fixture_workload_under_lab(
+    let lab_result = run_fixture_workload_under_lab(
         &faulting,
         &faulting_workload,
         &faulting_root.join("typed-lab"),
         LabConfig::new(faulting.seed),
-    ) {
-        Ok(_) => panic!("injected LAB write refusal must be typed"),
-        Err(error) => error,
+    );
+    assert!(
+        lab_result.is_err(),
+        "injected LAB write refusal must be typed"
+    );
+    let lab_failure = if let Err(error) = lab_result {
+        error
+    } else {
+        return;
     };
     assert!(
         matches!(
@@ -367,13 +373,19 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         ),
         "unexpected LAB failure: {lab_failure:?}"
     );
-    let live_failure = match run_fixture_workload_live(
+    let live_result = run_fixture_workload_live(
         &faulting,
         &faulting_workload,
         &faulting_root.join("typed-live"),
-    ) {
-        Ok(_) => panic!("injected live write refusal must be typed"),
-        Err(error) => error,
+    );
+    assert!(
+        live_result.is_err(),
+        "injected live write refusal must be typed"
+    );
+    let live_failure = if let Err(error) = live_result {
+        error
+    } else {
+        return;
     };
     assert_eq!(
         live_failure.failure_kind(),
@@ -416,6 +428,21 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         ),
         Err(error) if error.failure_kind() == Some(shrunk.failure())
     ));
+
+    let blocked_scratch_root = scratch_root("typed-scratch-io-control");
+    let blocking_file = blocked_scratch_root.join("ordinary-file");
+    let blocked_child = blocking_file.join("child");
+    std::fs::write(&blocking_file, b"not a directory").expect("plant blocking file");
+    assert!(matches!(
+        run_fixture_workload_under_lab(
+            &faulting,
+            shrunk.workload(),
+            &blocked_child,
+            LabConfig::new(faulting.seed),
+        ),
+        Err(FixtureRunError::ScratchIo(_))
+    ));
+    assert!(!blocked_child.exists());
 
     // One-minimality is executable, not inferred from the shrinker's counts:
     // deleting the sole retained action yields a canonical empty workload and

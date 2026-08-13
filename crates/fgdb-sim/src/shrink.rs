@@ -707,6 +707,9 @@ pub enum FixtureWorkloadShrinkError {
     /// The runtime failed without a component I/O identity suitable for
     /// same-bug comparison.
     Harness(FixtureRunError),
+    /// The reducer reported a reproduction without retaining the typed
+    /// component failure identity.
+    MissingFailureIdentity,
 }
 
 impl core::fmt::Display for FixtureWorkloadShrinkError {
@@ -715,6 +718,9 @@ impl core::fmt::Display for FixtureWorkloadShrinkError {
             Self::AttemptIo(kind) => write!(f, "fixture shrink attempt I/O failed: {kind:?}"),
             Self::Workload(error) => write!(f, "fixture shrink workload refused: {error}"),
             Self::Harness(error) => write!(f, "fixture shrink harness failed: {error}"),
+            Self::MissingFailureIdentity => {
+                f.write_str("fixture shrink reproduced without a typed failure identity")
+            }
         }
     }
 }
@@ -742,52 +748,54 @@ pub fn shrink_fixture_workload_under_lab(
     let mut target = None;
     let mut fatal = None;
     let mut ordinal = 0usize;
-    let mut reproduces = |_: &[()], retained: &[FixtureWorkloadAction]| {
-        if fatal.is_some() {
-            return ShrinkTrial::DidNotReproduce;
-        }
-        let candidate = match FixtureWorkload::try_from_retained_actions(cfg.seed, retained) {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                fatal = Some(FixtureWorkloadShrinkError::Workload(error));
+    let shrunk = {
+        let mut reproduces = |_: &[()], retained: &[FixtureWorkloadAction]| {
+            if fatal.is_some() {
                 return ShrinkTrial::DidNotReproduce;
             }
+            let candidate = match FixtureWorkload::try_from_retained_actions(cfg.seed, retained) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    fatal = Some(FixtureWorkloadShrinkError::Workload(error));
+                    return ShrinkTrial::DidNotReproduce;
+                }
+            };
+            let attempt = scratch_root.join(format!("fixture-workload-attempt-{ordinal:04}"));
+            ordinal += 1;
+            if let Err(error) = std::fs::create_dir_all(&attempt) {
+                fatal = Some(FixtureWorkloadShrinkError::AttemptIo(error.kind()));
+                return ShrinkTrial::DidNotReproduce;
+            }
+            match run_fixture_workload_under_lab(cfg, &candidate, &attempt, lab_config.clone()) {
+                Ok(_) => ShrinkTrial::DidNotReproduce,
+                Err(error) => match error.failure_kind() {
+                    Some(kind) if target.is_none() || target == Some(kind) => {
+                        target.get_or_insert(kind);
+                        ShrinkTrial::Reproduced
+                    }
+                    Some(kind) => ShrinkTrial::DifferentFailure(kind),
+                    None => {
+                        fatal = Some(FixtureWorkloadShrinkError::Harness(error));
+                        ShrinkTrial::DidNotReproduce
+                    }
+                },
+            }
         };
-        let attempt = scratch_root.join(format!("fixture-workload-attempt-{ordinal:04}"));
-        ordinal += 1;
-        if let Err(error) = std::fs::create_dir_all(&attempt) {
-            fatal = Some(FixtureWorkloadShrinkError::AttemptIo(error.kind()));
-            return ShrinkTrial::DidNotReproduce;
-        }
-        match run_fixture_workload_under_lab(cfg, &candidate, &attempt, lab_config.clone()) {
-            Ok(_) => ShrinkTrial::DidNotReproduce,
-            Err(error) => match error.failure_kind() {
-                Some(kind) if target.is_none() || target == Some(kind) => {
-                    target.get_or_insert(kind);
-                    ShrinkTrial::Reproduced
-                }
-                Some(kind) => ShrinkTrial::DifferentFailure(kind),
-                None => {
-                    fatal = Some(FixtureWorkloadShrinkError::Harness(error));
-                    ShrinkTrial::DidNotReproduce
-                }
-            },
-        }
+        shrink_schedule_and_workload(
+            Vec::<()>::new(),
+            workload.actions().to_vec(),
+            &mut reproduces,
+        )
     };
-
-    let shrunk = shrink_schedule_and_workload(
-        Vec::<()>::new(),
-        workload.actions().to_vec(),
-        &mut reproduces,
-    );
-    drop(reproduces);
     if let Some(error) = fatal {
         return Err(error);
     }
     let Some(shrunk) = shrunk else {
         return Ok(None);
     };
-    let failure = target.expect("a reproduced fixture shrink has a typed target");
+    let Some(failure) = target else {
+        return Err(FixtureWorkloadShrinkError::MissingFailureIdentity);
+    };
     let workload = FixtureWorkload::try_from_retained_actions(cfg.seed, &shrunk.workload)
         .map_err(FixtureWorkloadShrinkError::Workload)?;
     Ok(Some(FixtureWorkloadShrunk {

@@ -313,6 +313,22 @@ impl core::fmt::Display for FixtureTaskError {
 
 impl std::error::Error for FixtureTaskError {}
 
+/// Heap-stable task future used by the exported fixture adapter.
+///
+/// The fixture creates exactly two of these per bounded verification run. A
+/// named type keeps the public execution seam readable without hiding its
+/// task error behind an opaque, deeply nested return type.
+pub type FixtureTaskFuture =
+    Pin<Box<dyn std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static>>;
+
+/// Producer/consumer futures plus the exact trace and workload they share.
+pub type FixtureFutures = (
+    FixtureTaskFuture,
+    FixtureTaskFuture,
+    TraceHandle,
+    FixtureWorkload,
+);
+
 /// One immutable producer action in the exported fixture workload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixtureWorkloadAction {
@@ -1132,19 +1148,13 @@ async fn consumer(
 /// task under the deterministic scheduler; the live driver polls them jointly
 /// inside `block_on`. Both futures acquire their `Cx` ambiently, so they are
 /// runtime-agnostic by construction.
-pub fn fixture_futures(
-    cfg: &FixtureConfig,
-    scratch_dir: &Path,
-) -> (
-    impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
-    impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
-    TraceHandle,
-    FixtureWorkload,
-) {
+pub fn fixture_futures(cfg: &FixtureConfig, scratch_dir: &Path) -> FixtureFutures {
     let workload = FixtureWorkload::try_from_config(cfg)
         .expect("fixture configuration must materialize a bounded workload");
-    fixture_futures_for_workload(cfg, workload, scratch_dir)
-        .expect("generated fixture workload must match its configuration")
+    let futures = fixture_futures_for_workload(cfg, workload, scratch_dir)
+        .expect("generated fixture workload must match its configuration");
+    std::fs::create_dir_all(scratch_dir).expect("fixture scratch dir");
+    futures
 }
 
 /// Builds the fixture futures from an already materialized workload.
@@ -1156,17 +1166,8 @@ pub(crate) fn fixture_futures_for_workload(
     cfg: &FixtureConfig,
     workload: FixtureWorkload,
     scratch_dir: &Path,
-) -> Result<
-    (
-        impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
-        impl std::future::Future<Output = Result<(), FixtureTaskError>> + Send + 'static,
-        TraceHandle,
-        FixtureWorkload,
-    ),
-    FixtureWorkloadError,
-> {
+) -> Result<FixtureFutures, FixtureWorkloadError> {
     workload.validate_seed(cfg)?;
-    std::fs::create_dir_all(scratch_dir).expect("fixture scratch dir");
     let trace = TraceHandle::new(cfg.seed);
     let (producer_end, consumer_end) = VirtualTcpStream::pair(
         SocketAddr::from(([127, 0, 0, 1], 9101)),
@@ -1180,5 +1181,10 @@ pub(crate) fn fixture_futures_for_workload(
         trace.clone(),
     );
     let consumer_fut = consumer(cfg.clone(), consumer_end, trace.clone());
-    Ok((producer_fut, consumer_fut, trace, workload))
+    Ok((
+        Box::pin(producer_fut),
+        Box::pin(consumer_fut),
+        trace,
+        workload,
+    ))
 }

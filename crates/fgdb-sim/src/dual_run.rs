@@ -98,12 +98,16 @@ pub enum FixtureFailureKind {
 pub enum FixtureRunError {
     /// The supplied workload was malformed or belonged to another seed.
     Workload(FixtureWorkloadError),
+    /// The run's isolated scratch directory could not be created.
+    ScratchIo(io::ErrorKind),
     /// The producer returned a typed I/O failure.
     Producer(FixtureTaskError),
     /// The consumer returned a typed I/O failure.
     Consumer(FixtureTaskError),
     /// A LAB task terminated without returning its typed output.
     LabTaskTerminated { component: &'static str },
+    /// A LAB task could not be admitted to the runtime.
+    LabTaskCreate { component: &'static str },
     /// A LAB task was still incomplete after the runtime stopped.
     LabTaskIncomplete { component: &'static str },
     /// The LAB runtime stopped before quiescence.
@@ -142,10 +146,14 @@ impl core::fmt::Display for FixtureRunError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Workload(error) => write!(f, "fixture workload refused: {error}"),
+            Self::ScratchIo(kind) => write!(f, "fixture scratch I/O failed: {kind:?}"),
             Self::Producer(error) => write!(f, "fixture producer failed: {error}"),
             Self::Consumer(error) => write!(f, "fixture consumer failed: {error}"),
             Self::LabTaskTerminated { component } => {
                 write!(f, "fixture LAB {component} task terminated")
+            }
+            Self::LabTaskCreate { component } => {
+                write!(f, "fixture LAB {component} task could not be created")
             }
             Self::LabTaskIncomplete { component } => {
                 write!(f, "fixture LAB {component} task remained incomplete")
@@ -587,14 +595,20 @@ pub fn run_fixture_workload_under_lab(
     let (producer_fut, consumer_fut, trace, workload) =
         fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)
             .map_err(FixtureRunError::Workload)?;
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|error| FixtureRunError::ScratchIo(error.kind()))?;
     let (producer_task, mut producer_handle) = lab
         .state
         .create_task(root, Budget::INFINITE, producer_fut)
-        .expect("create producer task");
+        .map_err(|_| FixtureRunError::LabTaskCreate {
+            component: "producer",
+        })?;
     let (consumer_task, mut consumer_handle) = lab
         .state
         .create_task(root, Budget::INFINITE, consumer_fut)
-        .expect("create consumer task");
+        .map_err(|_| FixtureRunError::LabTaskCreate {
+            component: "consumer",
+        })?;
     lab.scheduler.lock().schedule(producer_task, 0);
     lab.scheduler.lock().schedule(consumer_task, 0);
     let virtual_report = lab.run_with_auto_advance();
@@ -693,6 +707,8 @@ pub fn run_fixture_workload_live(
     let (producer_fut, consumer_fut, trace, workload) =
         fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)
             .map_err(FixtureRunError::Workload)?;
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|error| FixtureRunError::ScratchIo(error.kind()))?;
     let (producer_result, consumer_result) =
         runtime.block_on(async move { join2(producer_fut, consumer_fut).await });
     producer_result.map_err(FixtureRunError::Producer)?;
