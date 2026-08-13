@@ -11,7 +11,10 @@
 
 use std::path::PathBuf;
 
-use fgdb_sim::dual_run::{determinism_gate, dual_run_fixture, run_fixture_under_lab};
+use fgdb_crypto::Hasher;
+use fgdb_sim::dual_run::{
+    FixtureRunReceipt, FixtureRuntime, determinism_gate, dual_run_fixture, run_fixture_under_lab,
+};
 use fgdb_sim::fixture::{FixtureConfig, MAX_FIXTURE_PAYLOAD_BYTES};
 use fgdb_sim::vfs::Trigger;
 
@@ -44,6 +47,17 @@ fn two_lab_runs_at_one_seed_are_byte_identical_across_seeds() {
         assert!(verdict.first_divergence.is_none());
         assert_eq!(verdict.trace_fingerprints[0], verdict.trace_fingerprints[1]);
         assert_eq!(verdict.schedule_hashes[0], verdict.schedule_hashes[1]);
+        assert_eq!(verdict.receipts.len(), 2);
+        assert_eq!(
+            verdict.receipts[0].trace_digest(),
+            verdict.receipts[1].trace_digest(),
+            "byte-identical runs must retain the same exact trace digest"
+        );
+        assert!(verdict.receipts.iter().all(|receipt| {
+            receipt.runtime() == FixtureRuntime::Lab
+                && receipt.seed() == seed
+                && receipt.virtual_clock_epoch_nanos().is_some()
+        }));
         assert!(
             verdict.log_lines.iter().any(|l| l.contains("PASSED")),
             "verdict must be reconstructable from its log: {:?}",
@@ -207,11 +221,53 @@ fn lab_runtime_integration_covers_time_disk_network_chaos_pressure_and_lifecycle
     assert!(run.region_close.quiescent && run.region_close.close_completed);
     assert!(run.obligation_balance.balanced);
     assert_eq!(run.obligation_balance.leaked, 0);
+    assert_eq!(run.receipt.runtime(), FixtureRuntime::Lab);
+    assert_eq!(run.receipt.seed(), cfg.seed);
+    assert_eq!(
+        run.receipt.virtual_clock_epoch_nanos(),
+        Some(run.virtual_clock_epoch_nanos)
+    );
+    assert_eq!(
+        run.receipt.injected_faults().len(),
+        usize::try_from(run.semantics.injected_faults).expect("fault count is nonnegative")
+    );
+    assert!(
+        run.receipt
+            .injected_faults()
+            .iter()
+            .all(|event| event.path.is_relative()),
+        "fixture receipts must not retain caller scratch prefixes"
+    );
+    assert_non_failure_receipt(&run.receipt);
+    let receipt_log = run.receipt.log_lines().join("\n");
+    for required in [
+        "scenario_id=",
+        "seed=",
+        "virtual_clock_epoch_nanos=",
+        "injected_fault",
+        "artifact_fields_asserted=",
+        "shrink_iterations=0",
+        "final_reproducer_path=none",
+    ] {
+        assert!(
+            receipt_log.contains(required),
+            "fixture receipt omitted {required:?}:\n{receipt_log}"
+        );
+    }
 
     // Keep both refusal controls inside the registered aggregate. Otherwise a
     // regression that drops task failures or the allocation bound could leave
     // the positive lab-runtime selector green.
     lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics();
+    raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable();
+}
+
+fn assert_non_failure_receipt(receipt: &FixtureRunReceipt) {
+    assert_eq!(receipt.scenario_id(), "fgdb.sim.fixture.producer_consumer");
+    assert!(!receipt.trace_digest().is_empty());
+    assert!(receipt.artifact_fields_asserted().is_empty());
+    assert_eq!(receipt.shrink_iterations(), 0);
+    assert!(receipt.final_reproducer_path().is_none());
 }
 
 #[test]
@@ -272,6 +328,21 @@ fn the_dual_run_matches_lab_and_live_at_one_seed() {
         digest_line.contains(&format!("live_digest={lab_digest}")),
         "at one seed the two digests must be the same digest: {digest_line}"
     );
+    assert_eq!(outcome.lab_receipt.runtime(), FixtureRuntime::Lab);
+    assert_eq!(outcome.live_receipt.runtime(), FixtureRuntime::Live);
+    assert_eq!(outcome.lab_receipt.seed(), cfg.seed);
+    assert_eq!(outcome.live_receipt.seed(), cfg.seed);
+    assert!(outcome.lab_receipt.virtual_clock_epoch_nanos().is_some());
+    assert_eq!(outcome.live_receipt.virtual_clock_epoch_nanos(), None);
+    assert_non_failure_receipt(&outcome.lab_receipt);
+    assert_non_failure_receipt(&outcome.live_receipt);
+    let trace_line = outcome
+        .log_lines
+        .iter()
+        .find(|line| line.contains("lab_trace_digest=") && line.contains("live_trace_digest="))
+        .expect("the dual run retains both exact execution-trace digests");
+    assert!(trace_line.contains(outcome.lab_receipt.trace_digest()));
+    assert!(trace_line.contains(outcome.live_receipt.trace_digest()));
 }
 
 #[test]
@@ -289,5 +360,88 @@ fn the_dual_run_detects_a_semantic_mutation() {
     assert!(
         !outcome.result.verdict.mismatches.is_empty(),
         "the mismatch must be named, not merely counted"
+    );
+    assert_eq!(outcome.lab_receipt.seed(), cfg.seed);
+    assert_eq!(outcome.live_receipt.seed(), cfg.seed ^ 1);
+    assert_ne!(
+        outcome.lab_receipt.trace_digest(),
+        outcome.live_receipt.trace_digest(),
+        "the live receipt must bind the mutated execution rather than the caller's base seed"
+    );
+}
+
+#[test]
+fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
+    let cfg = FixtureConfig::new(0xD0A3);
+    let lab_root = scratch_root("raw-receipt-trace-binding");
+    let raw = run_fixture_under_lab(&cfg, &lab_root, LabConfig::new(cfg.seed));
+    let mut trace_hasher = Hasher::new();
+    trace_hasher.update(b"fgdb.sim.fixture.trace.v1");
+    trace_hasher.update(&raw.trace_bytes);
+    assert_eq!(
+        raw.receipt.trace_digest(),
+        trace_hasher.finalize().to_hex(),
+        "the receipt digest must bind the completed execution bytes"
+    );
+
+    let mut changed_workload = cfg.clone();
+    changed_workload.rounds += 1;
+    let changed = run_fixture_under_lab(
+        &changed_workload,
+        &lab_root.join("same-seed-changed-workload"),
+        LabConfig::new(changed_workload.seed),
+    );
+    assert_eq!(raw.receipt.seed(), changed.receipt.seed());
+    assert_ne!(
+        raw.receipt.trace_digest(),
+        changed.receipt.trace_digest(),
+        "a same-seed workload mutation must change the execution-bound digest"
+    );
+
+    let honest_root = scratch_root("dual-receipt-contract");
+    let honest = dual_run_fixture(&cfg, &honest_root, None);
+    assert!(honest.result.passed(), "{}", honest.result.summary());
+    assert_non_failure_receipt(&honest.lab_receipt);
+    assert_non_failure_receipt(&honest.live_receipt);
+    assert_eq!(honest.lab_receipt.seed(), cfg.seed);
+    assert_eq!(honest.live_receipt.seed(), cfg.seed);
+    assert!(honest.lab_receipt.virtual_clock_epoch_nanos().is_some());
+    assert_eq!(honest.live_receipt.virtual_clock_epoch_nanos(), None);
+
+    let log = honest.log_lines.join("\n");
+    for required in [
+        "runtime=lab",
+        "runtime=live",
+        "virtual_clock_epoch_nanos=",
+        "virtual_clock_epoch_nanos=not-applicable-live",
+        "lab_trace_digest=",
+        "live_trace_digest=",
+        "artifact_fields_asserted=",
+        "shrink_iterations=0",
+        "final_reproducer_path=none",
+    ] {
+        assert!(
+            log.contains(required),
+            "dual-run receipt log omitted {required:?}:\n{log}"
+        );
+    }
+
+    let live_seed = cfg.seed ^ 1;
+    let mutated_root = scratch_root("dual-receipt-mutation");
+    let mutated = dual_run_fixture(&cfg, &mutated_root, Some(live_seed));
+    assert!(!mutated.result.passed());
+    assert_eq!(mutated.lab_receipt.seed(), cfg.seed);
+    assert_eq!(mutated.live_receipt.seed(), live_seed);
+    assert_ne!(
+        mutated.lab_receipt.trace_digest(),
+        mutated.live_receipt.trace_digest()
+    );
+    assert!(
+        mutated
+            .live_receipt
+            .log_lines()
+            .iter()
+            .any(|line| line.contains(&format!("seed={live_seed:#x}"))),
+        "the receipt must name the execution that actually ran, not the base request"
     );
 }

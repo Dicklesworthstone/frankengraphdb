@@ -34,7 +34,8 @@
 //! campaign verdict can be re-read without re-running (q97e's logging
 //! acceptance).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use asupersync::Budget;
 use asupersync::lab::{
@@ -43,11 +44,167 @@ use asupersync::lab::{
     TerminalOutcome, capture_obligation_balance, capture_region_close, normalize_lab_report,
 };
 use asupersync::runtime::RuntimeBuilder;
+use fgdb_crypto::Hasher;
 
 use crate::fixture::{FixtureConfig, FixtureSemantics, first_divergence, fixture_futures};
+use crate::vfs::FaultEvent;
 
 /// Scope name for the fixture's semantic counters.
 const SURFACE_SCOPE: &str = "fgdb.sim.fixture";
+
+/// Stable scenario identity shared by the fixture's lab and live executions.
+const FIXTURE_SCENARIO_ID: &str = "fgdb.sim.fixture.producer_consumer";
+
+/// Runtime posture that produced a fixture receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixtureRuntime {
+    /// Deterministic asupersync lab runtime with a virtual clock.
+    Lab,
+    /// Live asupersync runtime with a wall clock and ordinary scheduler.
+    Live,
+}
+
+impl FixtureRuntime {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lab => "lab",
+            Self::Live => "live",
+        }
+    }
+}
+
+/// Immutable, reconstructable facts emitted by one fixture execution.
+///
+/// This is deliberately separate from [`crate::artifact::RunReceipt`]: that
+/// receipt is closed over the built-in fault-replay scenarios, while this one
+/// records the exported producer/consumer fixture that runs under both lab and
+/// live. A live execution has no virtual-clock epoch and says so explicitly;
+/// it must never relabel a wall-clock observation as virtual time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureRunReceipt {
+    scenario_id: &'static str,
+    runtime: FixtureRuntime,
+    seed: u64,
+    virtual_clock_epoch_nanos: Option<u64>,
+    trace_digest: String,
+    injected_faults: Vec<FaultEvent>,
+    artifact_fields_asserted: Vec<&'static str>,
+    shrink_iterations: usize,
+    final_reproducer_path: Option<PathBuf>,
+}
+
+impl FixtureRunReceipt {
+    fn new(
+        runtime: FixtureRuntime,
+        seed: u64,
+        virtual_clock_epoch_nanos: Option<u64>,
+        trace_bytes: &[u8],
+        injected_faults: Vec<FaultEvent>,
+    ) -> Self {
+        let mut hasher = Hasher::new();
+        hasher.update(b"fgdb.sim.fixture.trace.v1");
+        hasher.update(trace_bytes);
+        Self {
+            scenario_id: FIXTURE_SCENARIO_ID,
+            runtime,
+            seed,
+            virtual_clock_epoch_nanos,
+            trace_digest: hasher.finalize().to_hex(),
+            injected_faults,
+            // The exported fixture is a passing substrate run. It neither
+            // asserts a failure-artifact schema nor claims to be pre-shrunk.
+            artifact_fields_asserted: Vec::new(),
+            shrink_iterations: 0,
+            final_reproducer_path: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn scenario_id(&self) -> &'static str {
+        self.scenario_id
+    }
+
+    #[must_use]
+    pub const fn runtime(&self) -> FixtureRuntime {
+        self.runtime
+    }
+
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    #[must_use]
+    pub const fn virtual_clock_epoch_nanos(&self) -> Option<u64> {
+        self.virtual_clock_epoch_nanos
+    }
+
+    #[must_use]
+    pub fn trace_digest(&self) -> &str {
+        &self.trace_digest
+    }
+
+    #[must_use]
+    pub fn injected_faults(&self) -> &[FaultEvent] {
+        &self.injected_faults
+    }
+
+    #[must_use]
+    pub fn artifact_fields_asserted(&self) -> &[&'static str] {
+        &self.artifact_fields_asserted
+    }
+
+    #[must_use]
+    pub const fn shrink_iterations(&self) -> usize {
+        self.shrink_iterations
+    }
+
+    #[must_use]
+    pub fn final_reproducer_path(&self) -> Option<&Path> {
+        self.final_reproducer_path.as_deref()
+    }
+
+    /// Complete structured log for this execution without rerunning it.
+    #[must_use]
+    pub fn log_lines(&self) -> Vec<String> {
+        let virtual_epoch = self.virtual_clock_epoch_nanos.map_or_else(
+            || "not-applicable-live".to_string(),
+            |epoch| epoch.to_string(),
+        );
+        let mut lines = vec![format!(
+            "fixture-run scenario_id={} runtime={} seed={:#x} virtual_clock_epoch_nanos={} trace_digest={}",
+            self.scenario_id,
+            self.runtime.as_str(),
+            self.seed,
+            virtual_epoch,
+            self.trace_digest,
+        )];
+        for event in &self.injected_faults {
+            lines.push(format!(
+                "fixture-run runtime={} injected_fault seq={} class={} path={} detail={:?}",
+                self.runtime.as_str(),
+                event.seq,
+                event.kind.class(),
+                event.path.display(),
+                event.kind,
+            ));
+        }
+        lines.push(format!(
+            "fixture-run runtime={} artifact_fields_asserted={}",
+            self.runtime.as_str(),
+            self.artifact_fields_asserted.join(",")
+        ));
+        lines.push(format!(
+            "fixture-run runtime={} shrink_iterations={} final_reproducer_path={}",
+            self.runtime.as_str(),
+            self.shrink_iterations,
+            self.final_reproducer_path
+                .as_deref()
+                .map_or_else(|| "none".to_string(), |path| path.display().to_string())
+        ));
+        lines
+    }
+}
 
 /// One completed lab execution of the fixture.
 pub struct LabFixtureRun {
@@ -59,12 +216,16 @@ pub struct LabFixtureRun {
     pub schedule_hash: u64,
     /// Virtual nanoseconds the run consumed — proof the clock was virtual.
     pub virtual_elapsed_nanos: u64,
+    /// Terminal virtual-clock epoch reported by the lab runtime.
+    pub virtual_clock_epoch_nanos: u64,
     /// Clock-free semantic projection.
     pub semantics: FixtureSemantics,
     /// Region-close evidence observed from the lab runtime report.
     pub region_close: RegionCloseRecord,
     /// Obligation-leak evidence observed by the lab runtime oracles.
     pub obligation_balance: ObligationBalanceRecord,
+    /// Immutable facts retained from this exact execution.
+    pub receipt: FixtureRunReceipt,
 }
 
 /// One completed live execution of the fixture.
@@ -75,6 +236,8 @@ pub struct LiveFixtureRun {
     pub region_close: RegionCloseRecord,
     /// Explicit live-adapter counters for the fixture's zero-obligation scope.
     pub obligation_balance: ObligationBalanceRecord,
+    /// Immutable facts retained from this exact execution.
+    pub receipt: FixtureRunReceipt,
 }
 
 /// Runs the fixture once under the lab runtime with auto-advancing virtual
@@ -124,14 +287,25 @@ pub fn run_fixture_under_lab(
         report.invariant_violations
     );
     let (runtime_semantics, _capture_manifest) = normalize_lab_report(&report, SURFACE_SCOPE);
+    let trace_bytes = trace.to_bytes();
+    let semantics = trace.semantics();
+    let receipt = FixtureRunReceipt::new(
+        FixtureRuntime::Lab,
+        cfg.seed,
+        Some(report.now_nanos),
+        &trace_bytes,
+        trace.fault_events(),
+    );
     LabFixtureRun {
-        trace_bytes: trace.to_bytes(),
+        trace_bytes,
         trace_fingerprint: report.trace_fingerprint,
         schedule_hash: report.trace_certificate.schedule_hash,
         virtual_elapsed_nanos: virtual_report.virtual_elapsed_nanos,
-        semantics: trace.semantics(),
+        virtual_clock_epoch_nanos: report.now_nanos,
+        semantics,
         region_close: runtime_semantics.region_close,
         obligation_balance: runtime_semantics.obligation_balance,
+        receipt,
     }
 }
 
@@ -148,8 +322,17 @@ pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> LiveFixtureR
     runtime.block_on(async move {
         join2(producer_fut, consumer_fut).await;
     });
+    let trace_bytes = trace.to_bytes();
+    let semantics = trace.semantics();
+    let receipt = FixtureRunReceipt::new(
+        FixtureRuntime::Live,
+        cfg.seed,
+        None,
+        &trace_bytes,
+        trace.fault_events(),
+    );
     LiveFixtureRun {
-        semantics: trace.semantics(),
+        semantics,
         // Returning from `join2` is the live adapter's direct witness that
         // both fixture children completed. The fixture creates no finalizers.
         region_close: capture_region_close(true, true),
@@ -157,6 +340,7 @@ pub fn run_fixture_live(cfg: &FixtureConfig, scratch_dir: &Path) -> LiveFixtureR
         // counters here so a future obligation-producing fixture must change
         // the witness rather than inheriting an unexplained constant.
         obligation_balance: capture_obligation_balance(0, 0, 0),
+        receipt,
     }
 }
 
@@ -216,6 +400,8 @@ pub struct DeterminismVerdict {
     pub schedule_hashes: Vec<u64>,
     /// Per-run virtual elapsed nanoseconds.
     pub virtual_elapsed_nanos: Vec<u64>,
+    /// Immutable receipt from every execution compared by this verdict.
+    pub receipts: Vec<FixtureRunReceipt>,
     /// The verdict, reconstructable without re-running.
     pub log_lines: Vec<String>,
 }
@@ -239,6 +425,7 @@ pub fn determinism_gate(
 
     let mut log_lines = Vec::new();
     for (i, run) in executions.iter().enumerate() {
+        log_lines.extend(run.receipt.log_lines());
         log_lines.push(format!(
             "determinism-gate seed={:#x} run={} trace_bytes={} fingerprint={:#x} schedule_hash={:#x} virtual_elapsed_ns={}",
             cfg.seed,
@@ -293,6 +480,7 @@ pub fn determinism_gate(
         trace_fingerprints: executions.iter().map(|r| r.trace_fingerprint).collect(),
         schedule_hashes: executions.iter().map(|r| r.schedule_hash).collect(),
         virtual_elapsed_nanos: executions.iter().map(|r| r.virtual_elapsed_nanos).collect(),
+        receipts: executions.iter().map(|r| r.receipt.clone()).collect(),
         log_lines,
     }
 }
@@ -331,6 +519,10 @@ fn to_normalized(
 pub struct DualRunOutcome {
     /// The foundation harness's structured comparison.
     pub result: DualRunResult,
+    /// Exact execution receipt produced by the lab side.
+    pub lab_receipt: FixtureRunReceipt,
+    /// Exact execution receipt produced by the live side.
+    pub live_receipt: FixtureRunReceipt,
     /// Side-by-side digests and counters, reconstructable without re-running.
     pub log_lines: Vec<String>,
 }
@@ -351,6 +543,10 @@ pub fn dual_run_fixture(
     let lab_dir = scratch_root.join("lab");
     let live_cfg = cfg.clone();
     let live_dir = scratch_root.join("live");
+    let lab_receipt_slot = Arc::new(Mutex::new(None));
+    let live_receipt_slot = Arc::new(Mutex::new(None));
+    let lab_receipt_capture = Arc::clone(&lab_receipt_slot);
+    let live_receipt_capture = Arc::clone(&live_receipt_slot);
 
     let mut harness = DualRunHarness::phase1(
         "fgdb.sim.fixture.producer_consumer",
@@ -361,6 +557,9 @@ pub fn dual_run_fixture(
     )
     .lab(move |config| {
         let run = run_fixture_under_lab(&lab_cfg, &lab_dir, config);
+        *lab_receipt_capture
+            .lock()
+            .expect("dual-run lab receipt slot") = Some(run.receipt.clone());
         to_normalized(&run.semantics, run.region_close, run.obligation_balance)
     });
     if let Some(seed) = live_seed_override {
@@ -368,6 +567,9 @@ pub fn dual_run_fixture(
             let mut mutated = live_cfg.clone();
             mutated.seed = seed;
             let run = run_fixture_live(&mutated, &live_dir);
+            *live_receipt_capture
+                .lock()
+                .expect("dual-run live receipt slot") = Some(run.receipt.clone());
             to_normalized(&run.semantics, run.region_close, run.obligation_balance)
         });
     } else {
@@ -375,10 +577,23 @@ pub fn dual_run_fixture(
             let mut effective = live_cfg.clone();
             effective.seed = seed;
             let run = run_fixture_live(&effective, &live_dir);
+            *live_receipt_capture
+                .lock()
+                .expect("dual-run live receipt slot") = Some(run.receipt.clone());
             to_normalized(&run.semantics, run.region_close, run.obligation_balance)
         });
     }
     let result = harness.run();
+    let lab_receipt = lab_receipt_slot
+        .lock()
+        .expect("dual-run lab receipt slot")
+        .take()
+        .expect("dual-run harness executed its lab side");
+    let live_receipt = live_receipt_slot
+        .lock()
+        .expect("dual-run live receipt slot")
+        .take()
+        .expect("dual-run harness executed its live side");
 
     let lab_digest = result
         .lab
@@ -394,10 +609,18 @@ pub fn dual_run_fixture(
         .surface_result
         .clone()
         .unwrap_or_default();
-    let log_lines = vec![
+    let mut log_lines = lab_receipt.log_lines();
+    log_lines.extend(live_receipt.log_lines());
+    log_lines.extend([
         format!(
             "dual-run seed={:#x} lab_digest={lab_digest} live_digest={live_digest}",
             cfg.seed
+        ),
+        format!(
+            "dual-run seed={:#x} lab_trace_digest={} live_trace_digest={}",
+            cfg.seed,
+            lab_receipt.trace_digest(),
+            live_receipt.trace_digest(),
         ),
         format!(
             "dual-run seed={:#x} lab_counters={:?} live_counters={:?}",
@@ -411,6 +634,11 @@ pub fn dual_run_fixture(
             result.passed(),
             result.verdict.mismatches.len()
         ),
-    ];
-    DualRunOutcome { result, log_lines }
+    ]);
+    DualRunOutcome {
+        result,
+        lab_receipt,
+        live_receipt,
+        log_lines,
+    }
 }
