@@ -391,6 +391,10 @@ pub enum WriteError {
     IdentitySpent {
         elem: ElementId,
     },
+    /// A [`WriteBatch::compare_and_set_vertex_property`] /
+    /// [`WriteBatch::compare_and_set_edge_property`] guard failed under
+    /// [`WriteMismatchPolicy::AbortWrite`]. Nothing durable happened.
+    CompareAndSetMismatch(Box<CompareAndSetMismatch>),
     Canonical(CanonicalError),
     /// Chronicle failed before the marker could have become durable. Unlike
     /// [`WriteError::CommitOutcomeUnknown`], retrying after correcting the
@@ -587,6 +591,11 @@ impl core::fmt::Display for WriteError {
                     "{elem:?} was spent by earlier history and can never be re-created"
                 )
             }
+            Self::CompareAndSetMismatch(mismatch) => write!(
+                f,
+                "compare-and-set of {:?} {:?} expected {:?}, found {:?}",
+                mismatch.elem, mismatch.name, mismatch.expected, mismatch.actual
+            ),
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
             Self::CommitOutcomeUnknown {
@@ -654,6 +663,30 @@ impl core::error::Error for OpenError {}
 impl core::error::Error for RebuildError {}
 impl core::error::Error for WriteError {}
 impl core::error::Error for ReadError {}
+
+/// What a failed CompareAndSet means on a [`WriteBatch`].
+///
+/// WriteBatch is one atomic write, not a multi-statement transaction.
+/// Appendix B's `StatementError` is therefore not an arm — that policy
+/// needs the statement machine (`fgdb-w2-txn-lifecycle-mhae`). Naming it
+/// here would be a substitute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteMismatchPolicy {
+    /// The guard does nothing. The rest of the batch continues.
+    NoOp,
+    /// Refuse the whole batch before anything durable happens.
+    AbortWrite,
+}
+
+/// The two values a failed CompareAndSet compared, boxed through
+/// [`WriteError::CompareAndSetMismatch`] so the error enum stays small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompareAndSetMismatch {
+    pub elem: ElementId,
+    pub name: PropertyKeyId,
+    pub expected: Option<CanonicalScalar>,
+    pub actual: Option<CanonicalScalar>,
+}
 
 /// One batch of graph mutations, committed atomically.
 ///
@@ -723,6 +756,13 @@ enum PendingRow {
         vid: VId,
         key: PropertyKeyId,
         value: Option<CanonicalScalar>,
+    },
+    CompareAndSet {
+        elem: ElementId,
+        key: PropertyKeyId,
+        expected: Option<Box<CanonicalScalar>>,
+        value: Box<CanonicalScalar>,
+        mismatch: WriteMismatchPolicy,
     },
 }
 
@@ -852,6 +892,48 @@ impl WriteBatch {
     ) -> &mut Self {
         self.rows
             .push(PendingRow::SetEdgeProperty { eid, key, value });
+        self
+    }
+
+    /// Set `vid`'s `key` to `value` only if it currently equals `expected`.
+    ///
+    /// [`WriteMismatchPolicy::AbortWrite`] refuses the batch before D2.
+    /// [`WriteMismatchPolicy::NoOp`] emits no row. There is no
+    /// `StatementError` arm — WriteBatch is one write.
+    pub fn compare_and_set_vertex_property(
+        &mut self,
+        vid: VId,
+        key: PropertyKeyId,
+        expected: Option<CanonicalScalar>,
+        value: CanonicalScalar,
+        mismatch: WriteMismatchPolicy,
+    ) -> &mut Self {
+        self.rows.push(PendingRow::CompareAndSet {
+            elem: ElementId::Vertex(vid),
+            key,
+            expected: expected.map(Box::new),
+            value: Box::new(value),
+            mismatch,
+        });
+        self
+    }
+
+    /// Set `eid`'s `key` to `value` only if it currently equals `expected`.
+    pub fn compare_and_set_edge_property(
+        &mut self,
+        eid: EId,
+        key: PropertyKeyId,
+        expected: Option<CanonicalScalar>,
+        value: CanonicalScalar,
+        mismatch: WriteMismatchPolicy,
+    ) -> &mut Self {
+        self.rows.push(PendingRow::CompareAndSet {
+            elem: ElementId::Edge(eid),
+            key,
+            expected: expected.map(Box::new),
+            value: Box::new(value),
+            mismatch,
+        });
         self
     }
 
@@ -1889,6 +1971,87 @@ impl<V: Vfs + Clone> Database<V> {
                     // version overlay — the chain steps once per COMMIT over
                     // the durable statement. Delete-after-update is folded to
                     // a single delete against this durable head.
+                    row
+                }
+                PendingRow::CompareAndSet {
+                    elem,
+                    key,
+                    expected,
+                    value,
+                    mismatch,
+                } => {
+                    let actual = match elem {
+                        ElementId::Vertex(vid) => {
+                            let live_now = !prefix_deleted_vertices.contains(&vid)
+                                && (prefix_content.contains_key(&vid)
+                                    || prefix_versions.contains_key(&ElementId::Vertex(vid))
+                                    || self.writer.is_vertex_live(vid));
+                            if !live_now {
+                                return Err(WriteError::UnknownVertex { vid });
+                            }
+                            let (_, props) =
+                                vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
+                            let position = props.binary_search_by_key(&key, |(k, _)| *k);
+                            position.ok().map(|at| props[at].1.clone())
+                        }
+                        ElementId::Edge(eid) => {
+                            let live_now = !prefix_deleted_edges.contains(&eid)
+                                && (prefix_edges.contains_key(&eid)
+                                    || self.writer.live_edge(eid).is_some());
+                            if !live_now {
+                                return Err(WriteError::UnknownEdge { eid });
+                            }
+                            let props = prefix_edge_rows.entry(eid).or_insert_with(|| {
+                                self.writer.live_edge_row(eid).unwrap_or_default()
+                            });
+                            let position = props.binary_search_by_key(&key, |(k, _)| *k);
+                            position.ok().map(|at| props[at].1.clone())
+                        }
+                    };
+                    if actual.as_ref() != expected.as_deref() {
+                        match mismatch {
+                            WriteMismatchPolicy::NoOp => continue,
+                            WriteMismatchPolicy::AbortWrite => {
+                                return Err(WriteError::CompareAndSetMismatch(Box::new(
+                                    CompareAndSetMismatch {
+                                        elem,
+                                        name: key,
+                                        expected: expected.map(|v| *v),
+                                        actual,
+                                    },
+                                )));
+                            }
+                        }
+                    }
+                    if actual.as_ref() == Some(value.as_ref()) {
+                        continue;
+                    }
+                    let after = (*value).clone();
+                    let row = DeltaRow::Property {
+                        elem,
+                        property: key,
+                        before: actual,
+                        after: Some(after.clone()),
+                    };
+                    match elem {
+                        ElementId::Vertex(vid) => {
+                            let (_, props) =
+                                vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
+                            match props.binary_search_by_key(&key, |(k, _)| *k) {
+                                Ok(at) => props[at].1 = after,
+                                Err(at) => props.insert(at, (key, after)),
+                            }
+                        }
+                        ElementId::Edge(eid) => {
+                            let props = prefix_edge_rows.entry(eid).or_insert_with(|| {
+                                self.writer.live_edge_row(eid).unwrap_or_default()
+                            });
+                            match props.binary_search_by_key(&key, |(k, _)| *k) {
+                                Ok(at) => props[at].1 = after,
+                                Err(at) => props.insert(at, (key, after)),
+                            }
+                        }
+                    }
                     row
                 }
             };
