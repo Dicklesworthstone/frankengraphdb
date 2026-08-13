@@ -391,6 +391,14 @@ pub enum WriteError {
     IdentitySpent {
         elem: ElementId,
     },
+    /// A [`WriteBatch::add_edge`] / [`WriteBatch::ensure_edge_by_triple`]
+    /// named an endpoint that is not live at that point in the batch.
+    /// Refused before D2: a durable CreateEdge the oracle cannot apply
+    /// (`ApplyError::DanglingEndpoint`) would poison reopen replay.
+    DanglingEndpoint {
+        eid: EId,
+        endpoint: VId,
+    },
     /// A [`WriteBatch::compare_and_set_vertex_property`] /
     /// [`WriteBatch::compare_and_set_edge_property`] guard failed under
     /// [`WriteMismatchPolicy::AbortWrite`]. Nothing durable happened.
@@ -590,6 +598,9 @@ impl core::fmt::Display for WriteError {
                     f,
                     "{elem:?} was spent by earlier history and can never be re-created"
                 )
+            }
+            Self::DanglingEndpoint { eid, endpoint } => {
+                write!(f, "{eid:?} names endpoint {endpoint:?}, which is not live")
             }
             Self::CompareAndSetMismatch(mismatch) => write!(
                 f,
@@ -814,6 +825,9 @@ impl WriteBatch {
         self
     }
 
+    /// Create the edge. Both endpoints must be live at this point in the
+    /// batch or the write refuses [`WriteError::DanglingEndpoint`]
+    /// before D2 (fgdb-r196).
     pub fn add_edge(
         &mut self,
         eid: EId,
@@ -834,6 +848,8 @@ impl WriteBatch {
     /// Create the edge only if no live `(src, this batch's relation, dst)`
     /// exists. Named `ensure_edge_by_triple` because the constraint-keyed
     /// `EnsureEdge` is not this method (fgdb-ensure-edge-constraint-counterfeit-xa2x).
+    /// A new triple still requires live endpoints
+    /// ([`WriteError::DanglingEndpoint`]).
     pub fn ensure_edge_by_triple(
         &mut self,
         eid: EId,
@@ -1823,6 +1839,18 @@ impl<V: Vfs + Clone> Database<V> {
                         return Err(WriteError::IdentitySpent {
                             elem: ElementId::Edge(eid),
                         });
+                    }
+                    // Referential integrity BEFORE D2 (fgdb-r196). The
+                    // oracle refuses `DanglingEndpoint` at apply; a
+                    // durable row it cannot replay poisons the spine.
+                    for endpoint in [src, dst] {
+                        let live_now = !prefix_deleted_vertices.contains(&endpoint)
+                            && (prefix_versions.contains_key(&ElementId::Vertex(endpoint))
+                                || prefix_content.contains_key(&endpoint)
+                                || self.writer.is_vertex_live(endpoint));
+                        if !live_now {
+                            return Err(WriteError::DanglingEndpoint { eid, endpoint });
+                        }
                     }
                     let row = DeltaRow::CreateEdge {
                         eid,
