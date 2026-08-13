@@ -13,13 +13,15 @@ use std::path::PathBuf;
 
 use fgdb_crypto::Hasher;
 use fgdb_sim::dual_run::{
-    DualRunOutcome, FixtureRunReceipt, FixtureRuntime, determinism_gate, dual_run_fixture,
-    dual_run_verdict_log_lines, run_fixture_under_lab, run_fixture_workload_under_lab,
+    DualRunOutcome, FixtureFailureKind, FixtureRunError, FixtureRunReceipt, FixtureRuntime,
+    determinism_gate, dual_run_fixture, dual_run_verdict_log_lines, run_fixture_under_lab,
+    run_fixture_workload_live, run_fixture_workload_under_lab,
 };
 use fgdb_sim::fixture::{
-    FixtureConfig, FixtureWorkload, FixtureWorkloadDecodeLimits, FixtureWorkloadError,
-    MAX_FIXTURE_PAYLOAD_BYTES,
+    FixtureConfig, FixtureTaskStage, FixtureWorkload, FixtureWorkloadDecodeLimits,
+    FixtureWorkloadError, MAX_FIXTURE_PAYLOAD_BYTES,
 };
+use fgdb_sim::shrink::shrink_fixture_workload_under_lab;
 use fgdb_sim::vfs::Trigger;
 
 use asupersync::lab::LabConfig;
@@ -343,13 +345,100 @@ fn assert_failed_dual_run_log_is_lossless(outcome: &DualRunOutcome) {
 fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
     let mut faulting = FixtureConfig::new(0x00FA_11ED);
     faulting.fault_plan.write_enospc = Trigger::Always;
+    let faulting_workload =
+        FixtureWorkload::try_from_config(&faulting).expect("faulting workload materializes");
     let faulting_root = scratch_root("task-failure-control");
+    let lab_failure = match run_fixture_workload_under_lab(
+        &faulting,
+        &faulting_workload,
+        &faulting_root.join("typed-lab"),
+        LabConfig::new(faulting.seed),
+    ) {
+        Ok(_) => panic!("injected LAB write refusal must be typed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        lab_failure,
+        FixtureRunError::Producer(error)
+            if error.stage() == FixtureTaskStage::DurableWrite
+                && error.action() == Some(0)
+                && error.kind() == std::io::ErrorKind::WriteZero
+    ), "unexpected LAB failure: {lab_failure:?}");
+    let live_failure = match run_fixture_workload_live(
+        &faulting,
+        &faulting_workload,
+        &faulting_root.join("typed-live"),
+    ) {
+        Ok(_) => panic!("injected live write refusal must be typed"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        live_failure.failure_kind(),
+        Some(FixtureFailureKind::Producer {
+            stage: FixtureTaskStage::DurableWrite,
+            kind: std::io::ErrorKind::WriteZero,
+        })
+    );
+
+    let shrunk = shrink_fixture_workload_under_lab(
+        &faulting,
+        &faulting_workload,
+        &faulting_root.join("shrink"),
+        LabConfig::new(faulting.seed),
+    )
+    .expect("fixture shrink infrastructure succeeds")
+    .expect("the injected producer failure reproduces");
+    assert_eq!(
+        shrunk.original_workload_digest(),
+        faulting_workload.canonical_digest_hex()
+    );
+    assert_eq!(shrunk.workload().actions().len(), 1);
+    assert_eq!(shrunk.workload().actions()[0].ordinal(), 0);
+    assert_eq!(
+        shrunk.failure(),
+        FixtureFailureKind::Producer {
+            stage: FixtureTaskStage::DurableWrite,
+            kind: std::io::ErrorKind::WriteZero,
+        }
+    );
+    assert!(shrunk.attempts() > 1);
+    assert!(shrunk.accepted() > 0);
+    assert_eq!(shrunk.rejected_different_failure(), 0);
+    assert!(matches!(
+        run_fixture_workload_under_lab(
+            &faulting,
+            shrunk.workload(),
+            &faulting_root.join("minimal-replay"),
+            LabConfig::new(faulting.seed),
+        ),
+        Err(error) if error.failure_kind() == Some(shrunk.failure())
+    ));
+
+    // One-minimality is executable, not inferred from the shrinker's counts:
+    // deleting the sole retained action yields a canonical empty workload and
+    // a passing LAB run under the identical fault plan.
+    let mut empty_bytes = shrunk.workload().to_canonical_bytes();
+    empty_bytes.truncate(8 + 8 + 4);
+    empty_bytes[16..20].copy_from_slice(&0u32.to_le_bytes());
+    let empty = FixtureWorkload::try_from_canonical_bytes(
+        &empty_bytes,
+        FixtureWorkloadDecodeLimits::default(),
+    )
+    .expect("empty retained workload is canonical");
+    run_fixture_workload_under_lab(
+        &faulting,
+        &empty,
+        &faulting_root.join("minimal-minus-action"),
+        LabConfig::new(faulting.seed),
+    )
+    .expect("removing the sole causal action must clear the failure");
+
     let failed = std::panic::catch_unwind(|| {
         run_fixture_under_lab(&faulting, &faulting_root, LabConfig::new(faulting.seed))
     });
     assert!(
         failed.is_err(),
-        "a producer task that panics on the injected write refusal was reported successful"
+        "the infallible convenience wrapper must not launder a typed task failure"
     );
 
     let mut oversized = FixtureConfig::new(0xB0_0D);
@@ -660,7 +749,9 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
             &wrong_seed_root,
             LabConfig::new(wrong_seed_cfg.seed)
         ),
-        Err(FixtureWorkloadError::SeedMismatch { .. })
+        Err(FixtureRunError::Workload(
+            FixtureWorkloadError::SeedMismatch { .. }
+        ))
     ));
     assert!(
         !wrong_seed_root.exists(),

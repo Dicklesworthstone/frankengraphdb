@@ -8,10 +8,12 @@
 //!
 //! That quotation is the target-state contract. The current reusable filing
 //! pipeline minimizes a typed [`FaultPlan`] through [`shrink`]. The separate
-//! [`shrink_schedule_and_workload`] primitive proves typed two-axis reduction,
-//! but is not yet wired to the asupersync task-dispatch schedule or to every
-//! sim/live/integration/E2E failure path. Callers must not describe this module
-//! as universal pre-shrinking until that integration exists.
+//! [`shrink_schedule_and_workload`] primitive proves typed two-axis reduction.
+//! [`shrink_fixture_workload_under_lab`] now consumes the fixture's real typed
+//! LAB execution verdict and minimizes its canonical workload actions, but the
+//! recorded asupersync task-dispatch schedule still cannot be forced through
+//! the pinned runtime. Callers must not describe this module as universal or
+//! schedule-aware pre-shrinking until that foundation integration exists.
 //!
 //! # The one law, and why it is a type and not a string comparison
 //!
@@ -49,8 +51,12 @@
 //! either. Stated rather than implied.
 
 use crate::artifact::{Failure, FailureKind, Replay, RunOutcome};
+use crate::dual_run::{FixtureFailureKind, FixtureRunError, run_fixture_workload_under_lab};
+use crate::fixture::{FixtureWorkload, FixtureWorkloadAction, FixtureWorkloadError};
 use crate::vfs::{FaultEvent, FaultPlan, Trigger};
+use asupersync::lab::LabConfig;
 use fgdb_crypto::Hasher;
+use std::io;
 use std::path::Path;
 
 fn isolated_run(replay: Replay, root: &Path, ordinal: &mut usize) -> std::io::Result<RunOutcome> {
@@ -511,16 +517,16 @@ pub struct HierarchicalShrunk<S, W> {
 
 /// Typed verdict for one hierarchical replay candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShrinkTrial {
+pub enum ShrinkTrial<K = FailureKind> {
     /// The candidate reproduced the exact target failure.
     Reproduced,
     /// The candidate no longer failed.
     DidNotReproduce,
     /// The candidate remained red, but it is a different bug.
-    DifferentFailure(FailureKind),
+    DifferentFailure(K),
 }
 
-fn reduce_axis<S, W, F>(
+fn reduce_axis<S, W, K, F>(
     schedule: &mut Vec<S>,
     workload: &mut Vec<W>,
     reduce_schedule: bool,
@@ -532,7 +538,7 @@ fn reduce_axis<S, W, F>(
 where
     S: Clone,
     W: Clone,
-    F: FnMut(&[S], &[W]) -> ShrinkTrial,
+    F: FnMut(&[S], &[W]) -> ShrinkTrial<K>,
 {
     let mut changed = false;
     let mut granularity = 2usize;
@@ -591,7 +597,7 @@ where
 /// neither can shrink: reducing a workload can expose a schedule reduction
 /// and vice versa.
 #[must_use]
-pub fn shrink_schedule_and_workload<S, W, F>(
+pub fn shrink_schedule_and_workload<S, W, K, F>(
     schedule: Vec<S>,
     workload: Vec<W>,
     mut reproduces: F,
@@ -599,10 +605,10 @@ pub fn shrink_schedule_and_workload<S, W, F>(
 where
     S: Clone,
     W: Clone,
-    F: FnMut(&[S], &[W]) -> ShrinkTrial,
+    F: FnMut(&[S], &[W]) -> ShrinkTrial<K>,
 {
     let mut attempts = 1usize;
-    if reproduces(&schedule, &workload) != ShrinkTrial::Reproduced {
+    if !matches!(reproduces(&schedule, &workload), ShrinkTrial::Reproduced) {
         return None;
     }
     let mut schedule = schedule;
@@ -639,4 +645,157 @@ where
         accepted,
         rejected_different_failure,
     })
+}
+
+/// A real LAB fixture workload reduced to one-minimal actions for the same
+/// typed component failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureWorkloadShrunk {
+    original_workload_digest: String,
+    workload: FixtureWorkload,
+    failure: FixtureFailureKind,
+    attempts: usize,
+    accepted: usize,
+    rejected_different_failure: usize,
+}
+
+impl FixtureWorkloadShrunk {
+    /// Digest of the complete workload that first reproduced the failure.
+    #[must_use]
+    pub fn original_workload_digest(&self) -> &str {
+        &self.original_workload_digest
+    }
+
+    /// Canonical one-minimal workload.
+    #[must_use]
+    pub const fn workload(&self) -> &FixtureWorkload {
+        &self.workload
+    }
+
+    /// Exact component/operation/I/O category retained by every reduction.
+    #[must_use]
+    pub const fn failure(&self) -> FixtureFailureKind {
+        self.failure
+    }
+
+    /// Candidate executions, including the original premise run.
+    #[must_use]
+    pub const fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    /// Workload reductions accepted.
+    #[must_use]
+    pub const fn accepted(&self) -> usize {
+        self.accepted
+    }
+
+    /// Smaller workloads refused because they failed differently.
+    #[must_use]
+    pub const fn rejected_different_failure(&self) -> usize {
+        self.rejected_different_failure
+    }
+}
+
+/// Infrastructure error that prevents an honest fixture shrink verdict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixtureWorkloadShrinkError {
+    /// An isolated attempt directory could not be created.
+    AttemptIo(io::ErrorKind),
+    /// Rebuilding a retained canonical action sequence failed.
+    Workload(FixtureWorkloadError),
+    /// The runtime failed without a component I/O identity suitable for
+    /// same-bug comparison.
+    Harness(FixtureRunError),
+}
+
+impl core::fmt::Display for FixtureWorkloadShrinkError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::AttemptIo(kind) => write!(f, "fixture shrink attempt I/O failed: {kind:?}"),
+            Self::Workload(error) => write!(f, "fixture shrink workload refused: {error}"),
+            Self::Harness(error) => write!(f, "fixture shrink harness failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for FixtureWorkloadShrinkError {}
+
+/// Minimize the canonical action sequence of one actually failing LAB fixture.
+///
+/// Each candidate executes in a fresh directory through
+/// [`run_fixture_workload_under_lab`]. A reduction is accepted only if the
+/// producer/consumer operation and stable `io::ErrorKind` equal the original
+/// failure. Passing candidates and different failures are never filed as the
+/// reproducer.
+///
+/// The LAB runtime chooses a deterministic schedule for every candidate. This
+/// function does **not** edit or force the retained `TaskScheduled` stream; it
+/// closes the workload axis only.
+pub fn shrink_fixture_workload_under_lab(
+    cfg: &crate::fixture::FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_root: &Path,
+    lab_config: LabConfig,
+) -> Result<Option<FixtureWorkloadShrunk>, FixtureWorkloadShrinkError> {
+    let original_workload_digest = workload.canonical_digest_hex();
+    let mut target = None;
+    let mut fatal = None;
+    let mut ordinal = 0usize;
+    let mut reproduces = |_: &[()], retained: &[FixtureWorkloadAction]| {
+        if fatal.is_some() {
+            return ShrinkTrial::DidNotReproduce;
+        }
+        let candidate = match FixtureWorkload::try_from_retained_actions(cfg.seed, retained) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                fatal = Some(FixtureWorkloadShrinkError::Workload(error));
+                return ShrinkTrial::DidNotReproduce;
+            }
+        };
+        let attempt = scratch_root.join(format!("fixture-workload-attempt-{ordinal:04}"));
+        ordinal += 1;
+        if let Err(error) = std::fs::create_dir_all(&attempt) {
+            fatal = Some(FixtureWorkloadShrinkError::AttemptIo(error.kind()));
+            return ShrinkTrial::DidNotReproduce;
+        }
+        match run_fixture_workload_under_lab(cfg, &candidate, &attempt, lab_config.clone()) {
+            Ok(_) => ShrinkTrial::DidNotReproduce,
+            Err(error) => match error.failure_kind() {
+                Some(kind) if target.is_none() || target == Some(kind) => {
+                    target.get_or_insert(kind);
+                    ShrinkTrial::Reproduced
+                }
+                Some(kind) => ShrinkTrial::DifferentFailure(kind),
+                None => {
+                    fatal = Some(FixtureWorkloadShrinkError::Harness(error));
+                    ShrinkTrial::DidNotReproduce
+                }
+            },
+        }
+    };
+
+    let shrunk = shrink_schedule_and_workload(
+        Vec::<()>::new(),
+        workload.actions().to_vec(),
+        &mut reproduces,
+    );
+    drop(reproduces);
+    if let Some(error) = fatal {
+        return Err(error);
+    }
+    let Some(shrunk) = shrunk else {
+        return Ok(None);
+    };
+    let failure = target.expect("a reproduced fixture shrink has a typed target");
+    let workload = FixtureWorkload::try_from_retained_actions(cfg.seed, &shrunk.workload)
+        .map_err(FixtureWorkloadShrinkError::Workload)?;
+    Ok(Some(FixtureWorkloadShrunk {
+        original_workload_digest,
+        workload,
+        failure,
+        attempts: shrunk.attempts,
+        accepted: shrunk.accepted,
+        rejected_different_failure: shrunk.rejected_different_failure,
+    }))
 }
