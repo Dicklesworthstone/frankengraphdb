@@ -1265,7 +1265,8 @@ fn observe_spine_durability(
     recovered_vertex: bool,
 ) -> LdfiExperimentObservation {
     if acknowledged.is_none()
-        || (crash.is_ok() && recovered_frontier == acknowledged && recovered_vertex)
+        || crash.is_err()
+        || (recovered_frontier == acknowledged && recovered_vertex)
     {
         LdfiExperimentObservation::InvariantHeld
     } else {
@@ -1286,6 +1287,17 @@ fn acknowledged_loss_observer_detects_a_planted_missing_commit() {
         planted_loss,
         LdfiExperimentObservation::InvariantViolated,
         "the detector must reject the same acknowledgement with its commit missing"
+    );
+    let harness_broke = observe_spine_durability(
+        Some(1),
+        &Err(std::io::Error::other("rollback refused")),
+        Some(1),
+        true,
+    );
+    assert_eq!(
+        harness_broke,
+        LdfiExperimentObservation::InvariantHeld,
+        "a crash-rollback I/O failure is harness breakage, not acknowledged-commit loss"
     );
 }
 
