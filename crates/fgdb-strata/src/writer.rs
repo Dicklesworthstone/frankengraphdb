@@ -969,6 +969,12 @@ impl BlockWriter {
                 chunk.family_ordinal,
             )
         });
+        // Encode every chunk before committing. Intra-seal predecessor
+        // links still advance — but only on a local copy — so a later
+        // chunk's refusal leaves `chain_heads` and `pending` exactly as
+        // they were (`seal_vertices` already does this; the public apply
+        // contract is that every typed refusal is a no-op).
+        let mut next_heads = self.chain_heads.clone();
         let mut sealed = Vec::with_capacity(staged.len());
         for chunk in staged {
             let StagedChunk {
@@ -990,7 +996,7 @@ impl BlockWriter {
                     locators.push(u8::try_from(rows.len()).expect("chunked to the ceiling"));
                 }
             }
-            let predecessor = self.chain_heads.get(&family).copied();
+            let predecessor = next_heads.get(&family).copied();
             let (bytes, property_patch) = if rows.is_empty() {
                 (
                     encode_block(self.partition, predecessor, &entries)
@@ -1020,8 +1026,7 @@ impl BlockWriter {
             let sealed_id = block_id(keys.0, keys.1, &bytes);
             // The family's chain advances to this block; the next chunk of
             // the same family — even within THIS seal — links to it.
-            self.chain_heads
-                .insert(family, DeltaBlockVersion(sealed_id));
+            next_heads.insert(family, DeltaBlockVersion(sealed_id));
             sealed.push(SealedBlock {
                 block_id: sealed_id,
                 bytes,
@@ -1037,6 +1042,7 @@ impl BlockWriter {
                     .insert((statement.entry.eid, statement.entry.created_at));
             }
         }
+        self.chain_heads = next_heads;
         self.pending.clear();
         self.sealed.extend(sealed);
         Ok(first)
@@ -1376,5 +1382,63 @@ mod tests {
             expected,
             "retry observes the same deterministic refusal"
         );
+    }
+
+    /// A later chunk's refusal must not leave the earlier chunk's predecessor
+    /// installed. `seal_vertices` encodes every chunk before committing;
+    /// edge `seal` used to advance `chain_heads` inside the encode loop, so a
+    /// two-family pending set whose second family is illegal would poison
+    /// retry: the next encode linked a predecessor that was never published.
+    #[test]
+    fn a_failed_seal_does_not_advance_chain_heads_of_an_earlier_chunk() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        writer.pending.insert(
+            (VId(1), RelationId(1), VId(2), EId(10), CommitSeq(1)),
+            PendingStatement {
+                entry: AdjacencyEntry {
+                    src: VId(1),
+                    relation: RelationId(1),
+                    dst: VId(2),
+                    eid: EId(10),
+                    created_at: CommitSeq(1),
+                    retired_at: None,
+                },
+                props: vec![],
+            },
+        );
+        writer.pending.insert(
+            (VId(2), RelationId(1), VId(3), EId(11), CommitSeq(1)),
+            PendingStatement {
+                entry: AdjacencyEntry {
+                    src: VId(2),
+                    relation: RelationId(1),
+                    dst: VId(3),
+                    eid: EId(11),
+                    created_at: CommitSeq(1),
+                    retired_at: Some(CommitSeq(1)),
+                },
+                props: vec![],
+            },
+        );
+
+        let expected = Err(WriteError::Block(BlockError::RetiredBeforeCreated {
+            at: 0,
+            created_at: CommitSeq(1),
+            retired_at: CommitSeq(1),
+        }));
+        assert_eq!(writer.seal(keys()), expected);
+        assert_eq!(writer.pending_len(), 2, "both families stay pending");
+        assert!(
+            writer.chain_heads.is_empty(),
+            "the lawful first family must not install a predecessor that was \
+             never published"
+        );
+        assert!(writer.sealed.is_empty());
+        assert_eq!(
+            writer.seal(keys()),
+            expected,
+            "retry observes the same refusal against the same heads"
+        );
+        assert!(writer.chain_heads.is_empty());
     }
 }
