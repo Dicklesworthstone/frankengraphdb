@@ -14,6 +14,49 @@
 use crate::chacha20;
 use crate::poly1305::Poly1305;
 
+/// The only registered V1 data-crypto profile.
+///
+/// Durable descriptors carry the numeric ID, but callers must resolve it
+/// through [`registered_object_aead_profile`] before any encryption or
+/// recovery work. Treating an unknown ID as decoration would make the stored
+/// profile lie about which primitive authenticated the bytes.
+pub const DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305: u16 = 1;
+
+/// Closed object-AEAD profile vocabulary for durable V1 descriptors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectAeadProfile {
+    /// XChaCha20-Poly1305 with a 24-byte nonce and 16-byte tag.
+    XChaCha20Poly1305V1,
+}
+
+impl ObjectAeadProfile {
+    pub const fn id(self) -> u16 {
+        match self {
+            Self::XChaCha20Poly1305V1 => DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305,
+        }
+    }
+
+    pub const fn nonce_len(self) -> u16 {
+        match self {
+            Self::XChaCha20Poly1305V1 => 24,
+        }
+    }
+
+    pub const fn tag_len(self) -> u16 {
+        match self {
+            Self::XChaCha20Poly1305V1 => 16,
+        }
+    }
+}
+
+/// Resolve a durable numeric profile ID through the closed V1 registry.
+pub const fn registered_object_aead_profile(id: u16) -> Option<ObjectAeadProfile> {
+    match id {
+        DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305 => Some(ObjectAeadProfile::XChaCha20Poly1305V1),
+        _ => None,
+    }
+}
+
 /// Authentication failure. Deliberately carries no detail: a decrypt error
 /// must not become a padding-oracle side channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

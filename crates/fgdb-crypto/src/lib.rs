@@ -23,7 +23,10 @@ pub mod cx;
 pub mod poly1305;
 pub mod zeroize;
 
-pub use aead::{AeadError, object_aead_aad, xchacha20poly1305_open, xchacha20poly1305_seal};
+pub use aead::{
+    AeadError, DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305, ObjectAeadProfile, object_aead_aad,
+    registered_object_aead_profile, xchacha20poly1305_open, xchacha20poly1305_seal,
+};
 pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
 pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
 
