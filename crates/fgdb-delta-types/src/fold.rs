@@ -126,7 +126,7 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 }
                 ElementId::Edge(eid) => {
                     let net = edges.entry(eid).or_default();
-                    if net.cancelled || net.deleted.is_some() {
+                    if net.cancelled || net.deleted.is_some() || net.cascade_owned {
                         continue;
                     }
                     if let Some(created) = &mut net.created {
@@ -176,7 +176,7 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 }
                 ElementId::Edge(eid) => {
                     let net = edges.entry(eid).or_default();
-                    if net.cancelled || net.deleted.is_some() {
+                    if net.cancelled || net.deleted.is_some() || net.cascade_owned {
                         continue;
                     }
                     if let Some(created) = &mut net.created {
@@ -327,6 +327,11 @@ struct EdgeNet {
     created: Option<CreatedEdge>,
     deleted: Option<ObjectId>,
     cancelled: bool,
+    /// A DeleteVertex cascade already owns this durable identity. Later
+    /// DeleteEdge / Property / ValidTime rows must not re-emit: apply is
+    /// tag-ordered (`DeleteVertex` before `DeleteEdge` / `Property`), so a
+    /// leftover row would hit a retired edge (fgdb-qgk9).
+    cascade_owned: bool,
     props: BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
     valid_time: Option<(Option<ValidTimePeriod>, Option<ValidTimePeriod>)>,
     valid_time_contract: Option<ObjectId>,
@@ -356,6 +361,7 @@ fn absorb_edge(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId) {
         net.props.clear();
         net.valid_time = None;
         net.deleted = None;
+        net.cascade_owned = true;
     }
 }
 
@@ -364,6 +370,9 @@ fn absorb_edge_with_delete(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId, before_
     if net.created.is_some() {
         *net = EdgeNet::default();
         net.cancelled = true;
+    } else if net.cascade_owned {
+        // Already claimed by a DeleteVertex cascade. A later DeleteEdge
+        // must not resurrect a standalone row (fgdb-qgk9).
     } else if !net.cancelled {
         net.deleted = Some(before_version);
         net.props.clear();
@@ -578,6 +587,55 @@ mod tests {
                     sorted_retired_incident_edges: vec![EId(11)],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn delete_vertex_then_delete_edge_stays_inside_the_cascade() {
+        let version = ObjectId([0x55; 32]);
+        let delete_vertex = DeltaRow::DeleteVertex {
+            vid: VId(1),
+            before_version: version,
+            sorted_retired_incident_edges: vec![EId(10)],
+        };
+        let delete_edge = DeltaRow::DeleteEdge {
+            eid: EId(10),
+            before_version: version,
+        };
+        let expected = vec![delete_vertex.clone()];
+        assert_eq!(
+            fold_target_disjoint(vec![delete_vertex.clone(), delete_edge.clone()]),
+            expected
+        );
+        assert_eq!(
+            fold_target_disjoint(vec![delete_edge, delete_vertex]),
+            expected
+        );
+    }
+
+    #[test]
+    fn delete_vertex_then_edge_property_does_not_reemit() {
+        let version = ObjectId([0x66; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+            DeltaRow::Property {
+                elem: ElementId::Edge(EId(10)),
+                property: PropertyKeyId(1),
+                before: Some(CanonicalScalar::Int(1)),
+                after: Some(CanonicalScalar::Int(2)),
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(10)],
+            }]
         );
     }
 }
