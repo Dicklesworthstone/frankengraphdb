@@ -258,7 +258,9 @@ fn a_self_consistent_oversized_transfer_length_fails_without_panicking() {
     descriptor.transfer_length = 56_404 * u64::from(descriptor.symbol_size);
 
     let identified = IdentifiedObject::new(&K_OID, NAMESPACE, KIND, &[], &plaintext());
-    let protected = identified.protect(&DEK, descriptor.cipher_descriptor(), &plaintext());
+    let protected = identified
+        .protect(&DEK, descriptor.cipher_descriptor(), &plaintext())
+        .expect("registered AEAD profile");
     assert_eq!(
         protected.ciphertext_id().0,
         descriptor.ciphertext_id,
@@ -292,7 +294,9 @@ fn an_oversized_source_block_is_refused_before_symbol_materialization() {
     descriptor.transfer_length = oversized.len() as u64;
 
     let identified = IdentifiedObject::new(&K_OID, NAMESPACE, KIND, &[], &plaintext());
-    let protected = identified.protect(&DEK, descriptor.cipher_descriptor(), &plaintext());
+    let protected = identified
+        .protect(&DEK, descriptor.cipher_descriptor(), &plaintext())
+        .expect("registered AEAD profile");
     let encoding = protected.encode(descriptor.encoding_descriptor());
 
     assert_eq!(
@@ -338,7 +342,9 @@ fn a_self_consistent_unregistered_fec_profile_is_refused() {
     descriptor.fec_profile = 2;
 
     let identified = IdentifiedObject::new(&K_OID, NAMESPACE, KIND, &[], &plaintext());
-    let protected = identified.protect(&DEK, descriptor.cipher_descriptor(), &plaintext());
+    let protected = identified
+        .protect(&DEK, descriptor.cipher_descriptor(), &plaintext())
+        .expect("registered AEAD profile");
     assert_eq!(
         protected.ciphertext_id().0,
         descriptor.ciphertext_id,

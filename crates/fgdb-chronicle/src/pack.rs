@@ -21,7 +21,7 @@
 //! pack would coarsen crypto-erasure granularity across epochs, tenants, or
 //! floors — so it **fails closed at build time**, not at review time.
 
-use crate::identity::{CipherDescriptor, IdentifiedObject, ProtectedObject};
+use crate::identity::{CipherDescriptor, IdentifiedObject, IdentityMismatch, ProtectedObject};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
 /// Which key domain an object's bytes are written under (plan §12.5).
@@ -88,6 +88,8 @@ pub enum PackError {
     MemberIdentityMismatch,
     /// A locator points outside the unpacked bytes.
     LocatorOutOfRange,
+    /// The selected data-crypto profile or tag length is not registered.
+    ProtectionProfile(IdentityMismatch),
 }
 
 /// Which axis of the pack domain a rejected member disagreed on.
@@ -111,6 +113,9 @@ impl core::fmt::Display for PackError {
                 f.write_str("member bytes do not recompute the member ObjectId")
             }
             Self::LocatorOutOfRange => f.write_str("member locator points outside the pack"),
+            Self::ProtectionProfile(error) => {
+                write!(f, "pack protection profile rejected: {error}")
+            }
         }
     }
 }
@@ -213,6 +218,11 @@ impl PackBuilder {
         if self.members.is_empty() {
             return Err(PackError::EmptyPack);
         }
+        fgdb_crypto::registered_object_aead_profile(profile.data_crypto_profile).ok_or(
+            PackError::ProtectionProfile(IdentityMismatch::UnsupportedDataCryptoProfile {
+                data_crypto_profile: profile.data_crypto_profile,
+            }),
+        )?;
         let mut packed_plaintext = Vec::new();
         let mut locators = Vec::with_capacity(self.members.len());
         for member in &self.members {
@@ -250,7 +260,9 @@ impl PackBuilder {
             // choose a shorter split and thereby weaken CiphertextId binding.
             object_tag_len: 16,
         };
-        let protected = pack_object.protect(dek, descriptor, &packed_plaintext);
+        let protected = pack_object
+            .protect(dek, descriptor, &packed_plaintext)
+            .map_err(PackError::ProtectionProfile)?;
 
         Ok(PackedObjectGroup {
             domain: self.domain,

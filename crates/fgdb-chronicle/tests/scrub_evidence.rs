@@ -63,7 +63,9 @@ fn fixture(repair_symbols: u32) -> Fixture {
     let plaintext = payload();
     let object = IdentifiedObject::new(K_OID, namespace(), OBJECT_KIND, b"hdr", &plaintext);
     let object_id = object.object_id();
-    let protected = object.protect(&dek(), cipher_descriptor(), &plaintext);
+    let protected = object
+        .protect(&dek(), cipher_descriptor(), &plaintext)
+        .expect("registered AEAD profile");
     let protected_len = protected.protected_bytes().len();
     let encoding = protected.encode(EncodingDescriptor {
         fec_profile: 1,

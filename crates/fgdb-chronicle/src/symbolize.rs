@@ -13,7 +13,7 @@
 //! that silently returns different bytes is the failure mode content
 //! addressing exists to make impossible, so it is checked, not assumed.
 
-use crate::identity::EncodedObject;
+use crate::identity::{EncodedObject, RecoveredObjectError};
 use crate::symbol::{SymbolError, SymbolRecord};
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::systematic::SystematicEncoder;
@@ -37,6 +37,9 @@ pub enum SymbolizeError {
     Symbol(SymbolError),
     /// The AEAD did not open — the recovered ciphertext was not authentic.
     AuthenticationFailed,
+    /// The AEAD opened, but descriptor+ciphertext+tag did not recompute the
+    /// durable `CiphertextId` carried by the admitted encoding.
+    CiphertextIdentityMismatch,
     /// THE IDENTITY LAW FIRED: bytes were recovered and opened, but their
     /// recomputed `ObjectId` is not the one requested. Content addressing
     /// says these are simply not that object.
@@ -69,6 +72,9 @@ impl core::fmt::Display for SymbolizeError {
             }
             Self::Symbol(error) => write!(f, "symbol rejected: {error}"),
             Self::AuthenticationFailed => f.write_str("recovered ciphertext failed authentication"),
+            Self::CiphertextIdentityMismatch => {
+                f.write_str("recovered ciphertext does not recompute the declared CiphertextId")
+            }
             Self::IdentityMismatch => {
                 f.write_str("recovered bytes do not recompute the requested ObjectId")
             }
@@ -364,7 +370,12 @@ pub fn decode_object(
     // decode that produced different ciphertext.
     let compressed = encoding
         .open_recovered(&protected, dek)
-        .map_err(|_| SymbolizeError::AuthenticationFailed)?;
+        .map_err(|error| match error {
+            RecoveredObjectError::AuthenticationFailed => SymbolizeError::AuthenticationFailed,
+            RecoveredObjectError::CiphertextIdentityMismatch => {
+                SymbolizeError::CiphertextIdentityMismatch
+            }
+        })?;
 
     // Layer 2, and the one FG-INV-09 names: the recovered plaintext must
     // recompute the requested identity. The AEAD proves the bytes are the ones

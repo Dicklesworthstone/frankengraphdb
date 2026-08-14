@@ -107,7 +107,9 @@ fn publish(cluster_incarnation: u64, visibility_epoch: u64, repair_symbols: u32)
     };
     let mut canonical = Vec::from(HEADER);
     canonical.extend_from_slice(&payload);
-    let protected = object.protect(&dek(), cipher.clone(), &canonical);
+    let protected = object
+        .protect(&dek(), cipher.clone(), &canonical)
+        .expect("registered AEAD profile");
     let protected_len = protected.protected_bytes().len();
 
     let encoding_descriptor = EncodingDescriptor {

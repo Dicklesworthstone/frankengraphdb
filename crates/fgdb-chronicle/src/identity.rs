@@ -19,7 +19,7 @@
 //! cannot get a `CiphertextId` without the `ObjectId` that went into the AEAD
 //! AAD. A caller holding the wrong stage does not compile.
 
-use fgdb_crypto::{Digest, aead};
+use fgdb_crypto::{Digest, ObjectAeadProfile, aead};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
 /// Canonical-plaintext facts every identity layer repeats. These are the
@@ -39,6 +39,26 @@ pub struct CipherDescriptor {
 }
 
 impl CipherDescriptor {
+    /// Resolve and validate the durable data-crypto profile before any
+    /// cryptographic operation, allocation derived from ciphertext shape, or
+    /// tag slicing. Profile IDs are a closed registry, not AAD decoration.
+    pub fn registered_aead_profile(&self) -> Result<ObjectAeadProfile, IdentityMismatch> {
+        let profile = fgdb_crypto::registered_object_aead_profile(self.data_crypto_profile).ok_or(
+            IdentityMismatch::UnsupportedDataCryptoProfile {
+                data_crypto_profile: self.data_crypto_profile,
+            },
+        )?;
+        // ubs:ignore -- public durable profile widths, not secret or authentication material.
+        if self.object_tag_len != profile.tag_len() {
+            return Err(IdentityMismatch::ObjectTagLength {
+                data_crypto_profile: self.data_crypto_profile,
+                expected: profile.tag_len(),
+                actual: self.object_tag_len,
+            });
+        }
+        Ok(profile)
+    }
+
     /// Canonical bytes: fixed-width little-endian fields in declaration order.
     /// The logical OID is bound separately by the AAD transcript, so it is
     /// deliberately not repeated here.
@@ -154,19 +174,26 @@ impl IdentifiedObject {
         dek: &[u8; 32],
         descriptor: CipherDescriptor,
         compressed_plaintext: &[u8],
-    ) -> ProtectedObject {
+    ) -> Result<ProtectedObject, IdentityMismatch> {
+        let profile = descriptor.registered_aead_profile()?;
         let aad = aead::object_aead_aad(&Digest(self.object_id.0), &descriptor.canonical_bytes());
-        let sealed =
-            aead::xchacha20poly1305_seal(dek, &descriptor.object_nonce, &aad, compressed_plaintext);
+        let sealed = match profile {
+            ObjectAeadProfile::XChaCha20Poly1305V1 => aead::xchacha20poly1305_seal(
+                dek,
+                &descriptor.object_nonce,
+                &aad,
+                compressed_plaintext,
+            ),
+        };
         let tag_start = sealed.len() - usize::from(descriptor.object_tag_len);
         let ciphertext_id =
             ciphertext_identity(&descriptor, &sealed[..tag_start], &sealed[tag_start..]);
-        ProtectedObject {
+        Ok(ProtectedObject {
             object_id: self.object_id,
             descriptor,
             sealed,
             ciphertext_id,
-        }
+        })
     }
 }
 
@@ -270,12 +297,27 @@ impl EncodingDescriptor {
     }
 }
 
-/// Which declared identity failed to recompute from its descriptor.
+/// Why a durable descriptor set could not be admitted.
 ///
-/// Deliberately separate from an AEAD failure: this fires BEFORE any bytes are
-/// opened, and it means the descriptor set itself is not self-consistent.
+/// Deliberately separate from an AEAD failure: this fires before any bytes are
+/// opened, and it means the descriptor set itself is unsupported or does not
+/// recompute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityMismatch {
+    /// The durable cipher descriptor names no registered data-crypto profile.
+    UnsupportedDataCryptoProfile { data_crypto_profile: u16 },
+    /// The declared object tag length disagrees with the selected profile.
+    ObjectTagLength {
+        data_crypto_profile: u16,
+        expected: u16,
+        actual: u16,
+    },
+    /// A bootstrap's declared nonce width disagrees with the selected profile.
+    ObjectNonceLength {
+        data_crypto_profile: u16,
+        expected: u16,
+        actual: u16,
+    },
     /// The declared `EncodingId` is not the digest of its own descriptor.
     EncodingId,
     /// The declared `PlacementId` is not the digest of its own descriptor.
@@ -284,14 +326,62 @@ pub enum IdentityMismatch {
 
 impl core::fmt::Display for IdentityMismatch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::EncodingId => "declared EncodingId does not recompute from its descriptor",
-            Self::PlacementId => "declared PlacementId does not recompute from its descriptor",
-        })
+        match self {
+            Self::UnsupportedDataCryptoProfile {
+                data_crypto_profile,
+            } => write!(f, "unsupported data-crypto profile {data_crypto_profile}"),
+            Self::ObjectTagLength {
+                data_crypto_profile,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "data-crypto profile {data_crypto_profile} requires tag length {expected}, not {actual}"
+            ),
+            Self::ObjectNonceLength {
+                data_crypto_profile,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "data-crypto profile {data_crypto_profile} requires nonce length {expected}, not {actual}"
+            ),
+            Self::EncodingId => {
+                f.write_str("declared EncodingId does not recompute from its descriptor")
+            }
+            Self::PlacementId => {
+                f.write_str("declared PlacementId does not recompute from its descriptor")
+            }
+        }
     }
 }
 
 impl core::error::Error for IdentityMismatch {}
+
+/// Why authenticated bytes recovered for an admitted encoding could not be
+/// opened as the exact durable ciphertext that encoding names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveredObjectError {
+    /// The AEAD rejected the recovered bytes, descriptor, object identity, or
+    /// DEK. Deliberately carries no primitive detail.
+    AuthenticationFailed,
+    /// The bytes authenticated, but their descriptor+ciphertext+tag digest is
+    /// not the durable `CiphertextId` carried by this encoding.
+    CiphertextIdentityMismatch,
+}
+
+impl core::fmt::Display for RecoveredObjectError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::AuthenticationFailed => "recovered ciphertext failed authentication",
+            Self::CiphertextIdentityMismatch => {
+                "recovered ciphertext does not recompute the declared CiphertextId"
+            }
+        })
+    }
+}
+
+impl core::error::Error for RecoveredObjectError {}
 
 /// Stage 3 — *how it is coded*.
 ///
@@ -345,6 +435,7 @@ impl EncodedObject {
         descriptor: EncodingDescriptor,
         declared_encoding_id: Digest,
     ) -> Result<Self, IdentityMismatch> {
+        cipher_descriptor.registered_aead_profile()?;
         let recomputed = fgdb_crypto::encoding_id(&descriptor.canonical_bytes(ciphertext_id));
         if recomputed != declared_encoding_id {
             return Err(IdentityMismatch::EncodingId);
@@ -388,17 +479,33 @@ impl EncodedObject {
         &self,
         protected_bytes: &[u8],
         dek: &[u8; 32],
-    ) -> Result<Vec<u8>, aead::AeadError> {
+    ) -> Result<Vec<u8>, RecoveredObjectError> {
         let aad = aead::object_aead_aad(
             &Digest(self.object_id.0),
             &self.cipher_descriptor.canonical_bytes(),
         );
-        aead::xchacha20poly1305_open(
+        let opened = aead::xchacha20poly1305_open(
             dek,
             &self.cipher_descriptor.object_nonce,
             &aad,
             protected_bytes,
         )
+        .map_err(|_| RecoveredObjectError::AuthenticationFailed)?;
+        let tag_len = usize::from(self.cipher_descriptor.object_tag_len);
+        let tag_start = protected_bytes
+            .len()
+            .checked_sub(tag_len)
+            .ok_or(RecoveredObjectError::AuthenticationFailed)?;
+        let recomputed = ciphertext_identity(
+            &self.cipher_descriptor,
+            &protected_bytes[..tag_start],
+            &protected_bytes[tag_start..],
+        );
+        // ubs:ignore -- public content identity after AEAD authentication, not secret material.
+        if recomputed != self.ciphertext_id {
+            return Err(RecoveredObjectError::CiphertextIdentityMismatch);
+        }
+        Ok(opened)
     }
 
     pub fn symbol_auth_key(&self, dek: &[u8; 32]) -> [u8; 32] {

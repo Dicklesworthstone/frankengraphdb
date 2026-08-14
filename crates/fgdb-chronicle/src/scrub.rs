@@ -197,6 +197,9 @@ pub fn scrub_object(
         Err(SymbolizeError::AuthenticationFailed) => ScrubVerdict::Lost {
             reason: LostReason::AuthenticationFailed,
         },
+        Err(SymbolizeError::CiphertextIdentityMismatch) => ScrubVerdict::Lost {
+            reason: LostReason::IdentityMismatch,
+        },
         Err(SymbolizeError::IdentityMismatch) => ScrubVerdict::Lost {
             reason: LostReason::IdentityMismatch,
         },

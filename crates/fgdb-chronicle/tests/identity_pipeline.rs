@@ -6,8 +6,12 @@
 //! plan requires — the property that lets branches, dedup, replication,
 //! backup, recoding, and KMS rewrap each touch one layer.
 
+use fgdb_chronicle::root::{OPENER_PAYLOAD_LEN, recover_root_object};
 use fgdb_chronicle::{
-    CipherDescriptor, EncodingDescriptor, IdentifiedObject, LocationForm, PlacementDescriptor,
+    CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, IdentityMismatch,
+    LocationForm, PackBuilder, PackDomain, PackError, PackProtectionProfile, PlacementDescriptor,
+    RecoveredObjectError, RootBootstrap, RootRecoveryError, RootSlot, SymbolError, SymbolRecord,
+    WriteKeyDomain,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 
@@ -29,7 +33,7 @@ fn descriptor(nonce_seed: u8, compressed_len: u64) -> CipherDescriptor {
         canonical_plaintext_len: 512,
         codec_profile: 1,
         compressed_len,
-        data_crypto_profile: 1,
+        data_crypto_profile: fgdb_crypto::DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305,
         dek_id: core::array::from_fn(|i| (i as u8).wrapping_add(nonce_seed)),
         object_nonce: core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(nonce_seed)),
         object_tag_len: 16,
@@ -46,6 +50,22 @@ fn encoding(fec_profile: u16) -> EncodingDescriptor {
         source_block_count: 4,
         symbol_auth_profile: 1,
     }
+}
+
+fn encoding_id_for(
+    ciphertext_id: fgdb_crypto::Digest,
+    descriptor: &EncodingDescriptor,
+) -> fgdb_crypto::Digest {
+    let mut canonical = Vec::with_capacity(32 + 2 + 8 + 8 + 4 + 2 + 2 + 2);
+    canonical.extend_from_slice(&ciphertext_id.0);
+    canonical.extend_from_slice(&descriptor.fec_profile.to_le_bytes());
+    canonical.extend_from_slice(&descriptor.transfer_length.to_le_bytes());
+    canonical.extend_from_slice(&descriptor.oti_common.to_le_bytes());
+    canonical.extend_from_slice(&descriptor.oti_scheme.to_le_bytes());
+    canonical.extend_from_slice(&descriptor.symbol_size.to_le_bytes());
+    canonical.extend_from_slice(&descriptor.source_block_count.to_le_bytes());
+    canonical.extend_from_slice(&descriptor.symbol_auth_profile.to_le_bytes());
+    fgdb_crypto::encoding_id(&canonical)
 }
 
 fn placement(epoch: u64) -> PlacementDescriptor {
@@ -92,6 +112,43 @@ fn payload() -> Vec<u8> {
     (0..512u32).map(|i| (i % 251) as u8).collect()
 }
 
+fn root_bootstrap(cipher: &CipherDescriptor) -> RootBootstrap {
+    RootBootstrap {
+        root_encoding_id: [0; 32],
+        root_placement_id: [0; 32],
+        root_placement_epoch: 1,
+        failure_domain_policy_id: 1,
+        root_failure_domain_id: 1,
+        segment_id: 1,
+        offset: 0,
+        encoded_len: 1,
+        root_symbol_inventory_digest: [0; 32],
+        object_kind: cipher.object_kind,
+        canonical_plaintext_len: cipher.canonical_plaintext_len,
+        codec_profile: cipher.codec_profile,
+        compressed_len: cipher.compressed_len,
+        data_crypto_profile: cipher.data_crypto_profile,
+        dek_id: cipher.dek_id,
+        nonce_len: 24,
+        nonce_or_siv: cipher.object_nonce,
+        object_tag_len: cipher.object_tag_len,
+        fec_profile: 1,
+        transfer_length: 1,
+        oti_common: 0,
+        oti_scheme: 0,
+        symbol_size: 1,
+        source_block_count: 1,
+        symbol_auth_profile: 1,
+        ciphertext_id: [0; 32],
+        ciphertext_digest: [0; 32],
+        opener_kind: 1,
+        oid_key_id: [0; 16],
+        opener_payload_len: 0,
+        opener_payload: [0; OPENER_PAYLOAD_LEN],
+        opener_digest: [0; 32],
+    }
+}
+
 /// The pipeline runs end to end and the protected bytes decrypt back to what
 /// went in.
 #[test]
@@ -100,7 +157,9 @@ fn pipeline_round_trips_through_all_four_layers() {
     let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
     let object_id = object.object_id();
 
-    let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+    let protected = object
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
     assert_eq!(
         protected.object_id(),
         object_id,
@@ -130,7 +189,9 @@ fn pipeline_round_trips_through_all_four_layers() {
 fn recoding_changes_only_the_encoding_identity() {
     let compressed = payload();
     let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
-    let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+    let protected = object
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
 
     let first = protected.encode(encoding(1));
     let recoded = protected.encode(encoding(2));
@@ -158,7 +219,9 @@ fn recoding_changes_only_the_encoding_identity() {
 fn moving_symbols_changes_only_the_placement_identity() {
     let compressed = payload();
     let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
-    let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+    let protected = object
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
     let encoded = protected.encode(encoding(1));
 
     let here = encoded.place(placement(1));
@@ -184,16 +247,20 @@ fn re_encryption_changes_only_the_ciphertext_identity() {
     let compressed = payload();
     let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
     let object_id = object.object_id();
-    let first = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+    let first = object
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
 
     let object_again = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
     let mut other_dek = dek();
     other_dek[0] ^= 0xff;
-    let second = object_again.protect(
-        &other_dek,
-        descriptor(2, compressed.len() as u64),
-        &compressed,
-    );
+    let second = object_again
+        .protect(
+            &other_dek,
+            descriptor(2, compressed.len() as u64),
+            &compressed,
+        )
+        .expect("registered AEAD profile");
 
     assert_eq!(first.object_id(), object_id);
     assert_eq!(
@@ -215,7 +282,9 @@ fn re_encryption_changes_only_the_ciphertext_identity() {
 fn the_aead_binds_identity_and_descriptor() {
     let compressed = payload();
     let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
-    let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+    let protected = object
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
 
     let mut wrong_dek = dek();
     wrong_dek[31] ^= 0x01;
@@ -229,7 +298,9 @@ fn the_aead_binds_identity_and_descriptor() {
     let other = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
     let mut lying_descriptor = descriptor(1, compressed.len() as u64);
     lying_descriptor.object_kind = 0x0003;
-    let relabelled = other.protect(&dek(), lying_descriptor, &compressed);
+    let relabelled = other
+        .protect(&dek(), lying_descriptor, &compressed)
+        .expect("registered AEAD profile");
     assert_ne!(
         relabelled.protected_bytes(),
         protected.protected_bytes(),
@@ -318,17 +389,16 @@ fn rewrapping_the_dek_cannot_move_any_identity() {
     let compressed = payload();
 
     let before = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload())
-        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
     let before_encoded = before.encode(encoding(1));
     let before_placed = before_encoded.place(placement(1));
 
     // A rewrap changes the KeyWrap record only: same DEK, same descriptor,
     // same bytes. Everything identity-bearing must therefore be unchanged.
-    let after = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload()).protect(
-        &dek(),
-        descriptor(1, compressed.len() as u64),
-        &compressed,
-    );
+    let after = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload())
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
     let after_encoded = after.encode(encoding(1));
     let after_placed = after_encoded.place(placement(1));
 
@@ -364,7 +434,9 @@ fn every_identity_recomputes_from_its_inputs() {
     let compressed = payload();
     let run = || {
         let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
-        let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+        let protected = object
+            .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+            .expect("registered AEAD profile");
         let encoded = protected.encode(encoding(1));
         let placed = encoded.place(placement(1));
         (
@@ -382,7 +454,9 @@ fn every_identity_recomputes_from_its_inputs() {
 fn symbol_auth_keys_are_per_encoding() {
     let compressed = payload();
     let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
-    let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+    let protected = object
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed)
+        .expect("registered AEAD profile");
 
     let first = protected.encode(encoding(1));
     let second = protected.encode(encoding(2));
@@ -396,5 +470,555 @@ fn symbol_auth_keys_are_per_encoding() {
         first.symbol_auth_key(&dek()),
         first.symbol_auth_key(&dek()),
         "K_symbol derivation is deterministic"
+    );
+}
+
+/// The governed `cargo-test:crypto-composition` entrypoint.
+///
+/// This proves the registered V1 composition that exists today: keyed logical
+/// identity, profile-bound object AEAD, encoding and placement identities,
+/// encoding-bound symbol authentication, and rewrap-stable downstream
+/// identities.
+/// It deliberately does NOT claim production per-ciphertext DEK minting or
+/// wrapping, passphrase-KDF profiles, nonce-reuse state, signing/KMS support,
+/// statistical timing, optimized zeroization inspection, or external audit.
+#[test]
+fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
+    let registered = fgdb_crypto::registered_object_aead_profile(1)
+        .expect("profile 1 is the closed V1 object-AEAD profile");
+    assert_eq!(registered.id(), 1);
+    assert_eq!(registered.nonce_len(), 24);
+    assert_eq!(registered.tag_len(), 16);
+    for id in 0..=u16::MAX {
+        if id == registered.id() {
+            assert_eq!(
+                fgdb_crypto::registered_object_aead_profile(id),
+                Some(registered)
+            );
+        } else {
+            assert!(
+                fgdb_crypto::registered_object_aead_profile(id).is_none(),
+                "unregistered profile {id} entered the closed numeric registry"
+            );
+        }
+    }
+
+    // Keep every identity-layer and rewrap law inside the one exact selector
+    // that CI registers; separate green tests must not be able to conceal a
+    // disconnected composition path.
+    pipeline_round_trips_through_all_four_layers();
+    recoding_changes_only_the_encoding_identity();
+    moving_symbols_changes_only_the_placement_identity();
+    re_encryption_changes_only_the_ciphertext_identity();
+    the_aead_binds_identity_and_descriptor();
+    dedup_does_not_cross_namespaces_or_keys();
+    rewrapping_the_dek_cannot_move_any_identity();
+    every_identity_recomputes_from_its_inputs();
+    symbol_auth_keys_are_per_encoding();
+
+    let compressed = payload();
+    let cipher = descriptor(1, compressed.len() as u64);
+    let identified = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
+    let identified_object_id = identified.object_id();
+    let protected = identified
+        .protect(&dek(), cipher.clone(), &compressed)
+        .expect("the registered profile seals");
+    assert_eq!(
+        protected.protected_bytes().len(),
+        compressed.len() + usize::from(registered.tag_len()),
+        "the registered durable tag width must equal the primitive output overhead"
+    );
+    let direct_aad = fgdb_crypto::object_aead_aad(
+        &fgdb_crypto::Digest(identified_object_id.0),
+        &cipher.canonical_bytes(),
+    );
+    assert_eq!(
+        protected.protected_bytes(),
+        fgdb_crypto::xchacha20poly1305_seal(&dek(), &cipher.object_nonce, &direct_aad, &compressed,),
+        "profile 1 must dispatch to the named XChaCha20-Poly1305 primitive"
+    );
+    let encoded = protected.encode(encoding(1));
+    let placed = encoded.place(placement(1));
+    assert_eq!(placed.object_id(), protected.object_id());
+    assert_eq!(placed.encoding_id(), encoded.encoding_id());
+    assert_eq!(
+        protected.open(&dek()).expect("registered profile opens"),
+        compressed
+    );
+
+    let logical = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
+    let mut other_key = k_oid();
+    other_key[0] ^= 1;
+    assert_ne!(
+        logical.object_id(),
+        IdentifiedObject::new(&other_key, namespace(), 0x0002, header(), &payload()).object_id(),
+        "K_oid is outside the logical-object identity transcript"
+    );
+    let mut other_namespace = namespace();
+    other_namespace.0[0] ^= 1;
+    assert_ne!(
+        logical.object_id(),
+        IdentifiedObject::new(&k_oid(), other_namespace, 0x0002, header(), &payload()).object_id(),
+        "the security namespace is outside the logical-object identity transcript"
+    );
+    assert_ne!(
+        logical.object_id(),
+        IdentifiedObject::new(&k_oid(), namespace(), 0x0003, header(), &payload()).object_id(),
+        "object kind is outside the logical-object identity transcript"
+    );
+    assert_ne!(
+        logical.object_id(),
+        IdentifiedObject::new(
+            &k_oid(),
+            namespace(),
+            0x0002,
+            b"changed-canonical-header",
+            &payload(),
+        )
+        .object_id(),
+        "canonical header bytes are outside the logical-object identity transcript"
+    );
+    let mut other_payload = payload();
+    other_payload[0] ^= 1;
+    assert_ne!(
+        logical.object_id(),
+        IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &other_payload).object_id(),
+        "canonical payload bytes are outside the logical-object identity transcript"
+    );
+
+    let mut cipher_mutations = Vec::new();
+    let mut mutation = cipher.clone();
+    mutation.object_kind ^= 1;
+    cipher_mutations.push(("object_kind", mutation));
+    let mut mutation = cipher.clone();
+    mutation.canonical_plaintext_len += 1;
+    cipher_mutations.push(("canonical_plaintext_len", mutation));
+    let mut mutation = cipher.clone();
+    mutation.codec_profile += 1;
+    cipher_mutations.push(("codec_profile", mutation));
+    let mut mutation = cipher.clone();
+    mutation.compressed_len += 1;
+    cipher_mutations.push(("compressed_len", mutation));
+    let mut mutation = cipher.clone();
+    mutation.dek_id[0] ^= 1;
+    cipher_mutations.push(("dek_id", mutation));
+    let mut mutation = cipher.clone();
+    mutation.object_nonce[0] ^= 1;
+    cipher_mutations.push(("object_nonce", mutation));
+    for (field, mutation) in cipher_mutations {
+        let substituted = EncodedObject::reconstruct(
+            encoded.object_id(),
+            mutation,
+            encoded.ciphertext_id(),
+            encoding(1),
+            encoded.encoding_id(),
+        )
+        .expect("a valid-form cipher mutation does not alter EncodingId");
+        assert!(
+            substituted
+                .open_recovered(protected.protected_bytes(), &dek())
+                .is_err(),
+            "cipher descriptor field {field} is outside the object-AEAD transcript"
+        );
+    }
+
+    let mut encoding_mutations = Vec::new();
+    let mut mutation = encoding(1);
+    mutation.fec_profile += 1;
+    encoding_mutations.push(("fec_profile", mutation));
+    let mut mutation = encoding(1);
+    mutation.transfer_length += 1;
+    encoding_mutations.push(("transfer_length", mutation));
+    let mut mutation = encoding(1);
+    mutation.oti_common += 1;
+    encoding_mutations.push(("oti_common", mutation));
+    let mut mutation = encoding(1);
+    mutation.oti_scheme += 1;
+    encoding_mutations.push(("oti_scheme", mutation));
+    let mut mutation = encoding(1);
+    mutation.symbol_size += 1;
+    encoding_mutations.push(("symbol_size", mutation));
+    let mut mutation = encoding(1);
+    mutation.source_block_count += 1;
+    encoding_mutations.push(("source_block_count", mutation));
+    let mut mutation = encoding(1);
+    mutation.symbol_auth_profile += 1;
+    encoding_mutations.push(("symbol_auth_profile", mutation));
+    for (field, mutation) in encoding_mutations {
+        assert_ne!(
+            protected.encode(mutation.clone()).encoding_id(),
+            encoded.encoding_id(),
+            "encoding descriptor field {field} is outside EncodingId"
+        );
+        assert_eq!(
+            EncodedObject::reconstruct(
+                encoded.object_id(),
+                cipher.clone(),
+                encoded.ciphertext_id(),
+                mutation,
+                encoded.encoding_id(),
+            ),
+            Err(IdentityMismatch::EncodingId),
+            "durable recovery accepted a rewritten encoding field {field}"
+        );
+    }
+
+    let mut forged_ciphertext_id = encoded.ciphertext_id();
+    forged_ciphertext_id.0[0] ^= 1;
+    let encoding_descriptor = encoding(1);
+    let forged_encoding_id = encoding_id_for(forged_ciphertext_id, &encoding_descriptor);
+    let forged_encoding = EncodedObject::reconstruct(
+        encoded.object_id(),
+        cipher.clone(),
+        forged_ciphertext_id,
+        encoding_descriptor,
+        forged_encoding_id,
+    )
+    .expect("the forged EncodingId exactly matches the forged CiphertextId");
+    assert_eq!(
+        forged_encoding.open_recovered(protected.protected_bytes(), &dek()),
+        Err(RecoveredObjectError::CiphertextIdentityMismatch),
+        "durable recovery must recompute CiphertextId even when EncodingId was consistently rewritten"
+    );
+
+    let mut placement_mutations = Vec::new();
+    let mut mutation = placement(1);
+    mutation.placement_epoch += 1;
+    placement_mutations.push(("placement_epoch", mutation));
+    let mut mutation = placement(1);
+    mutation.failure_domain_policy += 1;
+    placement_mutations.push(("failure_domain_policy", mutation));
+    let mut mutation = placement(1);
+    if let LocationForm::ContiguousSpan {
+        failure_domain_id, ..
+    } = &mut mutation.location_form
+    {
+        *failure_domain_id += 1;
+    }
+    placement_mutations.push(("contiguous.failure_domain_id", mutation));
+    let mut mutation = placement(1);
+    if let LocationForm::ContiguousSpan { segment_id, .. } = &mut mutation.location_form {
+        *segment_id += 1;
+    }
+    placement_mutations.push(("contiguous.segment_id", mutation));
+    let mut mutation = placement(1);
+    if let LocationForm::ContiguousSpan { offset, .. } = &mut mutation.location_form {
+        *offset += 1;
+    }
+    placement_mutations.push(("contiguous.offset", mutation));
+    let mut mutation = placement(1);
+    if let LocationForm::ContiguousSpan { encoded_len, .. } = &mut mutation.location_form {
+        *encoded_len += 1;
+    }
+    placement_mutations.push(("contiguous.encoded_len", mutation));
+    let mut mutation = placement(1);
+    if let LocationForm::ContiguousSpan {
+        symbol_inventory_digest,
+        ..
+    } = &mut mutation.location_form
+    {
+        symbol_inventory_digest.0[0] ^= 1;
+    }
+    placement_mutations.push(("contiguous.symbol_inventory_digest", mutation));
+    placement_mutations.push((
+        "location_form",
+        PlacementDescriptor {
+            placement_epoch: 1,
+            failure_domain_policy: 2,
+            location_form: LocationForm::Explicit {
+                sorted_symbol_inventory: vec![1, 2, 3],
+                failure_domains: vec![7],
+            },
+        },
+    ));
+    for (field, mutation) in placement_mutations {
+        assert_ne!(
+            encoded.place(mutation.clone()).placement_id(),
+            placed.placement_id(),
+            "placement descriptor field {field} is outside PlacementId"
+        );
+        assert_eq!(
+            encoded.verify_placement(&mutation, placed.placement_id()),
+            Err(IdentityMismatch::PlacementId),
+            "durable recovery accepted a rewritten placement field {field}"
+        );
+    }
+
+    let explicit = PlacementDescriptor {
+        placement_epoch: 2,
+        failure_domain_policy: 3,
+        location_form: LocationForm::Explicit {
+            sorted_symbol_inventory: vec![1, 2, 3],
+            failure_domains: vec![7, 9],
+        },
+    };
+    let explicit_placed = encoded.place(explicit.clone());
+    for (field, location_form) in [
+        (
+            "explicit.sorted_symbol_inventory",
+            LocationForm::Explicit {
+                sorted_symbol_inventory: vec![1, 2, 4],
+                failure_domains: vec![7, 9],
+            },
+        ),
+        (
+            "explicit.failure_domains",
+            LocationForm::Explicit {
+                sorted_symbol_inventory: vec![1, 2, 3],
+                failure_domains: vec![7, 10],
+            },
+        ),
+    ] {
+        let mutation = PlacementDescriptor {
+            location_form,
+            ..explicit.clone()
+        };
+        assert_ne!(
+            encoded.place(mutation.clone()).placement_id(),
+            explicit_placed.placement_id(),
+            "placement descriptor field {field} is outside PlacementId"
+        );
+        assert_eq!(
+            encoded.verify_placement(&mutation, explicit_placed.placement_id()),
+            Err(IdentityMismatch::PlacementId),
+            "durable recovery accepted a rewritten placement field {field}"
+        );
+    }
+
+    let symbol = SymbolRecord::for_encoding(
+        &encoded,
+        1,
+        42,
+        0,
+        (0..1280u32).map(|i| (i % 241) as u8).collect(),
+    );
+    let symbol_bytes = symbol.serialize(&encoded.symbol_auth_key(&dek()));
+    assert_eq!(
+        SymbolRecord::verify(&symbol_bytes, &encoded, &dek()).expect("authentic symbol"),
+        symbol
+    );
+    for offset in 0..symbol_bytes.len() {
+        let mut corrupted = symbol_bytes.clone();
+        corrupted[offset] ^= 0x01;
+        assert!(
+            SymbolRecord::verify(&corrupted, &encoded, &dek()).is_err(),
+            "serialized symbol byte {offset} is outside framing checks and the MAC transcript"
+        );
+    }
+
+    let recoded = protected.encode(encoding(2));
+    let foreign_symbol = SymbolRecord::for_encoding(
+        &recoded,
+        1,
+        42,
+        0,
+        (0..1280u32).map(|i| (i % 241) as u8).collect(),
+    );
+    let foreign_bytes = foreign_symbol.serialize(&recoded.symbol_auth_key(&dek()));
+    assert_eq!(
+        SymbolRecord::verify(&foreign_bytes, &encoded, &dek()),
+        Err(SymbolError::ForeignEncoding),
+        "a valid symbol from another EncodingId must not mix"
+    );
+
+    let mut wrong_dek = dek();
+    wrong_dek[0] ^= 0x80;
+    assert_eq!(
+        SymbolRecord::verify(&symbol_bytes, &encoded, &wrong_dek),
+        Err(SymbolError::AuthenticationFailed),
+        "the symbol transcript must authenticate under the selected DEK"
+    );
+    let mut corrupted_symbol = symbol_bytes.clone();
+    let payload_byte = corrupted_symbol.len() - 17;
+    corrupted_symbol[payload_byte] ^= 0x01;
+    assert_eq!(
+        SymbolRecord::verify(&corrupted_symbol, &encoded, &dek()),
+        Err(SymbolError::AuthenticationFailed),
+        "a payload change must fail the symbol MAC"
+    );
+
+    let mut unsupported = cipher.clone();
+    unsupported.data_crypto_profile = 2;
+    assert_eq!(
+        IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload()).protect(
+            &dek(),
+            unsupported.clone(),
+            &compressed,
+        ),
+        Err(IdentityMismatch::UnsupportedDataCryptoProfile {
+            data_crypto_profile: 2,
+        })
+    );
+    assert_eq!(
+        EncodedObject::reconstruct(
+            encoded.object_id(),
+            unsupported,
+            encoded.ciphertext_id(),
+            encoding(1),
+            encoded.encoding_id(),
+        ),
+        Err(IdentityMismatch::UnsupportedDataCryptoProfile {
+            data_crypto_profile: 2,
+        }),
+        "durable recovery must resolve the profile before accepting descriptors"
+    );
+
+    let domain = PackDomain {
+        namespace: namespace(),
+        tenant: 7,
+        write_key: WriteKeyDomain::CommitStream,
+        retention_class: 3,
+    };
+    let mut pack = PackBuilder::new(domain);
+    pack.add(
+        IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload()),
+        domain,
+    )
+    .expect("the member belongs to the pack domain");
+    assert!(
+        matches!(
+            pack.seal(
+                &k_oid(),
+                &dek(),
+                PackProtectionProfile {
+                    codec_profile: 1,
+                    data_crypto_profile: 2,
+                    dek_id: [7; 16],
+                },
+            ),
+            Err(PackError::ProtectionProfile(
+                IdentityMismatch::UnsupportedDataCryptoProfile {
+                    data_crypto_profile: 2,
+                }
+            ))
+        ),
+        "the production pack seam must propagate profile refusal"
+    );
+
+    for bad_tag_len in [0, 15, 17, u16::MAX] {
+        let mut invalid = cipher.clone();
+        invalid.object_tag_len = bad_tag_len;
+        assert_eq!(
+            IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload()).protect(
+                &dek(),
+                invalid.clone(),
+                &compressed,
+            ),
+            Err(IdentityMismatch::ObjectTagLength {
+                data_crypto_profile: 1,
+                expected: 16,
+                actual: bad_tag_len,
+            }),
+            "tag length {bad_tag_len} must be rejected before tag slicing"
+        );
+        assert_eq!(
+            EncodedObject::reconstruct(
+                encoded.object_id(),
+                invalid,
+                encoded.ciphertext_id(),
+                encoding(1),
+                encoded.encoding_id(),
+            ),
+            Err(IdentityMismatch::ObjectTagLength {
+                data_crypto_profile: 1,
+                expected: 16,
+                actual: bad_tag_len,
+            }),
+            "durable recovery must reject tag length {bad_tag_len}"
+        );
+    }
+
+    let bootstrap = root_bootstrap(&cipher);
+    assert_eq!(
+        bootstrap
+            .cipher_descriptor()
+            .expect("registered bootstrap profile"),
+        cipher,
+        "root bootstrap must preserve the complete admitted cipher descriptor"
+    );
+    for bad_nonce_len in [0, 23, 25] {
+        let mut invalid = bootstrap.clone();
+        invalid.nonce_len = bad_nonce_len;
+        assert_eq!(
+            invalid.cipher_descriptor(),
+            Err(IdentityMismatch::ObjectNonceLength {
+                data_crypto_profile: 1,
+                expected: 24,
+                actual: bad_nonce_len,
+            }),
+            "root bootstrap nonce length {bad_nonce_len} must not be discarded"
+        );
+
+        let slot = RootSlot {
+            format_major: 1,
+            format_minor: 0,
+            slot_generation: 1,
+            local_writer_fence_epoch: 1,
+            database_id: [1; 16],
+            database_security_namespace_id: namespace().0,
+            cluster_incarnation: 1,
+            incarnation_continuity_profile_id: 1,
+            cluster_incarnation_continuity_digest: [2; 32],
+            continuity_cas_version: 1,
+            service_visibility_epoch: 1,
+            root_manifest_oid: encoded.object_id().0,
+            bootstrap: invalid,
+        };
+        assert_eq!(
+            recover_root_object(&slot, &[], &k_oid(), &dek(), |_| slot.identity_tuple()),
+            Err(RootRecoveryError::DescriptorMismatch(
+                IdentityMismatch::ObjectNonceLength {
+                    data_crypto_profile: 1,
+                    expected: 24,
+                    actual: bad_nonce_len,
+                }
+            )),
+            "real root recovery must reject nonce length {bad_nonce_len} before symbol work"
+        );
+    }
+
+    // Reconstructing with another well-formed descriptor is allowed only far
+    // enough to let the AEAD authenticate the original ciphertext against the
+    // substituted AAD; it must then fail without releasing plaintext.
+    let mut substituted_cipher = cipher.clone();
+    substituted_cipher.object_kind ^= 1;
+    let substituted = EncodedObject::reconstruct(
+        encoded.object_id(),
+        substituted_cipher,
+        encoded.ciphertext_id(),
+        encoding(1),
+        encoded.encoding_id(),
+    )
+    .expect("the encoding identity intentionally excludes the cipher descriptor");
+    assert!(
+        substituted
+            .open_recovered(protected.protected_bytes(), &dek())
+            .is_err(),
+        "descriptor substitution must fail the object-AEAD AAD"
+    );
+
+    let wrong_object =
+        IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), b"other payload");
+    let substituted = EncodedObject::reconstruct(
+        wrong_object.object_id(),
+        cipher,
+        encoded.ciphertext_id(),
+        encoding(1),
+        encoded.encoding_id(),
+    )
+    .expect("the encoding identity intentionally excludes logical identity");
+    assert!(
+        substituted
+            .open_recovered(protected.protected_bytes(), &dek())
+            .is_err(),
+        "logical-object substitution must fail the object-AEAD AAD"
+    );
+
+    let mut moved = placement(1);
+    moved.placement_epoch += 1;
+    assert_eq!(
+        encoded.verify_placement(&moved, placed.placement_id()),
+        Err(IdentityMismatch::PlacementId),
+        "a durable placement must recompute against this EncodingId"
     );
 }

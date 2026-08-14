@@ -547,8 +547,8 @@ impl core::error::Error for RootRecoveryError {}
 
 impl RootBootstrap {
     /// Rebuild the root's exact `CipherDescriptorWithoutDigest`.
-    pub fn cipher_descriptor(&self) -> CipherDescriptor {
-        CipherDescriptor {
+    pub fn cipher_descriptor(&self) -> Result<CipherDescriptor, IdentityMismatch> {
+        let descriptor = CipherDescriptor {
             object_kind: self.object_kind,
             canonical_plaintext_len: self.canonical_plaintext_len,
             codec_profile: self.codec_profile,
@@ -557,7 +557,17 @@ impl RootBootstrap {
             dek_id: self.dek_id,
             object_nonce: self.nonce_or_siv,
             object_tag_len: self.object_tag_len,
+        };
+        let profile = descriptor.registered_aead_profile()?;
+        // ubs:ignore -- public durable profile widths, not a nonce-byte comparison.
+        if self.nonce_len != profile.nonce_len() {
+            return Err(IdentityMismatch::ObjectNonceLength {
+                data_crypto_profile: descriptor.data_crypto_profile,
+                expected: profile.nonce_len(),
+                actual: self.nonce_len,
+            });
         }
+        Ok(descriptor)
     }
 
     /// Rebuild the root's complete `EncodingDescriptorWithoutId`.
@@ -615,9 +625,12 @@ pub fn recover_root_object(
     // Step 1: the descriptor set must be self-consistent. An EncodingId that
     // is not the digest of its own descriptor means the frame was rewritten,
     // and no amount of valid symbols makes that safe.
+    let cipher_descriptor = bootstrap
+        .cipher_descriptor()
+        .map_err(RootRecoveryError::DescriptorMismatch)?;
     let encoding = EncodedObject::reconstruct(
         root_object_id,
-        bootstrap.cipher_descriptor(),
+        cipher_descriptor,
         Digest(bootstrap.ciphertext_id),
         bootstrap.encoding_descriptor(),
         Digest(bootstrap.root_encoding_id),

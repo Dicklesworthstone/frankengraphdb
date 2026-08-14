@@ -50,7 +50,9 @@ fn encoding_descriptor(fec_profile: u16) -> EncodingDescriptor {
 fn encoded(fec_profile: u16) -> fgdb_chronicle::EncodedObject {
     let payload: Vec<u8> = (0..512u32).map(|i| (i % 251) as u8).collect();
     let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, b"header", &payload);
-    let protected = object.protect(&dek(), cipher_descriptor(), &payload);
+    let protected = object
+        .protect(&dek(), cipher_descriptor(), &payload)
+        .expect("registered AEAD profile");
     protected.encode(encoding_descriptor(fec_profile))
 }
 

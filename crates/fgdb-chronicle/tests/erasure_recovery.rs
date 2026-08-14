@@ -94,7 +94,9 @@ fn fixture(repair_symbols: u32) -> Fixture {
     let plaintext = payload();
     let object = IdentifiedObject::new(&k_oid(), namespace(), OBJECT_KIND, header(), &plaintext);
     let object_id = object.object_id();
-    let protected = object.protect(&dek(), cipher_descriptor(), &plaintext);
+    let protected = object
+        .protect(&dek(), cipher_descriptor(), &plaintext)
+        .expect("registered AEAD profile");
     let protected_len = protected.protected_bytes().len();
     let encoding = protected.encode(encoding_descriptor(protected_len));
     let source_count = source_symbol_count(protected_len, SYMBOL_SIZE);
@@ -256,7 +258,9 @@ fn a_symbol_from_another_encoding_cannot_join_a_decode() {
     // Re-encode the same protected object under a different FEC profile.
     let plaintext = payload();
     let object = IdentifiedObject::new(&k_oid(), namespace(), OBJECT_KIND, header(), &plaintext);
-    let protected = object.protect(&dek(), cipher_descriptor(), &plaintext);
+    let protected = object
+        .protect(&dek(), cipher_descriptor(), &plaintext)
+        .expect("registered AEAD profile");
     let other_encoding = protected.encode(EncodingDescriptor {
         fec_profile: 2,
         ..encoding_descriptor(f.protected_len)

@@ -325,7 +325,9 @@ pub fn seal(
         object_nonce: derive_nonce(object_id),
         object_tag_len: 16,
     };
-    let protected = identified.protect(dek, cipher.clone(), plaintext);
+    let protected = identified
+        .protect(dek, cipher.clone(), plaintext)
+        .map_err(CapsuleError::DescriptorMismatch)?;
     let protected_len = protected.protected_bytes().len();
 
     let encoding_descriptor = EncodingDescriptor {
