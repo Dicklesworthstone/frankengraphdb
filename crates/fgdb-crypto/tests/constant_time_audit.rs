@@ -306,6 +306,22 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     let drop_start = source
         .find("impl<const N: usize> Drop for Secret<N>")
         .expect("Secret has an automatic Drop implementation");
+    assert_eq!(
+        source
+            .matches("impl<const N: usize> Drop for Secret<N>")
+            .count(),
+        1,
+        "zeroize.rs must contain exactly one Drop authority for Secret"
+    );
+    assert!(
+        source[..drop_start].ends_with("\n}\n\n"),
+        "the sole Drop implementation must be an unconditional top-level item, \
+         not a cfg- or macro-selected decoy"
+    );
+    assert!(
+        core::mem::needs_drop::<fgdb_crypto::zeroize::Secret<32>>(),
+        "the production-compiled Secret type must actually carry Drop glue"
+    );
     let drop_impl = &source[drop_start..];
     let drop_impl = &drop_impl[..drop_impl.find("\n}\n").unwrap_or(drop_impl.len())];
     assert_eq!(
