@@ -943,4 +943,18 @@ mod tests {
             "the unrelated create must survive so apply can refuse the cascade"
         );
     }
+
+    #[test]
+    fn a_self_loop_create_is_incident_and_cancels_with_its_vertex() {
+        let out = fold_target_disjoint(vec![
+            create_vertex(1, 1),
+            create_edge(10, 1, 1),
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0x01; 32]),
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+        ]);
+        assert!(out.is_empty(), "{out:?}");
+    }
 }

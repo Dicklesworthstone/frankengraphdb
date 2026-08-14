@@ -861,6 +861,21 @@ fn deleting_an_unknown_vertex_is_refused_before_any_edge_retires() {
     assert_eq!(entries[0].retired_at, None, "the refusal was atomic");
 }
 
+/// A self-loop is incident once. DeleteVertex's cascade must equal that
+/// singleton or apply refuses CascadeImageMismatch.
+#[test]
+fn a_self_loop_delete_cascades_the_edge_once() {
+    let mut w = writer();
+    apply_edge(&mut w, 1, 10, 1, 1).expect("creates a self-loop");
+    w.apply(keys(), CommitSeq(2), &delete_vertex_row(1, vec![EId(10)]))
+        .expect("self-loop cascade is a singleton");
+    assert!(w.live_edge(EId(10)).is_none(), "the loop must retire");
+    assert!(
+        w.live_vertex_row(VId(1)).is_none(),
+        "the vertex must retire"
+    );
+}
+
 /// A second delete of the same vertex is `UnknownVertex`: retirement removed
 /// it from the live map and the spent set forbids the re-create that could
 /// make it deletable again.
