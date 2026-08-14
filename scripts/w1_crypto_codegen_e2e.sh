@@ -77,6 +77,15 @@ else
   gate_diag "  source-linkage transcript: $EVIDENCE_DIR/source-linkage.log"
 fi
 
+if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
+  aead_forgery_timing_probe_is_bounded_and_detector_is_live -- --exact --nocapture \
+  >"$EVIDENCE_DIR/timing-evidence.log" 2>&1; then
+  gate_pass "bounded AEAD Welch-t screen is quiet and its planted early-exit detector fires"
+else
+  gate_fail "bounded AEAD timing screen or its planted detector failed"
+  gate_diag "  timing-evidence transcript: $EVIDENCE_DIR/timing-evidence.log"
+fi
+
 if cargo test --offline --locked -p fgdb-crypto --doc \
   >"$EVIDENCE_DIR/compile-fail.log" 2>&1; then
   gate_pass "public secret owners remain non-cloneable and consuming at compile time"

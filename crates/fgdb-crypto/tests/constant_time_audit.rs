@@ -5,16 +5,17 @@
 //! module in the crate, plus the two mechanical checks that stop the audit
 //! going quietly stale.
 //!
-//! **WHAT THIS IS NOT, said first so the green bar is not over-read.** This is a
-//! REVIEW artifact, not a timing measurement. It contains no dudect-style
-//! statistical timing tests and makes no claim that the compiled cipher code is
-//! constant-time on any particular microarchitecture. The separately
-//! registered `w1_crypto_codegen_e2e` gate now inspects the optimized zeroization
-//! boundary, but that narrow witness does not generalize to every kernel. §12.5
-//! is explicit that "the vectors pass therefore it is secure" is not an
-//! inference this project makes. Constant-time behaviour remains a
-//! `bounded_model` claim with named methodology, and the statistical lane plus
-//! the release-blocking external audit are still owed by this bead.
+//! **WHAT THIS IS NOT, said first so the green bar is not over-read.** The
+//! source table is a review artifact. The bounded Welch-t probe at the end of
+//! this file measures one public AEAD forgery shape on the current host; its
+//! planted early-exit control proves the detector is live, but it does not prove
+//! every compiled cipher path constant-time on every microarchitecture. The
+//! separately registered `w1_crypto_codegen_e2e` gate inspects the optimized
+//! zeroization boundary, and that narrow witness does not generalize to every
+//! kernel either. §12.5 is explicit that "the vectors pass therefore it is
+//! secure" is not an inference this project makes. Constant-time behaviour
+//! remains a `bounded_model` claim with named methodology, and the
+//! release-blocking external audit is still owed by this bead.
 //!
 //! **WHY THE AUDIT IS A TABLE AND NOT A COMMENT.** An audit written as prose in
 //! a doc comment is true on the day it is written and unfalsifiable afterwards.
@@ -25,6 +26,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Instant;
 
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -845,4 +847,214 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
             "AEAD derived key material escaped a scrub owner: missing {required_aead_path}"
         );
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RunningMoments {
+    count: u64,
+    mean_nanos: f64,
+    m2_nanos: f64,
+}
+
+impl RunningMoments {
+    const fn new() -> Self {
+        Self {
+            count: 0,
+            mean_nanos: 0.0,
+            m2_nanos: 0.0,
+        }
+    }
+
+    fn observe(&mut self, nanos: f64) {
+        self.count += 1;
+        let delta = nanos - self.mean_nanos;
+        self.mean_nanos += delta / self.count as f64;
+        let delta_after = nanos - self.mean_nanos;
+        self.m2_nanos += delta * delta_after;
+    }
+
+    fn sample_variance(self) -> f64 {
+        assert!(self.count >= 2, "Welch evidence needs at least two samples");
+        self.m2_nanos / (self.count - 1) as f64
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WelchEvidence {
+    first: RunningMoments,
+    last: RunningMoments,
+    t_statistic: f64,
+}
+
+fn elapsed_batch<F, R>(batch_size: usize, operation: &mut F) -> f64
+where
+    F: FnMut() -> R,
+{
+    let started = Instant::now();
+    for _ in 0..batch_size {
+        std::hint::black_box(operation());
+    }
+    started.elapsed().as_secs_f64() * 1_000_000_000.0
+}
+
+/// Deterministic ABBA interleaving balances monotonic host drift without using
+/// secret or ambient entropy to select classes. Each recorded sample is one
+/// complete batch, so timer quantization is small relative to the signal.
+fn interleaved_welch<F, G, R>(
+    rounds: usize,
+    batch_size: usize,
+    mut first: F,
+    mut last: G,
+) -> WelchEvidence
+where
+    F: FnMut() -> R,
+    G: FnMut() -> R,
+{
+    assert!(rounds >= 2, "Welch evidence needs at least two ABBA rounds");
+    assert!(batch_size > 0, "a timing sample must execute real work");
+
+    for _ in 0..32 {
+        std::hint::black_box(first());
+        std::hint::black_box(last());
+    }
+
+    let mut first_moments = RunningMoments::new();
+    let mut last_moments = RunningMoments::new();
+    for _ in 0..rounds {
+        first_moments.observe(elapsed_batch(batch_size, &mut first));
+        last_moments.observe(elapsed_batch(batch_size, &mut last));
+        last_moments.observe(elapsed_batch(batch_size, &mut last));
+        first_moments.observe(elapsed_batch(batch_size, &mut first));
+    }
+
+    let denominator = (first_moments.sample_variance() / first_moments.count as f64
+        + last_moments.sample_variance() / last_moments.count as f64)
+        .sqrt();
+    assert!(
+        denominator.is_finite() && denominator > 0.0,
+        "timing evidence has no finite measurable variance"
+    );
+    let t_statistic = (first_moments.mean_nanos - last_moments.mean_nanos) / denominator;
+    WelchEvidence {
+        first: first_moments,
+        last: last_moments,
+        t_statistic,
+    }
+}
+
+#[inline(never)]
+fn planted_early_exit_compare(left: &[u8], right: &[u8]) -> bool {
+    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
+        if left_byte != right_byte {
+            return false;
+        }
+    }
+    left.len() == right.len()
+}
+
+/// Bounded statistical evidence for the exact AEAD tag-compare regression the
+/// source audit forbids.
+///
+/// The two public inputs differ only in whether the forged tag mismatches at
+/// byte zero or byte fifteen. Authenticate-then-decrypt must reject both before
+/// producing plaintext. An early-return equality check makes the first class
+/// measurably faster; the production accumulator should not. This is a
+/// dudect-style Welch-t screen, not a portable constant-time theorem.
+#[test]
+fn aead_forgery_timing_probe_is_bounded_and_detector_is_live() {
+    const AEAD_ROUNDS: usize = 768;
+    const AEAD_BATCH_SIZE: usize = 128;
+    const CONTROL_ROUNDS: usize = 192;
+    const CONTROL_BATCH_SIZE: usize = 64;
+    const MAX_PRODUCTION_ABS_T: f64 = 10.0;
+    const MIN_PLANTED_ABS_T: f64 = 20.0;
+
+    let key = [0x42_u8; 32];
+    let nonce = [0x24_u8; 12];
+    let aad = b"fgdb:timing-probe:v1";
+    let sealed = fgdb_crypto::aead::chacha20poly1305_seal(&key, &nonce, aad, b"");
+    assert_eq!(sealed.len(), 16, "empty plaintext leaves exactly one tag");
+    let mut first_mismatch = sealed.clone();
+    first_mismatch[0] ^= 1;
+    let mut last_mismatch = sealed;
+    last_mismatch[15] ^= 1;
+    assert!(fgdb_crypto::aead::chacha20poly1305_open(&key, &nonce, aad, &first_mismatch).is_err());
+    assert!(fgdb_crypto::aead::chacha20poly1305_open(&key, &nonce, aad, &last_mismatch).is_err());
+
+    let production = interleaved_welch(
+        AEAD_ROUNDS,
+        AEAD_BATCH_SIZE,
+        || {
+            fgdb_crypto::aead::chacha20poly1305_open(
+                std::hint::black_box(&key),
+                std::hint::black_box(&nonce),
+                std::hint::black_box(aad),
+                std::hint::black_box(&first_mismatch),
+            )
+            .is_err()
+        },
+        || {
+            fgdb_crypto::aead::chacha20poly1305_open(
+                std::hint::black_box(&key),
+                std::hint::black_box(&nonce),
+                std::hint::black_box(aad),
+                std::hint::black_box(&last_mismatch),
+            )
+            .is_err()
+        },
+    );
+
+    let equal = [0xa5_u8; 512];
+    let mut control_first = equal;
+    control_first[0] ^= 1;
+    let mut control_last = equal;
+    control_last[control_last.len() - 1] ^= 1;
+    let planted = interleaved_welch(
+        CONTROL_ROUNDS,
+        CONTROL_BATCH_SIZE,
+        || {
+            planted_early_exit_compare(
+                std::hint::black_box(&control_first),
+                std::hint::black_box(&equal),
+            )
+        },
+        || {
+            planted_early_exit_compare(
+                std::hint::black_box(&control_last),
+                std::hint::black_box(&equal),
+            )
+        },
+    );
+
+    eprintln!(
+        "fgdb_crypto_timing_evidence method=welch_t_abba_v1 kernel=chacha20poly1305_open \
+         classes=tag_mismatch_first,tag_mismatch_last samples_per_class={} batch_size={} \
+         first_mean_ns={:.3} last_mean_ns={:.3} t_statistic={:.6} threshold_abs_t={MAX_PRODUCTION_ABS_T}",
+        production.first.count,
+        AEAD_BATCH_SIZE,
+        production.first.mean_nanos,
+        production.last.mean_nanos,
+        production.t_statistic,
+    );
+    eprintln!(
+        "fgdb_crypto_timing_evidence method=welch_t_abba_v1 kernel=planted_early_exit_compare \
+         classes=mismatch_first,mismatch_last samples_per_class={} batch_size={} \
+         first_mean_ns={:.3} last_mean_ns={:.3} t_statistic={:.6} required_abs_t={MIN_PLANTED_ABS_T}",
+        planted.first.count,
+        CONTROL_BATCH_SIZE,
+        planted.first.mean_nanos,
+        planted.last.mean_nanos,
+        planted.t_statistic,
+    );
+
+    assert_eq!(production.first.count, (AEAD_ROUNDS * 2) as u64);
+    assert_eq!(production.last.count, (AEAD_ROUNDS * 2) as u64);
+    assert!(
+        production.t_statistic.abs() <= MAX_PRODUCTION_ABS_T,
+        "bounded timing screen detected first-vs-last forged-tag separation: {production:?}"
+    );
+    assert!(
+        planted.t_statistic.abs() >= MIN_PLANTED_ABS_T,
+        "planted early-exit comparator escaped the timing detector: {planted:?}"
+    );
 }
