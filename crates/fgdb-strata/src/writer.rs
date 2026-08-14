@@ -653,6 +653,24 @@ impl BlockWriter {
                         self.seal_vertices(keys)?;
                     }
                 }
+                // Same law on the edge half: if the cascade's tombstones
+                // would trip the entry ceiling on a *later* `push`, seal
+                // first. Otherwise the first `retire` stages, the next
+                // early-seal refuses, and apply returns with a partial
+                // cascade — the shape preflight is written to forbid.
+                let mut incoming = 0usize;
+                for eid in sorted_retired_incident_edges {
+                    if let Some((entry, _)) = self.retirement_entry(*eid, seq)? {
+                        let key = (entry.src, entry.relation, entry.dst, *eid, entry.created_at);
+                        incoming += usize::from(!self.pending.contains_key(&key));
+                    }
+                }
+                if self.pending.len() + incoming
+                    > usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX)
+                    && !self.pending_has_live_at(seq)
+                {
+                    self.seal(keys)?;
+                }
                 for eid in sorted_retired_incident_edges {
                     self.retire(keys, *eid, seq)?;
                 }
@@ -1646,6 +1664,98 @@ mod tests {
             writer.pending_vertex_len(),
             ceiling,
             "the planted illegal rows stay; the delete added nothing"
+        );
+    }
+
+    /// A two-edge cascade used to `push` the first tombstone and only then
+    /// early-seal on the second. A refusing seal left E10 retired and E11
+    /// live — half a cascade, which preflight is supposed to make
+    /// unreachable.
+    #[test]
+    fn a_failed_cascade_seal_does_not_retire_the_first_edge() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        let rel = RelationId(1);
+        for vid in [1_u128, 2] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateVertex {
+                        vid: VId(vid),
+                        birth_ordinal: u64::try_from(vid).expect("test vid fits"),
+                        labels: vec![],
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("vertices");
+        }
+        for (eid, src, dst) in [(10_u128, 1_u128, 2_u128), (11, 2, 1)] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateEdge {
+                        eid: EId(eid),
+                        birth_ordinal: u64::try_from(eid).expect("test eid fits"),
+                        src: VId(src),
+                        relation: rel,
+                        dst: VId(dst),
+                        canonical_key: None,
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("edge");
+        }
+        writer.seal(keys()).expect("edge births durable");
+        writer.seal_vertices(keys()).expect("vertex births durable");
+
+        let ceiling = usize::try_from(MAX_BLOCK_ENTRIES).unwrap();
+        for i in 0..(ceiling - 1) {
+            let src = VId(1000 + i as u128);
+            writer.pending.insert(
+                (src, rel, VId(3), EId(1000 + i as u128), CommitSeq(0)),
+                PendingStatement {
+                    entry: AdjacencyEntry {
+                        src,
+                        relation: rel,
+                        dst: VId(3),
+                        eid: EId(1000 + i as u128),
+                        created_at: CommitSeq(0),
+                        retired_at: None,
+                    },
+                    props: vec![],
+                },
+            );
+        }
+        assert_eq!(writer.pending_len(), ceiling - 1);
+
+        let refusal = writer.apply(
+            keys(),
+            CommitSeq(2),
+            &DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: fgdb_types::ids::ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(10), EId(11)],
+            },
+        );
+        assert_eq!(
+            refusal,
+            Err(WriteError::Block(BlockError::CreatedAtZero { at: 0 }))
+        );
+        assert!(
+            writer.is_vertex_live(VId(2)),
+            "the refused delete must leave the vertex live"
+        );
+        assert!(
+            writer.live_edge(EId(10)).is_some() && writer.live_edge(EId(11)).is_some(),
+            "neither cascade member may retire if a later member's seal refuses"
+        );
+        assert_eq!(
+            writer.pending_len(),
+            ceiling - 1,
+            "the planted illegal families stay; the cascade added nothing"
         );
     }
 }
