@@ -169,15 +169,15 @@ async fn assert_reopened_vertex_matches_oracle(cx: &CommitCx, dir: &Path) {
     let engine_verification = engine.crypto_verification_events().to_vec();
     assert!(
         engine_verification.iter().any(|event| {
-            event.operation == VerificationOperation::ObjectRecovery
-                && event.outcome == VerificationOutcome::Accepted
+            matches!(event.operation, VerificationOperation::ObjectRecovery)
+                && matches!(event.outcome, VerificationOutcome::Accepted)
         }),
         "the product reopen must retain successful capsule verification evidence"
     );
     assert!(
         engine_verification
             .iter()
-            .all(|event| event.outcome == VerificationOutcome::Accepted),
+            .all(|event| matches!(event.outcome, VerificationOutcome::Accepted)),
         "a healthy product reopen must not manufacture a rejected verification event"
     );
     drop(engine);
@@ -188,8 +188,8 @@ async fn assert_reopened_vertex_matches_oracle(cx: &CommitCx, dir: &Path) {
     let replayed = replay(cx, &coordinator).await.expect("stream replays");
     assert!(
         replayed.crypto_verification_events.iter().any(|event| {
-            event.operation == VerificationOperation::ObjectRecovery
-                && event.outcome == VerificationOutcome::Accepted
+            matches!(event.operation, VerificationOperation::ObjectRecovery)
+                && matches!(event.outcome, VerificationOutcome::Accepted)
         }),
         "independent replay must retain its own successful verification evidence"
     );
@@ -197,7 +197,7 @@ async fn assert_reopened_vertex_matches_oracle(cx: &CommitCx, dir: &Path) {
         replayed
             .crypto_verification_events
             .iter()
-            .all(|event| event.outcome == VerificationOutcome::Accepted),
+            .all(|event| matches!(event.outcome, VerificationOutcome::Accepted)),
         "healthy replay must not manufacture a rejected verification event"
     );
     let graph = replayed
