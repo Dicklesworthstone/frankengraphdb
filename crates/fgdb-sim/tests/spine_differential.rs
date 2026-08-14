@@ -34,6 +34,7 @@ use fgdb::{
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
+use fgdb_chronicle::identity::{VerificationOperation, VerificationOutcome};
 use fgdb_chronicle::store::{ROOT_FILE_NAME, StoreError as SlotStoreError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_sim::{
@@ -165,12 +166,40 @@ async fn assert_reopened_vertex_matches_oracle(cx: &CommitCx, dir: &Path) {
         .expect("authoritative reopen repairs the root slot");
     assert_eq!(engine.frontier().expect("healthy frontier").0, 1);
     let engine_vertex = engine.vertex(VId(1)).expect("healthy read");
+    let engine_verification = engine.crypto_verification_events().to_vec();
+    assert!(
+        engine_verification.iter().any(|event| {
+            event.operation == VerificationOperation::ObjectRecovery
+                && event.outcome == VerificationOutcome::Accepted
+        }),
+        "the product reopen must retain successful capsule verification evidence"
+    );
+    assert!(
+        engine_verification
+            .iter()
+            .all(|event| event.outcome == VerificationOutcome::Accepted),
+        "a healthy product reopen must not manufacture a rejected verification event"
+    );
     drop(engine);
 
     let coordinator = CommitCoordinator::open(cx, dir, oracle_keys())
         .await
         .expect("oracle opens the durable stream");
     let replayed = replay(cx, &coordinator).await.expect("stream replays");
+    assert!(
+        replayed.crypto_verification_events.iter().any(|event| {
+            event.operation == VerificationOperation::ObjectRecovery
+                && event.outcome == VerificationOutcome::Accepted
+        }),
+        "independent replay must retain its own successful verification evidence"
+    );
+    assert!(
+        replayed
+            .crypto_verification_events
+            .iter()
+            .all(|event| event.outcome == VerificationOutcome::Accepted),
+        "healthy replay must not manufacture a rejected verification event"
+    );
     let graph = replayed
         .database
         .graph(GRAPH, BRANCH)

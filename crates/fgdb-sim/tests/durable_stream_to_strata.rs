@@ -156,7 +156,7 @@ async fn rebuild_from_stream(
         let commit_seq = CommitSeq(entry.marker.commit_seq);
         let EffectSource::Local { capsule_ref, .. } = &entry.marker.effect_source;
         let bytes = coordinator
-            .read_capsule(cx, *capsule_ref)
+            .read_capsule(cx, *capsule_ref, &mut Vec::new())
             .await
             .expect("a committed capsule is readable");
         let template =

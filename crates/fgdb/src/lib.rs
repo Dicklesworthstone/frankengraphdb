@@ -1564,12 +1564,8 @@ impl<V: Vfs + Clone> Database<V> {
         // checkpoint suffix the writer just folded. A suffix-only rebuild
         // would open a window starting at `published_at`, and the next
         // insert would see a gap (plan:397, FG-INV-18).
-        let delta_index = rebuild_delta_index(
-            cx,
-            &coordinator,
-            &mut crypto_verification_events,
-        )
-        .await?;
+        let delta_index =
+            rebuild_delta_index(cx, &coordinator, &mut crypto_verification_events).await?;
         Ok(Self {
             coordinator,
             store,

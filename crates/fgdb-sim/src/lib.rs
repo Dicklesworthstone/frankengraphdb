@@ -35,6 +35,7 @@ pub mod shrink;
 pub mod vfs;
 
 use fgdb_chronicle::commit::{CommitCoordinator, CommitError};
+use fgdb_chronicle::identity::CryptoVerificationEvent;
 use fgdb_chronicle::marker::EffectSource;
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
@@ -185,6 +186,10 @@ pub async fn commit_capsule<V: asupersync::fs::Vfs>(
 pub struct Replayed {
     pub database: ReferenceDatabase,
     pub index: LocalDeltaBatchIndex,
+    /// Secret-free crypto/identity outcomes observed while replay read the
+    /// durable capsules. This makes replay forensics retain the verification
+    /// evidence rather than satisfying the mandatory sink with a throwaway.
+    pub crypto_verification_events: Vec<CryptoVerificationEvent>,
 }
 
 /// Materialize the durable commit stream into graph state, discarding the
@@ -235,6 +240,7 @@ pub async fn replay_through<V: asupersync::fs::Vfs>(
 ) -> Result<Replayed, ReplayError> {
     let mut database = ReferenceDatabase::with_database_id(reference_database_id(cx, coordinator)?);
     let mut index = LocalDeltaBatchIndex::new();
+    let mut crypto_verification_events = Vec::new();
     for entry in coordinator.chain().entries() {
         let commit_seq = entry.marker.commit_seq;
         if commit_seq > through.0 {
@@ -251,7 +257,9 @@ pub async fn replay_through<V: asupersync::fs::Vfs>(
                 capsule_oid: *capsule_ref,
             });
         }
-        let bytes = coordinator.read_capsule(cx, *capsule_ref).await?;
+        let bytes = coordinator
+            .read_capsule(cx, *capsule_ref, &mut crypto_verification_events)
+            .await?;
 
         let recomputed = template_digest(&bytes);
         // ubs:ignore — canonical logical-effect integrity is public, not authentication material.
@@ -294,7 +302,11 @@ pub async fn replay_through<V: asupersync::fs::Vfs>(
             .insert(batch)
             .map_err(|error| ReplayError::Index { commit_seq, error })?;
     }
-    Ok(Replayed { database, index })
+    Ok(Replayed {
+        database,
+        index,
+        crypto_verification_events,
+    })
 }
 
 /// Bind every replay of one durable coordinator directory to the same reference

@@ -190,7 +190,7 @@ fn a_sealed_block_round_trips_through_the_container() {
     let container = encode_container(&sealed);
     let (descriptor, symbols) = decode_container(&container).expect("the container decodes");
     let recovered = keys()
-        .recover(&descriptor, &symbols, id)
+        .recover(&descriptor, &symbols, id, &mut Vec::new())
         .expect("recovers to the requested identity");
 
     assert_eq!(recovered, bytes, "byte-for-byte");
@@ -227,7 +227,7 @@ fn a_rotted_block_heals_and_still_decodes() {
 
     let (descriptor, damaged) = decode_container(&container).expect("still parses");
     let healed = keys()
-        .recover(&descriptor, &damaged, id)
+        .recover(&descriptor, &damaged, id, &mut Vec::new())
         .expect("heals within the repair budget");
     assert_eq!(healed, bytes, "healed byte-for-byte");
     assert_eq!(
@@ -251,7 +251,9 @@ fn a_block_rotted_beyond_the_budget_fails_closed() {
 
     let (descriptor, damaged) = decode_container(&container).expect("still parses");
     assert!(
-        keys().recover(&descriptor, &damaged, id).is_err(),
+        keys()
+            .recover(&descriptor, &damaged, id, &mut Vec::new())
+            .is_err(),
         "beyond the budget a block must fail closed, not return usable-looking bytes"
     );
 }

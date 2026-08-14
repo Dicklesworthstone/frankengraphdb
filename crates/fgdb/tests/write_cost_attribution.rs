@@ -166,7 +166,7 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
         plaintexts.push((
             entry.marker.commit_seq,
             runtime
-                .block_on(coordinator.read_capsule(&commit, *capsule_ref))
+                .block_on(coordinator.read_capsule(&commit, *capsule_ref, &mut Vec::new()))
                 .expect("replica capsule read"),
         ));
     }

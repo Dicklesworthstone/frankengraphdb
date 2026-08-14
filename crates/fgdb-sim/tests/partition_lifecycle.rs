@@ -190,7 +190,7 @@ async fn build_and_persist(
         frontier = commit_seq;
         let EffectSource::Local { capsule_ref, .. } = &entry.marker.effect_source;
         let bytes = reopened
-            .read_capsule(cx, *capsule_ref)
+            .read_capsule(cx, *capsule_ref, &mut Vec::new())
             .await
             .expect("readable");
         let template = LogicalDeltaTemplate::decode_canonical(&bytes).expect("decodes");

@@ -350,7 +350,7 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
             );
             if capsule_durable {
                 let orphan_bytes = reopened
-                    .read_capsule(cx, third.object_id)
+                    .read_capsule(cx, third.object_id, &mut Vec::new())
                     .await
                     .expect("readable");
                 assert!(
@@ -479,7 +479,7 @@ fn a_rewritten_capsule_is_refused_rather_than_materialized() {
         // Nothing partial was applied on the way to failing.
         assert!(
             reopened
-                .read_capsule(cx, capsules[0].object_id)
+                .read_capsule(cx, capsules[0].object_id, &mut Vec::new())
                 .await
                 .is_err(),
             "the substituted container must not recover under the committed identity"
@@ -680,7 +680,7 @@ fn a_committed_capsule_recovers_its_exact_plaintext_through_the_codec() {
             .await
             .expect("reopen");
         let recovered = reopened
-            .read_capsule(cx, capsule.object_id)
+            .read_capsule(cx, capsule.object_id, &mut Vec::new())
             .await
             .expect("recovers through the codec");
         assert_eq!(recovered, capsule.bytes);
@@ -1435,7 +1435,7 @@ fn a_flipped_bit_in_a_durable_capsule_heals_through_the_erasure_code() {
         assert_eq!(reopened.chain().len(), 3);
         assert_eq!(
             reopened
-                .read_capsule(cx, third.object_id)
+                .read_capsule(cx, third.object_id, &mut Vec::new())
                 .await
                 .expect("the erasure code heals one rotted bit"),
             third.bytes,
