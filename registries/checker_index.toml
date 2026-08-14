@@ -226,6 +226,13 @@ status = "live"
 unit = "artifact"
 
 [[checker]]
+symbol = "cargo-test:crypto-composition"
+kind = "cargo-test"
+artifact = "crates/fgdb-chronicle/tests/identity_pipeline.rs"
+status = "live"
+unit = "artifact"
+
+[[checker]]
 symbol = "cargo-test:claims"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"

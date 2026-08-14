@@ -8188,8 +8188,13 @@ evidence_scope = "implementation"
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:crypto-composition"
-status = "planned"
+status = "live"
 evidence_scope = "implementation"
+checker_id = "cargo-test:crypto-composition"
+package = "fgdb-chronicle"
+target = "identity_pipeline"
+selector = "registered_crypto_composition_is_profile_bound_and_fail_closed"
+command_argv = ["cargo", "test", "-p", "fgdb-chronicle", "--test", "identity_pipeline", "registered_crypto_composition_is_profile_bound_and_fail_closed", "--", "--exact"]
 
 [[verification_entrypoint]]
 entrypoint = "cargo-test:differential-conformance"
