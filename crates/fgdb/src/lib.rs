@@ -1772,6 +1772,16 @@ impl<V: Vfs + Clone> Database<V> {
                     if ensure && live_now {
                         continue;
                     }
+                    // Same-batch delete spends the id. prefix_versions is not
+                    // cleared, so this must beat AlreadyLive (fgdb-yuvu).
+                    // Historical spent is checked after AlreadyLive: the
+                    // writer's spent set includes every admitted (still-live)
+                    // identity.
+                    if prefix_deleted_vertices.contains(&vid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
                     // The fold's refusals, preflighted (fgdb-kokz): a create
                     // that the writer would refuse AFTER the two-fsync commit
                     // must refuse before it. Ensure is not resurrection.
@@ -1783,11 +1793,14 @@ impl<V: Vfs + Clone> Database<V> {
                             elem: ElementId::Vertex(vid),
                         });
                     }
-                    if prefix_deleted_vertices.contains(&vid) || self.writer.is_vertex_spent(vid) {
+                    if self.writer.is_vertex_spent(vid) {
                         return Err(WriteError::IdentitySpent {
                             elem: ElementId::Vertex(vid),
                         });
                     }
+                    let mut labels = labels;
+                    let mut props = props;
+                    sort_write_labels_and_props(&mut labels, &mut props);
                     let row = DeltaRow::CreateVertex {
                         vid,
                         birth_ordinal,
@@ -1830,12 +1843,17 @@ impl<V: Vfs + Clone> Database<V> {
                     if ensure && triple_live {
                         continue;
                     }
+                    if prefix_deleted_edges.contains(&eid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Edge(eid),
+                        });
+                    }
                     if prefix_edges.contains_key(&eid) || self.writer.live_edge(eid).is_some() {
                         return Err(WriteError::AlreadyLive {
                             elem: ElementId::Edge(eid),
                         });
                     }
-                    if prefix_deleted_edges.contains(&eid) || self.writer.is_edge_spent(eid) {
+                    if self.writer.is_edge_spent(eid) {
                         return Err(WriteError::IdentitySpent {
                             elem: ElementId::Edge(eid),
                         });
@@ -1852,6 +1870,8 @@ impl<V: Vfs + Clone> Database<V> {
                             return Err(WriteError::DanglingEndpoint { eid, endpoint });
                         }
                     }
+                    let mut props = props;
+                    sort_write_props(&mut props);
                     let row = DeltaRow::CreateEdge {
                         eid,
                         birth_ordinal,
@@ -3099,6 +3119,18 @@ fn fold_statement_versions(
 /// One vertex's mutable batch-prefix content: `(labels, props)`, both in
 /// canonical order.
 type VertexContent = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
+
+fn sort_write_labels_and_props(
+    labels: &mut [LabelId],
+    props: &mut [(PropertyKeyId, CanonicalScalar)],
+) {
+    labels.sort_unstable();
+    sort_write_props(props);
+}
+
+fn sort_write_props(props: &mut [(PropertyKeyId, CanonicalScalar)]) {
+    props.sort_by_key(|(key, _)| *key);
+}
 
 /// The batch-prefix content entry for `vid`, seeded from the merged committed
 /// row on first touch, so an update's before-image reflects everything the

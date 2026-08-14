@@ -2874,6 +2874,96 @@ fn compare_and_set_matches_aborts_and_noops() {
     });
 }
 
+/// Same-batch create overlay is what CAS `binary_search`s. Caller order is
+/// not canonical; a descending pair must still see the real before-image
+/// (fgdb-yuvu).
+#[test]
+fn same_batch_create_then_cas_sees_descending_property_keys() {
+    let dir = scratch("create-cas-unsorted");
+    under_lab(8214, move |cx| async move {
+        let cx = &cx;
+        let high = PropertyKeyId(200);
+        let low = PropertyKeyId(100);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(
+            VId(1),
+            vec![],
+            vec![
+                (high, CanonicalScalar::Int(2)),
+                (low, CanonicalScalar::Int(1)),
+            ],
+        );
+        batch.compare_and_set_vertex_property(
+            VId(1),
+            low,
+            Some(CanonicalScalar::Int(1)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        db.write(cx, batch)
+            .await
+            .expect("CAS must see the create's value, not miss it in an unsorted overlay");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![
+                (low, CanonicalScalar::Int(9)),
+                (high, CanonicalScalar::Int(2))
+            ]
+        );
+    });
+}
+
+/// A same-batch delete spends the identity. The next create is
+/// IdentitySpent, not AlreadyLive (fgdb-yuvu).
+#[test]
+fn same_batch_delete_then_create_is_identity_spent() {
+    let dir = scratch("delete-then-create");
+    under_lab(8215, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut vertex_case = WriteBatch::new(KNOWS);
+        vertex_case.delete_vertex(VId(1));
+        vertex_case.create_vertex(VId(1), vec![], vec![]);
+        let vertex_refusal = db
+            .write(cx, vertex_case)
+            .await
+            .expect_err("create after same-batch delete must refuse");
+        assert!(
+            matches!(
+                vertex_refusal,
+                WriteError::IdentitySpent {
+                    elem: ElementId::Vertex(VId(1))
+                }
+            ),
+            "create after delete of vid=1 must be IdentitySpent, got {vertex_refusal:?}"
+        );
+
+        let mut edge_case = WriteBatch::new(KNOWS);
+        edge_case.delete_edge(EId(10));
+        edge_case.add_edge(EId(10), VId(1), VId(2), vec![]);
+        let edge_refusal = db
+            .write(cx, edge_case)
+            .await
+            .expect_err("add_edge after same-batch delete must refuse");
+        assert!(
+            matches!(
+                edge_refusal,
+                WriteError::IdentitySpent {
+                    elem: ElementId::Edge(EId(10))
+                }
+            ),
+            "add_edge after delete of eid=10 must be IdentitySpent, got {edge_refusal:?}"
+        );
+    });
+}
+
 /// **EDGE COMPARE-AND-SET (fgdb-2zql).** The vertex method is witnessed
 /// above. This is the same `PendingRow` arm through
 /// [`WriteBatch::compare_and_set_edge_property`] — a broken edge path
