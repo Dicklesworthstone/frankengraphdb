@@ -73,6 +73,15 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                     net.cancelled = true;
                 } else {
                     for eid in &sorted_retired_incident_edges {
+                        // A cascade that names a same-batch create which is
+                        // not incident to this vid must not assassinate it.
+                        // Absorb would cancel the create and strip it from
+                        // the durable image, so apply would succeed minus
+                        // an unrelated edge (fgdb-kfta). Leave it; apply
+                        // refuses CascadeImageMismatch.
+                        if created_edge_is_non_incident(&edges, *eid, vid) {
+                            continue;
+                        }
                         absorb_edge(&mut edges, *eid);
                     }
                     let durable_cascade: Vec<EId> = sorted_retired_incident_edges
@@ -379,6 +388,13 @@ fn vertex_endpoint_gone(vertices: &BTreeMap<VId, VertexNet>, vid: VId) -> bool {
     vertices
         .get(&vid)
         .is_some_and(|net| net.cancelled || net.deleted.is_some())
+}
+
+fn created_edge_is_non_incident(edges: &BTreeMap<EId, EdgeNet>, eid: EId, vid: VId) -> bool {
+    edges
+        .get(&eid)
+        .and_then(|net| net.created.as_ref())
+        .is_some_and(|created| created.src != vid && created.dst != vid)
 }
 
 fn cancel_incident_created_edges(edges: &mut BTreeMap<EId, EdgeNet>, vid: VId) {
@@ -898,6 +914,33 @@ mod tests {
                 before_version: version,
             }],
             "a never-born vertex must not cascade-own a basis eid"
+        );
+    }
+
+    /// A basis DeleteVertex cascade that names a same-batch create which
+    /// does not touch this vid must not cancel that create (fgdb-kfta).
+    #[test]
+    fn a_hostile_cascade_does_not_assassinate_a_non_incident_create() {
+        let version = ObjectId([0xff; 32]);
+        let out = fold_target_disjoint(vec![
+            create_edge(99, 2, 3),
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(99)],
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                DeltaRow::DeleteVertex {
+                    vid: VId(1),
+                    before_version: version,
+                    sorted_retired_incident_edges: vec![EId(99)],
+                },
+                create_edge(99, 2, 3),
+            ],
+            "the unrelated create must survive so apply can refuse the cascade"
         );
     }
 }
