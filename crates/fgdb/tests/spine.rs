@@ -384,6 +384,60 @@ fn a_cascade_cancelled_edge_does_not_spend_the_eid() {
     });
 }
 
+/// DeleteVertex cascade is the live incident set across every relation,
+/// not just this batch's coordinate. A WORKS_WITH edge must retire when
+/// the endpoint is deleted in a KNOWS batch.
+#[test]
+fn delete_vertex_cascades_edges_of_every_relation() {
+    let dir = scratch("cross-rel-cascade");
+    under_lab(8229, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds knows");
+        let mut other = WriteBatch::new(WORKS_WITH);
+        other.add_edge(EId(12), VId(1), VId(2), vec![]);
+        db.write(cx, other).await.expect("seeds works_with");
+
+        let mut retire = WriteBatch::new(KNOWS);
+        retire.delete_vertex(VId(1));
+        db.write(cx, retire)
+            .await
+            .expect("KNOWS delete must cascade the WORKS_WITH edge too");
+        assert!(db.vertex(VId(1)).expect("reads").is_none());
+        assert!(db.edge(EId(10)).expect("reads").is_none());
+        assert!(
+            db.edge(EId(12)).expect("reads").is_none(),
+            "the other-relation incident edge must retire"
+        );
+        assert!(db.vertex(VId(2)).expect("reads").is_some());
+
+        let mut pair = WriteBatch::new(KNOWS);
+        pair.create_vertex(VId(3), vec![], vec![]);
+        pair.create_vertex(VId(4), vec![], vec![]);
+        db.write(cx, pair).await.expect("seeds pair");
+        let mut ww = WriteBatch::new(WORKS_WITH);
+        ww.add_edge(EId(20), VId(3), VId(4), vec![]);
+        db.write(cx, ww).await.expect("shared other-relation edge");
+        let mut dual = WriteBatch::new(KNOWS);
+        dual.delete_vertex(VId(4));
+        dual.delete_vertex(VId(3));
+        db.write(cx, dual)
+            .await
+            .expect("deleting both endpoints still retires the other-relation edge once");
+        assert!(db.edge(EId(20)).expect("reads").is_none());
+
+        drop(db);
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert!(db.edge(EId(12)).expect("reads").is_none());
+        assert!(db.edge(EId(20)).expect("reads").is_none());
+        assert!(db.vertex(VId(2)).expect("reads").is_some());
+    });
+}
+
 /// Identical label/prop repeats collapse; a key with two values still
 /// refuses Canonical (fgdb-nsrv).
 #[test]
