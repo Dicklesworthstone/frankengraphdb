@@ -17,15 +17,25 @@
 //!
 //! Shapes covered: distinct creates; create+delete inside one commit (the
 //! same-commit fold, whose durable image is NO entry); retirement of an
-//! earlier commit's edge (interval close via pending-key replace); and a
-//! vertex-delete cascade. Early-seal collisions are unreachable from legal
-//! row sequences folded here (identity reuse is refused by the spent-set);
-//! if a legal shape that seals early is ever found, it belongs in this file.
+//! earlier commit's edge (interval close via pending-key replace); a
+//! vertex-delete cascade; and FGSV V2 content restatement (label/property
+//! tombstone+successor on a vertex, property set then clear on an edge).
+//!
+//! Each commit seals before the clone-publish, matching the spine's
+//! per-commit seal law (`fold_stream` / `write_with_faults`). Without that
+//! seal, restatement mutates an unsealed birth in place and the published
+//! image never contains the superseded statement; production seals the
+//! birth first, so the next commit's restatement is a later-patch
+//! tombstone+successor. Equality under the weaker no-seal model does not
+//! prove the production law. Early-seal collisions are unreachable from
+//! legal row sequences folded here (identity reuse is refused by the
+//! spent-set); if a legal shape that seals early is ever found, it belongs
+//! in this file.
 
-use fgdb_delta_types::{DeltaRow, RelationId};
+use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::ids::{BranchId, DatabaseSecurityNamespaceId, GraphId};
-use fgdb_types::{CommitSeq, EId, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 
 const K_OID: [u8; 32] = [0x5a; 32];
 const GRAPH: GraphId = GraphId(1);
@@ -120,6 +130,61 @@ fn shapes() -> Vec<(&'static str, Vec<Vec<DeltaRow>>)> {
         ],
     ));
 
+    // FGSV V2 chain: a later commit restates the live vertex (label +
+    // property), then restates the property again. Incremental pending
+    // still holds the birth; rebuild applies the same rows from scratch.
+    shapes.push((
+        "vertex-content-restatement",
+        vec![
+            vec![create_vertex(1, 1)],
+            vec![
+                DeltaRow::LabelMembership {
+                    vid: VId(1),
+                    label: LabelId(3),
+                    before: false,
+                    after: true,
+                },
+                DeltaRow::Property {
+                    elem: ElementId::Vertex(VId(1)),
+                    property: PropertyKeyId(7),
+                    before: None,
+                    after: Some(CanonicalScalar::Int(1)),
+                },
+            ],
+            vec![DeltaRow::Property {
+                elem: ElementId::Vertex(VId(1)),
+                property: PropertyKeyId(7),
+                before: Some(CanonicalScalar::Int(1)),
+                after: Some(CanonicalScalar::Int(9)),
+            }],
+        ],
+    ));
+
+    // Edge content successor: set a property, then clear it. The retiring
+    // statement must restate the pre-update row (fgdb-yqor).
+    shapes.push((
+        "edge-content-restatement",
+        vec![
+            vec![
+                create_vertex(1, 1),
+                create_vertex(2, 2),
+                create_edge(10, 1, 2, 3),
+            ],
+            vec![DeltaRow::Property {
+                elem: ElementId::Edge(EId(10)),
+                property: PropertyKeyId(7),
+                before: None,
+                after: Some(CanonicalScalar::Int(4)),
+            }],
+            vec![DeltaRow::Property {
+                elem: ElementId::Edge(EId(10)),
+                property: PropertyKeyId(7),
+                before: Some(CanonicalScalar::Int(4)),
+                after: None,
+            }],
+        ],
+    ));
+
     shapes
 }
 
@@ -129,6 +194,13 @@ fn fold(writer: &mut BlockWriter, seq: u64, rows: &[DeltaRow]) {
             .apply(keys(), CommitSeq(seq), row)
             .expect("legal shape folds");
     }
+    // The per-commit seal law: production retains this sealed writer and
+    // publishes from a clone. Rebuild (`fold_stream`) seals at the same
+    // points, so the durable layout is a function of the stream.
+    writer.seal(keys()).expect("per-commit edge seal");
+    writer
+        .seal_vertices(keys())
+        .expect("per-commit vertex seal");
 }
 
 #[test]
