@@ -4,12 +4,13 @@
 # =============================================================================
 # Owner: fgdb-w1-crypto-y5o
 #
-# This gate makes one narrow compiled-code claim: every Secret drop delegates
-# to a non-inlined production boundary, and the optimized host object retains
-# that boundary as a call to memset with the source-pinned zero fill followed by
-# a compiler fence. It does NOT claim that copies in registers, moved-from
-# temporaries, swap, or other allocations are scrubbed, nor that every crypto
-# kernel is constant-time on any microarchitecture.
+# This gate makes one narrow compiled-code claim: Secret bytes and the original
+# Argon2/BLAKE2b word storage delegate to non-inlined production boundaries,
+# and the optimized host object retains each boundary as an unconditional call
+# to memset with the source-pinned zero fill followed by a compiler fence. It
+# does NOT claim that copies in registers, moved-from temporaries, allocator/OS
+# copies, swap, or crash remnants are scrubbed, nor that every crypto kernel is
+# constant-time on any microarchitecture.
 # =============================================================================
 
 set -uo pipefail
@@ -26,7 +27,6 @@ TARGET_DIR="$EVIDENCE_DIR/target"
 BUILD_LOG="$EVIDENCE_DIR/cargo-rustc.log"
 NM_LOG="$EVIDENCE_DIR/nm.log"
 OBJDUMP_LOG="$EVIDENCE_DIR/objdump.log"
-SYMBOL_LOG="$EVIDENCE_DIR/scrub-slice.symbol.log"
 
 MISSING_TOOLS=0
 for tool in cargo rustc nm objdump; do
@@ -71,9 +71,9 @@ esac
 if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
   secret_scrub_delegates_to_codegen_witnessed_boundary -- --exact \
   >"$EVIDENCE_DIR/source-linkage.log" 2>&1; then
-  gate_pass "every Secret scrub delegates to the non-inlined witnessed boundary"
+  gate_pass "Secret, Argon2, and BLAKE2b state delegate to witnessed scrub boundaries"
 else
-  gate_fail "Secret scrub no longer delegates to the witnessed boundary"
+  gate_fail "crypto state no longer delegates to the witnessed scrub boundaries"
   gate_diag "  source-linkage transcript: $EVIDENCE_DIR/source-linkage.log"
 fi
 
@@ -115,48 +115,58 @@ else
   exit $?
 fi
 
-if nm -C "$OBJECT" >"$NM_LOG" 2>&1; then
-  SYMBOL_COUNT="$(grep -Fc ' T fgdb_crypto::zeroize::scrub_slice' "$NM_LOG" || true)"
-  if [ "$SYMBOL_COUNT" -eq 1 ]; then
-    gate_pass "optimized object exports exactly one scrub_slice codegen boundary"
-  else
-    gate_fail "optimized object exposes $SYMBOL_COUNT scrub_slice boundaries; expected exactly one"
-  fi
-else
+if ! nm -C "$OBJECT" >"$NM_LOG" 2>&1; then
   gate_unrun "nm could not inspect the optimized production object"
   gate_diag "  nm transcript: $NM_LOG"
 fi
 
-if objdump -drC --no-show-raw-insn "$OBJECT" >"$OBJDUMP_LOG" 2>&1; then
+if ! objdump -drC --no-show-raw-insn "$OBJECT" >"$OBJDUMP_LOG" 2>&1; then
+  gate_unrun "objdump could not disassemble the optimized production object"
+  gate_diag "  objdump transcript: $OBJDUMP_LOG"
+else
+  inspect_scrub_boundary() {
+    local symbol="$1"
+    local storage_kind="$2"
+    local symbol_log="$EVIDENCE_DIR/${symbol//_/-}.symbol.log"
+    local symbol_count call_count memset_relocation_count conditional_branch_count
+
+    symbol_count="$(grep -Fc " T fgdb_crypto::zeroize::$symbol" "$NM_LOG" || true)"
+    if [ "$symbol_count" -eq 1 ]; then
+      gate_pass "optimized object exports exactly one $symbol codegen boundary"
+    else
+      gate_fail "optimized object exposes $symbol_count $symbol boundaries; expected exactly one"
+    fi
+
   awk '
-    /<fgdb_crypto::zeroize::scrub_slice>:/ { capture = 1 }
+    index($0, "<fgdb_crypto::zeroize::" symbol ">:") { capture = 1 }
     capture { print }
     capture && /^$/ { exit }
-  ' "$OBJDUMP_LOG" >"$SYMBOL_LOG"
-  CALL_COUNT="$(grep -Ec '[[:space:]](call|bl)[[:space:]]' "$SYMBOL_LOG" || true)"
-  MEMSET_RELOCATION_COUNT="$(grep -Ec '[[:space:]]R_[^[:space:]]+[[:space:]]+memset([@+-]|$)' \
-    "$SYMBOL_LOG" || true)"
-  CONDITIONAL_BRANCH_COUNT="$(grep -Ec \
+  ' symbol="$symbol" "$OBJDUMP_LOG" >"$symbol_log"
+  call_count="$(grep -Ec '[[:space:]](call|bl)[[:space:]]' "$symbol_log" || true)"
+  memset_relocation_count="$(grep -Ec '[[:space:]]R_[^[:space:]]+[[:space:]]+memset([@+-]|$)' \
+    "$symbol_log" || true)"
+  conditional_branch_count="$(grep -Ec \
     '^[[:space:]]*[0-9a-f]+:[[:space:]]+(j[a-z]+|loop[a-z]*|b\.[a-z]+|cbz|cbnz|tbz|tbnz)[[:space:]]' \
-    "$SYMBOL_LOG" || true)"
-  if [ "$CALL_COUNT" -eq 1 ] \
-    && [ "$MEMSET_RELOCATION_COUNT" -eq 1 ] \
-    && [ "$CONDITIONAL_BRANCH_COUNT" -eq 0 ] \
+    "$symbol_log" || true)"
+  if [ "$call_count" -eq 1 ] \
+    && [ "$memset_relocation_count" -eq 1 ] \
+    && [ "$conditional_branch_count" -eq 0 ] \
     && awk '
       /[[:space:]](call|bl)[[:space:]]/ { call_line = NR; next }
       /[[:space:]]R_[^[:space:]]+[[:space:]]+memset([@+-]|$)/ {
         if (call_line == NR - 1) found = 1
       }
       END { exit(found ? 0 : 1) }
-    ' "$SYMBOL_LOG"; then
-    gate_pass "optimized scrub_slice unconditionally makes exactly one memset call"
+    ' "$symbol_log"; then
+    gate_pass "optimized $symbol unconditionally scrubs $storage_kind with exactly one memset call"
   else
-    gate_fail "optimized scrub_slice is conditional or lacks exactly one memset-targeted call"
-    gate_diag "  symbol disassembly: $SYMBOL_LOG"
+    gate_fail "optimized $symbol is conditional or lacks exactly one memset-targeted call"
+    gate_diag "  symbol disassembly: $symbol_log"
   fi
-else
-  gate_unrun "objdump could not disassemble the optimized production object"
-  gate_diag "  objdump transcript: $OBJDUMP_LOG"
+  }
+
+  inspect_scrub_boundary "scrub_slice" "byte storage"
+  inspect_scrub_boundary "scrub_words" "word storage"
 fi
 
 gate_diag "  retained evidence: $EVIDENCE_DIR"
