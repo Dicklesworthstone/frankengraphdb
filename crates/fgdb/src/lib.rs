@@ -3495,11 +3495,13 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         cx,
         coordinator,
         keys,
-        &mut writer,
-        &mut versions,
-        &mut next_birth_ordinal,
+        &mut FoldState {
+            writer: &mut writer,
+            versions: &mut versions,
+            next_birth_ordinal: &mut next_birth_ordinal,
+            crypto_verification_events,
+        },
         published_at,
-        crypto_verification_events,
     )
     .await?;
 
@@ -3565,11 +3567,13 @@ async fn rebuild<V: Vfs>(
         cx,
         coordinator,
         keys,
-        &mut writer,
-        &mut versions,
-        &mut next_birth_ordinal,
+        &mut FoldState {
+            writer: &mut writer,
+            versions: &mut versions,
+            next_birth_ordinal: &mut next_birth_ordinal,
+            crypto_verification_events,
+        },
         CommitSeq(0),
-        crypto_verification_events,
     )
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
@@ -3684,15 +3688,19 @@ fn triple_is_live(
 /// versions map, and birth-ordinal allocator — the one stream fold shared by
 /// the from-scratch rebuild (`after = 0`) and the selected checkpoint's suffix
 /// replay past `published_at` (fgdb-ge6a).
+struct FoldState<'a> {
+    writer: &'a mut BlockWriter,
+    versions: &'a mut std::collections::BTreeMap<ElementId, ObjectId>,
+    next_birth_ordinal: &'a mut u64,
+    crypto_verification_events: &'a mut Vec<CryptoVerificationEvent>,
+}
+
 async fn fold_stream<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
     keys: &DatabaseKeys,
-    writer: &mut BlockWriter,
-    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
-    next_birth_ordinal: &mut u64,
+    state: &mut FoldState<'_>,
     after: CommitSeq,
-    crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<CommitSeq, RebuildError> {
     let mut frontier = after;
     let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
@@ -3715,7 +3723,7 @@ async fn fold_stream<V: Vfs>(
             });
         }
         let bytes = coordinator
-            .read_capsule(cx, *capsule_ref, crypto_verification_events)
+            .read_capsule(cx, *capsule_ref, state.crypto_verification_events)
             .await?;
         let recomputed = template_digest(&bytes);
         // FG-INV-09's recompute-from-registered-bytes check. Skipping it would
@@ -3750,9 +3758,10 @@ async fn fold_stream<V: Vfs>(
                     row,
                     DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
                 ) {
-                    *next_birth_ordinal += 1;
+                    *state.next_birth_ordinal += 1;
                 }
-                writer
+                state
+                    .writer
                     .apply(keys.block_keys(), commit_seq, row)
                     .map_err(|error| RebuildError::Fold {
                         commit_seq: commit_seq.0,
@@ -3761,7 +3770,7 @@ async fn fold_stream<V: Vfs>(
                 touched_elements(row, &mut touched);
             }
         }
-        fold_statement_versions(versions, &touched, writer).map_err(|error| {
+        fold_statement_versions(state.versions, &touched, state.writer).map_err(|error| {
             RebuildError::Decode {
                 commit_seq: commit_seq.0,
                 error,
@@ -3775,13 +3784,15 @@ async fn fold_stream<V: Vfs>(
         // checkpoint-selected open (which can only see SEALED durable state)
         // would republish a different — equally lawful, but not identical —
         // root, breaking the reopening-publishes-the-same-root determinism law.
-        writer
+        state
+            .writer
             .seal(keys.block_keys())
             .map_err(|error| RebuildError::Fold {
                 commit_seq: commit_seq.0,
                 error,
             })?;
-        writer
+        state
+            .writer
             .seal_vertices(keys.block_keys())
             .map_err(|error| RebuildError::Fold {
                 commit_seq: commit_seq.0,
