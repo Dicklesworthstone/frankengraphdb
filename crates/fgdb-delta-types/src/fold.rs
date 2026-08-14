@@ -59,14 +59,15 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 before_version,
                 sorted_retired_incident_edges,
             } => {
+                // Same-batch incident creates must cancel even if the cascade
+                // list omitted them. Apply births CreateEdge before
+                // DeleteVertex; a leftover create is CascadeImageMismatch
+                // on a basis delete (fgdb-aaz7) and DanglingEndpoint when
+                // the vertex itself is cancelled (fgdb-chx6).
+                cancel_incident_created_edges(&mut edges, vid);
                 let created_here = vertices.get(&vid).is_some_and(|net| net.created.is_some());
                 if created_here {
-                    // The vertex never becomes durable. Same-batch incident
-                    // creates must cancel even if the cascade list omitted
-                    // them — apply never sees this DeleteVertex, so a leftover
-                    // CreateEdge is DanglingEndpoint (fgdb-chx6). A never-born
-                    // vertex also cannot cascade-own a basis eid.
-                    cancel_incident_created_edges(&mut edges, vid);
+                    // A never-born vertex cannot cascade-own a basis eid.
                     let net = vertices.entry(vid).or_default();
                     *net = VertexNet::default();
                     net.cancelled = true;
@@ -572,6 +573,30 @@ mod tests {
                 vid: VId(1),
                 before_version: version,
                 sorted_retired_incident_edges: vec![fgdb_types::EId(1000)],
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            }]
+        );
+    }
+
+    /// A basis delete that omits a same-batch incident create must still
+    /// drop the create: apply would birth the edge, then refuse the cascade
+    /// image (fgdb-aaz7).
+    #[test]
+    fn same_batch_edge_create_is_stripped_even_when_omitted_from_a_basis_delete_cascade() {
+        let version = ObjectId([0x33; 32]);
+        let out = fold_target_disjoint(vec![
+            create_edge(1000, 1, 2),
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
             },
         ]);
         assert_eq!(
