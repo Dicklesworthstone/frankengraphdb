@@ -629,7 +629,7 @@ fn every_post_d2_recovery_failure_is_structured_and_executable() {
         assert_eq!(
             failure.kind,
             FailureKind::CommittedNeedsRecovery,
-            "{stage:?}"
+            "{stage:?}: observed {failure:?}"
         );
         let expected_recovery = RecoveryRequired {
             durable_frontier: CommitSeq(1),
@@ -711,10 +711,14 @@ fn every_post_d2_recovery_failure_is_structured_and_executable() {
 fn an_acknowledged_spine_loss_is_structured_and_replayable() {
     let replay = planted_spine_loss();
     let first = replay.run(&scratch_dir("spine-loss-first"));
+    assert!(
+        first.failure.is_some(),
+        "the persistent planted lie loses the acknowledged commit; observed {first:?}"
+    );
     let failure = first
         .failure
         .as_ref()
-        .expect("the persistent planted lie loses the acknowledged commit");
+        .expect("the failure presence was asserted above");
     assert_eq!(failure.kind, FailureKind::AcknowledgedCommitLost);
     assert_eq!(
         failure.durability,
