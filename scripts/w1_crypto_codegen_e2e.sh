@@ -127,7 +127,7 @@ else
   gate_diag "  nm transcript: $NM_LOG"
 fi
 
-if objdump -drC "$OBJECT" >"$OBJDUMP_LOG" 2>&1; then
+if objdump -drC --no-show-raw-insn "$OBJECT" >"$OBJDUMP_LOG" 2>&1; then
   awk '
     /<fgdb_crypto::zeroize::scrub_slice>:/ { capture = 1 }
     capture { print }
@@ -136,8 +136,12 @@ if objdump -drC "$OBJECT" >"$OBJDUMP_LOG" 2>&1; then
   CALL_COUNT="$(grep -Ec '[[:space:]](call|bl)[[:space:]]' "$SYMBOL_LOG" || true)"
   MEMSET_RELOCATION_COUNT="$(grep -Ec '[[:space:]]R_[^[:space:]]+[[:space:]]+memset([@+-]|$)' \
     "$SYMBOL_LOG" || true)"
+  CONDITIONAL_BRANCH_COUNT="$(grep -Ec \
+    '^[[:space:]]*[0-9a-f]+:[[:space:]]+(j[a-z]+|loop[a-z]*|b\.[a-z]+|cbz|cbnz|tbz|tbnz)[[:space:]]' \
+    "$SYMBOL_LOG" || true)"
   if [ "$CALL_COUNT" -eq 1 ] \
     && [ "$MEMSET_RELOCATION_COUNT" -eq 1 ] \
+    && [ "$CONDITIONAL_BRANCH_COUNT" -eq 0 ] \
     && awk '
       /[[:space:]](call|bl)[[:space:]]/ { call_line = NR; next }
       /[[:space:]]R_[^[:space:]]+[[:space:]]+memset([@+-]|$)/ {
@@ -145,9 +149,9 @@ if objdump -drC "$OBJECT" >"$OBJDUMP_LOG" 2>&1; then
       }
       END { exit(found ? 0 : 1) }
     ' "$SYMBOL_LOG"; then
-    gate_pass "optimized scrub_slice has exactly one call and it resolves to memset"
+    gate_pass "optimized scrub_slice unconditionally makes exactly one memset call"
   else
-    gate_fail "optimized scrub_slice no longer has exactly one memset-targeted call"
+    gate_fail "optimized scrub_slice is conditional or lacks exactly one memset-targeted call"
     gate_diag "  symbol disassembly: $SYMBOL_LOG"
   fi
 else

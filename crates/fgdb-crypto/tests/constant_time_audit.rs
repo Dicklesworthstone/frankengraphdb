@@ -285,6 +285,13 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     let source = std::fs::read_to_string(crate_root().join("src/zeroize.rs"))
         .expect("zeroize.rs is readable");
 
+    fn code_lines(body: &str) -> Vec<&str> {
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect::<Vec<_>>()
+    }
+
     let scrub_start = source
         .find("pub fn scrub(&mut self)")
         .expect("Secret::scrub is present");
@@ -301,9 +308,15 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         .expect("Secret has an automatic Drop implementation");
     let drop_impl = &source[drop_start..];
     let drop_impl = &drop_impl[..drop_impl.find("\n}\n").unwrap_or(drop_impl.len())];
-    assert!(
-        drop_impl.contains("fn drop(&mut self)") && drop_impl.contains("self.scrub();"),
-        "automatic Secret drop must invoke the witnessed scrub path:\n{drop_impl}"
+    assert_eq!(
+        code_lines(drop_impl),
+        [
+            "impl<const N: usize> Drop for Secret<N> {",
+            "fn drop(&mut self) {",
+            "self.scrub();",
+            "}",
+        ],
+        "automatic Secret drop must consist solely of invoking the witnessed scrub path"
     );
 
     let boundary_start = source
@@ -311,10 +324,14 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         .expect("the non-inlined codegen boundary is present");
     let boundary = &source[boundary_start..];
     let boundary = &boundary[..boundary.find("\n}").unwrap_or(boundary.len())];
-    assert!(
-        boundary.contains("bytes.fill(0);")
-            && boundary.contains("compiler_fence(Ordering::SeqCst);")
-            && !boundary.contains("if "),
-        "the witnessed boundary must unconditionally zero then fence:\n{boundary}"
+    assert_eq!(
+        code_lines(boundary),
+        [
+            "#[inline(never)]",
+            "pub fn scrub_slice(bytes: &mut [u8]) {",
+            "bytes.fill(0);",
+            "compiler_fence(Ordering::SeqCst);",
+        ],
+        "the witnessed boundary must consist solely of zeroing then fencing"
     );
 }
