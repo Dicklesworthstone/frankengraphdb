@@ -287,6 +287,7 @@ impl CapsuleKeys {
         descriptor: &CapsuleDescriptor,
         symbols: &[Vec<u8>],
         expected_object_id: ObjectId,
+        verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Vec<u8>, CapsuleError> {
         recover(
             descriptor,
@@ -295,6 +296,7 @@ impl CapsuleKeys {
             &self.k_oid,
             self.namespace,
             &self.dek,
+            verification,
         )
     }
 }

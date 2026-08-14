@@ -21,7 +21,9 @@
 //! pack would coarsen crypto-erasure granularity across epochs, tenants, or
 //! floors — so it **fails closed at build time**, not at review time.
 
-use crate::identity::{CipherDescriptor, IdentifiedObject, IdentityMismatch, ProtectedObject};
+use crate::identity::{
+    CipherDescriptor, CryptoVerificationSink, IdentifiedObject, IdentityMismatch, ProtectedObject,
+};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
 /// Which key domain an object's bytes are written under (plan §12.5).
@@ -350,11 +352,12 @@ impl PackedObjectGroup {
         object_id: ObjectId,
         k_oid: &[u8; 32],
         dek: &[u8; 32],
+        verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Vec<u8>, PackError> {
         let locator = self.locate(object_id).ok_or(PackError::NotAMember)?;
         let unpacked = self
             .protected
-            .open(dek)
+            .open(dek, verification)
             .map_err(|_| PackError::MemberIdentityMismatch)?;
 
         let start = usize::try_from(locator.offset).map_err(|_| PackError::LocatorOutOfRange)?;

@@ -500,6 +500,7 @@ impl<V: Vfs> CommitCoordinator<V> {
         &self,
         cx: &impl StorageReadCx,
         capsule_oid: ObjectId,
+        verification: &mut dyn crate::identity::CryptoVerificationSink,
     ) -> Result<Vec<u8>, CommitError> {
         cx.with_restriction_async(async {
             let container = self
@@ -507,7 +508,9 @@ impl<V: Vfs> CommitCoordinator<V> {
                 .read(&Self::capsule_path(&self.dir, capsule_oid))
                 .await?;
             let (descriptor, symbols) = decode_container(&container)?;
-            Ok(self.keys.recover(&descriptor, &symbols, capsule_oid)?)
+            Ok(self
+                .keys
+                .recover(&descriptor, &symbols, capsule_oid, verification)?)
         })
         .await
     }

@@ -343,6 +343,44 @@ fn a_same_batch_create_and_delete_leaves_no_element() {
             .await
             .expect("a folded-away create does not spend the vid");
         assert!(db.vertex(VId(3)).expect("reads").is_some());
+        // Same law for the edge that this batch created and deleted.
+        let mut again_edge = WriteBatch::new(KNOWS);
+        again_edge.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, again_edge)
+            .await
+            .expect("a folded-away create does not spend the eid");
+        assert!(db.edge(EId(10)).expect("reads").is_some());
+    });
+}
+
+/// An edge cancelled only because a same-batch endpoint delete absorbed
+/// it must also leave the eid reusable (fgdb-vhsv).
+#[test]
+fn a_cascade_cancelled_edge_does_not_spend_the_eid() {
+    let dir = scratch("cascade-fold-away-eid");
+    under_lab(8228, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(1), vec![], vec![]);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        batch.delete_vertex(VId(1));
+        db.write(cx, batch)
+            .await
+            .expect("create+cascade-delete folds the edge away");
+        assert!(db.edge(EId(10)).expect("reads").is_none());
+        assert!(db.vertex(VId(1)).expect("reads").is_none());
+        assert!(db.vertex(VId(2)).expect("reads").is_some());
+
+        let mut reuse = WriteBatch::new(KNOWS);
+        reuse.create_vertex(VId(1), vec![], vec![]);
+        reuse.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, reuse)
+            .await
+            .expect("a cascade-cancelled edge does not spend the eid");
+        assert!(db.edge(EId(10)).expect("reads").is_some());
+        assert!(db.vertex(VId(1)).expect("reads").is_some());
     });
 }
 
