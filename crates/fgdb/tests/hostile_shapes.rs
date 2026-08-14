@@ -29,19 +29,20 @@
 //! |---|---|
 //! | power-law degree skew | COVERED — `bytes_per_live_edge_under_power_law_skew` |
 //! | cold partition reopen | COVERED — every witness reads after drop + reopen |
-//! | long version chains | NOT REACHABLE: `WriteBatch` exposes `create_vertex` and `add_edge` only. With no retirement in the public surface, a second version of one edge cannot be expressed end-to-end. Reachable at tier D today (see fgdb-drwe's `version_chain_partition`), so the shape IS witnessed — one layer down, not here. |
+//! | long version chains | COVERED — `a_long_edge_version_chain_survives_cold_reopen_and_compaction` drives 65 exact property versions through the public durable write path, reads every historical value after a cold reopen, and proves compaction preserves them. |
 //! | deep branch chains | NOT REACHABLE: the spine has no branch API. Chronicle's branch-parent walk is the cost this shape exists to expose, and it does not exist to call. |
-//! | compaction under load | NOT REACHABLE end-to-end: `compact` is tier-D-internal and the spine exposes no trigger. fgdb-drwe measures the read cost compaction removes; the *foreground latency during* compaction remains owed by fgdb-p95p. |
+//! | compaction under load | PARTIAL: `Database::compact` is now a public, durable trigger and the long-chain witness proves it never moves historical answers or increases the referenced-block count. Concurrent foreground load remains unreachable: `compact` requires exclusive `&mut Database`, the spine owns an exclusive writer lease, and it exposes no read-only snapshot handle. The latency-under-load half remains owed by fgdb-p95p. |
 //!
-//! Three of five, and the two absent ones are absent because the engine cannot
-//! yet do the thing, not because the harness declined to look.
+//! Three covered, one partial, and one absent. The remaining portions are
+//! absent because the engine cannot yet express the thing, not because the
+//! harness declined to look.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, WriteBatch};
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{EId, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::path::{Path, PathBuf};
 
 const KNOWS: RelationId = RelationId(1);
@@ -428,6 +429,124 @@ fn a_cold_reopen_answers_identically_across_the_whole_skew() {
                     "vertex {src} lost neighbours across the reopen"
                 );
             }
+        }
+    });
+}
+
+/// WITNESS: one live edge can accumulate a hostile content-version chain
+/// through the public durable surface, and neither a cold reopen nor
+/// compaction may move any historical answer.
+///
+/// This deliberately does **not** assert that the uncompacted root must carry
+/// one block per update. That is today's expensive layout, not a law: an
+/// incremental writer that packs history earlier is an improvement and must
+/// stay green. The bound has teeth in the other direction — referenced blocks
+/// may grow at most linearly with the number of committed versions, and a
+/// compaction may never increase that read-amplification denominator.
+#[test]
+fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
+    const UPDATE_COMMITS: i64 = 64;
+
+    let dir = scratch("long-edge-version-chain");
+    under_lab(45, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let cx = &cx;
+            let property = PropertyKeyId(7);
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+
+            let mut first = WriteBatch::new(KNOWS);
+            first.create_vertex(VId(1), vec![], vec![]);
+            first.create_vertex(VId(2), vec![], vec![]);
+            first.add_edge(
+                EId(10),
+                VId(1),
+                VId(2),
+                vec![(property, CanonicalScalar::Int(0))],
+            );
+            let mut expected = vec![(db.write(cx, first).await.expect("commits"), 0i64)];
+
+            for value in 1..=UPDATE_COMMITS {
+                let mut update = WriteBatch::new(KNOWS);
+                update.set_edge_property(EId(10), property, Some(CanonicalScalar::Int(value)));
+                expected.push((db.write(cx, update).await.expect("commits update"), value));
+            }
+            assert_eq!(
+                expected.len(),
+                65,
+                "the hostile corpus must contain the creation plus 64 content updates"
+            );
+
+            let assert_history = |db: &Database| {
+                for (sequence, value) in &expected {
+                    let edge = db
+                        .edge_at(EId(10), *sequence)
+                        .expect("reads historical edge")
+                        .expect("the edge remains live throughout the chain");
+                    assert_eq!(
+                        edge.props,
+                        vec![(property, CanonicalScalar::Int(*value))],
+                        "sequence {sequence:?} answered with the wrong content version"
+                    );
+                }
+            };
+
+            assert_history(&db);
+            let root_before_reopen = db.partition_root().expect("healthy root");
+            drop(db);
+
+            // The cold path must reconstruct the entire historical chain, not
+            // merely the frontier value cached by the writer.
+            let mut db = Database::open(cx, &dir, keys()).await.expect("reopens");
+            assert_eq!(
+                db.partition_root().expect("healthy reopened root"),
+                root_before_reopen,
+                "cold open selected a different pre-compaction generation"
+            );
+            assert_history(&db);
+
+            let store =
+                fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            let root_before_id = db.partition_root().expect("healthy root");
+            let root_before = store
+                .get_root(cx, root_before_id)
+                .expect("resolves pre-compaction root");
+            let blocks_before = root_before.blocks.len();
+            assert!(
+                blocks_before > 0,
+                "a 65-version live edge references no blocks"
+            );
+            assert!(
+                blocks_before <= 65,
+                "{} committed versions reference {blocks_before} blocks — more than one new \
+                 edge-block reference per version for this fixed hostile corpus",
+                expected.len()
+            );
+
+            db.compact(cx).await.expect("compacts the hostile chain");
+            let compacted_root = db.partition_root().expect("healthy compacted root");
+            assert_ne!(
+                compacted_root, root_before_id,
+                "the hostile chain carried compaction debt, but compact published no replacement"
+            );
+            let root_after = store
+                .get_root(cx, compacted_root)
+                .expect("resolves compacted root");
+            assert!(
+                root_after.blocks.len() <= blocks_before,
+                "compaction increased referenced blocks from {blocks_before} to {}",
+                root_after.blocks.len()
+            );
+            assert_history(&db);
+            drop(db);
+
+            // The compacted generation is durable, and all 65 old answers are
+            // still reconstructable after a second cold open.
+            let db = Database::open(cx, &dir, keys())
+                .await
+                .expect("reopens compacted generation");
+            assert_eq!(db.partition_root().expect("healthy root"), compacted_root);
+            assert_history(&db);
         }
     });
 }

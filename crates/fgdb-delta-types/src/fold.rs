@@ -194,6 +194,34 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
         }
     }
 
+    // NENF emits DeleteVertex in VId order. A shared cascade eid must sit
+    // only on the smallest deleted VId so the first-applied cascade still
+    // equals the live incident set (fgdb-s9ja / fgdb-cczg).
+    let mut claimed: BTreeMap<EId, VId> = BTreeMap::new();
+    for (vid, net) in &vertices {
+        if let Some(deleted) = &net.deleted {
+            for eid in &deleted.sorted_retired_incident_edges {
+                claimed
+                    .entry(*eid)
+                    .and_modify(|owner| {
+                        if *vid < *owner {
+                            *owner = *vid;
+                        }
+                    })
+                    .or_insert(*vid);
+            }
+        }
+    }
+    if !claimed.is_empty() {
+        for (vid, net) in &mut vertices {
+            if let Some(deleted) = &mut net.deleted {
+                deleted
+                    .sorted_retired_incident_edges
+                    .retain(|eid| claimed.get(eid) == Some(vid));
+            }
+        }
+    }
+
     let mut out = Vec::new();
     for (vid, net) in vertices {
         if net.cancelled {
@@ -425,7 +453,7 @@ fn emit_valid_time(
 mod tests {
     use super::fold_target_disjoint;
     use crate::{DeltaRow, ElementId, PropertyKeyId};
-    use fgdb_types::{CanonicalScalar, ObjectId, VId};
+    use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
 
     fn prop(vid: u128, before: i64, after: i64) -> DeltaRow {
         DeltaRow::Property {
@@ -519,5 +547,37 @@ mod tests {
             },
         ]);
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn shared_cascade_eids_stay_on_the_smallest_deleted_vid() {
+        let version = ObjectId([0x44; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(10), EId(11)],
+            },
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                DeltaRow::DeleteVertex {
+                    vid: VId(1),
+                    before_version: version,
+                    sorted_retired_incident_edges: vec![EId(10)],
+                },
+                DeltaRow::DeleteVertex {
+                    vid: VId(2),
+                    before_version: version,
+                    sorted_retired_incident_edges: vec![EId(11)],
+                },
+            ]
+        );
     }
 }
