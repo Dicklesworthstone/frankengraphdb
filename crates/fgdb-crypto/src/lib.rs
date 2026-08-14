@@ -34,6 +34,10 @@ pub use argon2id::{
 };
 pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
 pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
+pub use cx::{
+    CryptoCx, DeterministicEntropy, EntropyError, EntropySource, FreshObjectProtectionMaterial,
+    ObjectProtectionMaterialRef, SystemEntropy,
+};
 
 /// The §5.1 logical-identity domain string (plan L278).
 pub const LOGICAL_IDENTITY_DOMAIN: &[u8] = b"fgdb:logical:v1";

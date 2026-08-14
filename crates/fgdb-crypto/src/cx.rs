@@ -39,6 +39,7 @@
 //! a zero buffer. A weak key that looks like a key is worse than a failed
 //! operation, because the failure is loud and the weak key is silent.
 
+use crate::ObjectAeadProfile;
 use crate::zeroize::Secret;
 use std::fs::File;
 use std::io::Read;
@@ -55,6 +56,8 @@ pub enum EntropyError {
         source_id: &'static str,
         detail: String,
     },
+    /// A test or replay source reached a production key-minting surface.
+    NotApprovedForKeyMaterial { source_id: &'static str },
 }
 
 impl core::fmt::Display for EntropyError {
@@ -65,11 +68,138 @@ impl core::fmt::Display for EntropyError {
                 "entropy source {source_id:?} is unavailable: {detail}; refusing to \
                  substitute a weaker source"
             ),
+            Self::NotApprovedForKeyMaterial { source_id } => write!(
+                f,
+                "entropy source {source_id:?} is not approved for object key material"
+            ),
         }
     }
 }
 
 impl core::error::Error for EntropyError {}
+
+/// A freshly minted object DEK and the public descriptor material that belongs
+/// to exactly one ciphertext.
+///
+/// The plan requires a random DEK per ciphertext. Keeping the three values in
+/// one non-`Clone`, non-`Copy` authority prevents the easiest misuse: minting a
+/// key in one place, then separately inventing or reusing its durable id and
+/// nonce at the Chronicle call site. [`FreshObjectProtectionMaterial::use_once`]
+/// consumes the authority, borrows the DEK only for the duration of one
+/// closure, and scrubs it when that closure returns.
+///
+/// This type deliberately does not implement serialization. The DEK becomes
+/// durable only through the typed `KeyWrap` machinery owned by W9; incident
+/// artifacts and ordinary descriptors may carry `dek_id` and `object_nonce`,
+/// never the key itself.
+///
+/// The authority cannot be cloned:
+///
+/// ```compile_fail
+/// fn duplicate(material: fgdb_crypto::FreshObjectProtectionMaterial) {
+///     let _copy = material.clone();
+/// }
+/// ```
+///
+/// And consuming it makes a second use a compile error:
+///
+/// ```compile_fail
+/// fn reuse(material: fgdb_crypto::FreshObjectProtectionMaterial) {
+///     material.use_once(|_| ());
+///     material.use_once(|_| ());
+/// }
+/// ```
+pub struct FreshObjectProtectionMaterial {
+    profile: ObjectAeadProfile,
+    dek: Secret<32>,
+    dek_id: [u8; 16],
+    object_nonce: [u8; 24],
+}
+
+impl FreshObjectProtectionMaterial {
+    /// The registered object-AEAD profile this material was minted for.
+    pub fn profile(&self) -> ObjectAeadProfile {
+        self.profile
+    }
+
+    /// The public, random identity that durable `KeyWrap` and cipher
+    /// descriptors use to refer to this DEK without exposing it.
+    pub fn dek_id(&self) -> [u8; 16] {
+        self.dek_id
+    }
+
+    /// The public XChaCha nonce for this one ciphertext.
+    ///
+    /// The nonce is not secret, but the crypto logging contract still forbids
+    /// printing it. The hand-written [`Debug`] implementation therefore
+    /// redacts it along with the DEK.
+    pub fn object_nonce(&self) -> [u8; 24] {
+        self.object_nonce
+    }
+
+    /// Consume this one-ciphertext authority and borrow its DEK for the exact
+    /// operation that builds the protected object and its `KeyWrap`.
+    ///
+    /// A caller can always deliberately copy a borrowed key in Rust, so this
+    /// is not claimed as an absolute non-copy theorem. It removes the ordinary
+    /// reusable-key API shape: there is no `dek()` getter and the authority
+    /// cannot be cloned or used by a second call after this one. A malicious
+    /// closure can still copy or reuse its borrow; the W2/W9 integration must
+    /// keep this closure scoped to one protect-plus-wrap operation.
+    pub fn use_once<R>(self, use_material: impl FnOnce(ObjectProtectionMaterialRef<'_>) -> R) -> R {
+        use_material(ObjectProtectionMaterialRef {
+            profile: self.profile,
+            dek: self.dek.expose(),
+            dek_id: self.dek_id,
+            object_nonce: self.object_nonce,
+        })
+    }
+}
+
+/// A closure-bounded view of fresh object protection material.
+///
+/// The key borrow cannot outlive the consumed
+/// [`FreshObjectProtectionMaterial`]. Public descriptor fields are copied
+/// because they are not secrets.
+pub struct ObjectProtectionMaterialRef<'a> {
+    profile: ObjectAeadProfile,
+    dek: &'a [u8; 32],
+    dek_id: [u8; 16],
+    object_nonce: [u8; 24],
+}
+
+impl<'a> ObjectProtectionMaterialRef<'a> {
+    pub fn profile(&self) -> ObjectAeadProfile {
+        self.profile
+    }
+
+    pub fn dek(&self) -> &'a [u8; 32] {
+        self.dek
+    }
+
+    pub fn dek_id(&self) -> [u8; 16] {
+        self.dek_id
+    }
+
+    pub fn object_nonce(&self) -> [u8; 24] {
+        self.object_nonce
+    }
+}
+
+/// Redacted for the same reason as the owning authority: a closure must not
+/// acquire a loggable view of the borrowed key or nonce.
+impl core::fmt::Debug for ObjectProtectionMaterialRef<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ObjectProtectionMaterialRef(redacted)")
+    }
+}
+
+/// Redacted: neither a DEK nor a nonce may reach a log through formatting.
+impl core::fmt::Debug for FreshObjectProtectionMaterial {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("FreshObjectProtectionMaterial(redacted)")
+    }
+}
 
 /// A source of bytes for secret material.
 ///
@@ -95,6 +225,7 @@ pub trait EntropySource {
 #[derive(Debug, Clone)]
 pub struct SystemEntropy {
     path: PathBuf,
+    approved_for_key_material: bool,
 }
 
 impl SystemEntropy {
@@ -106,6 +237,7 @@ impl SystemEntropy {
     pub fn new() -> Self {
         SystemEntropy {
             path: PathBuf::from("/dev/urandom"),
+            approved_for_key_material: true,
         }
     }
 
@@ -119,6 +251,7 @@ impl SystemEntropy {
     pub fn from_path_for_test(path: impl AsRef<Path>) -> Self {
         SystemEntropy {
             path: path.as_ref().to_path_buf(),
+            approved_for_key_material: false,
         }
     }
 }
@@ -218,6 +351,53 @@ impl CryptoCx<SystemEntropy> {
         CryptoCx {
             entropy: SystemEntropy::new(),
         }
+    }
+
+    /// Mint the complete random material for one object ciphertext.
+    ///
+    /// This method exists only on `CryptoCx<SystemEntropy>`. A lab/replay
+    /// `CryptoCx<DeterministicEntropy>` therefore cannot mint durable object
+    /// protection material at compile time:
+    ///
+    /// ```compile_fail
+    /// use fgdb_crypto::{CryptoCx, DeterministicEntropy, ObjectAeadProfile};
+    /// let replay = CryptoCx::new(DeterministicEntropy::for_test(7));
+    /// let _ = replay.fresh_object_protection_material(
+    ///     ObjectAeadProfile::XChaCha20Poly1305V1,
+    /// );
+    /// ```
+    ///
+    /// The test-path override on [`SystemEntropy`] is also refused. That
+    /// constructor remains useful for exercising read failures through
+    /// [`CryptoCx::secret`], but cannot be repurposed to feed a file or replay
+    /// stream into this production key-minting surface.
+    pub fn fresh_object_protection_material(
+        &self,
+        profile: ObjectAeadProfile,
+    ) -> Result<FreshObjectProtectionMaterial, EntropyError> {
+        if !self.entropy.approved_for_key_material {
+            return Err(EntropyError::NotApprovedForKeyMaterial {
+                source_id: self.entropy.source_id(),
+            });
+        }
+
+        // Mint the secret separately so it is inside a scrubbing wrapper from
+        // its first initialized byte. If the following public-material read
+        // fails, `dek` drops and scrubs before the error escapes.
+        let dek = self.secret::<32>()?;
+        let mut public_material = [0u8; 16 + 24];
+        self.entropy.fill(&mut public_material)?;
+        let mut dek_id = [0u8; 16];
+        dek_id.copy_from_slice(&public_material[..16]);
+        let mut object_nonce = [0u8; 24];
+        object_nonce.copy_from_slice(&public_material[16..]);
+
+        Ok(FreshObjectProtectionMaterial {
+            profile,
+            dek,
+            dek_id,
+            object_nonce,
+        })
     }
 }
 

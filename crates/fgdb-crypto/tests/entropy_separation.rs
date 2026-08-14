@@ -15,6 +15,7 @@
 //! known to be capable of failing.
 
 use fgdb_crypto::cx::{CryptoCx, DeterministicEntropy, EntropyError, EntropySource, SystemEntropy};
+use fgdb_crypto::{ObjectAeadProfile, xchacha20poly1305_open, xchacha20poly1305_seal};
 
 /// THE LOAD-BEARING TEST: production entropy is not reproducible.
 ///
@@ -170,6 +171,101 @@ fn minted_secrets_are_scrubbing_secrets() {
         .expect("OS entropy is available");
     secret.scrub();
     assert_eq!(secret.expose(), &[0u8; 32], "a minted secret must scrub");
+}
+
+/// The production capability mints the complete one-ciphertext authority, not
+/// three independently reusable values.
+#[test]
+fn production_material_is_fresh_consuming_and_profile_bound() {
+    let first = CryptoCx::production()
+        .fresh_object_protection_material(ObjectAeadProfile::XChaCha20Poly1305V1)
+        .expect("OS entropy is available");
+    let second = CryptoCx::production()
+        .fresh_object_protection_material(ObjectAeadProfile::XChaCha20Poly1305V1)
+        .expect("OS entropy is available");
+
+    assert_eq!(first.profile(), ObjectAeadProfile::XChaCha20Poly1305V1);
+    assert_eq!(first.profile().nonce_len(), 24);
+    assert_eq!(first.profile().tag_len(), 16);
+    assert_ne!(first.dek_id(), [0u8; 16], "the DEK identity was not filled");
+    assert_ne!(first.object_nonce(), [0u8; 24], "the nonce was not filled");
+    assert_ne!(
+        first.dek_id(),
+        second.dek_id(),
+        "the DEK identity was reused"
+    );
+    assert_ne!(
+        first.object_nonce(),
+        second.object_nonce(),
+        "the object nonce was reused"
+    );
+    assert!(
+        core::mem::needs_drop::<fgdb_crypto::FreshObjectProtectionMaterial>(),
+        "fresh material must own a scrubbing secret"
+    );
+    assert_eq!(
+        format!("{first:?}"),
+        "FreshObjectProtectionMaterial(redacted)",
+        "Debug must not print the DEK, its identity, or the nonce"
+    );
+
+    let aad = b"one-ciphertext-authority";
+    let plaintext = b"fresh object bytes";
+    let first_nonce = first.object_nonce();
+    let sealed = first.use_once(|material| {
+        assert_eq!(material.profile(), ObjectAeadProfile::XChaCha20Poly1305V1);
+        assert_eq!(
+            format!("{material:?}"),
+            "ObjectProtectionMaterialRef(redacted)",
+            "the closure-bounded authority must not print its borrowed DEK or nonce"
+        );
+        let sealed =
+            xchacha20poly1305_seal(material.dek(), &material.object_nonce(), aad, plaintext);
+        assert_eq!(
+            xchacha20poly1305_open(material.dek(), &material.object_nonce(), aad, &sealed)
+                .expect("the one use opens"),
+            plaintext
+        );
+        sealed
+    });
+    assert_eq!(
+        sealed.len(),
+        plaintext.len() + 16,
+        "the material's registered profile must select the advertised tag width"
+    );
+    second.use_once(|material| {
+        assert!(
+            xchacha20poly1305_open(material.dek(), &first_nonce, aad, &sealed).is_err(),
+            "a separately minted material authority reused the first ciphertext's DEK"
+        );
+    });
+}
+
+/// The deliberately public test-path override cannot become a production key
+/// source merely because its concrete type is still `SystemEntropy`.
+#[test]
+fn a_test_entropy_path_cannot_mint_object_protection_material() {
+    for path in ["/dev/zero", "/dev/null", "/nonexistent/entropy/device"] {
+        let cx = CryptoCx::new(SystemEntropy::from_path_for_test(path));
+        let error = cx
+            .fresh_object_protection_material(ObjectAeadProfile::XChaCha20Poly1305V1)
+            .expect_err("test-only entropy paths must be refused before reading");
+        assert!(
+            matches!(
+                error,
+                EntropyError::NotApprovedForKeyMaterial {
+                    source_id: "system"
+                }
+            ),
+            "the refusal must stay typed and identify the source: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("not approved for object key material"),
+            "the refusal must distinguish key-source admission from an I/O failure: {error}"
+        );
+    }
 }
 
 /// The trait is usable behind a reference, so a component can hold a source it

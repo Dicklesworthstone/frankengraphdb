@@ -476,13 +476,14 @@ fn symbol_auth_keys_are_per_encoding() {
 /// The governed `cargo-test:crypto-composition` entrypoint.
 ///
 /// This proves the registered V1 composition that exists today: keyed logical
-/// identity, the fixed passphrase-to-KEK profile, profile-bound object AEAD,
-/// encoding and placement identities, encoding-bound symbol authentication,
-/// and rewrap-stable downstream identities.
-/// It deliberately does NOT claim production per-ciphertext DEK minting or
-/// wrapping, root/key-wrap integration, nonce-reuse state, signing/KMS support,
-/// runtime KDF auto-tuning, statistical timing, optimized zeroization
-/// inspection, or external audit.
+/// identity, the fixed passphrase-to-KEK profile, the production-only fresh
+/// per-ciphertext material authority, profile-bound object AEAD, encoding and
+/// placement identities, encoding-bound symbol authentication, and
+/// rewrap-stable downstream identities.
+/// It deliberately does NOT claim Chronicle writer or durable KeyWrap/root
+/// integration, nonce-inventory persistence, signing/KMS support, runtime KDF
+/// auto-tuning, statistical timing, optimized zeroization inspection, or
+/// external audit.
 #[test]
 fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     let kdf_profile = fgdb_crypto::registered_passphrase_kdf_profile(1)
@@ -569,6 +570,103 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             );
         }
     }
+
+    let protect_once = |material: fgdb_crypto::FreshObjectProtectionMaterial,
+                        forbidden_prior: Option<(&[u8], &[u8; 24], &[u8])>| {
+        material.use_once(|material| {
+            assert_eq!(material.profile(), registered);
+            assert_eq!(
+                format!("{material:?}"),
+                "ObjectProtectionMaterialRef(redacted)",
+                "the borrowed DEK and nonce must not enter the registered gate transcript"
+            );
+            if let Some((prior_sealed, prior_nonce, prior_aad)) = forbidden_prior {
+                assert!(
+                    fgdb_crypto::xchacha20poly1305_open(
+                        material.dek(),
+                        prior_nonce,
+                        prior_aad,
+                        prior_sealed,
+                    )
+                    .is_err(),
+                    "fresh material reused the prior ciphertext's DEK"
+                );
+            }
+            let compressed = payload();
+            let mut cipher = descriptor(0x5a, compressed.len() as u64);
+            cipher.data_crypto_profile = registered.id();
+            cipher.dek_id = material.dek_id();
+            cipher.object_nonce = material.object_nonce();
+            let identified =
+                IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
+            let aad = fgdb_crypto::object_aead_aad(
+                &fgdb_crypto::Digest(identified.object_id().0),
+                &cipher.canonical_bytes(),
+            );
+            let protected = identified
+                .protect(material.dek(), cipher.clone(), &compressed)
+                .expect("fresh production material seals through the registered profile");
+            assert_eq!(protected.descriptor(), &cipher);
+            assert_eq!(
+                protected
+                    .open(material.dek())
+                    .expect("fresh production material opens in its closure"),
+                compressed
+            );
+            (
+                protected.object_id(),
+                protected.ciphertext_id(),
+                cipher.dek_id,
+                cipher.object_nonce,
+                protected.protected_bytes().to_vec(),
+                aad,
+            )
+        })
+    };
+    let refused_test_source =
+        fgdb_crypto::CryptoCx::new(fgdb_crypto::SystemEntropy::from_path_for_test("/dev/zero"))
+            .fresh_object_protection_material(registered)
+            .expect_err("a caller-chosen test path must not mint object key material");
+    assert_eq!(
+        refused_test_source,
+        fgdb_crypto::EntropyError::NotApprovedForKeyMaterial {
+            source_id: "system",
+        },
+        "the production-only capability must refuse before reading a caller-chosen path"
+    );
+
+    let crypto_cx = fgdb_crypto::CryptoCx::production();
+    let first_material = crypto_cx
+        .fresh_object_protection_material(registered)
+        .expect("production secret entropy is available");
+    assert_eq!(
+        format!("{first_material:?}"),
+        "FreshObjectProtectionMaterial(redacted)",
+        "the owning DEK authority must redact every field"
+    );
+    let first_fresh = protect_once(first_material, None);
+    let second_fresh = protect_once(
+        crypto_cx
+            .fresh_object_protection_material(registered)
+            .expect("production secret entropy is available"),
+        Some((&first_fresh.4, &first_fresh.3, &first_fresh.5)),
+    );
+    assert_eq!(
+        first_fresh.0, second_fresh.0,
+        "fresh physical protection must not move logical identity"
+    );
+    assert_ne!(
+        first_fresh.1, second_fresh.1,
+        "two per-ciphertext DEKs must produce distinct CiphertextIds"
+    );
+    assert_ne!(
+        first_fresh.2, second_fresh.2,
+        "two ciphertexts must not reuse one DEK identity"
+    );
+    assert_ne!(
+        first_fresh.3, second_fresh.3,
+        "two ciphertexts must not reuse one XChaCha nonce"
+    );
 
     // Keep every identity-layer and rewrap law inside the one exact selector
     // that CI registers; separate green tests must not be able to conceal a
