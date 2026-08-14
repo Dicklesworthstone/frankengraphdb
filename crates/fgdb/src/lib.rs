@@ -1735,9 +1735,7 @@ impl<V: Vfs + Clone> Database<V> {
         // before-image from the fold's live state PLUS the batch prefix: a
         // create-then-delete in one batch must image the version the create
         // just minted, exactly as the oracle will re-derive it at replay.
-        // Deletes take no birth ordinal — only creations spend one.
         let mut rows = Vec::with_capacity(batch.rows.len());
-        let mut birth_ordinal = self.snapshot.next_birth_ordinal;
         // The batch-prefix overlay: identities this batch created or deleted
         // ahead of the row being built, with the versions the prefix minted.
         let mut prefix_versions: std::collections::BTreeMap<ElementId, ObjectId> =
@@ -1758,7 +1756,13 @@ impl<V: Vfs + Clone> Database<V> {
         // prefix: (labels, props), both kept in canonical order.
         let mut prefix_content: std::collections::BTreeMap<VId, VertexContent> =
             std::collections::BTreeMap::new();
-        for pending in batch.rows {
+        // BirthOrdinal is the 1-based visit index in this batch, including
+        // no-ops — not graph cardinality (fgdb-4cyg / spa1).
+        for (visit, pending) in batch.rows.into_iter().enumerate() {
+            let intent_ordinal = u64::try_from(visit)
+                .ok()
+                .and_then(|visit| visit.checked_add(1))
+                .expect("a batch cannot contain 2^64 rows");
             let row = match pending {
                 PendingRow::Vertex {
                     vid,
@@ -1803,12 +1807,11 @@ impl<V: Vfs + Clone> Database<V> {
                     sort_write_labels_and_props(&mut labels, &mut props);
                     let row = DeltaRow::CreateVertex {
                         vid,
-                        birth_ordinal,
+                        birth_ordinal: intent_ordinal,
                         labels,
                         props,
                         valid_time: None,
                     };
-                    birth_ordinal += 1;
                     if let DeltaRow::CreateVertex {
                         birth_ordinal: ordinal,
                         labels,
@@ -1874,7 +1877,7 @@ impl<V: Vfs + Clone> Database<V> {
                     sort_write_props(&mut props);
                     let row = DeltaRow::CreateEdge {
                         eid,
-                        birth_ordinal,
+                        birth_ordinal: intent_ordinal,
                         src,
                         relation: batch.relation,
                         dst,
@@ -1882,7 +1885,6 @@ impl<V: Vfs + Clone> Database<V> {
                         props,
                         valid_time: None,
                     };
-                    birth_ordinal += 1;
                     prefix_edges.insert(eid, (src, dst));
                     if let DeltaRow::CreateEdge { props, .. } = &row {
                         let transcript =
@@ -1898,7 +1900,10 @@ impl<V: Vfs + Clone> Database<V> {
                         && (prefix_edges.contains_key(&eid)
                             || self.writer.live_edge(eid).is_some());
                     if !live_now {
-                        if if_present {
+                        // Already retired in this batch (cascade or an
+                        // earlier DeleteEdge): Nothing, like the reference
+                        // and like fold's cascade_owned ignore (fgdb-v31u).
+                        if if_present || prefix_deleted_edges.contains(&eid) {
                             continue;
                         }
                         return Err(WriteError::UnknownEdge { eid });
@@ -1919,7 +1924,7 @@ impl<V: Vfs + Clone> Database<V> {
                         && (prefix_versions.contains_key(&ElementId::Vertex(vid))
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
-                        if if_present {
+                        if if_present || prefix_deleted_vertices.contains(&vid) {
                             continue;
                         }
                         return Err(WriteError::UnknownVertex { vid });

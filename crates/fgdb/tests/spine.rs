@@ -339,6 +339,181 @@ fn a_same_batch_create_and_delete_leaves_no_element() {
     });
 }
 
+/// BirthOrdinal is the 1-based visit index in this batch (fgdb-4cyg / spa1),
+/// not a count of durable creates. A folded-away earlier create keeps its
+/// visit number on the surviving row; the next batch starts at 1 again.
+#[test]
+fn birth_ordinals_follow_visit_order_not_durable_create_count() {
+    let dir = scratch("birth-ordinal-visit");
+    under_lab(8216, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.delete_vertex(VId(1));
+        db.write(cx, first)
+            .await
+            .expect("V1 folds away; V2 keeps visit ordinal 2");
+        assert_eq!(
+            db.vertex(VId(2))
+                .expect("reads")
+                .expect("V2 is live")
+                .birth_ordinal,
+            2,
+            "the surviving create is the second visit"
+        );
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(3), vec![], vec![]);
+        db.write(cx, second).await.expect("a new batch starts at 1");
+        assert_eq!(
+            db.vertex(VId(3))
+                .expect("reads")
+                .expect("V3 is live")
+                .birth_ordinal,
+            1,
+            "unrelated population must not shift this batch's first create"
+        );
+    });
+}
+
+/// The same request against an empty graph and a populated one must stamp
+/// the same BirthOrdinal — spa1's discriminator against cardinality.
+#[test]
+fn birth_ordinals_do_not_depend_on_unrelated_population() {
+    let empty_dir = scratch("birth-ordinal-empty");
+    let full_dir = scratch("birth-ordinal-full");
+    under_lab(8217, move |cx| async move {
+        let cx = &cx;
+        let mut empty = Database::create(cx, &empty_dir, keys())
+            .await
+            .expect("creates empty");
+        let mut only = WriteBatch::new(KNOWS);
+        only.create_vertex(VId(500), vec![], vec![]);
+        empty.write(cx, only).await.expect("creates V500 on empty");
+        let from_empty = empty
+            .vertex(VId(500))
+            .expect("reads")
+            .expect("live")
+            .birth_ordinal;
+
+        let mut full = Database::create(cx, &full_dir, keys())
+            .await
+            .expect("creates full");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.create_vertex(VId(3), vec![], vec![]);
+        full.write(cx, seed).await.expect("seeds population");
+        let mut later = WriteBatch::new(KNOWS);
+        later.create_vertex(VId(500), vec![], vec![]);
+        full.write(cx, later)
+            .await
+            .expect("creates V500 on populated");
+        let from_full = full
+            .vertex(VId(500))
+            .expect("reads")
+            .expect("live")
+            .birth_ordinal;
+        assert_eq!(
+            from_empty, from_full,
+            "the same request must not change ordinals because unrelated verts exist"
+        );
+        assert_eq!(from_empty, 1);
+    });
+}
+
+/// A no-op visit still occupies its ordinal, so a later create is not
+/// renumbered into the no-op's slot.
+#[test]
+fn a_no_op_ensure_still_occupies_its_birth_ordinal() {
+    let dir = scratch("birth-ordinal-noop");
+    under_lab(8218, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        db.write(cx, seed).await.expect("seeds V1");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.ensure_vertex(VId(1), vec![], vec![]);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        db.write(cx, batch)
+            .await
+            .expect("ensure no-op then create V2");
+        assert_eq!(
+            db.vertex(VId(2))
+                .expect("reads")
+                .expect("V2 is live")
+                .birth_ordinal,
+            2,
+            "the create is the second visit; the ensure no-op kept slot 1"
+        );
+    });
+}
+
+/// DeleteVertex retires its cascade in the prefix. A later DeleteEdge of
+/// those eids is Nothing, not UnknownEdge — the fold would ignore it and
+/// the reference reduces a gone-edge delete to no-op (fgdb-v31u).
+#[test]
+fn delete_vertex_then_delete_cascade_edge_in_one_batch_is_a_noop() {
+    let dir = scratch("delete-after-cascade");
+    under_lab(8219, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.delete_vertex(VId(1));
+        batch.delete_edge(EId(10));
+        db.write(cx, batch)
+            .await
+            .expect("delete of a just-cascaded edge is Nothing");
+        assert!(db.vertex(VId(1)).expect("reads").is_none());
+        assert!(db.edge(EId(10)).expect("reads").is_none());
+        assert!(db.vertex(VId(2)).expect("reads").is_some());
+        let mut ghost = WriteBatch::new(KNOWS);
+        ghost.delete_edge(EId(10));
+        assert!(
+            matches!(
+                db.write(cx, ghost).await,
+                Err(WriteError::UnknownEdge { eid: EId(10) })
+            ),
+            "a later batch still refuses a missing edge"
+        );
+    });
+}
+
+#[test]
+fn a_second_delete_vertex_in_the_same_batch_is_a_noop() {
+    let dir = scratch("double-delete-vertex");
+    under_lab(8220, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        db.write(cx, seed).await.expect("seeds");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.delete_vertex(VId(1));
+        batch.delete_vertex(VId(1));
+        db.write(cx, batch)
+            .await
+            .expect("second same-batch delete is Nothing");
+        assert!(db.vertex(VId(1)).expect("reads").is_none());
+        let mut again = WriteBatch::new(KNOWS);
+        again.delete_vertex(VId(1));
+        assert!(
+            matches!(
+                db.write(cx, again).await,
+                Err(WriteError::UnknownVertex { vid: VId(1) })
+            ),
+            "a later batch still refuses a missing vertex"
+        );
+    });
+}
+
 /// **BOTH ENDPOINTS IN ONE BATCH (fgdb-cczg).** NENF applies DeleteVertex
 /// in VId order. Deleting the larger endpoint first must still assign the
 /// shared edge to the smaller VId so the fold's incident-set check holds.
