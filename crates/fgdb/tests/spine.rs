@@ -861,6 +861,91 @@ fn cas_expected_none_on_a_gone_element_refuses() {
     });
 }
 
+/// expected=None on a live element whose property is absent is a match,
+/// then set-Some writes the value (the gone-element twin of fgdb-pmj7).
+#[test]
+fn cas_expected_none_on_a_live_element_sets_the_property() {
+    let dir = scratch("cas-none-live");
+    under_lab(8230, move |cx| async move {
+        let cx = &cx;
+        let rank = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            None,
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        batch.compare_and_set_edge_property(
+            EId(10),
+            rank,
+            None,
+            CanonicalScalar::Int(8),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        db.write(cx, batch)
+            .await
+            .expect("expected=None on an absent property is a match");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(9))]
+        );
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(8))]
+        );
+
+        let mut again = WriteBatch::new(KNOWS);
+        again.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            None,
+            CanonicalScalar::Int(1),
+            WriteMismatchPolicy::NoOp,
+        );
+        again.create_vertex(VId(3), vec![], vec![]);
+        db.write(cx, again)
+            .await
+            .expect("expected=None after the property exists is a NoOp mismatch");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(rank, CanonicalScalar::Int(9))],
+            "NoOp mismatch must leave the matched value"
+        );
+        assert!(db.vertex(VId(3)).expect("reads").is_some());
+    });
+}
+
+/// A self-loop is incident once. Deleting the vertex must retire it
+/// without CascadeImageMismatch.
+#[test]
+fn delete_vertex_cascades_a_self_loop_once() {
+    let dir = scratch("self-loop-cascade");
+    under_lab(8231, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.add_edge(EId(12), VId(1), VId(1), vec![]);
+        db.write(cx, seed).await.expect("seeds loop");
+        let mut gone = WriteBatch::new(KNOWS);
+        gone.delete_vertex(VId(1));
+        db.write(cx, gone)
+            .await
+            .expect("self-loop cascade is a singleton");
+        assert!(db.vertex(VId(1)).expect("reads").is_none());
+        assert!(db.edge(EId(12)).expect("reads").is_none());
+    });
+}
+
 #[test]
 fn clearing_a_label_on_a_gone_vertex_is_a_noop() {
     let dir = scratch("clear-label-gone");
