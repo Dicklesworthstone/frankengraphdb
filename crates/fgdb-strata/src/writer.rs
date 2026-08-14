@@ -1158,6 +1158,25 @@ impl BlockWriter {
             created_at: seq,
             retired_at: None,
         };
+        // Same law as `fold_vertex_update`: seal first when the pair would
+        // trip the ceiling on the *second* push. Otherwise the tombstone
+        // stages, the successor's early-seal refuses, and apply returns
+        // with a retirement that `live` does not know about.
+        let tombstone_key = (
+            current.src,
+            current.relation,
+            current.dst,
+            eid,
+            current.created_at,
+        );
+        let successor_key = (current.src, current.relation, current.dst, eid, seq);
+        let incoming = usize::from(!self.pending.contains_key(&tombstone_key))
+            + usize::from(!self.pending.contains_key(&successor_key));
+        if self.pending.len() + incoming > usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX)
+            && !self.pending_has_live_at(seq)
+        {
+            self.seal(keys)?;
+        }
         self.push(keys, tombstone, current.props.clone())?;
         self.push(keys, successor, successor_row.clone())?;
         self.live.insert(
@@ -1345,10 +1364,10 @@ impl BlockWriter {
 #[cfg(test)]
 mod tests {
     use super::{BlockWriter, PendingStatement, WriteError};
-    use crate::{AdjacencyEntry, BlockError};
-    use fgdb_delta_types::RelationId;
+    use crate::{AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES};
+    use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
     use fgdb_types::ids::DatabaseSecurityNamespaceId;
-    use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
+    use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 
     const K_OID: [u8; 32] = [0x5a; 32];
 
@@ -1440,5 +1459,98 @@ mod tests {
             "retry observes the same refusal against the same heads"
         );
         assert!(writer.chain_heads.is_empty());
+    }
+
+    /// Cross-commit edge restatement `push`es a tombstone then a successor.
+    /// If the successor `push` is the one that hits the entry ceiling, a
+    /// failing seal used to leave the tombstone staged while `live` still
+    /// held the pre-update edge — apply's typed-refusal contract is a no-op.
+    #[test]
+    fn a_failed_successor_push_does_not_leave_a_restatement_tombstone() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        let rel = RelationId(1);
+        for vid in [1_u128, 2] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateVertex {
+                        vid: VId(vid),
+                        birth_ordinal: u64::try_from(vid).expect("test vid fits"),
+                        labels: vec![],
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("vertices");
+        }
+        writer
+            .apply(
+                keys(),
+                CommitSeq(1),
+                &DeltaRow::CreateEdge {
+                    eid: EId(10),
+                    birth_ordinal: 3,
+                    src: VId(1),
+                    relation: rel,
+                    dst: VId(2),
+                    canonical_key: None,
+                    props: vec![],
+                    valid_time: None,
+                },
+            )
+            .expect("edge");
+        writer.seal(keys()).expect("birth is durable");
+        writer.seal_vertices(keys()).expect("vertex birth durable");
+
+        let ceiling = usize::try_from(MAX_BLOCK_ENTRIES).unwrap();
+        for i in 0..(ceiling - 1) {
+            let src = VId(1000 + i as u128);
+            writer.pending.insert(
+                (src, rel, VId(3), EId(1000 + i as u128), CommitSeq(0)),
+                PendingStatement {
+                    entry: AdjacencyEntry {
+                        src,
+                        relation: rel,
+                        dst: VId(3),
+                        eid: EId(1000 + i as u128),
+                        created_at: CommitSeq(0),
+                        retired_at: None,
+                    },
+                    props: vec![],
+                },
+            );
+        }
+        assert_eq!(writer.pending_len(), ceiling - 1);
+
+        let refusal = writer.apply(
+            keys(),
+            CommitSeq(2),
+            &DeltaRow::Property {
+                elem: ElementId::Edge(EId(10)),
+                property: PropertyKeyId(7),
+                before: None,
+                after: Some(CanonicalScalar::Int(4)),
+            },
+        );
+        assert_eq!(
+            refusal,
+            Err(WriteError::Block(BlockError::CreatedAtZero { at: 0 }))
+        );
+        assert!(
+            writer.live_edge(EId(10)).is_some(),
+            "the refused restatement must leave the pre-update edge live"
+        );
+        assert!(
+            !writer
+                .pending
+                .contains_key(&(VId(1), rel, VId(2), EId(10), CommitSeq(1))),
+            "the tombstone of a refused restatement must not stay staged"
+        );
+        assert_eq!(
+            writer.pending_len(),
+            ceiling - 1,
+            "the planted illegal families stay; the restatement added nothing"
+        );
     }
 }
