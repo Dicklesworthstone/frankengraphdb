@@ -127,7 +127,10 @@ async fn commit_ok(coordinator: &mut CommitCoordinator, cx: &CommitCx, seq: u64)
 
 /// Sequence allocation has one live owner by mechanism, not by comment. The
 /// second independent descriptor must contend even inside this process, and
-/// dropping the owner must release the lease without any cleanup protocol.
+/// dropping the owner must explicitly unlock before descriptor close. The
+/// explicit step is what prevents a fork- or dup-inherited descriptor from
+/// retaining a lease after the owning coordinator is gone; no pathname or
+/// durable-state cleanup participates.
 #[test]
 fn only_one_live_coordinator_can_own_a_commit_stream() {
     under_lab(0x51_4c, |cx| async move {

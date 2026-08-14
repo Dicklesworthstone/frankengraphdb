@@ -1268,33 +1268,42 @@ mod tests {
                 profile: CapsuleProfile::balanced(),
             };
 
-            let owner = CommitCoordinator::open(&cx, &dir, keys).await;
-            assert!(owner.is_ok(), "first owner opens: {owner:?}");
-            let Ok(owner) = owner else {
-                return;
-            };
-            // `try_clone` duplicates the same open file description on Unix,
-            // exactly the lock-retention shape produced by fork before exec.
-            let inherited = owner._writer_lease.try_clone();
-            assert!(
-                inherited.is_ok(),
-                "the lease descriptor duplicates: {inherited:?}"
-            );
-            let Ok(inherited) = inherited else {
-                return;
-            };
-            drop(owner);
+            // Sixty-four immediate handoffs keep this a lock-lifecycle stress,
+            // not a one-shot example that happens to pass once on the host.
+            for iteration in 0..64 {
+                let owner = CommitCoordinator::open(&cx, &dir, keys).await;
+                assert!(
+                    owner.is_ok(),
+                    "owner opens at iteration {iteration}: {owner:?}"
+                );
+                let Ok(owner) = owner else {
+                    return;
+                };
+                // `try_clone` duplicates the same open file description on
+                // Unix, exactly the lock-retention shape produced by fork
+                // before exec.
+                let inherited = owner._writer_lease.try_clone();
+                assert!(
+                    inherited.is_ok(),
+                    "lease descriptor duplicates at iteration {iteration}: {inherited:?}"
+                );
+                let Ok(inherited) = inherited else {
+                    return;
+                };
+                drop(owner);
 
-            let successor = CommitCoordinator::open(&cx, &dir, keys).await;
-            assert!(
-                successor.is_ok(),
-                "dropping the owner explicitly unlocks inherited descriptors: {successor:?}"
-            );
-            let Ok(successor) = successor else {
-                return;
-            };
-            drop(successor);
-            drop(inherited);
+                let successor = CommitCoordinator::open(&cx, &dir, keys).await;
+                assert!(
+                    successor.is_ok(),
+                    "owner drop unlocks inherited descriptor at iteration {iteration}: \
+                     {successor:?}"
+                );
+                let Ok(successor) = successor else {
+                    return;
+                };
+                drop(successor);
+                drop(inherited);
+            }
         });
         assert!(
             report.lab_test_passed(),
