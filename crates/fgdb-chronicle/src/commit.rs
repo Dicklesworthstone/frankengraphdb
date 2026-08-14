@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn dropping_the_owner_explicitly_unlocks_a_duplicated_lease_descriptor() {
-        let ((), report) = run_async_under_lab(0x51_4c_554e_4c4f_434b, |root| async move {
+        let ((), report) = run_async_under_lab(0x514c_554e_4c4f_434b, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.commit();
             let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
