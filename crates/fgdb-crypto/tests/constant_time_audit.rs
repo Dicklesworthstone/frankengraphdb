@@ -215,8 +215,10 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         CryptoReleaseCandidate, EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN,
         EXTERNAL_CRYPTO_AUDIT_ENGAGEMENT_ID, EXTERNAL_CRYPTO_AUDIT_OWNER_BEAD,
         EXTERNAL_CRYPTO_AUDIT_RELEASE_GATE, EXTERNAL_CRYPTO_AUDIT_SCHEMA_VERSION,
-        ExternalCryptoAuditEvidence, REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN,
+        ExternalCryptoAuditEvidence, REGISTERED_CRYPTO_PROFILE_COUNT,
+        REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN,
         admit_external_crypto_audit, external_crypto_audit_plan_digest,
+        registered_crypto_profile_set_digest,
     };
 
     fn digest(byte: u8) -> [u8; 32] {
@@ -238,7 +240,7 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
             digest(5),
             digest(4),
             digest(1),
-            digest(2),
+            registered_crypto_profile_set_digest(),
         )
         .expect("the complete fixture is structurally valid")
     }
@@ -263,10 +265,22 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
     );
     assert!(AuditCoverage::REQUIRED.is_complete());
     assert_ne!(external_crypto_audit_plan_digest(), [0; 32]);
+    assert_eq!(REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, 1);
+    assert_eq!(REGISTERED_CRYPTO_PROFILE_COUNT, 3);
+    let registered_profile_set = registered_crypto_profile_set_digest();
+    assert_eq!(
+        registered_profile_set,
+        [
+            0xd8, 0x3b, 0xd3, 0xf4, 0xe8, 0xa5, 0x5f, 0x69, 0x7c, 0x07, 0x88, 0xaa, 0x06, 0x8c,
+            0x69, 0x32, 0xc3, 0x4d, 0x58, 0xa0, 0xf2, 0x4d, 0x46, 0x99, 0x39, 0xda, 0x81, 0x75,
+            0xe7, 0x8c, 0x84, 0x7f,
+        ],
+        "profile rows, order, or canonical transcript changed without invalidating audit evidence"
+    );
 
-    let candidate =
-        CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(3), digest(4), digest(5))
-            .expect("the release candidate pins five exact external identities");
+    let candidate = CryptoReleaseCandidate::try_new(digest(1), digest(3), digest(4), digest(5))
+        .expect("the release candidate pins four external identities and the live profile set");
+    assert_eq!(candidate.profile_set_digest(), registered_profile_set);
     let accepted = evidence(
         AuditConclusion::Accepted,
         true,
@@ -292,7 +306,7 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
     let admission = admit_external_crypto_audit(&candidate, Some(&decoded))
         .expect("only the exact complete accepted artifact admits release");
     assert_eq!(admission.source_revision_digest(), digest(1));
-    assert_eq!(admission.profile_set_digest(), digest(2));
+    assert_eq!(admission.profile_set_digest(), registered_profile_set);
     assert_eq!(admission.audit_evidence_digest(), decoded.evidence_digest());
 
     assert_eq!(
@@ -393,28 +407,19 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
 
     let candidate_mutations = [
         (
-            CryptoReleaseCandidate::try_new(digest(9), digest(2), digest(3), digest(4), digest(5))
-                .unwrap(),
+            CryptoReleaseCandidate::try_new(digest(9), digest(3), digest(4), digest(5)).unwrap(),
             CryptoAuditError::SourceRevisionMismatch,
         ),
         (
-            CryptoReleaseCandidate::try_new(digest(1), digest(9), digest(3), digest(4), digest(5))
-                .unwrap(),
-            CryptoAuditError::ProfileSetMismatch,
-        ),
-        (
-            CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(9), digest(4), digest(5))
-                .unwrap(),
+            CryptoReleaseCandidate::try_new(digest(1), digest(9), digest(4), digest(5)).unwrap(),
             CryptoAuditError::AuditorIdentityMismatch,
         ),
         (
-            CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(3), digest(9), digest(5))
-                .unwrap(),
+            CryptoReleaseCandidate::try_new(digest(1), digest(3), digest(9), digest(5)).unwrap(),
             CryptoAuditError::ReportMismatch,
         ),
         (
-            CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(3), digest(4), digest(9))
-                .unwrap(),
+            CryptoReleaseCandidate::try_new(digest(1), digest(3), digest(4), digest(9)).unwrap(),
             CryptoAuditError::AttestationMismatch,
         ),
     ];
@@ -425,13 +430,30 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         );
     }
 
-    // The five release pins and the five evidence identities refuse the zero
+    let stale_profile_evidence = ExternalCryptoAuditEvidence::try_new(
+        AuditConclusion::Accepted,
+        true,
+        AuditCoverage::REQUIRED,
+        AuditFindingCounts::default(),
+        digest(3),
+        digest(5),
+        digest(4),
+        digest(1),
+        digest(9),
+    )
+    .expect("stale audit evidence remains representable so admission can reject it");
+    assert_eq!(
+        admit_external_crypto_audit(&candidate, Some(&stale_profile_evidence)),
+        Err(CryptoAuditError::ProfileSetMismatch)
+    );
+
+    // The four caller-supplied release pins and the five evidence identities refuse the zero
     // sentinel independently; there is no "unassigned but accepted" state.
-    for field in 0..5 {
-        let mut values = [digest(1), digest(2), digest(3), digest(4), digest(5)];
+    for field in 0..4 {
+        let mut values = [digest(1), digest(3), digest(4), digest(5)];
         values[field] = [0; 32];
         assert!(matches!(
-            CryptoReleaseCandidate::try_new(values[0], values[1], values[2], values[3], values[4]),
+            CryptoReleaseCandidate::try_new(values[0], values[1], values[2], values[3]),
             Err(CryptoAuditError::ZeroDigest(_))
         ));
     }

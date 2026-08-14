@@ -44,10 +44,10 @@ pub const HEADER_LEN_V1: u16 = 4 + 2 + 2 + 4 + 32 + 32 + 32 + 2 + 4 + 4 + 4 + 8 
 
 /// The MAC length this build writes (BLAKE3 keyed, truncated to 128 bits —
 /// the profile is recorded in the header so a future profile is additive).
-pub const SYMBOL_MAC_LEN_V1: u16 = 16;
+pub const SYMBOL_MAC_LEN_V1: u16 = fgdb_crypto::SYMBOL_AUTH_TAG_BYTES;
 
 /// The symbol-MAC profile id for keyed BLAKE3 truncated to 128 bits.
-pub const SYMBOL_MAC_PROFILE_BLAKE3_128: u16 = 1;
+pub const SYMBOL_MAC_PROFILE_BLAKE3_128: u16 = fgdb_crypto::SYMBOL_AUTH_PROFILE_BLAKE3_128;
 
 /// Why a record was rejected. Every variant is a fail-closed outcome: no
 /// caller ever receives payload bytes from a record that did not verify.

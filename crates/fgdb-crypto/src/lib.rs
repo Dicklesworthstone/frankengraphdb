@@ -39,8 +39,9 @@ pub use audit::{
     EXTERNAL_CRYPTO_AUDIT_ENGAGEMENT_ID, EXTERNAL_CRYPTO_AUDIT_OWNER_BEAD,
     EXTERNAL_CRYPTO_AUDIT_RELEASE_GATE, EXTERNAL_CRYPTO_AUDIT_SCHEMA_VERSION,
     ExternalCryptoAuditEngagementPlan, ExternalCryptoAuditEvidence,
+    REGISTERED_CRYPTO_PROFILE_COUNT, REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION,
     REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN, admit_external_crypto_audit,
-    external_crypto_audit_plan_digest,
+    external_crypto_audit_plan_digest, registered_crypto_profile_set_digest,
 };
 pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
 pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
@@ -60,6 +61,20 @@ pub const PLACEMENT_IDENTITY_DOMAIN: &[u8] = b"fgdb:placement:v1";
 
 /// The §5.1 symbol-auth KDF domain string (plan L280).
 pub const SYMBOL_AUTH_DOMAIN: &str = "fgdb:symbol-auth:v1";
+
+/// Durable V1 profile ID for keyed BLAKE3 symbol authentication truncated to
+/// 128 bits.
+///
+/// Chronicle records this ID in every encoding and symbol descriptor.  The
+/// definition lives beside the key derivation rather than at a consumer call
+/// site so the external-audit profile manifest can bind the same authority.
+pub const SYMBOL_AUTH_PROFILE_BLAKE3_128: u16 = 1;
+
+/// Key width produced by the V1 symbol-auth derivation.
+pub const SYMBOL_AUTH_KEY_BYTES: u16 = 32;
+
+/// Authentication-tag width produced by the V1 symbol-auth profile.
+pub const SYMBOL_AUTH_TAG_BYTES: u16 = 16;
 
 /// `ObjectId = BLAKE3_keyed(K_oid, "fgdb:logical:v1" ‖ namespace ‖ header ‖ payload)`.
 ///

@@ -14,18 +14,31 @@
 //! only makes substitution, omission, stale-scope reuse, and unresolved
 //! findings fail closed once those decisions exist.
 
+use crate::aead::ObjectAeadProfile;
+use crate::argon2id::{PassphraseKdfProfile, Variant};
 use crate::blake3::{Hasher, hash};
+use crate::{
+    SYMBOL_AUTH_DOMAIN, SYMBOL_AUTH_KEY_BYTES, SYMBOL_AUTH_PROFILE_BLAKE3_128,
+    SYMBOL_AUTH_TAG_BYTES,
+};
 use core::fmt;
 
 const ARTIFACT_MAGIC: [u8; 8] = *b"FGCAUD01";
 const PLAN_DIGEST_DOMAIN: &[u8] = b"fgdb:crypto-external-audit-plan:v1";
 const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"fgdb:crypto-external-audit-artifact:v1";
+const PROFILE_SET_DIGEST_DOMAIN: &[u8] = b"fgdb:registered-crypto-profile-set:v1";
 
 /// The strict canonical artifact schema understood by this release interlock.
 pub const EXTERNAL_CRYPTO_AUDIT_SCHEMA_VERSION: u16 = 1;
 
 /// The fixed-width canonical artifact length.
 pub const EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN: usize = 222;
+
+/// Canonical schema version for the registered crypto-profile-set transcript.
+pub const REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION: u16 = 1;
+
+/// Exact number of V1 crypto profiles bound into release-audit evidence.
+pub const REGISTERED_CRYPTO_PROFILE_COUNT: u16 = 3;
 
 /// Stable registered engagement-plan identity.
 pub const EXTERNAL_CRYPTO_AUDIT_ENGAGEMENT_ID: &str = "fgdb.crypto.external-audit.v1";
@@ -144,6 +157,61 @@ pub fn external_crypto_audit_plan_digest() -> [u8; 32] {
     hasher.finalize().0
 }
 
+/// Digest the exact closed crypto-profile inventory implemented by this crate.
+///
+/// The transcript is deliberately derived from the public profile rows rather
+/// than supplied by a release caller.  Changing an algorithm, parameter,
+/// width, domain, profile ID, row order, or row count therefore invalidates
+/// old external-audit evidence.  The three V1 rows are object AEAD,
+/// passphrase KDF, and symbol authentication; a future signing profile must be
+/// added here and necessarily changes this digest.
+#[must_use]
+pub fn registered_crypto_profile_set_digest() -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(PROFILE_SET_DIGEST_DOMAIN);
+    hasher.update(&REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION.to_le_bytes());
+    hasher.update(&REGISTERED_CRYPTO_PROFILE_COUNT.to_le_bytes());
+
+    let aead = ObjectAeadProfile::XChaCha20Poly1305V1;
+    update_profile_header(&mut hasher, 1, aead.id(), b"xchacha20-poly1305-ietf");
+    hasher.update(&32_u16.to_le_bytes());
+    hasher.update(&aead.nonce_len().to_le_bytes());
+    hasher.update(&aead.tag_len().to_le_bytes());
+
+    let kdf = PassphraseKdfProfile::Argon2idRfc9106SecondV1.spec();
+    update_profile_header(&mut hasher, 2, kdf.profile_id, b"argon2id");
+    hasher.update(&kdf.argon2_version.to_le_bytes());
+    let variant_code = match kdf.variant {
+        Variant::Argon2d => 0_u32,
+        Variant::Argon2i => 1_u32,
+        Variant::Argon2id => 2_u32,
+    };
+    hasher.update(&variant_code.to_le_bytes());
+    hasher.update(&kdf.params.memory_kib.to_le_bytes());
+    hasher.update(&kdf.params.passes.to_le_bytes());
+    hasher.update(&kdf.params.lanes.to_le_bytes());
+    hasher.update(&kdf.salt_len.to_le_bytes());
+    hasher.update(&kdf.kek_len.to_le_bytes());
+
+    update_profile_header(
+        &mut hasher,
+        3,
+        SYMBOL_AUTH_PROFILE_BLAKE3_128,
+        b"blake3-keyed-128",
+    );
+    update_len_prefixed(&mut hasher, SYMBOL_AUTH_DOMAIN.as_bytes());
+    hasher.update(&SYMBOL_AUTH_KEY_BYTES.to_le_bytes());
+    hasher.update(&SYMBOL_AUTH_TAG_BYTES.to_le_bytes());
+
+    hasher.finalize().0
+}
+
+fn update_profile_header(hasher: &mut Hasher, class_tag: u16, profile_id: u16, algorithm: &[u8]) {
+    hasher.update(&class_tag.to_le_bytes());
+    hasher.update(&profile_id.to_le_bytes());
+    update_len_prefixed(hasher, algorithm);
+}
+
 fn update_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
     let length = u32::try_from(bytes.len()).expect("registered audit-plan fields fit u32");
     hasher.update(&length.to_le_bytes());
@@ -203,15 +271,17 @@ pub struct CryptoReleaseCandidate {
 
 impl CryptoReleaseCandidate {
     /// Build exact candidate pins. Zero is never a valid external artifact ID.
+    ///
+    /// The registered profile-set digest is not caller-selectable: it is
+    /// derived from the live closed profile rows so two mutually echoing stale
+    /// inputs cannot manufacture release admission.
     pub fn try_new(
         source_revision_digest: [u8; 32],
-        profile_set_digest: [u8; 32],
         approved_auditor_identity_digest: [u8; 32],
         approved_report_digest: [u8; 32],
         approved_attestation_digest: [u8; 32],
     ) -> Result<Self, CryptoAuditError> {
         require_nonzero("source_revision_digest", source_revision_digest)?;
-        require_nonzero("profile_set_digest", profile_set_digest)?;
         require_nonzero(
             "approved_auditor_identity_digest",
             approved_auditor_identity_digest,
@@ -220,7 +290,7 @@ impl CryptoReleaseCandidate {
         require_nonzero("approved_attestation_digest", approved_attestation_digest)?;
         Ok(Self {
             source_revision_digest,
-            profile_set_digest,
+            profile_set_digest: registered_crypto_profile_set_digest(),
             approved_auditor_identity_digest,
             approved_report_digest,
             approved_attestation_digest,
