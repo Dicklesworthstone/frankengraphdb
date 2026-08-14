@@ -741,6 +741,7 @@ pub struct FixtureRunReceipt {
     scenario_id: &'static str,
     runtime: FixtureRuntime,
     seed: u64,
+    scheduler_seed: Option<u64>,
     virtual_clock_epoch_nanos: Option<u64>,
     trace_digest: String,
     workload_digest: String,
@@ -758,6 +759,7 @@ impl FixtureRunReceipt {
     fn new(
         runtime: FixtureRuntime,
         seed: u64,
+        scheduler_seed: Option<u64>,
         virtual_clock_epoch_nanos: Option<u64>,
         trace_bytes: &[u8],
         workload: &FixtureWorkload,
@@ -772,6 +774,7 @@ impl FixtureRunReceipt {
             scenario_id: FIXTURE_SCENARIO_ID,
             runtime,
             seed,
+            scheduler_seed,
             virtual_clock_epoch_nanos,
             trace_digest: hasher.finalize().to_hex(),
             workload_digest: workload.canonical_digest_hex(),
@@ -801,6 +804,12 @@ impl FixtureRunReceipt {
     #[must_use]
     pub const fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// LAB scheduler seed recorded on the replay trace, or `None` for live.
+    #[must_use]
+    pub const fn scheduler_seed(&self) -> Option<u64> {
+        self.scheduler_seed
     }
 
     #[must_use]
@@ -864,7 +873,12 @@ impl FixtureRunReceipt {
     #[must_use]
     pub fn matches_lab_replay_trace(&self, trace: &ReplayTrace) -> bool {
         let digest = replay_trace_digest(trace);
-        let Some(dispatches) = completed_task_dispatch_steps(trace, self.seed) else {
+        // asupersync records LabConfig.seed on the trace. That is the
+        // scheduler seed, not the workload seed (fgdb-u95t).
+        let Some(scheduler_seed) = self.scheduler_seed else {
+            return false;
+        };
+        let Some(dispatches) = completed_task_dispatch_steps(trace, scheduler_seed) else {
             return false;
         };
         self.runtime == FixtureRuntime::Lab
@@ -1104,7 +1118,7 @@ pub fn run_fixture_workload_under_lab(
     let replay_trace = lab
         .finish_replay_trace()
         .ok_or(FixtureRunError::MissingReplayTrace)?;
-    let completed_dispatches = completed_task_dispatch_steps(&replay_trace, cfg.seed)
+    let completed_dispatches = completed_task_dispatch_steps(&replay_trace, scheduler_seed)
         .ok_or(FixtureRunError::IncompleteReplayTrace)?;
     let mut observed_task_ids: Vec<u64> = completed_dispatches
         .iter()
@@ -1162,6 +1176,7 @@ pub fn run_fixture_workload_under_lab(
     let receipt = FixtureRunReceipt::new(
         FixtureRuntime::Lab,
         cfg.seed,
+        Some(scheduler_seed),
         Some(report.now_nanos),
         &trace_bytes,
         &workload,
@@ -1253,6 +1268,7 @@ pub fn run_fixture_workload_live(
     let receipt = FixtureRunReceipt::new(
         FixtureRuntime::Live,
         cfg.seed,
+        None,
         None,
         &trace_bytes,
         &workload,

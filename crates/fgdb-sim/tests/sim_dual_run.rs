@@ -970,6 +970,28 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
         "seed mismatch must refuse before fixture filesystem side effects"
     );
 
+    let distinct_scheduler = cfg.seed ^ 0xA5A5_A5A5_A5A5_A5A5;
+    let distinct_root = lab_root.join("distinct-scheduler-seed");
+    let distinct = run_fixture_workload_under_lab(
+        &cfg,
+        &expected_workload,
+        &distinct_root,
+        LabConfig::new(distinct_scheduler),
+    )
+    .expect("a distinct scheduler seed is a lawful LAB configuration");
+    assert_eq!(distinct.receipt.seed(), cfg.seed);
+    assert_eq!(
+        distinct.receipt.scheduler_seed(),
+        Some(distinct_scheduler),
+        "the receipt must retain the scheduler seed that authenticated the trace"
+    );
+    assert!(
+        distinct
+            .receipt
+            .matches_lab_replay_trace(distinct.replay_trace()),
+        "trace authentication must use LabConfig.seed, not the workload seed"
+    );
+
     let mut trace_hasher = Hasher::new();
     trace_hasher.update(b"fgdb.sim.fixture.trace.v1");
     trace_hasher.update(&raw.trace_bytes);
