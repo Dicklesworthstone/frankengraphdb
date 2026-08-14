@@ -838,9 +838,9 @@ impl Failure {
     /// (fgdb-u95t).
     #[must_use]
     pub fn same_kind_and_typed_evidence(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.recovery == other.recovery
-            && self.durability == other.durability
+        self.kind == other.kind // ubs:ignore -- public failure classification, not secret material.
+            && self.recovery == other.recovery // ubs:ignore -- typed public recovery evidence.
+            && self.durability == other.durability // ubs:ignore -- typed public durability evidence.
     }
 
     fn new(kind: FailureKind, detail: impl Into<String>) -> Self {

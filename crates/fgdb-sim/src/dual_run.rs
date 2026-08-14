@@ -756,6 +756,7 @@ pub struct FixtureRunReceipt {
 }
 
 impl FixtureRunReceipt {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         runtime: FixtureRuntime,
         seed: u64,
