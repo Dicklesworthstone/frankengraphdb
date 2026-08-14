@@ -476,14 +476,81 @@ fn symbol_auth_keys_are_per_encoding() {
 /// The governed `cargo-test:crypto-composition` entrypoint.
 ///
 /// This proves the registered V1 composition that exists today: keyed logical
-/// identity, profile-bound object AEAD, encoding and placement identities,
-/// encoding-bound symbol authentication, and rewrap-stable downstream
-/// identities.
+/// identity, the fixed passphrase-to-KEK profile, profile-bound object AEAD,
+/// encoding and placement identities, encoding-bound symbol authentication,
+/// and rewrap-stable downstream identities.
 /// It deliberately does NOT claim production per-ciphertext DEK minting or
-/// wrapping, passphrase-KDF profiles, nonce-reuse state, signing/KMS support,
-/// statistical timing, optimized zeroization inspection, or external audit.
+/// wrapping, root/key-wrap integration, nonce-reuse state, signing/KMS support,
+/// runtime KDF auto-tuning, statistical timing, optimized zeroization
+/// inspection, or external audit.
 #[test]
 fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
+    let kdf_profile = fgdb_crypto::registered_passphrase_kdf_profile(1)
+        .expect("profile 1 is the closed V1 passphrase-KDF profile");
+    let kdf_spec = kdf_profile.spec();
+    assert_eq!(kdf_profile.id(), 1);
+    assert_eq!(kdf_spec.profile_id, 1);
+    assert_eq!(kdf_spec.argon2_version, 0x13);
+    assert_eq!(kdf_spec.variant, fgdb_crypto::argon2id::Variant::Argon2id);
+    assert_eq!(kdf_spec.params.memory_kib, 65_536);
+    assert_eq!(kdf_spec.params.passes, 3);
+    assert_eq!(kdf_spec.params.lanes, 4);
+    assert_eq!(kdf_spec.salt_len, 16);
+    assert_eq!(kdf_spec.kek_len, 32);
+    for id in 0..=u16::MAX {
+        if id == kdf_profile.id() {
+            assert_eq!(
+                fgdb_crypto::registered_passphrase_kdf_profile(id),
+                Some(kdf_profile)
+            );
+        } else {
+            assert!(
+                fgdb_crypto::registered_passphrase_kdf_profile(id).is_none(),
+                "unregistered passphrase-KDF profile {id} entered the closed numeric registry"
+            );
+        }
+    }
+
+    let passphrase = b"correct horse battery staple";
+    let salt = b"fgdb-kdf-salt-v1";
+    let profiled_kek = fgdb_crypto::derive_passphrase_kek(1, passphrase, salt)
+        .expect("the registered KDF profile derives a KEK");
+    // Independent OpenSSL 3 ARGON2ID oracle, configured with the exact row
+    // above (threads=1 is an execution choice; lanes=4 is the Argon2 input).
+    let oracle_kek = [
+        0xda, 0x77, 0xb3, 0xeb, 0x0b, 0x5f, 0x4d, 0x7c, 0x51, 0x06, 0x1f, 0xe6, 0xfc, 0x3b, 0xeb,
+        0x38, 0x67, 0xdf, 0x61, 0x85, 0x2c, 0xfc, 0xff, 0x46, 0xc9, 0xf0, 0xd1, 0x9a, 0x26, 0x3d,
+        0x76, 0xff,
+    ];
+    assert_eq!(
+        profiled_kek.expose(),
+        &oracle_kek,
+        "profile 1 must match an independent implementation of its complete pinned tuple"
+    );
+    for unknown in [0, 2, u16::MAX] {
+        assert_eq!(
+            fgdb_crypto::derive_passphrase_kek(unknown, passphrase, salt)
+                .expect_err("unknown KDF profile must fail"),
+            fgdb_crypto::PassphraseKdfError::UnsupportedProfile {
+                profile_id: unknown,
+            },
+            "unknown KDF profile {unknown} must fail before expensive derivation"
+        );
+    }
+    for bad_salt in [&salt[..15], b"fgdb-kdf-salt-v1-extra".as_slice()] {
+        assert_eq!(
+            fgdb_crypto::derive_passphrase_kek(1, passphrase, bad_salt)
+                .expect_err("wrong salt width must fail"),
+            fgdb_crypto::PassphraseKdfError::SaltLength {
+                profile_id: 1,
+                expected: 16,
+                actual: bad_salt.len(),
+            },
+            "profile 1 must reject a {}-byte salt before expensive derivation",
+            bad_salt.len()
+        );
+    }
+
     let registered = fgdb_crypto::registered_object_aead_profile(1)
         .expect("profile 1 is the closed V1 object-AEAD profile");
     assert_eq!(registered.id(), 1);

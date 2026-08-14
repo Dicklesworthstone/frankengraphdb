@@ -28,6 +28,7 @@
 //! chosen by a registered profile, never parsed from a stored string.
 
 use crate::blake2b::{Blake2b, blake2b};
+use crate::zeroize::Secret;
 
 /// Bytes per Argon2 block (RFC 9106 §3.1: the memory is addressed in 1 KiB
 /// blocks, and `G` is defined over exactly two of them).
@@ -41,6 +42,20 @@ const SYNC_POINTS: u32 = 4;
 /// pre-2016 construction and is NOT accepted, because silently computing the
 /// old one would produce a wrong key that looks fine).
 pub const VERSION: u32 = 0x13;
+
+/// Durable numeric ID for the V1 passphrase-KDF profile.
+///
+/// This is a FrankenGraphDB profile choice, not a claim that an arbitrary
+/// Argon2 parameter tuple is interchangeable with it.  Recovery resolves the
+/// ID through [`registered_passphrase_kdf_profile`] and obtains every cost and
+/// width from that closed row.
+pub const PASSPHRASE_KDF_PROFILE_ARGON2ID_RFC9106_SECOND: u16 = 1;
+
+/// The exact salt width registered by the V1 passphrase-KDF profile.
+pub const PASSPHRASE_KDF_SALT_BYTES: usize = 16;
+
+/// The exact KEK width produced by the V1 passphrase-KDF profile.
+pub const PASSPHRASE_KEK_BYTES: usize = 32;
 
 /// Which Argon2 addressing discipline to use.
 ///
@@ -128,6 +143,150 @@ pub struct Params {
     pub passes: u32,
     /// Degree of parallelism (`p`).
     pub lanes: u32,
+}
+
+/// One complete row in the closed passphrase-KDF profile registry.
+///
+/// The row deliberately carries the full tuple rather than merely naming
+/// "Argon2id".  Changing any field changes the derived KEK, so a partial row is
+/// not algorithm agility; it is an unrecoverable database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassphraseKdfProfileSpec {
+    /// Durable numeric profile identifier.
+    pub profile_id: u16,
+    /// Argon2 format version.  V1 accepts only RFC 9106 version 0x13.
+    pub argon2_version: u32,
+    /// Addressing variant.  A passphrase profile must be Argon2id.
+    pub variant: Variant,
+    /// Exact memory, pass, and lane costs.
+    pub params: Params,
+    /// Exact salt width in bytes.
+    pub salt_len: u16,
+    /// Exact derived KEK width in bytes.
+    pub kek_len: u16,
+}
+
+/// Closed V1 passphrase-KDF profile vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassphraseKdfProfile {
+    /// RFC 9106's second recommended option: Argon2id v0x13, 64 MiB, three
+    /// passes, four lanes, a 128-bit salt, and a 256-bit derived key.
+    ///
+    /// The first recommended option uses 2 GiB per invocation.  V1 chooses the
+    /// RFC's explicitly memory-constrained option so database open remains
+    /// operationally bounded on embedded postures.  This is a fixed profile,
+    /// not runtime auto-tuning; a future tuple receives another numeric ID.
+    Argon2idRfc9106SecondV1,
+}
+
+impl PassphraseKdfProfile {
+    /// The complete immutable registry row selected by this profile.
+    pub const fn spec(self) -> PassphraseKdfProfileSpec {
+        match self {
+            Self::Argon2idRfc9106SecondV1 => PassphraseKdfProfileSpec {
+                profile_id: PASSPHRASE_KDF_PROFILE_ARGON2ID_RFC9106_SECOND,
+                argon2_version: VERSION,
+                variant: Variant::Argon2id,
+                params: Params {
+                    memory_kib: 65_536,
+                    passes: 3,
+                    lanes: 4,
+                },
+                salt_len: PASSPHRASE_KDF_SALT_BYTES as u16,
+                kek_len: PASSPHRASE_KEK_BYTES as u16,
+            },
+        }
+    }
+
+    /// Durable numeric identifier.
+    pub const fn id(self) -> u16 {
+        self.spec().profile_id
+    }
+}
+
+/// Resolve a durable numeric profile ID through the closed V1 registry.
+pub const fn registered_passphrase_kdf_profile(id: u16) -> Option<PassphraseKdfProfile> {
+    match id {
+        PASSPHRASE_KDF_PROFILE_ARGON2ID_RFC9106_SECOND => {
+            Some(PassphraseKdfProfile::Argon2idRfc9106SecondV1)
+        }
+        _ => None,
+    }
+}
+
+/// Why profile-bound passphrase derivation was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassphraseKdfError {
+    /// The durable numeric profile ID is not in the closed registry.
+    UnsupportedProfile { profile_id: u16 },
+    /// The supplied salt width disagrees with the selected profile.
+    SaltLength {
+        profile_id: u16,
+        expected: u16,
+        actual: usize,
+    },
+    /// The registered tuple was rejected by the Argon2 primitive.
+    Primitive(Argon2Error),
+}
+
+impl core::fmt::Display for PassphraseKdfError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnsupportedProfile { profile_id } => {
+                write!(f, "unsupported passphrase-KDF profile {profile_id}")
+            }
+            Self::SaltLength {
+                profile_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "passphrase-KDF profile {profile_id} requires salt length {expected}, not {actual}"
+            ),
+            Self::Primitive(error) => write!(f, "registered passphrase KDF failed: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for PassphraseKdfError {}
+
+impl From<Argon2Error> for PassphraseKdfError {
+    fn from(error: Argon2Error) -> Self {
+        Self::Primitive(error)
+    }
+}
+
+/// Derive a profile-bound 256-bit KEK from a passphrase.
+///
+/// The caller supplies only the numeric profile ID, passphrase, and salt.  It
+/// cannot weaken the memory cost, pass count, lane count, variant, version, or
+/// output width.  The result uses [`Secret`] so the owned KEK is scrubbed on
+/// drop within the safe-code guarantee documented by that type.
+pub fn derive_passphrase_kek(
+    profile_id: u16,
+    passphrase: &[u8],
+    salt: &[u8],
+) -> Result<Secret<PASSPHRASE_KEK_BYTES>, PassphraseKdfError> {
+    let profile = registered_passphrase_kdf_profile(profile_id)
+        .ok_or(PassphraseKdfError::UnsupportedProfile { profile_id })?;
+    let spec = profile.spec();
+    if salt.len() != usize::from(spec.salt_len) {
+        return Err(PassphraseKdfError::SaltLength {
+            profile_id,
+            expected: spec.salt_len,
+            actual: salt.len(),
+        });
+    }
+
+    let mut kek = Secret::zeroed();
+    hash_into(
+        spec.variant,
+        spec.params,
+        passphrase,
+        salt,
+        kek.expose_mut(),
+    )?;
+    Ok(kek)
 }
 
 /// A 1 KiB Argon2 block.

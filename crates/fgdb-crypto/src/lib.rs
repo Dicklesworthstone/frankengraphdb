@@ -27,6 +27,11 @@ pub use aead::{
     AeadError, DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305, ObjectAeadProfile, object_aead_aad,
     registered_object_aead_profile, xchacha20poly1305_open, xchacha20poly1305_seal,
 };
+pub use argon2id::{
+    PASSPHRASE_KDF_PROFILE_ARGON2ID_RFC9106_SECOND, PASSPHRASE_KDF_SALT_BYTES,
+    PASSPHRASE_KEK_BYTES, PassphraseKdfError, PassphraseKdfProfile, PassphraseKdfProfileSpec,
+    derive_passphrase_kek, registered_passphrase_kdf_profile,
+};
 pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
 pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
 
