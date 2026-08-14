@@ -1158,13 +1158,24 @@ async fn spine_durability(
             .await
             .map_err(|error| recovery_drift(format!("genesis create failed: {error}")))?,
     );
-    let Ok(mut database) = Database::open_with_vfs(cx, vfs.clone(), dir, recovery_keys()).await
-    else {
-        return Ok(());
+    let mut database = match Database::open_with_vfs(cx, vfs.clone(), dir, recovery_keys()).await {
+        Ok(database) => database,
+        Err(_) if !vfs.events().is_empty() => return Ok(()),
+        Err(error) => {
+            return Err(recovery_drift(format!(
+                "faultable open failed before acknowledgement without an injected fault: {error}"
+            )));
+        }
     };
 
-    let Ok(acknowledged) = database.write(cx, recovery_batch(VId(1))).await else {
-        return Ok(());
+    let acknowledged = match database.write(cx, recovery_batch(VId(1))).await {
+        Ok(acknowledged) => acknowledged,
+        Err(_) if !vfs.events().is_empty() => return Ok(()),
+        Err(error) => {
+            return Err(recovery_drift(format!(
+                "write failed before acknowledgement without an injected fault: {error}"
+            )));
+        }
     };
     vfs.crash().await.map_err(|error| {
         Failure::new(
