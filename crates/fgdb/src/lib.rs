@@ -2127,6 +2127,12 @@ impl<V: Vfs + Clone> Database<V> {
             rows.push(row);
         }
 
+        // NENF emits DeleteVertex in VId order. An eid incident to two
+        // same-batch deletes must sit on the smaller endpoint so the
+        // first-applied cascade still matches the live incident set
+        // (fgdb-cczg).
+        assign_cascade_owners(&mut rows, &self.writer, &prefix_edges);
+
         // Fold evaluation-order rows to a target-disjoint net before the
         // template byte-sorts them (fgdb-w5-effects-normal-form-819.2).
         // Two sets on one field, set-then-delete, and create-then-delete
@@ -3527,6 +3533,54 @@ async fn rebuild_delta_index<V: Vfs>(
         })?;
     }
     Ok(index)
+}
+
+/// Keep each cascade eid on the smallest same-batch-deleted endpoint.
+///
+/// NENF applies `DeleteVertex` in VId order. Evaluation order may delete the
+/// larger endpoint first and park the shared edge on that row; the smaller
+/// VId would then apply with an empty cascade while the edge is still live.
+fn assign_cascade_owners(
+    rows: &mut [DeltaRow],
+    writer: &BlockWriter,
+    prefix_edges: &std::collections::BTreeMap<EId, (VId, VId)>,
+) {
+    let deleted: std::collections::BTreeSet<VId> = rows
+        .iter()
+        .filter_map(|row| match row {
+            DeltaRow::DeleteVertex { vid, .. } => Some(*vid),
+            _ => None,
+        })
+        .collect();
+    if deleted.len() < 2 {
+        return;
+    }
+    for row in rows.iter_mut() {
+        let DeltaRow::DeleteVertex {
+            vid,
+            sorted_retired_incident_edges,
+            ..
+        } = row
+        else {
+            continue;
+        };
+        sorted_retired_incident_edges.retain(|eid| {
+            let endpoints = prefix_edges
+                .get(eid)
+                .copied()
+                .or_else(|| writer.live_edge(*eid).map(|(src, _, dst, _)| (src, dst)));
+            match endpoints {
+                Some((src, dst)) => {
+                    [src, dst]
+                        .into_iter()
+                        .filter(|endpoint| deleted.contains(endpoint))
+                        .min()
+                        == Some(*vid)
+                }
+                None => true,
+            }
+        });
+    }
 }
 
 /// Is `(src, relation, dst)` live in the batch prefix or the retained fold?
