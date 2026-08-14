@@ -20,7 +20,7 @@
 //! memset-targeted byte and word boundaries. That remains measured artifact
 //! evidence, not a portable Rust-language zeroization theorem.
 
-use fgdb_crypto::zeroize::{Secret, scrub_slice, scrub_words};
+use fgdb_crypto::zeroize::{Secret, scrub_slice, scrub_words, scrub_words32};
 
 /// Scrubbing zeroes the bytes. The directly observable half of the contract.
 #[test]
@@ -131,6 +131,14 @@ fn scrub_words_zeroes_caller_owned_state() {
     let mut one = [u64::MAX];
     scrub_words(&mut one);
     assert_eq!(one, [0]);
+
+    let mut narrow = [0xfeed_face_u32; 17];
+    scrub_words32(&mut narrow);
+    assert!(narrow.iter().all(|word| *word == 0));
+    scrub_words32(&mut []);
+    let mut one_narrow = [u32::MAX];
+    scrub_words32(&mut one_narrow);
+    assert_eq!(one_narrow, [0]);
 }
 
 /// Scrubbing twice is legal and idempotent — `scrub` then `drop` is the normal

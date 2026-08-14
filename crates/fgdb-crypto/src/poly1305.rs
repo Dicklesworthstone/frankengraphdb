@@ -4,8 +4,26 @@
 //!
 //! Verified via the AEAD golden vectors (`tests/aead_vectors.rs`): a tag error
 //! anywhere in this file fails every ciphertext-and-tag comparison.
+//!
+//! The authenticator owns a one-time secret key and key-derived accumulator.
+//! Its state is non-cloneable and every stored key-derived field is scrubbed on
+//! drop, including authentication-failure paths. Source-level arithmetic
+//! scalars and compiler-created register/spill copies remain inside the
+//! explicit safe-code no-claim boundary in [`crate::zeroize`].
+
+use crate::zeroize::{Secret, scrub_slice, scrub_words, scrub_words32};
 
 /// One-time authenticator state. The key's `r` half is clamped per RFC 8439.
+///
+/// The state cannot be cloned, so one one-time key cannot accidentally become
+/// two independently live authenticators:
+///
+/// ```compile_fail
+/// use fgdb_crypto::poly1305::Poly1305;
+///
+/// let state = Poly1305::new(&[0_u8; 32]);
+/// let _copy = state.clone();
+/// ```
 pub struct Poly1305 {
     r: [u64; 5],
     /// Precomputed 5 * r limbs 1..4 for the reduction fold.
@@ -19,20 +37,21 @@ pub struct Poly1305 {
 impl Poly1305 {
     pub fn new(key: &[u8; 32]) -> Self {
         // Clamp r (RFC 8439 §2.5.1) then split into 26-bit limbs.
-        let t0 = u32::from_le_bytes([key[0], key[1], key[2], key[3]]) & 0x0fff_ffff;
-        let t1 = u32::from_le_bytes([key[4], key[5], key[6], key[7]]) & 0x0fff_fffc;
-        let t2 = u32::from_le_bytes([key[8], key[9], key[10], key[11]]) & 0x0fff_fffc;
-        let t3 = u32::from_le_bytes([key[12], key[13], key[14], key[15]]) & 0x0fff_fffc;
-        let r = [
-            u64::from(t0) & 0x3ff_ffff,
-            (u64::from(t0) >> 26 | u64::from(t1) << 6) & 0x3ff_ffff,
-            (u64::from(t1) >> 20 | u64::from(t2) << 12) & 0x3ff_ffff,
-            (u64::from(t2) >> 14 | u64::from(t3) << 18) & 0x3ff_ffff,
-            u64::from(t3) >> 8,
+        let mut t = [
+            u32::from_le_bytes([key[0], key[1], key[2], key[3]]) & 0x0fff_ffff,
+            u32::from_le_bytes([key[4], key[5], key[6], key[7]]) & 0x0fff_fffc,
+            u32::from_le_bytes([key[8], key[9], key[10], key[11]]) & 0x0fff_fffc,
+            u32::from_le_bytes([key[12], key[13], key[14], key[15]]) & 0x0fff_fffc,
         ];
-        Self {
-            r,
-            s_r: [r[1] * 5, r[2] * 5, r[3] * 5, r[4] * 5],
+        let mut state = Self {
+            r: [
+                u64::from(t[0]) & 0x3ff_ffff,
+                (u64::from(t[0]) >> 26 | u64::from(t[1]) << 6) & 0x3ff_ffff,
+                (u64::from(t[1]) >> 20 | u64::from(t[2]) << 12) & 0x3ff_ffff,
+                (u64::from(t[2]) >> 14 | u64::from(t[3]) << 18) & 0x3ff_ffff,
+                u64::from(t[3]) >> 8,
+            ],
+            s_r: [0; 4],
             pad: [
                 u32::from_le_bytes([key[16], key[17], key[18], key[19]]),
                 u32::from_le_bytes([key[20], key[21], key[22], key[23]]),
@@ -42,7 +61,15 @@ impl Poly1305 {
             acc: [0; 5],
             buffer: [0; 16],
             buffered: 0,
-        }
+        };
+        state.s_r = [
+            state.r[1] * 5,
+            state.r[2] * 5,
+            state.r[3] * 5,
+            state.r[4] * 5,
+        ];
+        scrub_words32(&mut t);
+        state
     }
 
     /// Absorb one 16-byte block. `final_partial` marks a short trailing block
@@ -61,14 +88,31 @@ impl Poly1305 {
         self.acc[4] += (u64::from(t3) >> 8) | if high_bit { 1 << 24 } else { 0 };
 
         // acc *= r  (mod 2^130 - 5), schoolbook with the 5x fold.
-        let a = self.acc;
-        let r = self.r;
-        let sr = self.s_r;
-        let d0 = a[0] * r[0] + a[1] * sr[3] + a[2] * sr[2] + a[3] * sr[1] + a[4] * sr[0];
-        let d1 = a[0] * r[1] + a[1] * r[0] + a[2] * sr[3] + a[3] * sr[2] + a[4] * sr[1];
-        let d2 = a[0] * r[2] + a[1] * r[1] + a[2] * r[0] + a[3] * sr[3] + a[4] * sr[2];
-        let d3 = a[0] * r[3] + a[1] * r[2] + a[2] * r[1] + a[3] * r[0] + a[4] * sr[3];
-        let d4 = a[0] * r[4] + a[1] * r[3] + a[2] * r[2] + a[3] * r[1] + a[4] * r[0];
+        let d0 = self.acc[0] * self.r[0]
+            + self.acc[1] * self.s_r[3]
+            + self.acc[2] * self.s_r[2]
+            + self.acc[3] * self.s_r[1]
+            + self.acc[4] * self.s_r[0];
+        let d1 = self.acc[0] * self.r[1]
+            + self.acc[1] * self.r[0]
+            + self.acc[2] * self.s_r[3]
+            + self.acc[3] * self.s_r[2]
+            + self.acc[4] * self.s_r[1];
+        let d2 = self.acc[0] * self.r[2]
+            + self.acc[1] * self.r[1]
+            + self.acc[2] * self.r[0]
+            + self.acc[3] * self.s_r[3]
+            + self.acc[4] * self.s_r[2];
+        let d3 = self.acc[0] * self.r[3]
+            + self.acc[1] * self.r[2]
+            + self.acc[2] * self.r[1]
+            + self.acc[3] * self.r[0]
+            + self.acc[4] * self.s_r[3];
+        let d4 = self.acc[0] * self.r[4]
+            + self.acc[1] * self.r[3]
+            + self.acc[2] * self.r[2]
+            + self.acc[3] * self.r[1]
+            + self.acc[4] * self.r[0];
 
         // Carry propagation back to 26-bit limbs.
         let mut c: u64;
@@ -103,15 +147,15 @@ impl Poly1305 {
             self.buffered += take;
             input = &input[take..];
             if self.buffered == 16 {
-                let block = self.buffer;
-                self.process_block(&block, true);
+                let block = Secret::new(self.buffer);
+                self.process_block(block.expose(), true);
                 self.buffered = 0;
             }
         }
         while input.len() >= 16 {
-            let mut block = [0u8; 16];
-            block.copy_from_slice(&input[..16]);
-            self.process_block(&block, true);
+            let mut block = Secret::<16>::zeroed();
+            block.expose_mut().copy_from_slice(&input[..16]);
+            self.process_block(block.expose(), true);
             input = &input[16..];
         }
         if !input.is_empty() {
@@ -124,10 +168,10 @@ impl Poly1305 {
     /// bit), fully reduce, add the pad half of the key mod 2^128.
     pub fn finalize(mut self) -> [u8; 16] {
         if self.buffered > 0 {
-            let mut block = [0u8; 16];
-            block[..self.buffered].copy_from_slice(&self.buffer[..self.buffered]);
-            block[self.buffered] = 1;
-            self.process_block(&block, false);
+            let mut block = Secret::<16>::zeroed();
+            block.expose_mut()[..self.buffered].copy_from_slice(&self.buffer[..self.buffered]);
+            block.expose_mut()[self.buffered] = 1;
+            self.process_block(block.expose(), false);
         }
 
         // Full reduction: fold the final carry, then conditionally subtract p.
@@ -185,5 +229,15 @@ impl Poly1305 {
             carry = sum >> 32;
         }
         tag
+    }
+}
+
+impl Drop for Poly1305 {
+    fn drop(&mut self) {
+        scrub_words(&mut self.r);
+        scrub_words(&mut self.s_r);
+        scrub_words32(&mut self.pad);
+        scrub_words(&mut self.acc);
+        scrub_slice(&mut self.buffer);
     }
 }

@@ -289,6 +289,12 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         .expect("argon2id.rs is readable");
     let blake = std::fs::read_to_string(crate_root().join("src/blake2b.rs"))
         .expect("blake2b.rs is readable");
+    let chacha = std::fs::read_to_string(crate_root().join("src/chacha20.rs"))
+        .expect("chacha20.rs is readable");
+    let poly = std::fs::read_to_string(crate_root().join("src/poly1305.rs"))
+        .expect("poly1305.rs is readable");
+    let aead =
+        std::fs::read_to_string(crate_root().join("src/aead.rs")).expect("aead.rs is readable");
 
     fn code_lines(body: &str) -> Vec<&str> {
         body.lines()
@@ -301,6 +307,9 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         ("zeroize.rs", source.as_str()),
         ("argon2id.rs", argon.as_str()),
         ("blake2b.rs", blake.as_str()),
+        ("chacha20.rs", chacha.as_str()),
+        ("poly1305.rs", poly.as_str()),
+        ("aead.rs", aead.as_str()),
     ] {
         for forbidden_indirection in ["#[cfg", "#[cfg_attr", "macro_rules!", "include!"] {
             assert!(
@@ -330,9 +339,19 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         compiled_words, [0_u64; 2],
         "the production-selected scrub_words must execute for every admitted length"
     );
+    let mut compiled_words32 = [0xa5_a5_a5_a5_u32; 2];
+    fgdb_crypto::zeroize::scrub_words32(&mut compiled_words32);
+    assert_eq!(
+        compiled_words32, [0_u32; 2],
+        "the production-selected scrub_words32 must execute for every admitted length"
+    );
     assert!(
         core::mem::needs_drop::<fgdb_crypto::blake2b::Blake2b>(),
         "the production BLAKE2b state must carry scrub-on-drop glue"
+    );
+    assert!(
+        core::mem::needs_drop::<fgdb_crypto::poly1305::Poly1305>(),
+        "the production Poly1305 state must carry scrub-on-drop glue"
     );
 
     let scrub_start = source
@@ -427,6 +446,30 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
             "compiler_fence(Ordering::SeqCst);",
         ],
         "the witnessed word boundary must consist solely of zeroing then fencing"
+    );
+
+    let narrow_boundary_start = source
+        .find("#[inline(never)]\npub fn scrub_words32")
+        .expect("the non-inlined 32-bit word codegen boundary is present");
+    assert_eq!(
+        source
+            .matches("pub fn scrub_words32(words: &mut [u32])")
+            .count(),
+        1,
+        "zeroize.rs must contain exactly one scrub_words32 authority"
+    );
+    let narrow_boundary = &source[narrow_boundary_start..];
+    let narrow_boundary =
+        &narrow_boundary[..narrow_boundary.find("\n}").unwrap_or(narrow_boundary.len())];
+    assert_eq!(
+        code_lines(narrow_boundary),
+        [
+            "#[inline(never)]",
+            "pub fn scrub_words32(words: &mut [u32]) {",
+            "words.fill(0);",
+            "compiler_fence(Ordering::SeqCst);",
+        ],
+        "the witnessed 32-bit word boundary must consist solely of zeroing then fencing"
     );
 
     assert!(
@@ -577,4 +620,118 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         ["scrub_words(&mut m);", "scrub_words(&mut v);"],
         "BLAKE2b must scrub both secret-derived compression temporaries before return"
     );
+
+    let chacha_drop_start = chacha
+        .find("impl<const N: usize> Drop for SensitiveWords32<N>")
+        .expect("ChaCha native word state has automatic scrub-on-drop glue");
+    assert_eq!(
+        chacha
+            .matches("impl<const N: usize> Drop for SensitiveWords32<N>")
+            .count(),
+        1,
+        "chacha20.rs must contain exactly one native-word Drop authority"
+    );
+    assert!(
+        chacha[..chacha_drop_start].ends_with("\n\n"),
+        "the ChaCha word-state Drop authority must be an unconditional top-level item"
+    );
+    let chacha_drop = &chacha[chacha_drop_start..];
+    let chacha_drop = &chacha_drop[..chacha_drop.find("\n}\n").unwrap_or(chacha_drop.len())];
+    assert_eq!(
+        code_lines(chacha_drop),
+        [
+            "impl<const N: usize> Drop for SensitiveWords32<N> {",
+            "fn drop(&mut self) {",
+            "scrub_words32(&mut self.0);",
+            "}",
+        ],
+        "every ChaCha key/state word owner must scrub its original storage on drop"
+    );
+    assert!(
+        !chacha.contains("impl Clone for SensitiveWords32")
+            && !chacha.contains("impl core::ops::Deref for SensitiveWords32")
+            && !chacha.contains("impl core::ops::DerefMut for SensitiveWords32"),
+        "ChaCha word owners must not expose duplication or raw-array escape APIs"
+    );
+    for required_secret_owner in [
+        "fn key_words(key: &[u8; 32]) -> SensitiveWords32<8>",
+        "fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> Secret<64>",
+        "pub fn poly1305_key(key: &[u8; 32], nonce: &[u8; 12]) -> Secret<32>",
+        "pub fn hchacha20(key: &[u8; 32], nonce16: &[u8; 16]) -> Secret<32>",
+        "let initial = SensitiveWords32([",
+        "let mut state = SensitiveWords32(initial.0);",
+        "double_round(&mut state.0);",
+        "let mut out = Secret::<64>::zeroed();",
+        "let mut out = Secret::<32>::zeroed();",
+    ] {
+        assert!(
+            chacha.contains(required_secret_owner),
+            "ChaCha derived key material escaped a scrub owner: missing {required_secret_owner}"
+        );
+    }
+
+    let poly_drop_start = poly
+        .find("impl Drop for Poly1305")
+        .expect("Poly1305 state has automatic scrub-on-drop glue");
+    assert_eq!(
+        poly.matches("impl Drop for Poly1305").count(),
+        1,
+        "poly1305.rs must contain exactly one Poly1305 Drop authority"
+    );
+    assert!(
+        poly[..poly_drop_start].ends_with("\n}\n\n"),
+        "the Poly1305 Drop authority must be an unconditional top-level item"
+    );
+    let poly_drop = &poly[poly_drop_start..];
+    let poly_drop = &poly_drop[..poly_drop.find("\n}\n").unwrap_or(poly_drop.len())];
+    assert_eq!(
+        code_lines(poly_drop),
+        [
+            "impl Drop for Poly1305 {",
+            "fn drop(&mut self) {",
+            "scrub_words(&mut self.r);",
+            "scrub_words(&mut self.s_r);",
+            "scrub_words32(&mut self.pad);",
+            "scrub_words(&mut self.acc);",
+            "scrub_slice(&mut self.buffer);",
+            "}",
+        ],
+        "Poly1305 drop must scrub every key-derived and message-bearing state field"
+    );
+    assert_eq!(
+        poly.matches("scrub_words32(&mut t);").count(),
+        1,
+        "Poly1305 construction must scrub its separate clamped-key word staging array"
+    );
+    assert_eq!(
+        poly.matches("let mut block = Secret::<16>::zeroed();")
+            .count(),
+        2,
+        "Poly1305 must scrub both explicit full-block and final-partial staging copies"
+    );
+    assert_eq!(
+        poly.matches("let block = Secret::new(self.buffer);")
+            .count(),
+        1,
+        "Poly1305 must scrub the copied buffered-block staging owner"
+    );
+    assert!(
+        !poly.contains("impl Clone for Poly1305")
+            && !poly.contains("impl core::ops::Deref for Poly1305")
+            && !poly.contains("impl core::ops::DerefMut for Poly1305"),
+        "Poly1305 must not expose state duplication or field-escape APIs"
+    );
+
+    for required_aead_path in [
+        "let otk = chacha20::poly1305_key(key, nonce);",
+        "compute_tag(otk.expose(), aad",
+        "fn xchacha_subparts(key: &[u8; 32], nonce24: &[u8; 24]) -> (Secret<32>, [u8; 12])",
+        "chacha20poly1305_seal(subkey.expose(), &subnonce",
+        "chacha20poly1305_open(subkey.expose(), &subnonce",
+    ] {
+        assert!(
+            aead.contains(required_aead_path),
+            "AEAD derived key material escaped a scrub owner: missing {required_aead_path}"
+        );
+    }
 }

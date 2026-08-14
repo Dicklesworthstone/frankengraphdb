@@ -4,8 +4,9 @@
 //! `K_oid`, a DEK, a KEK, an Argon2id output — ultimately occupies byte or word
 //! storage, and storage that is simply dropped leaves its contents in the
 //! freed allocation or on the stack. [`Secret`] is the fixed-size byte wrapper;
-//! [`scrub_slice`] and [`scrub_words`] are the boundaries for owned primitive
-//! state whose surrounding type supplies its own `Drop` implementation.
+//! [`scrub_slice`], [`scrub_words`], and [`scrub_words32`] are the boundaries
+//! for owned primitive state whose surrounding type supplies its own `Drop`
+//! implementation.
 //!
 //! **WHAT THIS CAN AND CANNOT PROMISE, stated up front because the usual
 //! zeroization claim is overstated.** This crate is `#![forbid(unsafe_code)]`,
@@ -140,6 +141,17 @@ pub fn scrub_slice(bytes: &mut [u8]) {
 /// for [`scrub_slice`].
 #[inline(never)]
 pub fn scrub_words(words: &mut [u64]) {
+    words.fill(0);
+    compiler_fence(Ordering::SeqCst);
+}
+
+/// Scrub caller-owned 32-bit word storage in place.
+///
+/// ChaCha20 and Poly1305 keep their native state in `u32` lanes. This is the
+/// width-preserving counterpart of [`scrub_words`], with the same witnessed
+/// safe-code boundary and the same explicit limits.
+#[inline(never)]
+pub fn scrub_words32(words: &mut [u32]) {
     words.fill(0);
     compiler_fence(Ordering::SeqCst);
 }

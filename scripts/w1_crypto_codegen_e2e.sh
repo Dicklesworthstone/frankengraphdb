@@ -5,7 +5,7 @@
 # Owner: fgdb-w1-crypto-y5o
 #
 # This gate makes one narrow compiled-code claim: Secret bytes and the original
-# Argon2/BLAKE2b word storage delegate to non-inlined production boundaries,
+# Argon2/BLAKE2b/ChaCha20/Poly1305 word storage delegate to non-inlined boundaries,
 # and the optimized host object retains each boundary as an unconditional call
 # to memset with the source-pinned zero fill followed by a compiler fence. It
 # does NOT claim that copies in registers, moved-from temporaries, allocator/OS
@@ -71,7 +71,7 @@ esac
 if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
   secret_scrub_delegates_to_codegen_witnessed_boundary -- --exact \
   >"$EVIDENCE_DIR/source-linkage.log" 2>&1; then
-  gate_pass "Secret, Argon2, and BLAKE2b state delegate to witnessed scrub boundaries"
+  gate_pass "owned crypto-derived state delegates to witnessed scrub boundaries"
 else
   gate_fail "crypto state no longer delegates to the witnessed scrub boundaries"
   gate_diag "  source-linkage transcript: $EVIDENCE_DIR/source-linkage.log"
@@ -138,7 +138,7 @@ else
     local symbol_log="$EVIDENCE_DIR/${symbol//_/-}.symbol.log"
     local symbol_count call_count memset_relocation_count conditional_branch_count
 
-    symbol_count="$(grep -Fc " T fgdb_crypto::zeroize::$symbol" "$NM_LOG" || true)"
+    symbol_count="$(grep -Ec " T fgdb_crypto::zeroize::${symbol}$" "$NM_LOG" || true)"
     if [ "$symbol_count" -eq 1 ]; then
       gate_pass "optimized object exports exactly one $symbol codegen boundary"
     else
@@ -175,6 +175,7 @@ else
 
   inspect_scrub_boundary "scrub_slice" "byte storage"
   inspect_scrub_boundary "scrub_words" "word storage"
+  inspect_scrub_boundary "scrub_words32" "32-bit word storage"
 fi
 
 gate_diag "  retained evidence: $EVIDENCE_DIR"

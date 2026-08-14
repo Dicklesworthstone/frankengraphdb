@@ -10,9 +10,15 @@
 //! Decryption is authenticate-then-decrypt: the tag is verified over the
 //! ciphertext before any plaintext byte is produced, and failure returns an
 //! error carrying nothing.
+//!
+//! Per-message Poly1305 keys and XChaCha subkeys are represented by
+//! [`crate::zeroize::Secret`], so both success and authentication refusal scrub
+//! their original owned buffers. The caller still owns the input key and any
+//! returned plaintext/ciphertext; this module cannot erase caller storage.
 
 use crate::chacha20;
 use crate::poly1305::Poly1305;
+use crate::zeroize::Secret;
 
 /// The only registered V1 data-crypto profile.
 ///
@@ -105,7 +111,7 @@ pub fn chacha20poly1305_seal(
     let mut out = Vec::with_capacity(plaintext.len() + TAG_LEN);
     out.extend_from_slice(plaintext);
     chacha20::xor_stream(key, 1, nonce, &mut out);
-    let tag = compute_tag(&otk, aad, &out);
+    let tag = compute_tag(otk.expose(), aad, &out);
     out.extend_from_slice(&tag);
     out
 }
@@ -126,7 +132,7 @@ pub fn chacha20poly1305_open(
     expected_tag.copy_from_slice(tag_bytes);
 
     let otk = chacha20::poly1305_key(key, nonce);
-    let tag = compute_tag(&otk, aad, ciphertext);
+    let tag = compute_tag(otk.expose(), aad, ciphertext);
     if !constant_time_eq16(&tag, &expected_tag) {
         return Err(AeadError);
     }
@@ -138,7 +144,7 @@ pub fn chacha20poly1305_open(
 /// XChaCha20-Poly1305 subkey/nonce derivation: HChaCha20 over the first 16
 /// nonce bytes yields the subkey; the last 8 nonce bytes become the tail of a
 /// 12-byte nonce whose first 4 bytes are zero.
-fn xchacha_subparts(key: &[u8; 32], nonce24: &[u8; 24]) -> ([u8; 32], [u8; 12]) {
+fn xchacha_subparts(key: &[u8; 32], nonce24: &[u8; 24]) -> (Secret<32>, [u8; 12]) {
     let mut nonce16 = [0u8; 16];
     nonce16.copy_from_slice(&nonce24[..16]);
     let subkey = chacha20::hchacha20(key, &nonce16);
@@ -156,7 +162,7 @@ pub fn xchacha20poly1305_seal(
     plaintext: &[u8],
 ) -> Vec<u8> {
     let (subkey, subnonce) = xchacha_subparts(key, nonce);
-    chacha20poly1305_seal(&subkey, &subnonce, aad, plaintext)
+    chacha20poly1305_seal(subkey.expose(), &subnonce, aad, plaintext)
 }
 
 /// XChaCha20-Poly1305 open.
@@ -167,7 +173,7 @@ pub fn xchacha20poly1305_open(
     ciphertext_and_tag: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
     let (subkey, subnonce) = xchacha_subparts(key, nonce);
-    chacha20poly1305_open(&subkey, &subnonce, aad, ciphertext_and_tag)
+    chacha20poly1305_open(subkey.expose(), &subnonce, aad, ciphertext_and_tag)
 }
 
 /// The §5.1 object-AEAD AAD domain string (plan L280).
