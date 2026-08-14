@@ -15,7 +15,9 @@
 //! kernel either. §12.5 is explicit that "the vectors pass therefore it is
 //! secure" is not an inference this project makes. Constant-time behaviour
 //! remains a `bounded_model` claim with named methodology, and the
-//! release-blocking external audit is still owed by this bead.
+//! release-blocking external audit itself is still owed by this bead. The
+//! registered evidence/release interlock below proves only that release cannot
+//! proceed without exact externally approved audit artifacts.
 //!
 //! **WHY THE AUDIT IS A TABLE AND NOT A COMMENT.** An audit written as prose in
 //! a doc comment is true on the day it is written and unfalsifiable afterwards.
@@ -45,7 +47,7 @@ enum Verdict {
 /// The audit table. One row per `src/*.rs`, rationale mandatory.
 ///
 /// Reviewed 2026-08-04 by CalmSwan against the sources at that commit.
-const AUDIT: [(&str, Verdict, &str); 9] = [
+const AUDIT: [(&str, Verdict, &str); 10] = [
     (
         "lib.rs",
         Verdict::Clean,
@@ -106,6 +108,14 @@ const AUDIT: [(&str, Verdict, &str); 9] = [
          Consequence to respect elsewhere: do not run this on a host where an \
          attacker observes the cache and the password is the asset in question \
          — that is a deployment constraint, not something the code can fix.",
+    ),
+    (
+        "audit.rs",
+        Verdict::Clean,
+        "External-audit evidence and release admission operate only on public \
+         artifact digests, fixed coverage tags, and finding counts. No key, \
+         plaintext, nonce, or other secret enters this module; branching on \
+         the public audit verdict is the purpose of the release interlock.",
     ),
     (
         "cx.rs",
@@ -189,6 +199,310 @@ fn every_verdict_is_justified() {
                  will most want to challenge"
             );
         }
+    }
+}
+
+/// External review is a release input, not a prose promise.
+///
+/// This aggregate pins the registered engagement plan, strict artifact codec,
+/// exact release-candidate bindings, and every refusal predicate. It does not
+/// claim that an auditor has been selected or that a report already exists;
+/// `None` is the repository's honest current evidence state and must refuse.
+#[test]
+fn external_audit_evidence_is_canonical_and_release_blocking() {
+    use fgdb_crypto::{
+        AuditConclusion, AuditCoverage, AuditFindingCounts, AuditMethod, CryptoAuditError,
+        CryptoReleaseCandidate, EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN,
+        EXTERNAL_CRYPTO_AUDIT_ENGAGEMENT_ID, EXTERNAL_CRYPTO_AUDIT_OWNER_BEAD,
+        EXTERNAL_CRYPTO_AUDIT_RELEASE_GATE, EXTERNAL_CRYPTO_AUDIT_SCHEMA_VERSION,
+        ExternalCryptoAuditEvidence, REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN,
+        admit_external_crypto_audit, external_crypto_audit_plan_digest,
+    };
+
+    fn digest(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    fn evidence(
+        conclusion: AuditConclusion,
+        independent: bool,
+        coverage: AuditCoverage,
+        findings: AuditFindingCounts,
+    ) -> ExternalCryptoAuditEvidence {
+        ExternalCryptoAuditEvidence::try_new(
+            conclusion,
+            independent,
+            coverage,
+            findings,
+            digest(3),
+            digest(5),
+            digest(4),
+            digest(1),
+            digest(2),
+        )
+        .expect("the complete fixture is structurally valid")
+    }
+
+    assert_eq!(EXTERNAL_CRYPTO_AUDIT_SCHEMA_VERSION, 1);
+    assert_eq!(EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN, 222);
+    assert_eq!(
+        REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN.id,
+        EXTERNAL_CRYPTO_AUDIT_ENGAGEMENT_ID
+    );
+    assert_eq!(
+        REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN.owner_bead,
+        EXTERNAL_CRYPTO_AUDIT_OWNER_BEAD
+    );
+    assert_eq!(
+        REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN.release_gate,
+        EXTERNAL_CRYPTO_AUDIT_RELEASE_GATE
+    );
+    assert_eq!(
+        REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN.required_coverage,
+        AuditCoverage::REQUIRED
+    );
+    assert!(AuditCoverage::REQUIRED.is_complete());
+    assert_ne!(external_crypto_audit_plan_digest(), [0; 32]);
+
+    let candidate =
+        CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(3), digest(4), digest(5))
+            .expect("the release candidate pins five exact external identities");
+    let accepted = evidence(
+        AuditConclusion::Accepted,
+        true,
+        AuditCoverage::REQUIRED,
+        AuditFindingCounts::default(),
+    );
+
+    // The repository has no report today. Absence must be the load-bearing
+    // release refusal, not a default-success state.
+    assert_eq!(
+        admit_external_crypto_audit(&candidate, None),
+        Err(CryptoAuditError::MissingAuditEvidence)
+    );
+
+    let canonical = accepted.to_canonical_bytes();
+    assert_eq!(canonical.len(), EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN);
+    let decoded = ExternalCryptoAuditEvidence::try_from_canonical_bytes(&canonical)
+        .expect("the strict artifact decodes");
+    assert_eq!(decoded, accepted);
+    assert_eq!(decoded.to_canonical_bytes(), canonical);
+    assert_ne!(decoded.evidence_digest(), [0; 32]);
+
+    let admission = admit_external_crypto_audit(&candidate, Some(&decoded))
+        .expect("only the exact complete accepted artifact admits release");
+    assert_eq!(admission.source_revision_digest(), digest(1));
+    assert_eq!(admission.profile_set_digest(), digest(2));
+    assert_eq!(admission.audit_evidence_digest(), decoded.evidence_digest());
+
+    assert_eq!(
+        admit_external_crypto_audit(
+            &candidate,
+            Some(&evidence(
+                AuditConclusion::Rejected,
+                true,
+                AuditCoverage::REQUIRED,
+                AuditFindingCounts::default(),
+            )),
+        ),
+        Err(CryptoAuditError::AuditRejected)
+    );
+    assert_eq!(
+        admit_external_crypto_audit(
+            &candidate,
+            Some(&evidence(
+                AuditConclusion::Accepted,
+                false,
+                AuditCoverage::REQUIRED,
+                AuditFindingCounts::default(),
+            )),
+        ),
+        Err(CryptoAuditError::IndependenceNotAttested)
+    );
+
+    let methods = [
+        AuditMethod::PrimitiveAndProfileVectors,
+        AuditMethod::StatisticalTiming,
+        AuditMethod::SecretControlFlowAudit,
+        AuditMethod::MisuseResistance,
+        AuditMethod::Zeroization,
+        AuditMethod::EntropyAndRedaction,
+        AuditMethod::CompositionAndKeyLifecycle,
+    ];
+    assert_eq!(
+        methods
+            .iter()
+            .fold(0_u16, |bits, method| bits | method.bit()),
+        AuditCoverage::REQUIRED.bits(),
+        "the test's independent methodology inventory must equal the registered mask"
+    );
+    for method in methods {
+        let coverage = AuditCoverage::try_from_bits(AuditCoverage::REQUIRED.bits() & !method.bit())
+            .expect("removing a known method leaves known coverage");
+        assert_eq!(
+            admit_external_crypto_audit(
+                &candidate,
+                Some(&evidence(
+                    AuditConclusion::Accepted,
+                    true,
+                    coverage,
+                    AuditFindingCounts::default(),
+                )),
+            ),
+            Err(CryptoAuditError::IncompleteCoverage(method.bit())),
+            "omitting {method:?} must independently block release"
+        );
+    }
+    assert_eq!(
+        AuditCoverage::try_from_bits(AuditCoverage::REQUIRED.bits() | 0x8000),
+        Err(CryptoAuditError::UnknownCoverageBits(0x8000))
+    );
+
+    for findings in [
+        AuditFindingCounts {
+            critical: 1,
+            ..AuditFindingCounts::default()
+        },
+        AuditFindingCounts {
+            high: 1,
+            ..AuditFindingCounts::default()
+        },
+        AuditFindingCounts {
+            medium: 1,
+            ..AuditFindingCounts::default()
+        },
+        AuditFindingCounts {
+            low: 1,
+            ..AuditFindingCounts::default()
+        },
+    ] {
+        assert_eq!(
+            admit_external_crypto_audit(
+                &candidate,
+                Some(&evidence(
+                    AuditConclusion::Accepted,
+                    true,
+                    AuditCoverage::REQUIRED,
+                    findings,
+                )),
+            ),
+            Err(CryptoAuditError::UnresolvedFindings(findings)),
+            "every unresolved severity independently blocks release"
+        );
+    }
+
+    let candidate_mutations = [
+        (
+            CryptoReleaseCandidate::try_new(digest(9), digest(2), digest(3), digest(4), digest(5))
+                .unwrap(),
+            CryptoAuditError::SourceRevisionMismatch,
+        ),
+        (
+            CryptoReleaseCandidate::try_new(digest(1), digest(9), digest(3), digest(4), digest(5))
+                .unwrap(),
+            CryptoAuditError::ProfileSetMismatch,
+        ),
+        (
+            CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(9), digest(4), digest(5))
+                .unwrap(),
+            CryptoAuditError::AuditorIdentityMismatch,
+        ),
+        (
+            CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(3), digest(9), digest(5))
+                .unwrap(),
+            CryptoAuditError::ReportMismatch,
+        ),
+        (
+            CryptoReleaseCandidate::try_new(digest(1), digest(2), digest(3), digest(4), digest(9))
+                .unwrap(),
+            CryptoAuditError::AttestationMismatch,
+        ),
+    ];
+    for (mutated, expected) in candidate_mutations {
+        assert_eq!(
+            admit_external_crypto_audit(&mutated, Some(&accepted)),
+            Err(expected)
+        );
+    }
+
+    // The five release pins and the five evidence identities refuse the zero
+    // sentinel independently; there is no "unassigned but accepted" state.
+    for field in 0..5 {
+        let mut values = [digest(1), digest(2), digest(3), digest(4), digest(5)];
+        values[field] = [0; 32];
+        assert!(matches!(
+            CryptoReleaseCandidate::try_new(values[0], values[1], values[2], values[3], values[4]),
+            Err(CryptoAuditError::ZeroDigest(_))
+        ));
+    }
+    for field in 0..5 {
+        let mut values = [digest(3), digest(5), digest(4), digest(1), digest(2)];
+        values[field] = [0; 32];
+        assert!(matches!(
+            ExternalCryptoAuditEvidence::try_new(
+                AuditConclusion::Accepted,
+                true,
+                AuditCoverage::REQUIRED,
+                AuditFindingCounts::default(),
+                values[0],
+                values[1],
+                values[2],
+                values[3],
+                values[4],
+            ),
+            Err(CryptoAuditError::ZeroDigest(_))
+        ));
+    }
+
+    for length in 0..EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN {
+        assert_eq!(
+            ExternalCryptoAuditEvidence::try_from_canonical_bytes(&canonical[..length]),
+            Err(CryptoAuditError::InvalidArtifactLength {
+                expected: EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN,
+                actual: length,
+            })
+        );
+    }
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    assert_eq!(
+        ExternalCryptoAuditEvidence::try_from_canonical_bytes(&trailing),
+        Err(CryptoAuditError::InvalidArtifactLength {
+            expected: EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN,
+            actual: EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN + 1,
+        })
+    );
+
+    let codec_mutations: [(usize, u8, CryptoAuditError); 5] = [
+        (0, b'X', CryptoAuditError::InvalidArtifactMagic),
+        (8, 2, CryptoAuditError::UnsupportedSchemaVersion(2)),
+        (10, 0xff, CryptoAuditError::UnknownConclusion(0xff)),
+        (11, 2, CryptoAuditError::InvalidBoolean(2)),
+        (13, 0x80, CryptoAuditError::UnknownCoverageBits(0x8000)),
+    ];
+    for (offset, byte, expected) in codec_mutations {
+        let mut mutated = canonical.clone();
+        mutated[offset] = byte;
+        assert_eq!(
+            ExternalCryptoAuditEvidence::try_from_canonical_bytes(&mutated),
+            Err(expected),
+            "canonical mutation at offset {offset} must fail with its own typed error"
+        );
+    }
+
+    let mut wrong_plan = canonical.clone();
+    wrong_plan[30] ^= 1;
+    assert_eq!(
+        ExternalCryptoAuditEvidence::try_from_canonical_bytes(&wrong_plan),
+        Err(CryptoAuditError::EngagementPlanMismatch)
+    );
+    for digest_offset in [62, 94, 126, 158, 190] {
+        let mut missing = canonical.clone();
+        missing[digest_offset..digest_offset + 32].fill(0);
+        assert!(matches!(
+            ExternalCryptoAuditEvidence::try_from_canonical_bytes(&missing),
+            Err(CryptoAuditError::ZeroDigest(_))
+        ));
     }
 }
 

@@ -86,6 +86,15 @@ else
   gate_diag "  timing-evidence transcript: $EVIDENCE_DIR/timing-evidence.log"
 fi
 
+if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
+  external_audit_evidence_is_canonical_and_release_blocking -- --exact \
+  >"$EVIDENCE_DIR/external-audit-interlock.log" 2>&1; then
+  gate_pass "external crypto audit evidence is canonical and exact release admission fails closed"
+else
+  gate_fail "external crypto audit evidence or release admission interlock failed"
+  gate_diag "  external-audit transcript: $EVIDENCE_DIR/external-audit-interlock.log"
+fi
+
 if cargo test --offline --locked -p fgdb-crypto --doc \
   >"$EVIDENCE_DIR/compile-fail.log" 2>&1; then
   gate_pass "public secret owners remain non-cloneable and consuming at compile time"

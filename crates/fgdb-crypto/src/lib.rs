@@ -16,6 +16,7 @@
 
 pub mod aead;
 pub mod argon2id;
+pub mod audit;
 pub mod blake2b;
 pub mod blake3;
 pub mod chacha20;
@@ -31,6 +32,15 @@ pub use argon2id::{
     PASSPHRASE_KDF_PROFILE_ARGON2ID_RFC9106_SECOND, PASSPHRASE_KDF_SALT_BYTES,
     PASSPHRASE_KEK_BYTES, PassphraseKdfError, PassphraseKdfProfile, PassphraseKdfProfileSpec,
     derive_passphrase_kek, registered_passphrase_kdf_profile,
+};
+pub use audit::{
+    AuditConclusion, AuditCoverage, AuditFindingCounts, AuditMethod, CryptoAuditError,
+    CryptoReleaseAdmission, CryptoReleaseCandidate, EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN,
+    EXTERNAL_CRYPTO_AUDIT_ENGAGEMENT_ID, EXTERNAL_CRYPTO_AUDIT_OWNER_BEAD,
+    EXTERNAL_CRYPTO_AUDIT_RELEASE_GATE, EXTERNAL_CRYPTO_AUDIT_SCHEMA_VERSION,
+    ExternalCryptoAuditEngagementPlan, ExternalCryptoAuditEvidence,
+    REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN, admit_external_crypto_audit,
+    external_crypto_audit_plan_digest,
 };
 pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
 pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
