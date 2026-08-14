@@ -22,6 +22,135 @@
 use fgdb_crypto::{Digest, ObjectAeadProfile, aead};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
+/// Stable prefix width carried by crypto verification diagnostics.
+///
+/// The complete `EncodingId` remains in the durable identity graph; the log
+/// needs only enough public identity to correlate one rejection without
+/// turning routine verification telemetry into a second authoritative index.
+pub const VERIFICATION_ENCODING_PREFIX_BYTES: usize = 8;
+
+/// Which cryptographic or identity boundary emitted a verification event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationOperation {
+    ObjectOpen,
+    EncodingReconstruction,
+    PlacementIdentity,
+    SymbolRecord,
+    RecoveredObjectOpen,
+    ObjectRecovery,
+}
+
+/// Stable, typed rejection classes for post-implementation verification.
+///
+/// These classes deliberately contain no primitive detail, key material,
+/// nonce, plaintext, or ciphertext bytes. A log consumer can correlate and
+/// count failures without becoming a padding oracle or a secret-bearing
+/// incident artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationFailureClass {
+    UnsupportedDataCryptoProfile,
+    ObjectTagLength,
+    EncodingIdentity,
+    PlacementIdentity,
+    Authentication,
+    CiphertextIdentity,
+    SymbolTruncated,
+    SymbolUnsupportedFraming,
+    SymbolInconsistentLengths,
+    ForeignEncoding,
+    InvalidParameters,
+    InsufficientSymbols,
+    DecodeFailed,
+    LogicalIdentity,
+}
+
+/// Accepted or rejected is explicit; a rejection always carries its typed
+/// class rather than relying on a free-form error string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationOutcome {
+    Accepted,
+    Rejected(VerificationFailureClass),
+}
+
+/// Secret-free record emitted by every public Chronicle crypto-verification
+/// path.
+///
+/// `plaintext_len` is the canonical logical length declared by the admitted
+/// cipher descriptor. `ciphertext_len` is the actual protected input length
+/// when bytes are present and the checked declared length otherwise. The
+/// encoding prefix is absent only before an encoding exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CryptoVerificationEvent {
+    pub profile_id: u16,
+    pub object_kind: u16,
+    pub plaintext_len: u64,
+    pub ciphertext_len: Option<u64>,
+    pub encoding_id_prefix: Option<[u8; VERIFICATION_ENCODING_PREFIX_BYTES]>,
+    pub operation: VerificationOperation,
+    pub outcome: VerificationOutcome,
+}
+
+impl CryptoVerificationEvent {
+    #[must_use]
+    pub const fn failure_class(self) -> Option<VerificationFailureClass> {
+        match self.outcome {
+            VerificationOutcome::Accepted => None,
+            VerificationOutcome::Rejected(class) => Some(class),
+        }
+    }
+}
+
+/// Capability supplied by the caller of every verification path.
+///
+/// There is deliberately no no-op implementation. A production caller must
+/// choose where these bounded, secret-free records go, while tests can use a
+/// `Vec<CryptoVerificationEvent>` as an exact in-memory witness.
+pub trait CryptoVerificationSink {
+    fn record(&mut self, event: CryptoVerificationEvent);
+}
+
+impl CryptoVerificationSink for Vec<CryptoVerificationEvent> {
+    fn record(&mut self, event: CryptoVerificationEvent) {
+        self.push(event);
+    }
+}
+
+fn encoding_prefix(
+    encoding_id: Option<Digest>,
+) -> Option<[u8; VERIFICATION_ENCODING_PREFIX_BYTES]> {
+    encoding_id.map(|encoding_id| {
+        let mut prefix = [0u8; VERIFICATION_ENCODING_PREFIX_BYTES];
+        prefix.copy_from_slice(&encoding_id.0[..VERIFICATION_ENCODING_PREFIX_BYTES]);
+        prefix
+    })
+}
+
+fn declared_ciphertext_len(descriptor: &CipherDescriptor) -> Option<u64> {
+    descriptor
+        .compressed_len
+        .checked_add(u64::from(descriptor.object_tag_len))
+}
+
+pub(crate) fn verification_event(
+    descriptor: &CipherDescriptor,
+    encoding_id: Option<Digest>,
+    actual_ciphertext_len: Option<usize>,
+    operation: VerificationOperation,
+    outcome: VerificationOutcome,
+) -> CryptoVerificationEvent {
+    CryptoVerificationEvent {
+        profile_id: descriptor.data_crypto_profile,
+        object_kind: descriptor.object_kind,
+        plaintext_len: descriptor.canonical_plaintext_len,
+        ciphertext_len: actual_ciphertext_len
+            .and_then(|len| u64::try_from(len).ok())
+            .or_else(|| declared_ciphertext_len(descriptor)),
+        encoding_id_prefix: encoding_prefix(encoding_id),
+        operation,
+        outcome,
+    }
+}
+
 /// Canonical-plaintext facts every identity layer repeats. These are the
 /// fields of `CipherDescriptorWithoutDigest` that the plan fixes as inputs to
 /// the AEAD AAD; FEC and placement are deliberately absent, which is what lets
@@ -245,12 +374,33 @@ impl ProtectedObject {
 
     /// Recover the compressed plaintext. Fails closed on any tampering of the
     /// ciphertext, tag, descriptor, DEK, or bound object identity.
-    pub fn open(&self, dek: &[u8; 32]) -> Result<Vec<u8>, aead::AeadError> {
+    pub fn open(
+        &self,
+        dek: &[u8; 32],
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<Vec<u8>, aead::AeadError> {
         let aad = aead::object_aead_aad(
             &Digest(self.object_id.0),
             &self.descriptor.canonical_bytes(),
         );
-        aead::xchacha20poly1305_open(dek, &self.descriptor.object_nonce, &aad, &self.sealed)
+        let result = aead::xchacha20poly1305_open(
+            dek,
+            &self.descriptor.object_nonce,
+            &aad,
+            &self.sealed,
+        );
+        verification.record(verification_event(
+            &self.descriptor,
+            None,
+            Some(self.sealed.len()),
+            VerificationOperation::ObjectOpen,
+            if result.is_ok() {
+                VerificationOutcome::Accepted
+            } else {
+                VerificationOutcome::Rejected(VerificationFailureClass::Authentication)
+            },
+        ));
+        result
     }
 
     /// Stage 2 → 3. The same authenticated ciphertext may be encoded — and
@@ -434,12 +584,49 @@ impl EncodedObject {
         ciphertext_id: Digest,
         descriptor: EncodingDescriptor,
         declared_encoding_id: Digest,
+        verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Self, IdentityMismatch> {
-        cipher_descriptor.registered_aead_profile()?;
+        if let Err(error) = cipher_descriptor.registered_aead_profile() {
+            let failure = match error {
+                IdentityMismatch::UnsupportedDataCryptoProfile { .. } => {
+                    VerificationFailureClass::UnsupportedDataCryptoProfile
+                }
+                IdentityMismatch::ObjectTagLength { .. } => {
+                    VerificationFailureClass::ObjectTagLength
+                }
+                IdentityMismatch::ObjectNonceLength { .. } => {
+                    VerificationFailureClass::InvalidParameters
+                }
+                IdentityMismatch::EncodingId => VerificationFailureClass::EncodingIdentity,
+                IdentityMismatch::PlacementId => VerificationFailureClass::PlacementIdentity,
+            };
+            verification.record(verification_event(
+                &cipher_descriptor,
+                Some(declared_encoding_id),
+                None,
+                VerificationOperation::EncodingReconstruction,
+                VerificationOutcome::Rejected(failure),
+            ));
+            return Err(error);
+        }
         let recomputed = fgdb_crypto::encoding_id(&descriptor.canonical_bytes(ciphertext_id));
         if recomputed != declared_encoding_id {
+            verification.record(verification_event(
+                &cipher_descriptor,
+                Some(declared_encoding_id),
+                None,
+                VerificationOperation::EncodingReconstruction,
+                VerificationOutcome::Rejected(VerificationFailureClass::EncodingIdentity),
+            ));
             return Err(IdentityMismatch::EncodingId);
         }
+        verification.record(verification_event(
+            &cipher_descriptor,
+            Some(declared_encoding_id),
+            None,
+            VerificationOperation::EncodingReconstruction,
+            VerificationOutcome::Accepted,
+        ));
         Ok(Self {
             cipher_descriptor,
             object_id,
@@ -457,11 +644,26 @@ impl EncodedObject {
         &self,
         descriptor: &PlacementDescriptor,
         declared_placement_id: Digest,
+        verification: &mut dyn CryptoVerificationSink,
     ) -> Result<(), IdentityMismatch> {
         let recomputed = fgdb_crypto::placement_id(&descriptor.canonical_bytes(self.encoding_id));
         if recomputed != declared_placement_id {
+            verification.record(verification_event(
+                &self.cipher_descriptor,
+                Some(self.encoding_id),
+                None,
+                VerificationOperation::PlacementIdentity,
+                VerificationOutcome::Rejected(VerificationFailureClass::PlacementIdentity),
+            ));
             return Err(IdentityMismatch::PlacementId);
         }
+        verification.record(verification_event(
+            &self.cipher_descriptor,
+            Some(self.encoding_id),
+            None,
+            VerificationOperation::PlacementIdentity,
+            VerificationOutcome::Accepted,
+        ));
         Ok(())
     }
 
@@ -479,23 +681,41 @@ impl EncodedObject {
         &self,
         protected_bytes: &[u8],
         dek: &[u8; 32],
+        verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Vec<u8>, RecoveredObjectError> {
         let aad = aead::object_aead_aad(
             &Digest(self.object_id.0),
             &self.cipher_descriptor.canonical_bytes(),
         );
-        let opened = aead::xchacha20poly1305_open(
+        let opened = match aead::xchacha20poly1305_open(
             dek,
             &self.cipher_descriptor.object_nonce,
             &aad,
             protected_bytes,
-        )
-        .map_err(|_| RecoveredObjectError::AuthenticationFailed)?;
+        ) {
+            Ok(opened) => opened,
+            Err(_) => {
+                verification.record(verification_event(
+                    &self.cipher_descriptor,
+                    Some(self.encoding_id),
+                    Some(protected_bytes.len()),
+                    VerificationOperation::RecoveredObjectOpen,
+                    VerificationOutcome::Rejected(VerificationFailureClass::Authentication),
+                ));
+                return Err(RecoveredObjectError::AuthenticationFailed);
+            }
+        };
         let tag_len = usize::from(self.cipher_descriptor.object_tag_len);
-        let tag_start = protected_bytes
-            .len()
-            .checked_sub(tag_len)
-            .ok_or(RecoveredObjectError::AuthenticationFailed)?;
+        let Some(tag_start) = protected_bytes.len().checked_sub(tag_len) else {
+            verification.record(verification_event(
+                &self.cipher_descriptor,
+                Some(self.encoding_id),
+                Some(protected_bytes.len()),
+                VerificationOperation::RecoveredObjectOpen,
+                VerificationOutcome::Rejected(VerificationFailureClass::Authentication),
+            ));
+            return Err(RecoveredObjectError::AuthenticationFailed);
+        };
         let recomputed = ciphertext_identity(
             &self.cipher_descriptor,
             &protected_bytes[..tag_start],
@@ -503,8 +723,22 @@ impl EncodedObject {
         );
         // ubs:ignore -- public content identity after AEAD authentication, not secret material.
         if recomputed != self.ciphertext_id {
+            verification.record(verification_event(
+                &self.cipher_descriptor,
+                Some(self.encoding_id),
+                Some(protected_bytes.len()),
+                VerificationOperation::RecoveredObjectOpen,
+                VerificationOutcome::Rejected(VerificationFailureClass::CiphertextIdentity),
+            ));
             return Err(RecoveredObjectError::CiphertextIdentityMismatch);
         }
+        verification.record(verification_event(
+            &self.cipher_descriptor,
+            Some(self.encoding_id),
+            Some(protected_bytes.len()),
+            VerificationOperation::RecoveredObjectOpen,
+            VerificationOutcome::Accepted,
+        ));
         Ok(opened)
     }
 

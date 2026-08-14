@@ -20,7 +20,10 @@
 //!    therefore takes an [`EncodedObject`] and checks the record against it;
 //!    there is no entry point that authenticates a record against itself.
 
-use crate::identity::EncodedObject;
+use crate::identity::{
+    CryptoVerificationSink, EncodedObject, VerificationFailureClass, VerificationOperation,
+    VerificationOutcome, verification_event,
+};
 use fgdb_crypto::Digest;
 use fgdb_types::ids::ObjectId;
 
@@ -296,55 +299,85 @@ impl SymbolRecord {
         bytes: &[u8],
         encoding: &EncodedObject,
         dek: &[u8; 32],
+        verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Self, SymbolError> {
-        let (record, claimed_mac) = Self::parse_framing(bytes)?;
+        let result = (|| {
+            let (record, claimed_mac) = Self::parse_framing(bytes)?;
 
-        // Bind to the authenticated encoding BEFORE checking the MAC: a
-        // record from a foreign encoding must be rejected as foreign, not as
-        // an authentication failure, and symbols from different EncodingIds
-        // must never mix in a decode.
-        // ubs:ignore — public encoding identity, not authentication material.
-        if record.encoding_id != encoding.encoding_id()
-            // ubs:ignore — public ciphertext identity, not authentication material.
-            || record.ciphertext_id != encoding.ciphertext_id()
-            || record.logical_oid != encoding.object_id()
-            || record.object_kind != encoding.cipher_descriptor().object_kind
-        {
-            return Err(SymbolError::ForeignEncoding);
-        }
-        let descriptor = encoding.descriptor();
-        if record.transfer_length != descriptor.transfer_length
-            || record.oti_common != descriptor.oti_common
-            || record.oti_scheme != descriptor.oti_scheme
-            // ubs:ignore — public descriptor profile, not a MAC or authentication tag.
-            || record.symbol_mac_profile != descriptor.symbol_auth_profile
-        {
-            return Err(SymbolError::ForeignEncoding);
-        }
-        if record.source_block >= u32::from(descriptor.source_block_count) {
-            return Err(SymbolError::InconsistentLengths);
-        }
-        // The encoder pads every source symbol to exactly `symbol_size`
-        // (symbolize.rs source_symbols zero-fills), and asupersync's
-        // validate_input requires the same equality wholesale: anything else
-        // is damage this check exists to name, not a shape to admit. A
-        // short-but-MAC-valid payload would otherwise enter here and fail the
-        // whole decode as one erasure too many, contradicting the per-symbol
-        // MAC's reason for existing.
-        if record.payload.len() != usize::from(descriptor.symbol_size) {
-            return Err(SymbolError::InconsistentLengths);
-        }
+            // Bind to the authenticated encoding BEFORE checking the MAC: a
+            // record from a foreign encoding must be rejected as foreign, not as
+            // an authentication failure, and symbols from different EncodingIds
+            // must never mix in a decode.
+            // ubs:ignore — public encoding identity, not authentication material.
+            if record.encoding_id != encoding.encoding_id()
+                // ubs:ignore — public ciphertext identity, not authentication material.
+                || record.ciphertext_id != encoding.ciphertext_id()
+                || record.logical_oid != encoding.object_id()
+                || record.object_kind != encoding.cipher_descriptor().object_kind
+            {
+                return Err(SymbolError::ForeignEncoding);
+            }
+            let descriptor = encoding.descriptor();
+            if record.transfer_length != descriptor.transfer_length
+                || record.oti_common != descriptor.oti_common
+                || record.oti_scheme != descriptor.oti_scheme
+                // ubs:ignore — public descriptor profile, not a MAC or authentication tag.
+                || record.symbol_mac_profile != descriptor.symbol_auth_profile
+            {
+                return Err(SymbolError::ForeignEncoding);
+            }
+            if record.source_block >= u32::from(descriptor.source_block_count) {
+                return Err(SymbolError::InconsistentLengths);
+            }
+            // The encoder pads every source symbol to exactly `symbol_size`
+            // (symbolize.rs source_symbols zero-fills), and asupersync's
+            // validate_input requires the same equality wholesale: anything else
+            // is damage this check exists to name, not a shape to admit. A
+            // short-but-MAC-valid payload would otherwise enter here and fail the
+            // whole decode as one erasure too many, contradicting the per-symbol
+            // MAC's reason for existing.
+            if record.payload.len() != usize::from(descriptor.symbol_size) {
+                return Err(SymbolError::InconsistentLengths);
+            }
 
-        let k_symbol = encoding.symbol_auth_key(dek);
-        let expected = record.compute_mac(&k_symbol);
-        let mut diff = 0u8;
-        for (a, b) in expected.iter().zip(claimed_mac.iter()) {
-            diff |= a ^ b;
-        }
-        if diff != 0 {
-            return Err(SymbolError::AuthenticationFailed);
-        }
-        Ok(record)
+            let k_symbol = encoding.symbol_auth_key(dek);
+            let expected = record.compute_mac(&k_symbol);
+            let mut diff = 0u8;
+            for (a, b) in expected.iter().zip(claimed_mac.iter()) {
+                diff |= a ^ b;
+            }
+            if diff != 0 {
+                return Err(SymbolError::AuthenticationFailed);
+            }
+            Ok(record)
+        })();
+
+        let outcome = match result.as_ref() {
+            Ok(_) => VerificationOutcome::Accepted,
+            Err(SymbolError::Truncated) => {
+                VerificationOutcome::Rejected(VerificationFailureClass::SymbolTruncated)
+            }
+            Err(SymbolError::UnsupportedFraming) => VerificationOutcome::Rejected(
+                VerificationFailureClass::SymbolUnsupportedFraming,
+            ),
+            Err(SymbolError::InconsistentLengths) => VerificationOutcome::Rejected(
+                VerificationFailureClass::SymbolInconsistentLengths,
+            ),
+            Err(SymbolError::ForeignEncoding) => {
+                VerificationOutcome::Rejected(VerificationFailureClass::ForeignEncoding)
+            }
+            Err(SymbolError::AuthenticationFailed) => {
+                VerificationOutcome::Rejected(VerificationFailureClass::Authentication)
+            }
+        };
+        verification.record(verification_event(
+            encoding.cipher_descriptor(),
+            Some(encoding.encoding_id()),
+            Some(bytes.len()),
+            VerificationOperation::SymbolRecord,
+            outcome,
+        ));
+        result
     }
 
     /// Build a record for one symbol of an encoding. All identity fields come

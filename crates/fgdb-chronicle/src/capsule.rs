@@ -33,7 +33,8 @@
 //! budget instead of poisoning the result.
 
 use crate::identity::{
-    CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, IdentityMismatch,
+    CipherDescriptor, CryptoVerificationSink, EncodedObject, EncodingDescriptor, IdentifiedObject,
+    IdentityMismatch,
 };
 use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
 use fgdb_crypto::Digest;
@@ -485,6 +486,7 @@ pub fn recover(
     k_oid: &[u8; 32],
     namespace: DatabaseSecurityNamespaceId,
     dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, CapsuleError> {
     // Step 1: the descriptor set must be self-consistent. An EncodingId that is
     // not the digest of its own descriptor means the frame was rewritten, and
@@ -495,6 +497,7 @@ pub fn recover(
         Digest(descriptor.ciphertext_id),
         descriptor.encoding_descriptor(),
         Digest(descriptor.encoding_id),
+        verification,
     )
     .map_err(CapsuleError::DescriptorMismatch)?;
 
@@ -537,7 +540,9 @@ pub fn recover(
     // filtering.
     let authentic: Vec<Vec<u8>> = symbols
         .iter()
-        .filter(|bytes| crate::symbol::SymbolRecord::verify(bytes, &encoding, dek).is_ok())
+        .filter(|bytes| {
+            crate::symbol::SymbolRecord::verify(bytes, &encoding, dek, verification).is_ok()
+        })
         .cloned()
         .collect();
 
@@ -560,6 +565,7 @@ pub fn recover(
             protected_len: descriptor.protected_len() as usize,
         },
         dek,
+        verification,
     )
     .map_err(CapsuleError::Recovery)
 }

@@ -13,7 +13,10 @@
 //! that silently returns different bytes is the failure mode content
 //! addressing exists to make impossible, so it is checked, not assumed.
 
-use crate::identity::{EncodedObject, RecoveredObjectError};
+use crate::identity::{
+    CryptoVerificationSink, EncodedObject, RecoveredObjectError, VerificationFailureClass,
+    VerificationOperation, VerificationOutcome, verification_event,
+};
 use crate::symbol::{SymbolError, SymbolRecord};
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::systematic::SystematicEncoder;
@@ -292,6 +295,59 @@ pub fn decode_object(
     serialized_symbols: &[Vec<u8>],
     target: RecoveryTarget<'_>,
     dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
+) -> Result<Vec<u8>, SymbolizeError> {
+    let result = decode_object_inner(encoding, serialized_symbols, target, dek, verification);
+    let outcome = match result.as_ref() {
+        Ok(_) => VerificationOutcome::Accepted,
+        Err(SymbolizeError::InvalidParameters)
+        | Err(SymbolizeError::EncoderUnavailable)
+        | Err(SymbolizeError::AllocationFailed) => {
+            VerificationOutcome::Rejected(VerificationFailureClass::InvalidParameters)
+        }
+        Err(SymbolizeError::InsufficientSymbols) => {
+            VerificationOutcome::Rejected(VerificationFailureClass::InsufficientSymbols)
+        }
+        Err(SymbolizeError::Symbol(error)) => VerificationOutcome::Rejected(match error {
+            SymbolError::Truncated => VerificationFailureClass::SymbolTruncated,
+            SymbolError::UnsupportedFraming => {
+                VerificationFailureClass::SymbolUnsupportedFraming
+            }
+            SymbolError::InconsistentLengths => {
+                VerificationFailureClass::SymbolInconsistentLengths
+            }
+            SymbolError::ForeignEncoding => VerificationFailureClass::ForeignEncoding,
+            SymbolError::AuthenticationFailed => VerificationFailureClass::Authentication,
+        }),
+        Err(SymbolizeError::AuthenticationFailed) => {
+            VerificationOutcome::Rejected(VerificationFailureClass::Authentication)
+        }
+        Err(SymbolizeError::CiphertextIdentityMismatch) => {
+            VerificationOutcome::Rejected(VerificationFailureClass::CiphertextIdentity)
+        }
+        Err(SymbolizeError::IdentityMismatch) => {
+            VerificationOutcome::Rejected(VerificationFailureClass::LogicalIdentity)
+        }
+        Err(SymbolizeError::DecodeFailed) => {
+            VerificationOutcome::Rejected(VerificationFailureClass::DecodeFailed)
+        }
+    };
+    verification.record(verification_event(
+        encoding.cipher_descriptor(),
+        Some(encoding.encoding_id()),
+        Some(target.protected_len),
+        VerificationOperation::ObjectRecovery,
+        outcome,
+    ));
+    result
+}
+
+fn decode_object_inner(
+    encoding: &EncodedObject,
+    serialized_symbols: &[Vec<u8>],
+    target: RecoveryTarget<'_>,
+    dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, SymbolizeError> {
     let RecoveryTarget {
         k_oid,
@@ -323,7 +379,7 @@ pub fn decode_object(
     for bytes in serialized_symbols {
         // Authenticate BEFORE the symbol can influence the decode: a forged or
         // foreign symbol must not enter the linear system at all.
-        let record = SymbolRecord::verify(bytes, encoding, dek)?;
+        let record = SymbolRecord::verify(bytes, encoding, dek, verification)?;
         if (record.esi as usize) < k {
             received.push(ReceivedSymbol::source(record.esi, record.payload));
         } else {
@@ -369,7 +425,7 @@ pub fn decode_object(
     // Layer 1 of the check: the AEAD must open. This already rejects any
     // decode that produced different ciphertext.
     let compressed = encoding
-        .open_recovered(&protected, dek)
+        .open_recovered(&protected, dek, verification)
         .map_err(|error| match error {
             RecoveredObjectError::AuthenticationFailed => SymbolizeError::AuthenticationFailed,
             RecoveredObjectError::CiphertextIdentityMismatch => {

@@ -34,8 +34,10 @@ pub mod validate;
 
 pub use commit::{CommitCoordinator, CommitError, CrashPoint};
 pub use identity::{
-    CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, IdentityMismatch,
-    LocationForm, PlacedObject, PlacementDescriptor, ProtectedObject, RecoveredObjectError,
+    CipherDescriptor, CryptoVerificationEvent, CryptoVerificationSink, EncodedObject,
+    EncodingDescriptor, IdentifiedObject, IdentityMismatch, LocationForm, PlacedObject,
+    PlacementDescriptor, ProtectedObject, RecoveredObjectError, VerificationFailureClass,
+    VerificationOperation, VerificationOutcome,
 };
 pub use marker::{
     ChainError, ChainedMarker, CommitMarker, EffectSource, HeadCasMismatch, HeadUpdate, MarkerChain,

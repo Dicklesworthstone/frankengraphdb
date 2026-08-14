@@ -37,8 +37,8 @@
 //! and enforced as specified.
 
 use crate::identity::{
-    CipherDescriptor, EncodedObject, EncodingDescriptor, IdentityMismatch, LocationForm,
-    PlacementDescriptor,
+    CipherDescriptor, CryptoVerificationSink, EncodedObject, EncodingDescriptor, IdentityMismatch,
+    LocationForm, PlacementDescriptor,
 };
 use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object};
 use fgdb_crypto::Digest;
@@ -618,6 +618,7 @@ pub fn recover_root_object(
     k_oid: &[u8; 32],
     dek: &[u8; 32],
     recovered_identity_tuple: impl Fn(&[u8]) -> IdentityTuple,
+    verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, RootRecoveryError> {
     let bootstrap = &slot.bootstrap;
     let root_object_id = ObjectId(slot.root_manifest_oid);
@@ -634,6 +635,7 @@ pub fn recover_root_object(
         Digest(bootstrap.ciphertext_id),
         bootstrap.encoding_descriptor(),
         Digest(bootstrap.root_encoding_id),
+        verification,
     )
     .map_err(RootRecoveryError::DescriptorMismatch)?;
 
@@ -644,6 +646,7 @@ pub fn recover_root_object(
         .verify_placement(
             &bootstrap.placement_descriptor(),
             Digest(bootstrap.root_placement_id),
+            verification,
         )
         .map_err(RootRecoveryError::DescriptorMismatch)?;
 
@@ -670,6 +673,7 @@ pub fn recover_root_object(
             protected_len,
         },
         dek,
+        verification,
     )
     .map_err(RootRecoveryError::Recovery)?;
 

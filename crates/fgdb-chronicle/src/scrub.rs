@@ -15,7 +15,7 @@
 //! attempted — the content hash of asupersync's `DecodeProof`, so the
 //! evidence is attestable rather than anecdotal.
 
-use crate::identity::EncodedObject;
+use crate::identity::{CryptoVerificationSink, EncodedObject};
 use crate::symbol::SymbolRecord;
 use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object};
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
@@ -115,6 +115,7 @@ pub fn scrub_object(
     serialized_symbols: &[Vec<u8>],
     target: RecoveryTarget<'_>,
     dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
 ) -> ScrubReport {
     let symbol_size = usize::from(encoding.descriptor().symbol_size);
     let source_symbols = if symbol_size == 0 {
@@ -129,7 +130,7 @@ pub fn scrub_object(
     let mut symbols_authentic = 0usize;
     let mut conflicting_symbols = false;
     for bytes in serialized_symbols {
-        if let Ok(record) = SymbolRecord::verify(bytes, encoding, dek) {
+        if let Ok(record) = SymbolRecord::verify(bytes, encoding, dek, verification) {
             symbols_authentic += 1;
             let coordinate = (record.source_block, record.esi);
             match authentic_by_coordinate.entry(coordinate) {
@@ -176,8 +177,15 @@ pub fn scrub_object(
     // Pass 2: attempt recovery from the authentic symbols only, and capture
     // the decode proof as attestable evidence.
     let decode_proof_hash =
-        decode_proof_attestation(encoding, &authentic, source_symbols, symbol_size, dek);
-    let recovery = decode_object(encoding, &authentic, target, dek);
+        decode_proof_attestation(
+            encoding,
+            &authentic,
+            source_symbols,
+            symbol_size,
+            dek,
+            verification,
+        );
+    let recovery = decode_object(encoding, &authentic, target, dek, verification);
 
     let verdict = match recovery {
         Ok(_) => {
@@ -228,6 +236,7 @@ fn decode_proof_attestation(
     source_symbols: usize,
     symbol_size: usize,
     dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
 ) -> Option<[u8; 32]> {
     // `source_symbols` derives from the descriptor's transfer_length, which
     // is authenticated only by the UNKEYED EncodingId — attacker-rewritable
@@ -239,7 +248,7 @@ fn decode_proof_attestation(
         InactivationDecoder::try_new(source_symbols, symbol_size, code_seed(encoding)).ok()?;
     let mut received = decoder.constraint_symbols();
     for bytes in authentic_symbols {
-        let record = SymbolRecord::verify(bytes, encoding, dek).ok()?;
+        let record = SymbolRecord::verify(bytes, encoding, dek, verification).ok()?;
         if (record.esi as usize) < source_symbols {
             received.push(ReceivedSymbol::source(record.esi, record.payload));
         } else {
