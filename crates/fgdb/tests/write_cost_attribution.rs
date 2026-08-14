@@ -43,13 +43,16 @@
 //!    itself were the O(history) term, THIS would grow; if it is flat, the
 //!    attribution excludes the commit protocol.
 //!
-//! **VERDICT SHAPE.** Attribution holds when: the marginal write reproduces
-//! the growth (mechanism present at this scale), the rebuild replica accounts
-//! for the majority of the marginal write at large N (the suspect is the
-//! cost), and the chronicle-only control stays flat (the alternative is
-//! excluded). Each is asserted with deliberately coarse ratios — this box runs
-//! many panes; per `cx_probe.rs`'s own doctrine these numbers are REPORTED,
-//! never promoted to a §17 gate, and the assertions are on shape, not speed.
+//! **VERDICT SHAPE.** Attribution holds when: the marginal write, normalized
+//! against adjacent constant-work fsync sentinels, reproduces the growth
+//! (mechanism present at this scale); the rebuild replica accounts for the
+//! majority of the marginal write at large N (the suspect is the cost); and
+//! the chronicle-only control stays flat (the alternative is excluded). Each
+//! is asserted with deliberately coarse ratios — this box runs many panes, so
+//! raw wall time is reported but never decides a verdict without its adjacent
+//! load control. Per `cx_probe.rs`'s own doctrine these numbers are REPORTED,
+//! never promoted to a §17 speed gate, and the assertions are on shape, not
+//! speed.
 //!
 //! **UBS DISPOSITION:** as in `cx_probe.rs`, `Instant::now()` here is a
 //! measurement interval start, never key material; `keys()` is the same fixed
@@ -65,7 +68,7 @@ use fgdb_strata::writer::BlockWriter;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::{BranchId, DatabaseSecurityNamespaceId, GraphId, ObjectId};
 use fgdb_types::{EId, VId};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn production_runtime() -> (Runtime, Cx) {
@@ -93,6 +96,123 @@ fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-fujt-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
+}
+
+/// One constant-work write-through in the subject directory. The floor keeps
+/// clock quantization from manufacturing an enormous ratio on a suspiciously
+/// fast filesystem response.
+fn fsync_sentinel(path: &Path) -> Duration {
+    use std::io::Write as _;
+
+    let payload = [0u8; 4096];
+    let start = Instant::now();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .expect("sentinel opens");
+    file.write_all(&payload).expect("sentinel writes");
+    file.sync_all().expect("sentinel syncs");
+    start.elapsed().max(Duration::from_micros(50))
+}
+
+fn median_duration<const N: usize>(mut samples: [Duration; N]) -> Duration {
+    assert!(N > 0, "a sentinel median needs at least one sample");
+    samples.sort_unstable();
+    samples[N / 2]
+}
+
+/// Compare work after dividing out adjacent constant-work latency, without a
+/// floating-point verdict. This is the exact predicate licensed by
+/// `sentinel_normalization_rejects_history_growth_without_false_redding_load`.
+fn normalized_growth_within(
+    small_work: Duration,
+    small_sentinel: Duration,
+    large_work: Duration,
+    large_sentinel: Duration,
+    max_factor: u128,
+) -> bool {
+    let observed = large_work
+        .as_nanos()
+        .checked_mul(small_sentinel.as_nanos())
+        .expect("measured duration cross-product fits u128");
+    let allowed = small_work
+        .as_nanos()
+        .checked_mul(large_sentinel.as_nanos())
+        .and_then(|value| value.checked_mul(max_factor))
+        .expect("measured duration budget fits u128");
+    observed <= allowed
+}
+
+/// Require the normalized reference cost to be at least `factor` times the
+/// normalized subject cost. This is Verdict 2's load-independent form.
+fn normalized_reference_dominates(
+    subject: Duration,
+    subject_sentinel: Duration,
+    reference: Duration,
+    reference_sentinel: Duration,
+    factor: u128,
+) -> bool {
+    let required = subject
+        .as_nanos()
+        .checked_mul(reference_sentinel.as_nanos())
+        .and_then(|value| value.checked_mul(factor))
+        .expect("measured duration requirement fits u128");
+    let observed = reference
+        .as_nanos()
+        .checked_mul(subject_sentinel.as_nanos())
+        .expect("measured duration cross-product fits u128");
+    required <= observed
+}
+
+#[test]
+fn sentinel_normalization_rejects_history_growth_without_false_redding_load() {
+    // Fivefold raw inflation caused entirely by fivefold neighboring I/O load
+    // is the same amount of attributed work and must remain green.
+    assert!(normalized_growth_within(
+        Duration::from_millis(80),
+        Duration::from_millis(10),
+        Duration::from_millis(400),
+        Duration::from_millis(50),
+        2,
+    ));
+
+    // The same raw inflation with an unchanged sentinel is real subject growth
+    // and must still red. This prevents normalization from becoming a waiver.
+    assert!(!normalized_growth_within(
+        Duration::from_millis(80),
+        Duration::from_millis(10),
+        Duration::from_millis(400),
+        Duration::from_millis(10),
+        2,
+    ));
+
+    // Equal load inflation on the subject and reference cannot change whether
+    // the rebuild is at least twice as expensive as the live write.
+    assert!(normalized_reference_dominates(
+        Duration::from_millis(100),
+        Duration::from_millis(10),
+        Duration::from_millis(200),
+        Duration::from_millis(10),
+        2,
+    ));
+    assert!(normalized_reference_dominates(
+        Duration::from_millis(500),
+        Duration::from_millis(50),
+        Duration::from_millis(1000),
+        Duration::from_millis(50),
+        2,
+    ));
+
+    // A genuinely under-dominant rebuild remains red after normalization.
+    assert!(!normalized_reference_dominates(
+        Duration::from_millis(100),
+        Duration::from_millis(10),
+        Duration::from_millis(150),
+        Duration::from_millis(10),
+        2,
+    ));
 }
 
 /// One edge per commit, the sweep's history-building shape.
@@ -269,7 +389,7 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
 
     // ---- Instrument 1 + 2: marginal write and rebuild replica per history size.
     let mut marginal = Vec::new();
-    let mut replicas: Vec<(usize, ReplicaStages)> = Vec::new();
+    let mut replicas: Vec<(usize, ReplicaStages, Duration)> = Vec::new();
     for &n in &HISTORY_POINTS {
         let dir = scratch(&format!("hist-{n}"));
         let mut db = runtime
@@ -277,6 +397,8 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
             .expect("creates");
         build_history(&runtime, &commit, &mut db, n);
 
+        let sentinel_path = dir.join("marginal-write-sentinel");
+        let sentinel_before = fsync_sentinel(&sentinel_path);
         let start = Instant::now();
         let mut batch = WriteBatch::new(KNOWS);
         batch.create_vertex(VId(900_000), vec![], vec![]);
@@ -285,10 +407,22 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
             .block_on(db.write(&commit, batch))
             .expect("marginal commit");
         let t_marginal = start.elapsed();
-        marginal.push((n, t_marginal));
+        let sentinel_after_1 = fsync_sentinel(&sentinel_path);
+        let sentinel_after_2 = fsync_sentinel(&sentinel_path);
+        let sentinel = median_duration([sentinel_before, sentinel_after_1, sentinel_after_2]);
+        marginal.push((n, t_marginal, sentinel));
 
         drop(db);
-        replicas.push((n, rebuild_replica(&dir)));
+        let replica_sentinel_before = fsync_sentinel(&sentinel_path);
+        let replica = rebuild_replica(&dir);
+        let replica_sentinel_after_1 = fsync_sentinel(&sentinel_path);
+        let replica_sentinel_after_2 = fsync_sentinel(&sentinel_path);
+        let replica_sentinel = median_duration([
+            replica_sentinel_before,
+            replica_sentinel_after_1,
+            replica_sentinel_after_2,
+        ]);
+        replicas.push((n, replica, replica_sentinel));
     }
 
     // ---- Instrument 3: chronicle-only control — raw commits, no rebuild.
@@ -309,25 +443,10 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     // O(history) term; only work that grows with THIS stream's history can
     // move the ratio.
     let sentinel_path = control_dir.join("sentinel");
-    let sentinel_payload = [0u8; 4096];
     let mut control: Vec<(Duration, f64)> = Vec::new();
     for round in 0..HISTORY_POINTS[HISTORY_POINTS.len() - 1] as u64 + 1 {
         let (bytes, capsule) = control_capsule_bytes(round);
-        let sentinel_start = Instant::now();
-        {
-            use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&sentinel_path)
-                .expect("sentinel opens");
-            file.write_all(&sentinel_payload).expect("sentinel writes");
-            file.sync_all().expect("sentinel syncs");
-        }
-        // Floored against clock quantization so a suspiciously fast sync
-        // cannot manufacture a huge ratio.
-        let sentinel = sentinel_start.elapsed().max(Duration::from_micros(50));
+        let sentinel = fsync_sentinel(&sentinel_path);
         let start = Instant::now();
         runtime
             .block_on(coordinator.commit(&commit, &bytes, |seq, oid| {
@@ -341,12 +460,16 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     // ---- REPORT, in full, before any verdict: every number the assertions
     // use must be reconstructable from the test log alone.
     eprintln!("fujt attribution report");
-    for ((n, t), (_, stages)) in marginal.iter().zip(&replicas) {
+    for ((n, t, sentinel), (_, stages, replica_sentinel)) in marginal.iter().zip(&replicas) {
         eprintln!(
-            "  history={n:>3} marginal_write={t:?} replica_total={:?} \
+            "  history={n:>3} marginal_write={t:?} sentinel={sentinel:?} \
+             marginal/sentinel={:.2} replica_total={:?} \
+             replica_sentinel={replica_sentinel:?} replica/sentinel={:.2} \
              [chain_recover={:?} capsule_read={:?} digest={:?} decode={:?} \
              fold={:?} publish_reopen={:?}]",
+            t.as_secs_f64() / sentinel.as_secs_f64(),
             stages.total(),
+            stages.total().as_secs_f64() / replica_sentinel.as_secs_f64(),
             stages.open_recover_chain,
             stages.capsule_read_recover,
             stages.digest_verify,
@@ -373,15 +496,17 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     // landed): the marginal write is BOUNDED — it must not grow with history.
     // Attribution-era numbers, kept for the record: 81→183→445 ms over
     // 8→32→96 (a 5.5x climb, 95% of it rebuild's capsule re-read loop).
-    // Post-fix: 47.7→46.9→49.4 ms, flat. 2x headroom keeps machine noise from
-    // deciding the verdict; a real regression to per-commit rebuild is >5x.
-    let (small_n, small_t) = marginal[0];
-    let (large_n, large_t) = marginal[marginal.len() - 1];
+    // Post-fix: 47.7→46.9→49.4 ms, flat. The adjacent same-directory sentinel
+    // removes machine-wide I/O inflation from the verdict; 2x headroom remains
+    // unchanged, while a real regression to per-commit rebuild is >5x.
+    let (small_n, small_t, small_sentinel) = marginal[0];
+    let (large_n, large_t, large_sentinel) = marginal[marginal.len() - 1];
     assert!(
-        large_t.as_nanos() <= small_t.as_nanos().saturating_mul(2),
+        normalized_growth_within(small_t, small_sentinel, large_t, large_sentinel, 2,),
         "THE O(HISTORY) WRITE COST IS BACK: marginal write at {large_n} \
-         commits ({large_t:?}) is more than 2x the marginal write at \
-         {small_n} commits ({small_t:?}). The incremental snapshot path \
+         commits ({large_t:?} / {large_sentinel:?} sentinel) is more than 2x \
+         the sentinel-normalized marginal write at {small_n} commits \
+         ({small_t:?} / {small_sentinel:?} sentinel). The incremental snapshot path \
          (fgdb-fujt) bounded this; something reintroduced per-commit work \
          proportional to history. Report above."
     );
@@ -391,13 +516,21 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     // deliberately untouched), so at the largest history the marginal write
     // must be well under it — inverted from the attribution era, when the
     // replica accounted for ≥ half the marginal write.
-    let (_, large_stages) = replicas[replicas.len() - 1];
+    let (_, large_stages, large_replica_sentinel) = replicas[replicas.len() - 1];
     assert!(
-        large_t.as_nanos() * 2 <= large_stages.total().as_nanos(),
-        "the marginal write at {large_n} commits ({large_t:?}) is not well \
-         under the full-rebuild replica ({:?}) — the write path is paying \
+        normalized_reference_dominates(
+            large_t,
+            large_sentinel,
+            large_stages.total(),
+            large_replica_sentinel,
+            2,
+        ),
+        "the sentinel-normalized marginal write at {large_n} commits \
+         ({large_t:?} / {large_sentinel:?}) is not well under the \
+         sentinel-normalized full-rebuild replica ({:?} / {:?}) — the write path is paying \
          history-proportional rebuild work again; report above.",
-        large_stages.total()
+        large_stages.total(),
+        large_replica_sentinel,
     );
 
     // ---- VERDICT 3: the durable commit protocol is NOT the term — raw
