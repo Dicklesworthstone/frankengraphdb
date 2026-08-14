@@ -292,9 +292,36 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
             .collect::<Vec<_>>()
     }
 
+    for forbidden_indirection in ["#[cfg", "#[cfg_attr", "macro_rules!", "include!"] {
+        assert!(
+            !source.contains(forbidden_indirection),
+            "zeroize.rs must keep its scrub authority unconditional and directly \
+             inspectable; found {forbidden_indirection}"
+        );
+    }
+
+    let mut compiled_secret = fgdb_crypto::zeroize::Secret::new([0xa5_u8; 2]);
+    compiled_secret.scrub();
+    assert_eq!(
+        compiled_secret.expose(),
+        &[0_u8; 2],
+        "the production-selected Secret::scrub method must execute the exact source authority"
+    );
+    let mut compiled_slice = [0xa5_u8; 2];
+    fgdb_crypto::zeroize::scrub_slice(&mut compiled_slice);
+    assert_eq!(
+        compiled_slice, [0_u8; 2],
+        "the production-selected scrub_slice must execute for every admitted length"
+    );
+
     let scrub_start = source
         .find("pub fn scrub(&mut self)")
         .expect("Secret::scrub is present");
+    assert_eq!(
+        source.matches("pub fn scrub(&mut self)").count(),
+        1,
+        "zeroize.rs must contain exactly one Secret::scrub authority"
+    );
     let scrub = &source[scrub_start..];
     let scrub = &scrub[..scrub.find("\n    }").unwrap_or(scrub.len())];
     assert_eq!(
@@ -338,6 +365,13 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     let boundary_start = source
         .find("#[inline(never)]\npub fn scrub_slice")
         .expect("the non-inlined codegen boundary is present");
+    assert_eq!(
+        source
+            .matches("pub fn scrub_slice(bytes: &mut [u8])")
+            .count(),
+        1,
+        "zeroize.rs must contain exactly one scrub_slice authority"
+    );
     let boundary = &source[boundary_start..];
     let boundary = &boundary[..boundary.find("\n}").unwrap_or(boundary.len())];
     assert_eq!(
