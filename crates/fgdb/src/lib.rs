@@ -948,7 +948,10 @@ impl WriteBatch {
     /// Set `vid`'s `key` to `value` only if it currently equals `expected`.
     ///
     /// [`WriteMismatchPolicy::AbortWrite`] refuses the batch before D2.
-    /// [`WriteMismatchPolicy::NoOp`] emits no row. There is no
+    /// [`WriteMismatchPolicy::NoOp`] emits no row on a mismatch. A gone
+    /// element is observed as `None`: `expected=Some` is a NoOp mismatch;
+    /// `expected=None` matches and then refuses [`WriteError::UnknownVertex`]
+    /// / [`WriteError::UnknownEdge`] (fgdb-pmj7). There is no
     /// `StatementError` arm — WriteBatch is one write.
     pub fn compare_and_set_vertex_property(
         &mut self,
@@ -1965,6 +1968,10 @@ impl<V: Vfs + Clone> Database<V> {
                             || prefix_versions.contains_key(&ElementId::Vertex(vid))
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
+                        // Not a member of a gone vertex is already true.
+                        if !member {
+                            continue;
+                        }
                         return Err(WriteError::UnknownVertex { vid });
                     }
                     let (labels, _) =
@@ -2082,27 +2089,42 @@ impl<V: Vfs + Clone> Database<V> {
                     value,
                     mismatch,
                 } => {
-                    let actual = match elem {
+                    let live_now = match elem {
                         ElementId::Vertex(vid) => {
-                            let live_now = !prefix_deleted_vertices.contains(&vid)
+                            !prefix_deleted_vertices.contains(&vid)
                                 && (prefix_content.contains_key(&vid)
                                     || prefix_versions.contains_key(&ElementId::Vertex(vid))
-                                    || self.writer.is_vertex_live(vid));
-                            if !live_now {
-                                return Err(WriteError::UnknownVertex { vid });
-                            }
+                                    || self.writer.is_vertex_live(vid))
+                        }
+                        ElementId::Edge(eid) => {
+                            !prefix_deleted_edges.contains(&eid)
+                                && (prefix_edges.contains_key(&eid)
+                                    || self.writer.live_edge(eid).is_some())
+                        }
+                    };
+                    if !live_now {
+                        // Reference property_of on a gone element is None.
+                        // expected=Some is a mismatch: NoOp is Nothing
+                        // (fgdb-q6zj). expected=None matches, then set-Some
+                        // on a gone element is Unknown* — NoOp is not a
+                        // license to invent the element (fgdb-pmj7).
+                        // AbortWrite still names the missing id.
+                        if expected.is_some() && matches!(mismatch, WriteMismatchPolicy::NoOp) {
+                            continue;
+                        }
+                        return Err(match elem {
+                            ElementId::Vertex(vid) => WriteError::UnknownVertex { vid },
+                            ElementId::Edge(eid) => WriteError::UnknownEdge { eid },
+                        });
+                    }
+                    let actual = match elem {
+                        ElementId::Vertex(vid) => {
                             let (_, props) =
                                 vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
                             let position = props.binary_search_by_key(&key, |(k, _)| *k);
                             position.ok().map(|at| props[at].1.clone())
                         }
                         ElementId::Edge(eid) => {
-                            let live_now = !prefix_deleted_edges.contains(&eid)
-                                && (prefix_edges.contains_key(&eid)
-                                    || self.writer.live_edge(eid).is_some());
-                            if !live_now {
-                                return Err(WriteError::UnknownEdge { eid });
-                            }
                             let props = prefix_edge_rows.entry(eid).or_insert_with(|| {
                                 self.writer.live_edge_row(eid).unwrap_or_default()
                             });
@@ -3134,15 +3156,30 @@ fn fold_statement_versions(
 type VertexContent = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
 
 fn sort_write_labels_and_props(
-    labels: &mut [LabelId],
-    props: &mut [(PropertyKeyId, CanonicalScalar)],
+    labels: &mut Vec<LabelId>,
+    props: &mut Vec<(PropertyKeyId, CanonicalScalar)>,
 ) {
     labels.sort_unstable();
+    labels.dedup();
     sort_write_props(props);
 }
 
-fn sort_write_props(props: &mut [(PropertyKeyId, CanonicalScalar)]) {
+/// Sort by key. Identical `(key, value)` repeats collapse (the reference's
+/// `canonical_props`); a key with two different values is left adjacent so
+/// template build refuses `NonCanonicalPropertyOrder` (fgdb-nsrv).
+fn sort_write_props(props: &mut Vec<(PropertyKeyId, CanonicalScalar)>) {
     props.sort_by_key(|(key, _)| *key);
+    let mut kept = 0usize;
+    for i in 0..props.len() {
+        if kept > 0 && props[i].0 == props[kept - 1].0 && props[i].1 == props[kept - 1].1 {
+            continue;
+        }
+        if kept != i {
+            props[kept] = props[i].clone();
+        }
+        kept += 1;
+    }
+    props.truncate(kept);
 }
 
 /// The batch-prefix content entry for `vid`, seeded from the merged committed

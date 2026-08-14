@@ -26,7 +26,7 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{
     CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError, WriteMismatchPolicy,
 };
-use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{CanonicalError, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
@@ -331,10 +331,79 @@ fn a_same_batch_create_and_delete_leaves_no_element() {
             "the surviving vertices are untouched"
         );
         drop(db);
-        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert!(
             db.vertex(VId(3)).expect("reads").is_none(),
             "and the fold is stable"
+        );
+        // A never-durable create+delete must not spend the identity.
+        let mut again = WriteBatch::new(KNOWS);
+        again.create_vertex(VId(3), vec![], vec![]);
+        db.write(cx, again)
+            .await
+            .expect("a folded-away create does not spend the vid");
+        assert!(db.vertex(VId(3)).expect("reads").is_some());
+    });
+}
+
+/// Identical label/prop repeats collapse; a key with two values still
+/// refuses Canonical (fgdb-nsrv).
+#[test]
+fn identical_create_duplicates_collapse_and_conflicts_still_refuse() {
+    let dir = scratch("create-dups");
+    under_lab(8224, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(
+            VId(1),
+            vec![LabelId(3), LabelId(5), LabelId(3)],
+            vec![
+                (key, CanonicalScalar::Int(1)),
+                (key, CanonicalScalar::Int(1)),
+            ],
+        );
+        batch.create_vertex(VId(2), vec![], vec![]);
+        batch.add_edge(
+            EId(10),
+            VId(1),
+            VId(2),
+            vec![
+                (key, CanonicalScalar::Int(9)),
+                (key, CanonicalScalar::Int(9)),
+            ],
+        );
+        db.write(cx, batch)
+            .await
+            .expect("identical duplicates collapse");
+        let row = db.vertex(VId(1)).expect("reads").expect("live");
+        assert_eq!(row.labels, vec![LabelId(3), LabelId(5)]);
+        assert_eq!(row.props, vec![(key, CanonicalScalar::Int(1))]);
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(key, CanonicalScalar::Int(9))]
+        );
+
+        let mut conflict = WriteBatch::new(KNOWS);
+        conflict.create_vertex(
+            VId(3),
+            vec![],
+            vec![
+                (key, CanonicalScalar::Int(1)),
+                (key, CanonicalScalar::Int(2)),
+            ],
+        );
+        let refusal = db
+            .write(cx, conflict)
+            .await
+            .expect_err("conflicting values for one key must refuse");
+        assert!(
+            matches!(
+                refusal,
+                WriteError::Canonical(CanonicalError::NonCanonicalPropertyOrder { .. })
+            ),
+            "conflict must be Canonical, got {refusal:?}"
         );
     });
 }
@@ -559,6 +628,268 @@ fn clearing_a_property_on_a_gone_element_is_a_noop() {
             ),
             "set-to-a-value on a missing vertex still refuses"
         );
+    });
+}
+
+/// expected=Some on a gone element is a mismatch, so NoOp is Nothing
+/// and a sibling create still commits (fgdb-q6zj). AbortWrite on a
+/// missing id stays Unknown*. expected=None is a match — see
+/// `cas_expected_none_on_a_gone_element_refuses`.
+#[test]
+fn cas_noop_on_a_gone_element_continues_the_batch() {
+    let dir = scratch("cas-noop-gone");
+    under_lab(8222, move |cx| async move {
+        let cx = &cx;
+        let rank = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.delete_vertex(VId(1));
+        batch.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        batch.compare_and_set_edge_property(
+            EId(10),
+            rank,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        batch.create_vertex(VId(3), vec![], vec![]);
+        db.write(cx, batch)
+            .await
+            .expect("NoOp CAS on a just-deleted element continues");
+        assert!(db.vertex(VId(3)).expect("reads").is_some());
+
+        let mut abort = WriteBatch::new(KNOWS);
+        abort.compare_and_set_vertex_property(
+            VId(99),
+            rank,
+            Some(CanonicalScalar::Int(1)),
+            CanonicalScalar::Int(2),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        assert!(
+            matches!(
+                db.write(cx, abort).await,
+                Err(WriteError::UnknownVertex { vid: VId(99) })
+            ),
+            "AbortWrite on a missing vertex is still UnknownVertex"
+        );
+    });
+}
+
+/// expected=None on a gone element matches (property_of is None), then
+/// set-Some is Unknown* — NoOp does not swallow the refusal (fgdb-pmj7).
+#[test]
+fn cas_expected_none_on_a_gone_element_refuses() {
+    let dir = scratch("cas-none-gone");
+    under_lab(8225, move |cx| async move {
+        let cx = &cx;
+        let rank = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.delete_vertex(VId(1));
+        batch.compare_and_set_vertex_property(
+            VId(1),
+            rank,
+            None,
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        batch.create_vertex(VId(3), vec![], vec![]);
+        assert!(
+            matches!(
+                db.write(cx, batch).await,
+                Err(WriteError::UnknownVertex { vid: VId(1) })
+            ),
+            "a matching CAS cannot set a property on a just-deleted vertex"
+        );
+        assert!(
+            db.vertex(VId(1)).expect("reads").is_some(),
+            "the refused batch must not delete either"
+        );
+        assert!(
+            db.vertex(VId(3)).expect("reads").is_none(),
+            "the sibling create must not commit"
+        );
+
+        let mut edge = WriteBatch::new(KNOWS);
+        edge.delete_edge(EId(10));
+        edge.compare_and_set_edge_property(
+            EId(10),
+            rank,
+            None,
+            CanonicalScalar::Int(9),
+            WriteMismatchPolicy::NoOp,
+        );
+        edge.create_vertex(VId(4), vec![], vec![]);
+        assert!(
+            matches!(
+                db.write(cx, edge).await,
+                Err(WriteError::UnknownEdge { eid: EId(10) })
+            ),
+            "a matching CAS cannot set a property on a just-deleted edge"
+        );
+        assert!(db.edge(EId(10)).expect("reads").is_some());
+        assert!(db.vertex(VId(4)).expect("reads").is_none());
+
+        let mut missing = WriteBatch::new(KNOWS);
+        missing.compare_and_set_vertex_property(
+            VId(99),
+            rank,
+            None,
+            CanonicalScalar::Int(1),
+            WriteMismatchPolicy::NoOp,
+        );
+        missing.create_vertex(VId(5), vec![], vec![]);
+        assert!(
+            matches!(
+                db.write(cx, missing).await,
+                Err(WriteError::UnknownVertex { vid: VId(99) })
+            ),
+            "expected=None on a never-created vertex is still UnknownVertex"
+        );
+        assert!(db.vertex(VId(5)).expect("reads").is_none());
+    });
+}
+
+#[test]
+fn clearing_a_label_on_a_gone_vertex_is_a_noop() {
+    let dir = scratch("clear-label-gone");
+    under_lab(8223, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![LabelId(3)], vec![]);
+        db.write(cx, seed).await.expect("seeds");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.delete_vertex(VId(1));
+        batch.set_vertex_label(VId(1), LabelId(3), false);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        db.write(cx, batch)
+            .await
+            .expect("clear-label after delete is Nothing");
+        assert!(db.vertex(VId(2)).expect("reads").is_some());
+        let mut add = WriteBatch::new(KNOWS);
+        add.set_vertex_label(VId(99), LabelId(3), true);
+        assert!(
+            matches!(
+                db.write(cx, add).await,
+                Err(WriteError::UnknownVertex { vid: VId(99) })
+            ),
+            "adding a label to a missing vertex still refuses"
+        );
+    });
+}
+
+/// WriteBatch must carry a same-commit run past MAX_PATCH_ROWS /
+/// MAX_BLOCK_ENTRIES through Chronicle D2, apply, seal, and publish
+/// (fgdb-k4fe / otcw).
+#[test]
+fn a_same_commit_run_past_the_format_ceiling_reopens() {
+    let dir = scratch("257-ceiling");
+    under_lab(8226, move |cx| async move {
+        let cx = &cx;
+        let count = 257u128;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut vertices = WriteBatch::new(KNOWS);
+        for n in 1..=count {
+            vertices.create_vertex(VId(n), vec![], vec![]);
+        }
+        db.write(cx, vertices)
+            .await
+            .expect("257 same-commit vertex creates must commit");
+        let mut edges = WriteBatch::new(KNOWS);
+        for n in 1..=count {
+            edges.add_edge(EId(n), VId(1), VId(2), vec![]);
+        }
+        db.write(cx, edges)
+            .await
+            .expect("257 same-commit edges must commit");
+        for n in 1..=count {
+            assert!(
+                db.vertex(VId(n)).expect("reads").is_some(),
+                "vid={n} must be live before drop"
+            );
+            assert!(
+                db.edge(EId(n)).expect("reads").is_some(),
+                "eid={n} must be live before drop"
+            );
+        }
+        drop(db);
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        for n in 1..=count {
+            assert!(
+                db.vertex(VId(n)).expect("reads").is_some(),
+                "vid={n} must survive reopen past the patch ceiling"
+            );
+            assert!(
+                db.edge(EId(n)).expect("reads").is_some(),
+                "eid={n} must survive reopen past the block ceiling"
+            );
+        }
+    });
+}
+
+/// 256 same-family propertied edges exceed MAX_PROPERTY_PATCH_ROWS (255).
+/// WriteBatch must still commit; the locator column at the ceiling is
+/// lawful (fgdb-hc04).
+#[test]
+fn a_same_commit_propertied_family_past_the_patch_row_ceiling_reopens() {
+    let dir = scratch("256-propertied");
+    under_lab(8227, move |cx| async move {
+        let cx = &cx;
+        let count = 256u128;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        db.write(cx, seed).await.expect("seeds");
+        let mut edges = WriteBatch::new(KNOWS);
+        for n in 1..=count {
+            edges.add_edge(
+                EId(n),
+                VId(1),
+                VId(2),
+                vec![(key, CanonicalScalar::Int(n as i64))],
+            );
+        }
+        db.write(cx, edges)
+            .await
+            .expect("256 propertied same-family edges must commit");
+        for n in 1..=count {
+            assert_eq!(
+                db.edge(EId(n)).expect("reads").expect("live").props,
+                vec![(key, CanonicalScalar::Int(n as i64))],
+                "eid={n} must keep its property before drop"
+            );
+        }
+        drop(db);
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        for n in 1..=count {
+            assert_eq!(
+                db.edge(EId(n)).expect("reads").expect("live").props,
+                vec![(key, CanonicalScalar::Int(n as i64))],
+                "eid={n} must survive reopen past the property-patch ceiling"
+            );
+        }
     });
 }
 

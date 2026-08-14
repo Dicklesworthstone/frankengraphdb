@@ -319,21 +319,28 @@ pub fn read_property_patch(
 /// patch in hand, so a block with a scrambled locator column refuses on its
 /// own bytes.
 pub fn validate_locator_sequence(locators: &[u8]) -> Result<usize, EdgePropertyPatchError> {
-    let mut next: u8 = 1;
+    // `next` is wider than the locator byte: a lawful full column is
+    // `1..=255`, and the increment after 255 must not wrap or refuse
+    // (fgdb-hc04). A 256th non-zero locator cannot inhabit a u8 and is
+    // the format ceiling, not a bijection scramble.
+    let mut next: u16 = 1;
     for (entry_at, &locator) in locators.iter().enumerate() {
         if locator == 0 {
             continue;
         }
-        if locator != next {
+        if u32::from(next) > MAX_PROPERTY_PATCH_ROWS {
+            return Err(EdgePropertyPatchError::ImplausibleRowCount {
+                declared: u32::from(next),
+            });
+        }
+        if u16::from(locator) != next {
             return Err(EdgePropertyPatchError::LocatorBijectionViolation {
                 entry_at,
-                expected: next,
+                expected: u8::try_from(next).expect("next is 1..=255 here"),
                 found: locator,
             });
         }
-        next = next
-            .checked_add(1)
-            .ok_or(EdgePropertyPatchError::ImplausibleRowCount { declared: u32::MAX })?;
+        next += 1;
     }
     Ok(usize::from(next - 1))
 }

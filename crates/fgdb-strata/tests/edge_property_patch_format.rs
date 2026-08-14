@@ -11,6 +11,7 @@ use fgdb_strata::edge_props::{
     EdgePropertyPatchError, EdgePropertyPatchVersion, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS,
     PROPERTY_PATCH_FORMAT_V1, PROPERTY_PATCH_MAGIC, decode_property_patch, encode_property_patch,
     property_patch_id, read_property_patch, validate_block_patch_consistency,
+    validate_locator_sequence,
 };
 use fgdb_strata::{
     AdjacencyEntry, BLOCK_FORMAT_V4, BlockError, decode_block, decode_block_with_properties,
@@ -190,6 +191,42 @@ fn the_row_ceiling_is_shared_with_the_locator_in_both_directions() {
             declared: MAX_PROPERTY_PATCH_ROWS + 1
         })
     );
+}
+
+/// A lawful full column is `1..=255`. The increment after 255 must not
+/// wrap a u8 and refuse the ceiling itself (fgdb-hc04).
+#[test]
+fn a_full_locator_column_at_the_row_ceiling_is_lawful() {
+    let n = usize::try_from(MAX_PROPERTY_PATCH_ROWS).expect("fits");
+    let locators: Vec<u8> = (1..=u8::try_from(n).expect("255 fits")).collect();
+    assert_eq!(
+        validate_locator_sequence(&locators).expect("the ceiling column is lawful"),
+        n
+    );
+    let mut overflow = locators.clone();
+    overflow.push(1);
+    assert_eq!(
+        validate_locator_sequence(&overflow),
+        Err(EdgePropertyPatchError::ImplausibleRowCount {
+            declared: MAX_PROPERTY_PATCH_ROWS + 1
+        }),
+        "a 256th non-zero locator is the format ceiling, not a scramble"
+    );
+    let entries: Vec<AdjacencyEntry> = (1..=n as u128)
+        .map(|i| AdjacencyEntry {
+            src: VId(1),
+            relation: RelationId(1),
+            dst: VId(2),
+            eid: EId(i),
+            created_at: CommitSeq(1),
+            retired_at: None,
+        })
+        .collect();
+    let rows: Vec<EdgePropertyRow> = (1..=n as u64)
+        .map(|i| vec![(PropertyKeyId(i), CanonicalScalar::Int(i as i64))])
+        .collect();
+    encode_block_with_properties(0, None, &entries, ObjectId([0xab; 32]), &locators, &rows)
+        .expect("a full 255-row hosted patch encodes");
 }
 
 // ---------------------------------------------------------------------------

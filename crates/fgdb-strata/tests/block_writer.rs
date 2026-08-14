@@ -36,6 +36,15 @@ fn writer() -> BlockWriter {
 }
 
 fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
+    create_with_props(eid, src, dst, vec![])
+}
+
+fn create_with_props(
+    eid: u128,
+    src: u128,
+    dst: u128,
+    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+) -> DeltaRow {
     DeltaRow::CreateEdge {
         eid: EId(eid),
         birth_ordinal: eid as u64,
@@ -43,7 +52,7 @@ fn create(eid: u128, src: u128, dst: u128) -> DeltaRow {
         relation: REL,
         dst: VId(dst),
         canonical_key: None,
-        props: vec![],
+        props,
         valid_time: None,
     }
 }
@@ -1009,6 +1018,49 @@ fn a_same_commit_family_past_the_entry_ceiling_publishes_conforming_blocks() {
         eids,
         (1..=count as u128).map(EId).collect::<Vec<_>>(),
         "every created edge must survive the split"
+    );
+    fgdb_strata::root::encode_root(&root).expect("the split root is lawful");
+}
+
+/// The property-patch ceiling is 255 (u8 locators). 256 same-family
+/// propertied edges must split or encode_property_patch / u8::try_from
+/// refuse the chunk (fgdb-hc04).
+#[test]
+fn a_same_commit_propertied_family_past_the_patch_row_ceiling_publishes() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    seed_vertices(&mut w, 1, &[1, 2]);
+    let ceiling = usize::try_from(fgdb_strata::edge_props::MAX_PROPERTY_PATCH_ROWS).expect("fits");
+    let count = ceiling + 1;
+    let key = PropertyKeyId(7);
+    for n in 1..=count {
+        w.apply(
+            keys(),
+            seq,
+            &create_with_props(n as u128, 1, 2, vec![(key, CanonicalScalar::Int(n as i64))]),
+        )
+        .expect("creates up to and past the property-patch ceiling");
+    }
+    let (root, blocks, _patches) = w
+        .publish(keys(), seq)
+        .expect("publish must split the oversized propertied family");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "one family of {} propertied entries is two blocks",
+        count
+    );
+    assert_eq!(root.blocks.len(), 2);
+    let mut eids: Vec<EId> = blocks
+        .iter()
+        .flat_map(|block| decode_block(&block.bytes).expect("each chunk decodes"))
+        .map(|entry| entry.eid)
+        .collect();
+    eids.sort();
+    assert_eq!(
+        eids,
+        (1..=count as u128).map(EId).collect::<Vec<_>>(),
+        "every propertied edge must survive the split"
     );
     fgdb_strata::root::encode_root(&root).expect("the split root is lawful");
 }
