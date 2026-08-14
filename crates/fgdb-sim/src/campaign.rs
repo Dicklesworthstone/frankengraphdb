@@ -995,7 +995,11 @@ impl FalsificationCampaignRecord {
         {
             return Err(CampaignRecordError::NonUtf8ReproducerPath);
         }
-        if final_run.failure.as_ref() != Some(&shrunk.failure) {
+        if !final_run
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.same_kind_and_typed_evidence(&shrunk.failure))
+        {
             return Err(CampaignRecordError::ReproducerChangedFailureKind);
         }
         let artifact = final_run

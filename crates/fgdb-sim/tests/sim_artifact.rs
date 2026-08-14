@@ -23,7 +23,7 @@
 use fgdb::{DerivedPublicationStage, RecoveryRequired};
 use fgdb_sim::artifact::{
     ARTIFACT_REPLAY_ENV, ARTIFACT_REPLAY_EXPECTED_DIGEST_ENV, Absence, CONTRACT_FIELDS,
-    CommitDurabilityObservation, FailureKind, Field, Replay, Scenario, ScenarioCatalog,
+    CommitDurabilityObservation, Failure, FailureKind, Field, Replay, Scenario, ScenarioCatalog,
     ScenarioRegistration, ScenarioRegistrationError, replay_evidence_digest,
 };
 use fgdb_sim::vfs::{FaultPlan, Trigger};
@@ -77,6 +77,37 @@ fn plan_substituting_fixture(
         plan: FaultPlan::faultless(),
     }
     .run(dir)
+}
+
+#[test]
+fn failure_sameness_ignores_detail_prose() {
+    let left = Failure {
+        kind: FailureKind::IoFailed,
+        detail: "open failed: /tmp/shrink-attempt-0001/append.log".into(),
+        recovery: None,
+        durability: None,
+    };
+    let right = Failure {
+        kind: FailureKind::IoFailed,
+        detail: "open failed: /tmp/minimal-reproducer/append.log".into(),
+        recovery: None,
+        durability: None,
+    };
+    assert!(
+        left.same_kind_and_typed_evidence(&right),
+        "path-bearing detail must not change the failure identity"
+    );
+    assert_ne!(
+        left, right,
+        "PartialEq still sees the prose; filing must not use it"
+    );
+    let different_kind = Failure {
+        kind: FailureKind::AcknowledgedBytesLost,
+        detail: left.detail.clone(),
+        recovery: None,
+        durability: None,
+    };
+    assert!(!left.same_kind_and_typed_evidence(&different_kind));
 }
 
 #[test]

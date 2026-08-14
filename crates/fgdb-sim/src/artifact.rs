@@ -833,6 +833,16 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// Kind plus typed recovery/durability evidence. `detail` is prose and
+    /// must not decide sameness — it interpolates paths and `io::Error`
+    /// (fgdb-u95t).
+    #[must_use]
+    pub fn same_kind_and_typed_evidence(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.recovery == other.recovery
+            && self.durability == other.durability
+    }
+
     fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
         Self {
             kind,
@@ -1156,7 +1166,12 @@ async fn spine_durability(
     let Ok(acknowledged) = database.write(cx, recovery_batch(VId(1))).await else {
         return Ok(());
     };
-    let crash_succeeded = vfs.crash().await.is_ok();
+    vfs.crash().await.map_err(|error| {
+        Failure::new(
+            FailureKind::IoFailed,
+            format!("crash rollback failed: {error}"),
+        )
+    })?;
     drop(database);
 
     let reopened = Database::open(cx, dir, recovery_keys()).await;
@@ -1177,14 +1192,14 @@ async fn spine_durability(
     }
     let observation = CommitDurabilityObservation {
         acknowledged,
-        crash_succeeded,
+        crash_succeeded: true,
         reopen_succeeded,
         recovered_frontier,
         recovered_vertex,
         planted: plant_loss,
     };
 
-    if crash_succeeded && recovered_frontier == Some(acknowledged) && recovered_vertex {
+    if recovered_frontier == Some(acknowledged) && recovered_vertex {
         Ok(())
     } else {
         Err(Failure::acknowledged_commit_lost(observation))
