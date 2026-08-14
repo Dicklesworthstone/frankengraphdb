@@ -1210,6 +1210,7 @@ async fn spine_durability(
         planted: plant_loss,
     };
 
+    // ubs:ignore -- public commit-sequence recovery state, not secret material.
     if recovered_frontier == Some(acknowledged) && recovered_vertex {
         Ok(())
     } else {
@@ -1263,6 +1264,7 @@ async fn post_d2_recovery(
                 "{stage:?} returned the wrong typed recovery outcome: {other:?}"
             )),
         });
+    // ubs:ignore -- public typed simulation outcome, not secret material.
     if error.kind != FailureKind::CommittedNeedsRecovery {
         return Err(error);
     }
@@ -1369,6 +1371,7 @@ async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Res
         let n = poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &written[done..]))
             .await
             .map_err(|error| {
+                // ubs:ignore -- public ENOSPC errno classification, not secret material.
                 let kind = if error.raw_os_error() == Some(28) {
                     FailureKind::WriteRefused
                 } else {
@@ -1406,6 +1409,7 @@ async fn durable_append(vfs: &FaultVfs, dir: &Path, expect_durable: bool) -> Res
         )
     })?;
     if expect_durable {
+        // ubs:ignore -- public crash-model file bytes, not secret material.
         if durable == written {
             Ok(())
         } else {
