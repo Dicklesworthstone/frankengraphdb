@@ -605,14 +605,16 @@ struct EligibilityDecision {
     fires: bool,
 }
 
-fn trace_fault_point(class: Class, ordinal: u64) {
-    let Some(cx) = Cx::current() else {
-        return;
-    };
-    cx.trace(&format!(
-        "{FAULT_POINT_TRACE_PREFIX}{}:{ordinal}",
-        class.trace_name()
-    ));
+fn trace_fault_point(lab: &Lab, class: Class, ordinal: u64) {
+    // Prefer the live task's Cx so markers land on the snapshot buffer
+    // LDFI reads. Fall back to the construction Cx when ambient lookup
+    // is None inside a polled future (fgdb-yevb).
+    let message = format!("{FAULT_POINT_TRACE_PREFIX}{}:{ordinal}", class.trace_name());
+    if let Some(cx) = Cx::current() {
+        cx.trace(&message);
+    } else if let Some(cx) = lab.clock.as_ref() {
+        cx.trace(&message);
+    }
 }
 
 /// One namespace operation applied to the backing store whose durability is
@@ -883,7 +885,9 @@ impl<V: Vfs> FaultVfs<V> {
         );
         Self {
             backing: Arc::new(backing),
-            lab: Arc::new(Lab::new(plan, None)),
+            // Retain the ambient Cx for fault-point traces. Latency is
+            // refused above, so this is not used as a timer (fgdb-yevb).
+            lab: Arc::new(Lab::new(plan, Cx::current())),
         }
     }
 
@@ -932,6 +936,16 @@ impl<V: Vfs> FaultVfs<V> {
         self.lab.lock().flushed_bytes
     }
 
+    /// Whether fault-point traces can be emitted without ambient `Cx`.
+    ///
+    /// True when construction captured a `Cx` (`new` under a lab task, or
+    /// `with_clock`). False when the VFS was built outside any capability
+    /// context — LDFI then cannot see those seams (fgdb-yevb).
+    #[must_use]
+    pub fn retains_trace_context(&self) -> bool {
+        self.lab.clock.is_some()
+    }
+
     /// Simulates process loss.
     ///
     /// Every handle opened before this call refuses every subsequent
@@ -974,7 +988,7 @@ impl<V: Vfs> FaultVfs<V> {
         };
         let mut lost = Vec::new();
         for (op, decision) in decided {
-            trace_fault_point(Class::DirentLoss, decision.ordinal);
+            trace_fault_point(&self.lab, Class::DirentLoss, decision.ordinal);
             if decision.fires {
                 lost.push(op);
             }
@@ -1132,7 +1146,7 @@ impl<V: Vfs> FaultFile<V> {
             let decision = lab.decide(Class::Latency);
             (decision, lab.plan.latency_micros)
         };
-        trace_fault_point(Class::Latency, decision.ordinal);
+        trace_fault_point(&self.lab, Class::Latency, decision.ordinal);
         if !decision.fires {
             return Ok(());
         }
@@ -1207,7 +1221,7 @@ impl<V: Vfs> FaultFile<V> {
             }
             decision
         };
-        trace_fault_point(Class::DirentLie, decision.ordinal);
+        trace_fault_point(&self.lab, Class::DirentLie, decision.ordinal);
         if decision.fires {
             // Return success having settled nothing: the operations stay
             // pending, exactly as an fsync lie leaves sectors dirty.
@@ -1270,7 +1284,7 @@ impl<V: Vfs> FaultFile<V> {
             }
             decision
         };
-        trace_fault_point(Class::FsyncLie, decision.ordinal);
+        trace_fault_point(&self.lab, Class::FsyncLie, decision.ordinal);
         if decision.fires {
             // Return success having written nothing, and leave the bytes
             // dirty exactly as a real write-back cache would.
@@ -1299,7 +1313,7 @@ impl<V: Vfs> FaultFile<V> {
                 });
                 (decision, choice)
             };
-            trace_fault_point(Class::TornWrite, decision.ordinal);
+            trace_fault_point(&self.lab, Class::TornWrite, decision.ordinal);
             if decision.fires {
                 torn = choice;
             }
@@ -1356,7 +1370,7 @@ impl<V: Vfs> FaultFile<V> {
                 });
                 (decision, selected)
             };
-            trace_fault_point(Class::BitFlip, decision.ordinal);
+            trace_fault_point(&self.lab, Class::BitFlip, decision.ordinal);
             if decision.fires {
                 flip = selected;
             }
@@ -1460,7 +1474,7 @@ impl<V: Vfs> AsyncWrite for FaultFile<V> {
             }
             decision
         };
-        trace_fault_point(Class::WriteEnospc, decision.ordinal);
+        trace_fault_point(&self.lab, Class::WriteEnospc, decision.ordinal);
         if decision.fires {
             // Refuse before touching the image, cursor, or dirty set. A
             // short write would be legal too, but it would normally be

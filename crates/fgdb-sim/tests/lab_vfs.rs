@@ -117,6 +117,28 @@ fn a_faultless_plan_injects_nothing() {
     );
 }
 
+/// `FaultVfs::unix` must keep the construction `Cx` so fault-point traces
+/// survive the documented ambient-`Cx` hole inside polled futures (fgdb-yevb).
+#[test]
+fn unix_constructed_under_lab_retains_a_trace_context() {
+    let retained = run_and_expect_lab_green(0x7e7b, |_| async move {
+        FaultVfs::unix(FaultPlan::faultless()).retains_trace_context()
+    });
+    assert!(
+        retained,
+        "construction under a lab task must capture Cx for later poll-path traces"
+    );
+}
+
+#[test]
+fn unix_constructed_outside_lab_has_no_trace_context() {
+    let vfs = FaultVfs::unix(FaultPlan::faultless());
+    assert!(
+        !vfs.retains_trace_context(),
+        "outside a capability context there is no Cx to retain"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The fsync lie
 // ---------------------------------------------------------------------------
