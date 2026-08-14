@@ -233,6 +233,13 @@ status = "live"
 unit = "artifact"
 
 [[checker]]
+symbol = "w1_crypto_codegen_e2e"
+kind = "script"
+artifact = "scripts/w1_crypto_codegen_e2e.sh"
+status = "live"
+unit = "artifact"
+
+[[checker]]
 symbol = "cargo-test:claims"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"

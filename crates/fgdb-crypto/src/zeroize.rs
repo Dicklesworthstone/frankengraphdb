@@ -11,17 +11,24 @@
 //! `forbid` cannot be lowered (see AGENTS.md's toolchain rule: `unsafe` lives
 //! only in the separately named `fgdb-unsafe-*` boundary crates). What is
 //! available in safe code is an ordinary overwrite followed by
-//! [`compiler_fence`], which forbids the *compiler* from moving or eliding the
-//! preceding writes across it.
+//! [`compiler_fence`]. The fence is relevant to same-thread asynchronous
+//! observers, but Rust does **not** specify it as a general compiler barrier or
+//! as a guarantee that a dead store survives optimization.
 //!
-//! That is a real guarantee and a narrower one than "the secret is gone":
+//! The live `w1_crypto_codegen_e2e` gate therefore makes the narrower claim we
+//! can actually witness: for the pinned host toolchain, the optimized production
+//! object retains the zeroing call at the non-inlined boundary below. That is a
+//! measured artifact property, not a language-level promise and not the claim
+//! "the secret is gone":
 //!
-//! - IT DOES prevent the compiler from treating the final write as dead code,
-//!   which is the failure mode that silently removes a hand-written scrub.
+//! - IT DOES catch the observed failure mode where removing the fence lets the
+//!   pinned optimizer delete the final write; the gate mutation-proves that
+//!   distinction on the current toolchain.
 //! - IT DOES NOT reach copies the compiler already made — spilled registers, a
 //!   moved-from temporary, a `Vec` reallocation that copied and freed the old
-//!   buffer. [`Secret`] is fixed-size and non-`Clone` precisely to keep the
-//!   number of such copies at one, but "one" is not "zero".
+//!   buffer. [`Secret`] is fixed-size and non-`Clone` to avoid exposing APIs
+//!   that deliberately multiply those copies, but the compiler may still move
+//!   bytes in ways this type cannot observe or scrub.
 //! - IT DOES NOT defeat an attacker who can read the process's memory while it
 //!   is running. Zeroization narrows a post-hoc window (core dump, swap,
 //!   freed-page reuse); it is not a confidentiality control.
@@ -78,10 +85,7 @@ impl<const N: usize> Secret<N> {
     /// point its owner chooses rather than at scope exit — the KEK after the
     /// DEKs are unwrapped, for instance.
     pub fn scrub(&mut self) {
-        self.bytes.fill(0);
-        // The fence is the whole mechanism: without it the compiler may observe
-        // that `bytes` is never read again and delete the fill entirely.
-        compiler_fence(Ordering::SeqCst);
+        scrub_slice(&mut self.bytes);
     }
 }
 
@@ -109,7 +113,18 @@ impl<const N: usize> From<[u8; N]> for Secret<N> {
 /// For buffers this crate does not own the type of — a decrypted plaintext
 /// `Vec`, an intermediate Argon2 block — where wrapping in [`Secret`] is not
 /// possible. Same guarantee and same limits as [`Secret::scrub`].
+///
+/// This is deliberately one non-inlined code-generation boundary. Every
+/// [`Secret`] drop delegates here, and `w1_crypto_codegen_e2e.sh` inspects the
+/// optimized production object to require the zeroing call to survive. Without
+/// one stable boundary, generic drop glue would be monomorphized into whichever
+/// downstream crate happened to use a particular `Secret<N>`, making the
+/// claimed code-generation evidence impossible to enumerate honestly.
+#[inline(never)]
 pub fn scrub_slice(bytes: &mut [u8]) {
     bytes.fill(0);
+    // This is not a portable dead-store-elision guarantee. The live codegen
+    // gate witnesses that the fill survives in the pinned optimized host
+    // object, and goes red when this fence is removed on that toolchain.
     compiler_fence(Ordering::SeqCst);
 }

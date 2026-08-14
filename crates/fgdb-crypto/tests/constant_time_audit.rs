@@ -7,14 +7,14 @@
 //!
 //! **WHAT THIS IS NOT, said first so the green bar is not over-read.** This is a
 //! REVIEW artifact, not a timing measurement. It contains no dudect-style
-//! statistical timing tests and makes no claim that the compiled code is
-//! constant-time on any particular microarchitecture. §12.5 is explicit that
-//! "the vectors pass therefore it is secure" is not an inference this project
-//! makes, and the same applies here: a reviewed source can still compile to a
-//! branch. Constant-time behaviour remains a `bounded_model` claim with named
-//! methodology, and the statistical lane plus the release-blocking external
-//! audit are still owed by this bead — it is explicitly not closable as
-//! done-for-1.0 without a registered audit engagement plan.
+//! statistical timing tests and makes no claim that the compiled cipher code is
+//! constant-time on any particular microarchitecture. The separately
+//! registered `w1_crypto_codegen_e2e` gate now inspects the optimized zeroization
+//! boundary, but that narrow witness does not generalize to every kernel. §12.5
+//! is explicit that "the vectors pass therefore it is secure" is not an
+//! inference this project makes. Constant-time behaviour remains a
+//! `bounded_model` claim with named methodology, and the statistical lane plus
+//! the release-blocking external audit are still owed by this bead.
 //!
 //! **WHY THE AUDIT IS A TABLE AND NOT A COMMENT.** An audit written as prose in
 //! a doc comment is true on the day it is written and unfalsifiable afterwards.
@@ -38,8 +38,6 @@ enum Verdict {
     /// Secret-dependent addressing that is REQUIRED by the specification and
     /// accepted deliberately. Never a shrug — the rationale is in the row.
     AcceptedByDesign,
-    /// Handles no secret material at all.
-    NotSecretBearing,
 }
 
 /// The audit table. One row per `src/*.rs`, rationale mandatory.
@@ -116,11 +114,13 @@ const AUDIT: [(&str, Verdict, &str); 9] = [
     ),
     (
         "zeroize.rs",
-        Verdict::NotSecretBearing,
-        "Holds secret bytes but makes no decision from them: `fill(0)` plus a \
-         compiler fence, unconditionally. Note the fence itself is REVIEWED, NOT \
-         WITNESSED — see tests/zeroize.rs; verifying it needs codegen \
-         inspection, which this lane also does not do.",
+        Verdict::Clean,
+        "Holds secret bytes but makes no decision from them: every Secret drop \
+         delegates to the one non-inlined `scrub_slice` boundary, which performs \
+         `fill(0)` plus a compiler fence unconditionally. The source delegation \
+         is pinned below and the optimized boundary is independently inspected \
+         by the live w1_crypto_codegen_e2e gate. That witness covers the zeroing \
+         call only; it makes no claim about copies outside the owned buffer.",
     ),
 ];
 
@@ -271,5 +271,50 @@ fn the_reduction_stays_branchless() {
         !window.contains("if "),
         "the final reduction regained a branch, which leaks whether the \
          accumulator exceeded the modulus: {window}"
+    );
+}
+
+/// Every generic `Secret<N>` drop reaches the one release-codegen boundary.
+///
+/// The release-object gate can only prove something about the public
+/// `scrub_slice` symbol if `Secret::scrub` actually delegates to it. Keeping the
+/// linkage assertion beside the source audit makes the two halves mutually
+/// load-bearing: a surviving symbol that no secret calls is not evidence.
+#[test]
+fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
+    let source = std::fs::read_to_string(crate_root().join("src/zeroize.rs"))
+        .expect("zeroize.rs is readable");
+
+    let scrub_start = source
+        .find("pub fn scrub(&mut self)")
+        .expect("Secret::scrub is present");
+    let scrub = &source[scrub_start..];
+    let scrub = &scrub[..scrub.find("\n    }").unwrap_or(scrub.len())];
+    assert!(
+        scrub.contains("scrub_slice(&mut self.bytes);") && !scrub.contains("self.bytes.fill"),
+        "Secret::scrub must delegate instead of growing an unwitnessed generic \
+         zeroing path:\n{scrub}"
+    );
+
+    let drop_start = source
+        .find("impl<const N: usize> Drop for Secret<N>")
+        .expect("Secret has an automatic Drop implementation");
+    let drop_impl = &source[drop_start..];
+    let drop_impl = &drop_impl[..drop_impl.find("\n}\n").unwrap_or(drop_impl.len())];
+    assert!(
+        drop_impl.contains("fn drop(&mut self)") && drop_impl.contains("self.scrub();"),
+        "automatic Secret drop must invoke the witnessed scrub path:\n{drop_impl}"
+    );
+
+    let boundary_start = source
+        .find("#[inline(never)]\npub fn scrub_slice")
+        .expect("the non-inlined codegen boundary is present");
+    let boundary = &source[boundary_start..];
+    let boundary = &boundary[..boundary.find("\n}").unwrap_or(boundary.len())];
+    assert!(
+        boundary.contains("bytes.fill(0);")
+            && boundary.contains("compiler_fence(Ordering::SeqCst);")
+            && !boundary.contains("if "),
+        "the witnessed boundary must unconditionally zero then fence:\n{boundary}"
     );
 }
