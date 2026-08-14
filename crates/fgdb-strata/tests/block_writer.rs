@@ -876,6 +876,34 @@ fn a_self_loop_delete_cascades_the_edge_once() {
     );
 }
 
+/// Early-seal during cascade retire must not leave the writer half-applied
+/// when the incident set is past MAX_BLOCK_ENTRIES.
+#[test]
+fn a_cascade_past_the_entry_ceiling_retires_every_incident_edge() {
+    let mut w = writer();
+    seed_vertices(&mut w, 1, &[1, 2]);
+    let count = usize::try_from(fgdb_strata::MAX_BLOCK_ENTRIES).expect("fits") + 1;
+    let seq = CommitSeq(1);
+    for n in 1..=count {
+        w.apply(keys(), seq, &create(n as u128, 1, 2))
+            .expect("creates an incident edge");
+    }
+    let cascade: Vec<EId> = (1..=count as u128).map(EId).collect();
+    w.apply(keys(), CommitSeq(2), &delete_vertex_row(1, cascade))
+        .expect("a 257-edge cascade must retire atomically");
+    for n in 1..=count as u128 {
+        assert!(
+            w.live_edge(EId(n)).is_none(),
+            "eid={n} must retire with the vertex"
+        );
+    }
+    assert!(w.live_vertex_row(VId(1)).is_none());
+    assert!(
+        w.live_vertex_row(VId(2)).is_some(),
+        "the other endpoint stays"
+    );
+}
+
 /// A second delete of the same vertex is `UnknownVertex`: retirement removed
 /// it from the live map and the spent set forbids the re-create that could
 /// make it deletable again.
