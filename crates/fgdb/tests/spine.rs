@@ -514,6 +514,54 @@ fn a_second_delete_vertex_in_the_same_batch_is_a_noop() {
     });
 }
 
+/// RemoveProp of an already-absent property is Nothing, including when the
+/// element was deleted earlier in the batch or never existed (fgdb-vsgw).
+#[test]
+fn clearing_a_property_on_a_gone_element_is_a_noop() {
+    let dir = scratch("remove-prop-gone");
+    under_lab(8221, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.delete_vertex(VId(1));
+        batch.set_vertex_property(VId(1), key, None);
+        batch.set_edge_property(EId(10), key, None);
+        batch.create_vertex(VId(3), vec![], vec![]);
+        db.write(cx, batch)
+            .await
+            .expect("clear-after-delete is Nothing and the sibling create commits");
+        assert!(db.vertex(VId(1)).expect("reads").is_none());
+        assert!(db.edge(EId(10)).expect("reads").is_none());
+        assert!(db.vertex(VId(3)).expect("reads").is_some());
+
+        let mut missing = WriteBatch::new(KNOWS);
+        missing.set_vertex_property(VId(99), key, None);
+        missing.set_edge_property(EId(99), key, None);
+        missing.create_vertex(VId(4), vec![], vec![]);
+        db.write(cx, missing)
+            .await
+            .expect("clear of a never-seen id is Nothing");
+        assert!(db.vertex(VId(4)).expect("reads").is_some());
+
+        let mut ghost = WriteBatch::new(KNOWS);
+        ghost.set_vertex_property(VId(99), key, Some(CanonicalScalar::Int(1)));
+        assert!(
+            matches!(
+                db.write(cx, ghost).await,
+                Err(WriteError::UnknownVertex { vid: VId(99) })
+            ),
+            "set-to-a-value on a missing vertex still refuses"
+        );
+    });
+}
+
 /// **BOTH ENDPOINTS IN ONE BATCH (fgdb-cczg).** NENF applies DeleteVertex
 /// in VId order. Deleting the larger endpoint first must still assign the
 /// shared edge to the smaller VId so the fold's incident-set check holds.

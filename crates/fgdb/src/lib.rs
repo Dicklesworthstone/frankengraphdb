@@ -1999,6 +1999,11 @@ impl<V: Vfs + Clone> Database<V> {
                         && (prefix_edges.contains_key(&eid)
                             || self.writer.live_edge(eid).is_some());
                     if !live_now {
+                        // RemoveProp of an already-absent property is Nothing,
+                        // including when the edge itself is gone (fgdb-vsgw).
+                        if value.is_none() {
+                            continue;
+                        }
                         return Err(WriteError::UnknownEdge { eid });
                     }
                     let props = prefix_edge_rows
@@ -2037,6 +2042,9 @@ impl<V: Vfs + Clone> Database<V> {
                             || prefix_versions.contains_key(&ElementId::Vertex(vid))
                             || self.writer.is_vertex_live(vid));
                     if !live_now {
+                        if value.is_none() {
+                            continue;
+                        }
                         return Err(WriteError::UnknownVertex { vid });
                     }
                     let (_, props) = vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
