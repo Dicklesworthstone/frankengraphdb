@@ -11,6 +11,14 @@
 //! Scalar only, by doctrine: the workspace forbids `unsafe`, so the SIMD
 //! variant belongs to the `fgdb-unsafe-simd` boundary crate and must be
 //! bit-identical to this fallback before it may exist at all.
+//!
+//! Keyed and derive-key modes keep persistent key words, chaining values, and
+//! buffered material in scrub-on-drop storage. The fixed chaining-value stack
+//! avoids leaving moved values in inaccessible spare `Vec` capacity. As with
+//! [`crate::zeroize`], this covers original safe-Rust storage, not compiler
+//! register/spill copies or the caller-owned key/input/output buffers.
+
+use crate::zeroize::{scrub_slice, scrub_words32};
 
 /// The BLAKE3 initialization vector (the SHA-256 IV words).
 const IV: [u32; 8] = [
@@ -39,6 +47,7 @@ const MSG_SCHEDULE: [[usize; 16]; 7] = [
 
 const BLOCK_LEN: usize = 64;
 const CHUNK_LEN: usize = 1024;
+const MAX_CV_STACK_DEPTH: usize = 64;
 
 const CHUNK_START: u32 = 1 << 0;
 const CHUNK_END: u32 = 1 << 1;
@@ -47,6 +56,11 @@ const ROOT: u32 = 1 << 3;
 const KEYED_HASH: u32 = 1 << 4;
 const DERIVE_KEY_CONTEXT: u32 = 1 << 5;
 const DERIVE_KEY_MATERIAL: u32 = 1 << 6;
+
+#[inline]
+fn owns_secret_state(flags: u32) -> bool {
+    flags & (KEYED_HASH | DERIVE_KEY_MATERIAL) != 0
+}
 
 #[inline(always)]
 #[allow(clippy::many_single_char_names)]
@@ -128,7 +142,7 @@ fn words_from_block(block: &[u8; BLOCK_LEN]) -> [u32; 16] {
 }
 
 #[inline(always)]
-fn first_8_words(compression_output: [u32; 16]) -> [u32; 8] {
+fn first_8_words(compression_output: &[u32; 16]) -> [u32; 8] {
     let mut cv = [0u32; 8];
     cv.copy_from_slice(&compression_output[..8]);
     cv
@@ -153,9 +167,9 @@ struct ChunkState {
 }
 
 impl ChunkState {
-    fn new(key_words: [u32; 8], chunk_counter: u64, flags: u32) -> Self {
+    fn new(key_words: &[u32; 8], chunk_counter: u64, flags: u32) -> Self {
         Self {
-            chaining_value: key_words,
+            chaining_value: *key_words,
             chunk_counter,
             block: [0; BLOCK_LEN],
             block_len: 0,
@@ -181,14 +195,19 @@ impl ChunkState {
             // A full buffered block is compressed only once MORE input
             // arrives: the final block of the chunk must keep CHUNK_END.
             if usize::from(self.block_len) == BLOCK_LEN {
-                let block_words = words_from_block(&self.block);
-                self.chaining_value = first_8_words(compress(
+                let mut block_words = words_from_block(&self.block);
+                let mut compression_output = compress(
                     &self.chaining_value,
                     &block_words,
                     self.chunk_counter,
                     BLOCK_LEN as u32,
                     self.flags | self.start_flag(),
-                ));
+                );
+                self.chaining_value = first_8_words(&compression_output);
+                if owns_secret_state(self.flags) {
+                    scrub_words32(&mut compression_output);
+                    scrub_words32(&mut block_words);
+                }
                 self.blocks_compressed += 1;
                 self.block = [0; BLOCK_LEN];
                 self.block_len = 0;
@@ -203,13 +222,21 @@ impl ChunkState {
     }
 
     fn output(&self) -> Output {
-        let block_words = words_from_block(&self.block);
         Output {
             input_chaining_value: self.chaining_value,
-            block_words,
+            block_words: words_from_block(&self.block),
             counter: self.chunk_counter,
             block_len: u32::from(self.block_len),
             flags: self.flags | self.start_flag() | CHUNK_END,
+        }
+    }
+}
+
+impl Drop for ChunkState {
+    fn drop(&mut self) {
+        if owns_secret_state(self.flags) {
+            scrub_words32(&mut self.chaining_value);
+            scrub_slice(&mut self.block);
         }
     }
 }
@@ -226,18 +253,23 @@ struct Output {
 
 impl Output {
     fn chaining_value(&self) -> [u32; 8] {
-        first_8_words(compress(
+        let mut compression_output = compress(
             &self.input_chaining_value,
             &self.block_words,
             self.counter,
             self.block_len,
             self.flags,
-        ))
+        );
+        let chaining_value = first_8_words(&compression_output);
+        if owns_secret_state(self.flags) {
+            scrub_words32(&mut compression_output);
+        }
+        chaining_value
     }
 
     fn root_output_bytes(&self, out: &mut [u8]) {
         for (block_counter, out_block) in out.chunks_mut(2 * BLOCK_LEN / 2).enumerate() {
-            let words = compress(
+            let mut words = compress(
                 &self.input_chaining_value,
                 &self.block_words,
                 block_counter as u64,
@@ -247,73 +279,104 @@ impl Output {
             for (word, out_word) in words.iter().zip(out_block.chunks_mut(4)) {
                 out_word.copy_from_slice(&word.to_le_bytes()[..out_word.len()]);
             }
+            if owns_secret_state(self.flags) {
+                scrub_words32(&mut words);
+            }
+        }
+    }
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        if owns_secret_state(self.flags) {
+            scrub_words32(&mut self.input_chaining_value);
+            scrub_words32(&mut self.block_words);
         }
     }
 }
 
 fn parent_output(
-    left_child: [u32; 8],
-    right_child: [u32; 8],
-    key_words: [u32; 8],
+    left_child: &[u32; 8],
+    right_child: &[u32; 8],
+    key_words: &[u32; 8],
     flags: u32,
 ) -> Output {
-    let mut block_words = [0u32; 16];
-    block_words[..8].copy_from_slice(&left_child);
-    block_words[8..].copy_from_slice(&right_child);
-    Output {
-        input_chaining_value: key_words,
-        block_words,
+    let mut output = Output {
+        input_chaining_value: *key_words,
+        block_words: [0; 16],
         counter: 0,
         block_len: BLOCK_LEN as u32,
         flags: PARENT | flags,
-    }
+    };
+    output.block_words[..8].copy_from_slice(left_child);
+    output.block_words[8..].copy_from_slice(right_child);
+    output
 }
 
 fn parent_cv(
-    left_child: [u32; 8],
-    right_child: [u32; 8],
-    key_words: [u32; 8],
+    left_child: &[u32; 8],
+    right_child: &[u32; 8],
+    key_words: &[u32; 8],
     flags: u32,
 ) -> [u32; 8] {
     parent_output(left_child, right_child, key_words, flags).chaining_value()
 }
 
 /// Streaming BLAKE3 hasher (plain, keyed, or derive-key mode).
+///
+/// The same public type can own a keyed-hash or derive-key state, so it is
+/// deliberately non-`Clone` even when a particular value is in plain mode:
+///
+/// ```compile_fail
+/// use fgdb_crypto::blake3::Hasher;
+///
+/// let state = Hasher::new_keyed(&[0_u8; 32]);
+/// let _copy = state.clone();
+/// ```
 pub struct Hasher {
     chunk_state: ChunkState,
     key_words: [u32; 8],
     /// Chaining values of completed subtrees, lowest level last-pushed.
-    cv_stack: Vec<[u32; 8]>,
+    cv_stack: [[u32; 8]; MAX_CV_STACK_DEPTH],
+    cv_stack_len: usize,
     flags: u32,
 }
 
 impl Hasher {
-    fn new_internal(key_words: [u32; 8], flags: u32) -> Self {
+    fn new_internal(key_words: &[u32; 8], flags: u32) -> Self {
         Self {
             chunk_state: ChunkState::new(key_words, 0, flags),
-            key_words,
-            cv_stack: Vec::new(),
+            key_words: *key_words,
+            cv_stack: [[0; 8]; MAX_CV_STACK_DEPTH],
+            cv_stack_len: 0,
             flags,
         }
     }
 
     /// Plain hash mode.
     pub fn new() -> Self {
-        Self::new_internal(IV, 0)
+        Self::new_internal(&IV, 0)
     }
 
     /// Keyed hash mode with a 256-bit key.
     pub fn new_keyed(key: &[u8; 32]) -> Self {
-        Self::new_internal(words_from_key(key), KEYED_HASH)
+        let mut key_words = words_from_key(key);
+        let hasher = Self::new_internal(&key_words, KEYED_HASH);
+        scrub_words32(&mut key_words);
+        hasher
     }
 
     /// Key-derivation mode: `context` should be a hardcoded, globally unique,
     /// application-specific string (the fgdb domain-separation strings).
     pub fn new_derive_key(context: &str) -> Self {
-        let mut context_hasher = Self::new_internal(IV, DERIVE_KEY_CONTEXT);
+        let mut context_hasher = Self::new_internal(&IV, DERIVE_KEY_CONTEXT);
         context_hasher.update(context.as_bytes());
-        let context_key = context_hasher.finalize();
-        Self::new_internal(words_from_key(&context_key.0), DERIVE_KEY_MATERIAL)
+        let mut context_key = context_hasher.finalize();
+        let mut key_words = words_from_key(&context_key.0);
+        let hasher = Self::new_internal(&key_words, DERIVE_KEY_MATERIAL);
+        scrub_words32(&mut key_words);
+        scrub_slice(&mut context_key.0);
+        hasher
     }
 
     /// After popping `total_chunks.trailing_zeros()` levels, completed
@@ -321,14 +384,31 @@ impl Hasher {
     /// representation of the completed-chunk count.
     fn add_chunk_chaining_value(&mut self, mut new_cv: [u32; 8], mut total_chunks: u64) {
         while total_chunks & 1 == 0 {
-            let left = self
-                .cv_stack
-                .pop()
+            self.cv_stack_len = self
+                .cv_stack_len
+                .checked_sub(1)
                 .expect("cv stack tracks the binary representation of the chunk count");
-            new_cv = parent_cv(left, new_cv, self.key_words, self.flags);
+            let mut left = self.cv_stack[self.cv_stack_len];
+            if owns_secret_state(self.flags) {
+                scrub_words32(&mut self.cv_stack[self.cv_stack_len]);
+            }
+            let mut right = new_cv;
+            new_cv = parent_cv(&left, &right, &self.key_words, self.flags);
+            if owns_secret_state(self.flags) {
+                scrub_words32(&mut left);
+                scrub_words32(&mut right);
+            }
             total_chunks >>= 1;
         }
-        self.cv_stack.push(new_cv);
+        assert!(
+            self.cv_stack_len < MAX_CV_STACK_DEPTH,
+            "a usize-sized input cannot exceed the fixed BLAKE3 tree depth"
+        );
+        self.cv_stack[self.cv_stack_len] = new_cv;
+        self.cv_stack_len += 1;
+        if owns_secret_state(self.flags) {
+            scrub_words32(&mut new_cv);
+        }
     }
 
     /// Absorb input bytes. Chainable with further `update` calls.
@@ -337,10 +417,13 @@ impl Hasher {
             // A full chunk is finalized only once more input arrives: the
             // final chunk of the whole message must become the root.
             if self.chunk_state.len() == CHUNK_LEN {
-                let chunk_cv = self.chunk_state.output().chaining_value();
+                let mut chunk_cv = self.chunk_state.output().chaining_value();
                 let total_chunks = self.chunk_state.chunk_counter + 1;
                 self.add_chunk_chaining_value(chunk_cv, total_chunks);
-                self.chunk_state = ChunkState::new(self.key_words, total_chunks, self.flags);
+                if owns_secret_state(self.flags) {
+                    scrub_words32(&mut chunk_cv);
+                }
+                self.chunk_state = ChunkState::new(&self.key_words, total_chunks, self.flags);
             }
             let want = CHUNK_LEN - self.chunk_state.len();
             let take = want.min(input.len());
@@ -352,8 +435,12 @@ impl Hasher {
 
     fn final_output(&self) -> Output {
         let mut output = self.chunk_state.output();
-        for &left in self.cv_stack.iter().rev() {
-            output = parent_output(left, output.chaining_value(), self.key_words, self.flags);
+        for left in self.cv_stack[..self.cv_stack_len].iter().rev() {
+            let mut right = output.chaining_value();
+            output = parent_output(left, &right, &self.key_words, self.flags);
+            if owns_secret_state(self.flags) {
+                scrub_words32(&mut right);
+            }
         }
         output
     }
@@ -369,6 +456,17 @@ impl Hasher {
     /// `finalize`, unbounded length).
     pub fn finalize_xof(&self, out: &mut [u8]) {
         self.final_output().root_output_bytes(out);
+    }
+}
+
+impl Drop for Hasher {
+    fn drop(&mut self) {
+        if owns_secret_state(self.flags) {
+            scrub_words32(&mut self.key_words);
+            for chaining_value in &mut self.cv_stack {
+                scrub_words32(chaining_value);
+            }
+        }
     }
 }
 

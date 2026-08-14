@@ -339,3 +339,11 @@ fn modes_and_domains_are_separated() {
         "encoding and placement domains must separate identical descriptors"
     );
 }
+
+#[test]
+fn streaming_state_has_scrub_on_drop_glue() {
+    assert!(
+        core::mem::needs_drop::<Hasher>(),
+        "a keyed BLAKE3 state must not release persistent key words or chaining values unsrubbed"
+    );
+}

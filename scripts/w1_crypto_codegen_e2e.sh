@@ -5,7 +5,7 @@
 # Owner: fgdb-w1-crypto-y5o
 #
 # This gate makes one narrow compiled-code claim: Secret bytes and the original
-# Argon2/BLAKE2b/ChaCha20/Poly1305 word storage delegate to non-inlined boundaries,
+# Argon2/BLAKE2b/BLAKE3/ChaCha20/Poly1305 word storage delegates to non-inlined boundaries,
 # and the optimized host object retains each boundary as an unconditional call
 # to memset with the source-pinned zero fill followed by a compiler fence. It
 # does NOT claim that copies in registers, moved-from temporaries, allocator/OS

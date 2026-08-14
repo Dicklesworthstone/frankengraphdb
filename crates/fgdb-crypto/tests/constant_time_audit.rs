@@ -289,6 +289,8 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         .expect("argon2id.rs is readable");
     let blake = std::fs::read_to_string(crate_root().join("src/blake2b.rs"))
         .expect("blake2b.rs is readable");
+    let blake3 =
+        std::fs::read_to_string(crate_root().join("src/blake3.rs")).expect("blake3.rs is readable");
     let chacha = std::fs::read_to_string(crate_root().join("src/chacha20.rs"))
         .expect("chacha20.rs is readable");
     let poly = std::fs::read_to_string(crate_root().join("src/poly1305.rs"))
@@ -307,6 +309,7 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         ("zeroize.rs", source.as_str()),
         ("argon2id.rs", argon.as_str()),
         ("blake2b.rs", blake.as_str()),
+        ("blake3.rs", blake3.as_str()),
         ("chacha20.rs", chacha.as_str()),
         ("poly1305.rs", poly.as_str()),
         ("aead.rs", aead.as_str()),
@@ -348,6 +351,10 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     assert!(
         core::mem::needs_drop::<fgdb_crypto::blake2b::Blake2b>(),
         "the production BLAKE2b state must carry scrub-on-drop glue"
+    );
+    assert!(
+        core::mem::needs_drop::<fgdb_crypto::blake3::Hasher>(),
+        "the production BLAKE3 state must carry keyed-state scrub-on-drop glue"
     );
     assert!(
         core::mem::needs_drop::<fgdb_crypto::poly1305::Poly1305>(),
@@ -619,6 +626,110 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         &compression_lines[compression_lines.len() - 2..],
         ["scrub_words(&mut m);", "scrub_words(&mut v);"],
         "BLAKE2b must scrub both secret-derived compression temporaries before return"
+    );
+
+    assert!(
+        blake3.contains("const MAX_CV_STACK_DEPTH: usize = 64;")
+            && blake3.contains("cv_stack: [[u32; 8]; MAX_CV_STACK_DEPTH]")
+            && !blake3.contains("cv_stack: Vec<"),
+        "BLAKE3 must keep the complete bounded chaining-value stack in scrub-addressable storage"
+    );
+    let secret_mode_start = blake3
+        .find("#[inline]\nfn owns_secret_state")
+        .expect("the BLAKE3 secret-mode classifier is directly inspectable");
+    let secret_mode = &blake3[secret_mode_start..];
+    let secret_mode = &secret_mode[..secret_mode.find("\n}").unwrap_or(secret_mode.len())];
+    assert_eq!(
+        code_lines(secret_mode),
+        [
+            "#[inline]",
+            "fn owns_secret_state(flags: u32) -> bool {",
+            "flags & (KEYED_HASH | DERIVE_KEY_MATERIAL) != 0",
+        ],
+        "only keyed-hash and derive-key material modes own secret BLAKE3 state"
+    );
+    for (drop_signature, expected_lines) in [
+        (
+            "impl Drop for ChunkState",
+            vec![
+                "impl Drop for ChunkState {",
+                "fn drop(&mut self) {",
+                "if owns_secret_state(self.flags) {",
+                "scrub_words32(&mut self.chaining_value);",
+                "scrub_slice(&mut self.block);",
+                "}",
+                "}",
+            ],
+        ),
+        (
+            "impl Drop for Output",
+            vec![
+                "impl Drop for Output {",
+                "fn drop(&mut self) {",
+                "if owns_secret_state(self.flags) {",
+                "scrub_words32(&mut self.input_chaining_value);",
+                "scrub_words32(&mut self.block_words);",
+                "}",
+                "}",
+            ],
+        ),
+        (
+            "impl Drop for Hasher",
+            vec![
+                "impl Drop for Hasher {",
+                "fn drop(&mut self) {",
+                "if owns_secret_state(self.flags) {",
+                "scrub_words32(&mut self.key_words);",
+                "for chaining_value in &mut self.cv_stack {",
+                "scrub_words32(chaining_value);",
+                "}",
+                "}",
+                "}",
+            ],
+        ),
+    ] {
+        assert_eq!(
+            blake3.matches(drop_signature).count(),
+            1,
+            "blake3.rs must contain exactly one {drop_signature} authority"
+        );
+        let drop_start = blake3
+            .find(drop_signature)
+            .expect("the counted BLAKE3 Drop authority is present");
+        assert!(
+            blake3[..drop_start].ends_with("\n\n"),
+            "{drop_signature} must be an unconditional top-level item"
+        );
+        let drop_body = &blake3[drop_start..];
+        let drop_body = &drop_body[..drop_body.find("\n}\n").unwrap_or(drop_body.len())];
+        assert_eq!(
+            code_lines(drop_body),
+            expected_lines,
+            "{drop_signature} no longer scrubs its complete keyed-state authority"
+        );
+    }
+    assert_eq!(
+        blake3.matches("scrub_words32(&mut key_words);").count(),
+        2,
+        "both keyed-hash and derive-key constructors must scrub their parsed key-word staging"
+    );
+    assert_eq!(
+        blake3.matches("scrub_slice(&mut context_key.0);").count(),
+        1,
+        "derive-key construction must scrub its separate context-key digest"
+    );
+    assert_eq!(
+        blake3
+            .matches("scrub_words32(&mut compression_output);")
+            .count(),
+        2,
+        "both chunk and output chaining-value compression temporaries must be scrubbed"
+    );
+    assert!(
+        !blake3.contains("impl Clone for Hasher")
+            && !blake3.contains("impl core::ops::Deref for Hasher")
+            && !blake3.contains("impl core::ops::DerefMut for Hasher"),
+        "BLAKE3 must not expose keyed-state duplication or field-escape APIs"
     );
 
     let chacha_drop_start = chacha
