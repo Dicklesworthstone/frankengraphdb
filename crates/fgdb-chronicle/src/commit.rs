@@ -262,6 +262,22 @@ pub struct CommitCoordinator<V: Vfs = UnixVfs> {
     commit_log_parent_sync_pending: bool,
 }
 
+impl<V: Vfs> Drop for CommitCoordinator<V> {
+    fn drop(&mut self) {
+        // `flock` ownership follows the open file description on Unix. A
+        // descriptor duplicated by `fork` or `try_clone` can therefore keep
+        // the lease alive after this coordinator's descriptor closes, even
+        // though the process that owned the coordinator has dropped it. An
+        // explicit unlock changes the shared lock state before close, so a
+        // transient fork-to-exec child cannot make an immediate authoritative
+        // reopen nondeterministically report `WriterAlreadyOpen`.
+        //
+        // Drop cannot return an I/O error. Closing this descriptor remains the
+        // platform fallback if explicit unlock is unsupported or fails.
+        let _ = self._writer_lease.unlock();
+    }
+}
+
 /// How an entry failed to decode. The two arms ARE the torn-tail rule: bytes
 /// missing at the end of the file is a crash, bytes present but wrong is
 /// damage. See [`CommitCoordinator::recover_chain`].
@@ -1157,7 +1173,11 @@ fn decode_hex_oid(hex: &str) -> Option<ObjectId> {
 #[cfg(test)]
 mod tests {
     use super::{CommitCoordinator, ENTRY_HEADER_BYTES, EntryDefect, UnixVfs};
+    use crate::capsule::{CapsuleKeys, CapsuleProfile};
     use asupersync::io::{AsyncRead, ReadBuf};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::context::PurposeContexts;
+    use fgdb_types::ids::DatabaseSecurityNamespaceId;
     use std::future::Future;
     use std::io;
     use std::pin::{Pin, pin};
@@ -1218,5 +1238,67 @@ mod tests {
             .expect("a header was present");
         assert!(matches!(decoded, Err(EntryDefect::Corrupt)));
         assert_eq!(entry.len(), ENTRY_HEADER_BYTES);
+    }
+
+    #[test]
+    fn dropping_the_owner_explicitly_unlocks_a_duplicated_lease_descriptor() {
+        let ((), report) = run_async_under_lab(0x51_4c_554e_4c4f_434b, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+            assert!(epoch.is_ok(), "the system clock is after the Unix epoch");
+            let Ok(epoch) = epoch else {
+                return;
+            };
+            let process_epoch = epoch.as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "fgdb-commit-explicit-unlock-{}-{process_epoch}",
+                std::process::id()
+            ));
+            let created = std::fs::create_dir(&dir);
+            assert!(created.is_ok(), "scratch directory is fresh: {created:?}");
+            if created.is_err() {
+                return;
+            }
+            let keys = CapsuleKeys {
+                k_oid: [0x5a; 32],
+                namespace: DatabaseSecurityNamespaceId([0x77; 32]),
+                dek: [0x3c; 32],
+                object_kind: 0x0274,
+                profile: CapsuleProfile::balanced(),
+            };
+
+            let owner = CommitCoordinator::open(&cx, &dir, keys).await;
+            assert!(owner.is_ok(), "first owner opens: {owner:?}");
+            let Ok(owner) = owner else {
+                return;
+            };
+            // `try_clone` duplicates the same open file description on Unix,
+            // exactly the lock-retention shape produced by fork before exec.
+            let inherited = owner._writer_lease.try_clone();
+            assert!(
+                inherited.is_ok(),
+                "the lease descriptor duplicates: {inherited:?}"
+            );
+            let Ok(inherited) = inherited else {
+                return;
+            };
+            drop(owner);
+
+            let successor = CommitCoordinator::open(&cx, &dir, keys).await;
+            assert!(
+                successor.is_ok(),
+                "dropping the owner explicitly unlocks inherited descriptors: {successor:?}"
+            );
+            let Ok(successor) = successor else {
+                return;
+            };
+            drop(successor);
+            drop(inherited);
+        });
+        assert!(
+            report.lab_test_passed(),
+            "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+        );
     }
 }
