@@ -112,10 +112,27 @@ pub fn normalize(
         let Some(vertex) = basis.vertex(*vid) else {
             continue;
         };
+        // Apply is byte-sorted: DeleteVertex rows run in VId order. A shared
+        // cascade eid must sit only on the smallest deleted endpoint so the
+        // first apply still equals the live incident set (fgdb-qgk9 / s9ja).
+        let sorted_retired_incident_edges: Vec<EId> = basis
+            .incident_edges(*vid)
+            .into_iter()
+            .filter(|eid| {
+                let Some(edge) = basis.edge(*eid) else {
+                    return true;
+                };
+                [edge.src, edge.dst]
+                    .into_iter()
+                    .filter(|endpoint| deleted_vids.contains(endpoint))
+                    .min()
+                    == Some(*vid)
+            })
+            .collect();
         rows.push(DeltaRow::DeleteVertex {
             vid: *vid,
             before_version: vertex.version,
-            sorted_retired_incident_edges: basis.incident_edges(*vid),
+            sorted_retired_incident_edges,
         });
     }
     for eid in &deleted_eids {
@@ -711,8 +728,8 @@ fn classify_valid_time(
 mod tests {
     use super::{EffectFate, NoOpPolicy, normalize};
     use crate::ReferenceGraph;
-    use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId};
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, EId, VId};
 
     const PROP: PropertyKeyId = PropertyKeyId(100);
     const LABEL: LabelId = LabelId(10);
@@ -872,5 +889,94 @@ mod tests {
                 policy: NoOpPolicy::Absorbed
             }
         );
+    }
+
+    fn create_edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
+        DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal: eid as u64,
+            src: VId(src),
+            relation: RelationId(1),
+            dst: VId(dst),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        }
+    }
+
+    #[test]
+    fn dual_endpoint_delete_keeps_a_shared_eid_on_the_smallest_vid() {
+        let mut basis = ReferenceGraph::new();
+        apply(
+            &mut basis,
+            &[
+                create(1, 0),
+                create(2, 0),
+                create(3, 0),
+                create_edge(10, 1, 2),
+                create_edge(11, 2, 3),
+            ],
+        );
+        let v1 = basis.vertex(VId(1)).expect("seeded").version;
+        let v2 = basis.vertex(VId(2)).expect("seeded").version;
+
+        // After-image: both endpoints gone. Apply the net-safe partition so
+        // apply_row's cascade law can build that graph at all.
+        let mut workspace = basis.clone();
+        apply(
+            &mut workspace,
+            &[
+                DeltaRow::DeleteVertex {
+                    vid: VId(1),
+                    before_version: v1,
+                    sorted_retired_incident_edges: vec![EId(10)],
+                },
+                DeltaRow::DeleteVertex {
+                    vid: VId(2),
+                    before_version: v2,
+                    sorted_retired_incident_edges: vec![EId(11)],
+                },
+            ],
+        );
+
+        // Evaluation order deleted the larger endpoint first with the full
+        // incident set — the shape that is not apply-safe until normalize
+        // reassigns the shared eid.
+        let source = [
+            DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: v2,
+                sorted_retired_incident_edges: vec![EId(10), EId(11)],
+            },
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: v1,
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+        ];
+        let form = normalize(&basis, &workspace, &source);
+        assert_eq!(
+            form.rows,
+            vec![
+                DeltaRow::DeleteVertex {
+                    vid: VId(1),
+                    before_version: v1,
+                    sorted_retired_incident_edges: vec![EId(10)],
+                },
+                DeltaRow::DeleteVertex {
+                    vid: VId(2),
+                    before_version: v2,
+                    sorted_retired_incident_edges: vec![EId(11)],
+                },
+            ]
+        );
+
+        let mut replay = basis.clone();
+        apply(&mut replay, &form.rows);
+        assert!(replay.vertex(VId(1)).is_none());
+        assert!(replay.vertex(VId(2)).is_none());
+        assert!(replay.edge(EId(10)).is_none());
+        assert!(replay.edge(EId(11)).is_none());
+        assert!(replay.vertex(VId(3)).is_some());
     }
 }
