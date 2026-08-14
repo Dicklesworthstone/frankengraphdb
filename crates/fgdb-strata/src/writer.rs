@@ -638,6 +638,21 @@ impl BlockWriter {
                     crate::vertex::validate_patch_row(0, &retired).map_err(WriteError::Patch)?;
                     Some(retired)
                 };
+                // Seal an oversized vertex pending set BEFORE the cascade
+                // retires anything. Doing it after — the old order — left
+                // edges gone and the vertex live when `seal_vertices`
+                // refused (the same half-applied shape preflight exists
+                // to prevent on the edge list).
+                if let Some(retired) = &tombstone {
+                    let key = (*vid, retired.created_at);
+                    if !self.pending_vertices.contains_key(&key)
+                        && self.pending_vertices.len()
+                            >= usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX)
+                        && !self.pending_vertices_have_live_at(seq)
+                    {
+                        self.seal_vertices(keys)?;
+                    }
+                }
                 for eid in sorted_retired_incident_edges {
                     self.retire(keys, *eid, seq)?;
                 }
@@ -650,16 +665,8 @@ impl BlockWriter {
                         );
                     }
                     Some(retired) => {
-                        let key = (*vid, retired.created_at);
-                        if !self.pending_vertices.contains_key(&key)
-                            && self.pending_vertices.len()
-                                >= usize::try_from(crate::vertex::MAX_PATCH_ROWS)
-                                    .unwrap_or(usize::MAX)
-                            && !self.pending_vertices_have_live_at(seq)
-                        {
-                            self.seal_vertices(keys)?;
-                        }
-                        self.pending_vertices.insert(key, retired);
+                        self.pending_vertices
+                            .insert((*vid, retired.created_at), retired);
                     }
                 }
                 let removed = self.live_vertices.remove(vid);
@@ -1364,6 +1371,7 @@ impl BlockWriter {
 #[cfg(test)]
 mod tests {
     use super::{BlockWriter, PendingStatement, WriteError};
+    use crate::vertex::{MAX_PATCH_ROWS, VertexPatchError, VertexRow};
     use crate::{AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES};
     use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
     use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -1551,6 +1559,93 @@ mod tests {
             writer.pending_len(),
             ceiling - 1,
             "the planted illegal families stay; the restatement added nothing"
+        );
+    }
+
+    /// `DeleteVertex` used to retire the cascade and only then seal an
+    /// oversized vertex pending set. A refusing `seal_vertices` left the
+    /// edges gone and the vertex live — the half-applied state
+    /// `preflight_retirements` exists to prevent.
+    #[test]
+    fn a_failed_vertex_seal_does_not_retire_the_cascade() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        let rel = RelationId(1);
+        for vid in [1_u128, 2] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateVertex {
+                        vid: VId(vid),
+                        birth_ordinal: u64::try_from(vid).expect("test vid fits"),
+                        labels: vec![],
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("vertices");
+        }
+        writer
+            .apply(
+                keys(),
+                CommitSeq(1),
+                &DeltaRow::CreateEdge {
+                    eid: EId(10),
+                    birth_ordinal: 3,
+                    src: VId(1),
+                    relation: rel,
+                    dst: VId(2),
+                    canonical_key: None,
+                    props: vec![],
+                    valid_time: None,
+                },
+            )
+            .expect("edge");
+        writer.seal(keys()).expect("edge birth durable");
+        writer.seal_vertices(keys()).expect("vertex birth durable");
+
+        let ceiling = usize::try_from(MAX_PATCH_ROWS).unwrap();
+        for i in 0..ceiling {
+            let vid = VId(2000 + i as u128);
+            writer.pending_vertices.insert(
+                (vid, CommitSeq(0)),
+                VertexRow {
+                    vid,
+                    birth_ordinal: 1,
+                    created_at: CommitSeq(0),
+                    retired_at: None,
+                    labels: vec![],
+                    props: vec![],
+                },
+            );
+        }
+        assert_eq!(writer.pending_vertex_len(), ceiling);
+
+        let refusal = writer.apply(
+            keys(),
+            CommitSeq(2),
+            &DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: fgdb_types::ids::ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+        );
+        assert_eq!(
+            refusal,
+            Err(WriteError::Patch(VertexPatchError::CreatedAtZero { at: 0 }))
+        );
+        assert!(
+            writer.is_vertex_live(VId(2)),
+            "the refused delete must leave the vertex live"
+        );
+        assert!(
+            writer.live_edge(EId(10)).is_some(),
+            "the refused delete must not retire the cascade"
+        );
+        assert_eq!(
+            writer.pending_vertex_len(),
+            ceiling,
+            "the planted illegal rows stay; the delete added nothing"
         );
     }
 }
