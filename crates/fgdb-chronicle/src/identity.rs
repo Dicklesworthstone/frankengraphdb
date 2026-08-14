@@ -383,12 +383,8 @@ impl ProtectedObject {
             &Digest(self.object_id.0),
             &self.descriptor.canonical_bytes(),
         );
-        let result = aead::xchacha20poly1305_open(
-            dek,
-            &self.descriptor.object_nonce,
-            &aad,
-            &self.sealed,
-        );
+        let result =
+            aead::xchacha20poly1305_open(dek, &self.descriptor.object_nonce, &aad, &self.sealed);
         verification.record(verification_event(
             &self.descriptor,
             None,

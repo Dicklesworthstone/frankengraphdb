@@ -357,12 +357,12 @@ impl SymbolRecord {
             Err(SymbolError::Truncated) => {
                 VerificationOutcome::Rejected(VerificationFailureClass::SymbolTruncated)
             }
-            Err(SymbolError::UnsupportedFraming) => VerificationOutcome::Rejected(
-                VerificationFailureClass::SymbolUnsupportedFraming,
-            ),
-            Err(SymbolError::InconsistentLengths) => VerificationOutcome::Rejected(
-                VerificationFailureClass::SymbolInconsistentLengths,
-            ),
+            Err(SymbolError::UnsupportedFraming) => {
+                VerificationOutcome::Rejected(VerificationFailureClass::SymbolUnsupportedFraming)
+            }
+            Err(SymbolError::InconsistentLengths) => {
+                VerificationOutcome::Rejected(VerificationFailureClass::SymbolInconsistentLengths)
+            }
             Err(SymbolError::ForeignEncoding) => {
                 VerificationOutcome::Rejected(VerificationFailureClass::ForeignEncoding)
             }

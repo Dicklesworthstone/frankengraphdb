@@ -176,15 +176,14 @@ pub fn scrub_object(
 
     // Pass 2: attempt recovery from the authentic symbols only, and capture
     // the decode proof as attestable evidence.
-    let decode_proof_hash =
-        decode_proof_attestation(
-            encoding,
-            &authentic,
-            source_symbols,
-            symbol_size,
-            dek,
-            verification,
-        );
+    let decode_proof_hash = decode_proof_attestation(
+        encoding,
+        &authentic,
+        source_symbols,
+        symbol_size,
+        dek,
+        verification,
+    );
     let recovery = decode_object(encoding, &authentic, target, dek, verification);
 
     let verdict = match recovery {

@@ -310,12 +310,8 @@ pub fn decode_object(
         }
         Err(SymbolizeError::Symbol(error)) => VerificationOutcome::Rejected(match error {
             SymbolError::Truncated => VerificationFailureClass::SymbolTruncated,
-            SymbolError::UnsupportedFraming => {
-                VerificationFailureClass::SymbolUnsupportedFraming
-            }
-            SymbolError::InconsistentLengths => {
-                VerificationFailureClass::SymbolInconsistentLengths
-            }
+            SymbolError::UnsupportedFraming => VerificationFailureClass::SymbolUnsupportedFraming,
+            SymbolError::InconsistentLengths => VerificationFailureClass::SymbolInconsistentLengths,
             SymbolError::ForeignEncoding => VerificationFailureClass::ForeignEncoding,
             SymbolError::AuthenticationFailed => VerificationFailureClass::Authentication,
         }),

@@ -8,9 +8,10 @@
 
 use fgdb_chronicle::root::{OPENER_PAYLOAD_LEN, recover_root_object};
 use fgdb_chronicle::{
-    CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, IdentityMismatch,
-    LocationForm, PackBuilder, PackDomain, PackError, PackProtectionProfile, PlacementDescriptor,
-    RecoveredObjectError, RootBootstrap, RootRecoveryError, RootSlot, SymbolError, SymbolRecord,
+    CipherDescriptor, CryptoVerificationEvent, EncodedObject, EncodingDescriptor, IdentifiedObject,
+    IdentityMismatch, LocationForm, PackBuilder, PackDomain, PackError, PackProtectionProfile,
+    PlacementDescriptor, RecoveredObjectError, RootBootstrap, RootRecoveryError, RootSlot,
+    SymbolError, SymbolRecord, VerificationFailureClass, VerificationOperation, VerificationOutcome,
     WriteKeyDomain,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -167,7 +168,7 @@ fn pipeline_round_trips_through_all_four_layers() {
     );
     assert_eq!(
         protected
-            .open(&dek())
+            .open(&dek(), &mut Vec::new())
             .expect("well-formed object must open"),
         compressed,
         "protected bytes must decrypt to the compressed plaintext"
@@ -289,7 +290,7 @@ fn the_aead_binds_identity_and_descriptor() {
     let mut wrong_dek = dek();
     wrong_dek[31] ^= 0x01;
     assert!(
-        protected.open(&wrong_dek).is_err(),
+        protected.open(&wrong_dek, &mut Vec::new()).is_err(),
         "the wrong DEK must fail closed"
     );
 
@@ -486,6 +487,7 @@ fn symbol_auth_keys_are_per_encoding() {
 /// external audit.
 #[test]
 fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
+    let mut verification = Vec::new();
     let kdf_profile = fgdb_crypto::registered_passphrase_kdf_profile(1)
         .expect("profile 1 is the closed V1 passphrase-KDF profile");
     let kdf_spec = kdf_profile.spec();
@@ -571,8 +573,8 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
         }
     }
 
-    let protect_once = |material: fgdb_crypto::FreshObjectProtectionMaterial,
-                        forbidden_prior: Option<(&[u8], &[u8; 24], &[u8])>| {
+    let mut protect_once = |material: fgdb_crypto::FreshObjectProtectionMaterial,
+                            forbidden_prior: Option<(&[u8], &[u8; 24], &[u8])>| {
         material.use_once(|material| {
             assert_eq!(material.profile(), registered);
             assert_eq!(
@@ -609,7 +611,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             assert_eq!(protected.descriptor(), &cipher);
             assert_eq!(
                 protected
-                    .open(material.dek())
+                    .open(material.dek(), &mut verification)
                     .expect("fresh production material opens in its closure"),
                 compressed
             );
@@ -707,7 +709,9 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     assert_eq!(placed.object_id(), protected.object_id());
     assert_eq!(placed.encoding_id(), encoded.encoding_id());
     assert_eq!(
-        protected.open(&dek()).expect("registered profile opens"),
+        protected
+            .open(&dek(), &mut verification)
+            .expect("registered profile opens"),
         compressed
     );
 
@@ -777,11 +781,12 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             encoded.ciphertext_id(),
             encoding(1),
             encoded.encoding_id(),
+            &mut verification,
         )
         .expect("a valid-form cipher mutation does not alter EncodingId");
         assert!(
             substituted
-                .open_recovered(protected.protected_bytes(), &dek())
+                .open_recovered(protected.protected_bytes(), &dek(), &mut verification)
                 .is_err(),
             "cipher descriptor field {field} is outside the object-AEAD transcript"
         );
@@ -822,6 +827,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
                 encoded.ciphertext_id(),
                 mutation,
                 encoded.encoding_id(),
+                &mut verification,
             ),
             Err(IdentityMismatch::EncodingId),
             "durable recovery accepted a rewritten encoding field {field}"
@@ -838,10 +844,15 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
         forged_ciphertext_id,
         encoding_descriptor,
         forged_encoding_id,
+        &mut verification,
     )
     .expect("the forged EncodingId exactly matches the forged CiphertextId");
     assert_eq!(
-        forged_encoding.open_recovered(protected.protected_bytes(), &dek()),
+        forged_encoding.open_recovered(
+            protected.protected_bytes(),
+            &dek(),
+            &mut verification,
+        ),
         Err(RecoveredObjectError::CiphertextIdentityMismatch),
         "durable recovery must recompute CiphertextId even when EncodingId was consistently rewritten"
     );
@@ -903,7 +914,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             "placement descriptor field {field} is outside PlacementId"
         );
         assert_eq!(
-            encoded.verify_placement(&mutation, placed.placement_id()),
+            encoded.verify_placement(&mutation, placed.placement_id(), &mut verification),
             Err(IdentityMismatch::PlacementId),
             "durable recovery accepted a rewritten placement field {field}"
         );
@@ -944,7 +955,11 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             "placement descriptor field {field} is outside PlacementId"
         );
         assert_eq!(
-            encoded.verify_placement(&mutation, explicit_placed.placement_id()),
+            encoded.verify_placement(
+                &mutation,
+                explicit_placed.placement_id(),
+                &mut verification,
+            ),
             Err(IdentityMismatch::PlacementId),
             "durable recovery accepted a rewritten placement field {field}"
         );
@@ -959,14 +974,15 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     );
     let symbol_bytes = symbol.serialize(&encoded.symbol_auth_key(&dek()));
     assert_eq!(
-        SymbolRecord::verify(&symbol_bytes, &encoded, &dek()).expect("authentic symbol"),
+        SymbolRecord::verify(&symbol_bytes, &encoded, &dek(), &mut verification)
+            .expect("authentic symbol"),
         symbol
     );
     for offset in 0..symbol_bytes.len() {
         let mut corrupted = symbol_bytes.clone();
         corrupted[offset] ^= 0x01;
         assert!(
-            SymbolRecord::verify(&corrupted, &encoded, &dek()).is_err(),
+            SymbolRecord::verify(&corrupted, &encoded, &dek(), &mut verification).is_err(),
             "serialized symbol byte {offset} is outside framing checks and the MAC transcript"
         );
     }
@@ -981,7 +997,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     );
     let foreign_bytes = foreign_symbol.serialize(&recoded.symbol_auth_key(&dek()));
     assert_eq!(
-        SymbolRecord::verify(&foreign_bytes, &encoded, &dek()),
+        SymbolRecord::verify(&foreign_bytes, &encoded, &dek(), &mut verification),
         Err(SymbolError::ForeignEncoding),
         "a valid symbol from another EncodingId must not mix"
     );
@@ -989,7 +1005,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     let mut wrong_dek = dek();
     wrong_dek[0] ^= 0x80;
     assert_eq!(
-        SymbolRecord::verify(&symbol_bytes, &encoded, &wrong_dek),
+        SymbolRecord::verify(&symbol_bytes, &encoded, &wrong_dek, &mut verification),
         Err(SymbolError::AuthenticationFailed),
         "the symbol transcript must authenticate under the selected DEK"
     );
@@ -997,7 +1013,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     let payload_byte = corrupted_symbol.len() - 17;
     corrupted_symbol[payload_byte] ^= 0x01;
     assert_eq!(
-        SymbolRecord::verify(&corrupted_symbol, &encoded, &dek()),
+        SymbolRecord::verify(&corrupted_symbol, &encoded, &dek(), &mut verification),
         Err(SymbolError::AuthenticationFailed),
         "a payload change must fail the symbol MAC"
     );
@@ -1021,6 +1037,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             encoded.ciphertext_id(),
             encoding(1),
             encoded.encoding_id(),
+            &mut verification,
         ),
         Err(IdentityMismatch::UnsupportedDataCryptoProfile {
             data_crypto_profile: 2,
@@ -1083,6 +1100,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
                 encoded.ciphertext_id(),
                 encoding(1),
                 encoded.encoding_id(),
+                &mut verification,
             ),
             Err(IdentityMismatch::ObjectTagLength {
                 data_crypto_profile: 1,
@@ -1130,7 +1148,14 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             bootstrap: invalid,
         };
         assert_eq!(
-            recover_root_object(&slot, &[], &k_oid(), &dek(), |_| slot.identity_tuple()),
+            recover_root_object(
+                &slot,
+                &[],
+                &k_oid(),
+                &dek(),
+                |_| slot.identity_tuple(),
+                &mut verification,
+            ),
             Err(RootRecoveryError::DescriptorMismatch(
                 IdentityMismatch::ObjectNonceLength {
                     data_crypto_profile: 1,
@@ -1153,11 +1178,12 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
         encoded.ciphertext_id(),
         encoding(1),
         encoded.encoding_id(),
+        &mut verification,
     )
     .expect("the encoding identity intentionally excludes the cipher descriptor");
     assert!(
         substituted
-            .open_recovered(protected.protected_bytes(), &dek())
+            .open_recovered(protected.protected_bytes(), &dek(), &mut verification)
             .is_err(),
         "descriptor substitution must fail the object-AEAD AAD"
     );
@@ -1170,11 +1196,12 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
         encoded.ciphertext_id(),
         encoding(1),
         encoded.encoding_id(),
+        &mut verification,
     )
     .expect("the encoding identity intentionally excludes logical identity");
     assert!(
         substituted
-            .open_recovered(protected.protected_bytes(), &dek())
+            .open_recovered(protected.protected_bytes(), &dek(), &mut verification)
             .is_err(),
         "logical-object substitution must fail the object-AEAD AAD"
     );
@@ -1182,8 +1209,76 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     let mut moved = placement(1);
     moved.placement_epoch += 1;
     assert_eq!(
-        encoded.verify_placement(&moved, placed.placement_id()),
+        encoded.verify_placement(&moved, placed.placement_id(), &mut verification),
         Err(IdentityMismatch::PlacementId),
         "a durable placement must recompute against this EncodingId"
+    );
+
+    let accepted_open = CryptoVerificationEvent {
+        profile_id: 1,
+        object_kind: 0x0002,
+        plaintext_len: 512,
+        ciphertext_len: Some((compressed.len() + 16) as u64),
+        encoding_id_prefix: None,
+        operation: VerificationOperation::ObjectOpen,
+        outcome: VerificationOutcome::Accepted,
+    };
+    assert!(
+        verification.contains(&accepted_open),
+        "the registered object-open path did not emit its exact success record: {verification:?}"
+    );
+    for (operation, failure) in [
+        (
+            VerificationOperation::EncodingReconstruction,
+            VerificationFailureClass::UnsupportedDataCryptoProfile,
+        ),
+        (
+            VerificationOperation::EncodingReconstruction,
+            VerificationFailureClass::ObjectTagLength,
+        ),
+        (
+            VerificationOperation::PlacementIdentity,
+            VerificationFailureClass::PlacementIdentity,
+        ),
+        (
+            VerificationOperation::SymbolRecord,
+            VerificationFailureClass::ForeignEncoding,
+        ),
+        (
+            VerificationOperation::SymbolRecord,
+            VerificationFailureClass::Authentication,
+        ),
+        (
+            VerificationOperation::RecoveredObjectOpen,
+            VerificationFailureClass::CiphertextIdentity,
+        ),
+    ] {
+        assert!(
+            verification.iter().any(|event| {
+                event.operation == operation && event.failure_class() == Some(failure)
+            }),
+            "typed verification failure {operation:?}/{failure:?} was not emitted"
+        );
+    }
+    assert!(
+        verification.iter().any(|event| {
+            event.operation == VerificationOperation::SymbolRecord
+                && event.encoding_id_prefix.is_some()
+                && event.outcome == VerificationOutcome::Accepted
+        }),
+        "an accepted symbol did not carry its public EncodingId prefix"
+    );
+    let rendered = format!("{verification:?}");
+    assert!(
+        !rendered.contains(&format!("{:?}", dek())),
+        "verification diagnostics exposed the DEK: {rendered}"
+    );
+    assert!(
+        !rendered.contains(&format!("{:?}", cipher.object_nonce)),
+        "verification diagnostics exposed the object nonce: {rendered}"
+    );
+    assert!(
+        !rendered.contains("canonical-header") && !rendered.contains("payload"),
+        "verification diagnostics exposed plaintext: {rendered}"
     );
 }
