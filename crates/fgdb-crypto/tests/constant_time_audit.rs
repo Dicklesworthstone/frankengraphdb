@@ -297,10 +297,10 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         .expect("Secret::scrub is present");
     let scrub = &source[scrub_start..];
     let scrub = &scrub[..scrub.find("\n    }").unwrap_or(scrub.len())];
-    assert!(
-        scrub.contains("scrub_slice(&mut self.bytes);") && !scrub.contains("self.bytes.fill"),
-        "Secret::scrub must delegate instead of growing an unwitnessed generic \
-         zeroing path:\n{scrub}"
+    assert_eq!(
+        code_lines(scrub),
+        ["pub fn scrub(&mut self) {", "scrub_slice(&mut self.bytes);",],
+        "Secret::scrub must consist solely of delegating to the witnessed boundary"
     );
 
     let drop_start = source
