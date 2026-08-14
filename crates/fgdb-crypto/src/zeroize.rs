@@ -1,9 +1,11 @@
 //! Scrubbing key material on drop, without `unsafe`.
 //!
 //! Increment 4 of bead fgdb-w1-crypto-y5o. Every secret this crate handles — a
-//! `K_oid`, a DEK, a KEK, an Argon2id output — is a fixed-size byte array, and
-//! a byte array that is simply dropped leaves its bytes in the freed
-//! allocation or on the stack. [`Secret`] is the wrapper that scrubs them.
+//! `K_oid`, a DEK, a KEK, an Argon2id output — ultimately occupies byte or word
+//! storage, and storage that is simply dropped leaves its contents in the
+//! freed allocation or on the stack. [`Secret`] is the fixed-size byte wrapper;
+//! [`scrub_slice`] and [`scrub_words`] are the boundaries for owned primitive
+//! state whose surrounding type supplies its own `Drop` implementation.
 //!
 //! **WHAT THIS CAN AND CANNOT PROMISE, stated up front because the usual
 //! zeroization claim is overstated.** This crate is `#![forbid(unsafe_code)]`,
@@ -126,5 +128,18 @@ pub fn scrub_slice(bytes: &mut [u8]) {
     // This is not a portable dead-store-elision guarantee. The live codegen
     // gate witnesses that the fill survives in the pinned optimized host
     // object, and goes red when this fence is removed on that toolchain.
+    compiler_fence(Ordering::SeqCst);
+}
+
+/// Scrub a caller-owned machine-word slice in place.
+///
+/// Argon2's memory matrix and BLAKE2b's compression state are natively arrays
+/// of `u64`. Scrubbing those arrays through their original word storage avoids
+/// first manufacturing a byte copy that would itself need erasure. This has
+/// exactly the measured-toolchain guarantee and no-claim boundary documented
+/// for [`scrub_slice`].
+#[inline(never)]
+pub fn scrub_words(words: &mut [u64]) {
+    words.fill(0);
     compiler_fence(Ordering::SeqCst);
 }

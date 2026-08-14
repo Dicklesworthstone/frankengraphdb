@@ -28,7 +28,7 @@
 //! chosen by a registered profile, never parsed from a stored string.
 
 use crate::blake2b::{Blake2b, blake2b};
-use crate::zeroize::Secret;
+use crate::zeroize::{Secret, scrub_slice, scrub_words};
 
 /// Bytes per Argon2 block (RFC 9106 §3.1: the memory is addressed in 1 KiB
 /// blocks, and `G` is defined over exactly two of them).
@@ -290,8 +290,42 @@ pub fn derive_passphrase_kek(
 }
 
 /// A 1 KiB Argon2 block.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Block([u64; BLOCK_WORDS]);
+
+impl Drop for Block {
+    fn drop(&mut self) {
+        scrub_words(&mut self.0);
+    }
+}
+
+/// A heap byte buffer containing only secret-derived KDF state.
+///
+/// This wrapper exists for panic paths as much as the ordinary return path:
+/// hand-written `scrub_slice` calls after each use would be skipped by an
+/// unwind. It is private because general-purpose callers should use [`Secret`]
+/// for fixed-width keys rather than acquire a clonable secret `Vec` API.
+struct SensitiveBytes(Vec<u8>);
+
+impl core::ops::Deref for SensitiveBytes {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for SensitiveBytes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for SensitiveBytes {
+    fn drop(&mut self) {
+        scrub_slice(&mut self.0);
+    }
+}
 
 impl Block {
     const fn zero() -> Self {
@@ -366,7 +400,7 @@ fn permute(v: &mut [u64; 16]) {
 /// over every column, of `R = X XOR Y`, finally XORed back with `R`.
 fn compress(x: &Block, y: &Block) -> Block {
     let r = x.xor(y);
-    let mut q = r;
+    let mut q = r.clone();
 
     // Rows: eight groups of sixteen consecutive words.
     for row in 0..8 {
@@ -374,6 +408,7 @@ fn compress(x: &Block, y: &Block) -> Block {
         v.copy_from_slice(&q.0[row * 16..row * 16 + 16]);
         permute(&mut v);
         q.0[row * 16..row * 16 + 16].copy_from_slice(&v);
+        scrub_words(&mut v);
     }
 
     // Columns: eight groups of sixteen words strided across the rows, taken two
@@ -390,6 +425,7 @@ fn compress(x: &Block, y: &Block) -> Block {
             q.0[16 * k + 2 * col] = v[2 * k];
             q.0[16 * k + 2 * col + 1] = v[2 * k + 1];
         }
+        scrub_words(&mut v);
     }
 
     q.xor(&r)
@@ -401,28 +437,32 @@ fn compress(x: &Block, y: &Block) -> Block {
 /// 64-byte BLAKE2b outputs contributing 32 bytes each, with a final short
 /// block. Getting this wrong yields plausible bytes for every length and the
 /// right bytes only at 64.
-fn variable_hash(out_len: usize, input: &[u8]) -> Vec<u8> {
-    let mut prefixed = Vec::with_capacity(4 + input.len());
+fn variable_hash(out_len: usize, input: &[u8]) -> SensitiveBytes {
+    let mut prefixed = SensitiveBytes(Vec::with_capacity(4 + input.len()));
     prefixed.extend_from_slice(&(out_len as u32).to_le_bytes());
     prefixed.extend_from_slice(input);
 
     if out_len <= 64 {
-        return blake2b(out_len, &prefixed).expect("out_len is within BLAKE2b's range");
+        return SensitiveBytes(
+            blake2b(out_len, &prefixed).expect("out_len is within BLAKE2b's range"),
+        );
     }
 
-    let mut out = Vec::with_capacity(out_len);
-    let mut v = blake2b(64, &prefixed).expect("64 is a legal digest length");
+    let mut out = SensitiveBytes(Vec::with_capacity(out_len));
+    let mut v = SensitiveBytes(blake2b(64, &prefixed).expect("64 is a legal digest length"));
     out.extend_from_slice(&v[..32]);
 
     // Each further full block contributes its first 32 bytes.
     let r = out_len.div_ceil(32) - 2;
     for _ in 1..r {
-        v = blake2b(64, &v).expect("64 is a legal digest length");
+        v = SensitiveBytes(blake2b(64, &v).expect("64 is a legal digest length"));
         out.extend_from_slice(&v[..32]);
     }
 
     let tail = out_len - 32 * r;
-    let last = blake2b(tail, &v).expect("the tail is within BLAKE2b's range");
+    let last = SensitiveBytes(
+        blake2b(tail, &v).expect("the tail is within BLAKE2b's range"),
+    );
     out.extend_from_slice(&last);
     out
 }
@@ -486,7 +526,7 @@ pub fn hash_into_with_secret(
         h0_input.update(&(field.len() as u32).to_le_bytes());
         h0_input.update(field);
     }
-    let h0 = h0_input.finalize();
+    let h0 = SensitiveBytes(h0_input.finalize());
 
     // Memory layout: m' is rounded DOWN to a multiple of 4*lanes so every slice
     // of every lane has the same length.
@@ -501,7 +541,7 @@ pub fn hash_into_with_secret(
     // The first two blocks of every lane come straight from H0.
     for (lane, _) in (0..lanes).map(|l| (l, ())) {
         for index in 0..2usize {
-            let mut input = Vec::with_capacity(72);
+            let mut input = SensitiveBytes(Vec::with_capacity(72));
             input.extend_from_slice(&h0);
             input.extend_from_slice(&(index as u32).to_le_bytes());
             input.extend_from_slice(&(lane as u32).to_le_bytes());
@@ -532,12 +572,13 @@ pub fn hash_into_with_secret(
     }
 
     // The final block is the XOR of every lane's last block.
-    let mut final_block = memory[lane_length - 1];
+    let mut final_block = memory[lane_length - 1].clone();
     for lane in 1..lanes {
         final_block = final_block.xor(&memory[lane * lane_length + lane_length - 1]);
     }
 
-    let tag = variable_hash(out.len(), &final_block.to_bytes());
+    let final_block_bytes = Secret::new(final_block.to_bytes());
+    let tag = variable_hash(out.len(), final_block_bytes.expose());
     out.copy_from_slice(&tag);
     Ok(())
 }
@@ -684,8 +725,8 @@ fn fill_segment(
         let ref_index = (start_position + relative as usize) % lane_length;
 
         let current = lane * lane_length + position;
-        let reference = memory[ref_lane * lane_length + ref_index];
-        let fresh = compress(&memory[previous], &reference);
+        let reference = ref_lane * lane_length + ref_index;
+        let fresh = compress(&memory[previous], &memory[reference]);
 
         // After the first pass the new block is XORed into the old one rather
         // than replacing it, which is what makes later passes strictly add

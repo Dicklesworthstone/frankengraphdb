@@ -23,6 +23,8 @@
 
 use core::cmp::min;
 
+use crate::zeroize::{Secret, scrub_slice, scrub_words};
+
 /// The BLAKE2b initialization vector — the same constants as SHA-512's IV
 /// (RFC 7693 §2.6), which is why they look familiar and are not a typo.
 const IV: [u64; 8] = [
@@ -142,6 +144,12 @@ fn compress(h: &mut [u64; 8], block: &[u8; BLOCK_LEN], counter: u128, last: bool
     for i in 0..8 {
         h[i] ^= v[i] ^ v[i + 8];
     }
+
+    // Both arrays are functions of the message (and, for keyed mode, the
+    // secret key). They are the original stack storage, so erase them before
+    // returning rather than waiting for ordinary stack reuse.
+    scrub_words(&mut m);
+    scrub_words(&mut v);
 }
 
 /// A streaming BLAKE2b instance.
@@ -152,7 +160,6 @@ fn compress(h: &mut [u64; 8], block: &[u8; BLOCK_LEN], counter: u128, last: bool
 /// consumed the final block without its finalization flag, and every message
 /// whose length is an exact multiple of the block size would hash wrong. The
 /// buffer therefore lags one block behind the input on purpose.
-#[derive(Clone)]
 pub struct Blake2b {
     h: [u64; 8],
     buffer: [u8; BLOCK_LEN],
@@ -202,9 +209,9 @@ impl Blake2b {
 
         if !key.is_empty() {
             // The key occupies one whole zero-padded block.
-            let mut key_block = [0u8; BLOCK_LEN];
-            key_block[..key.len()].copy_from_slice(key);
-            state.update(&key_block);
+            let mut key_block = Secret::<BLOCK_LEN>::zeroed();
+            key_block.expose_mut()[..key.len()].copy_from_slice(key);
+            state.update(key_block.expose());
         }
         Ok(state)
     }
@@ -215,8 +222,7 @@ impl Blake2b {
             if self.buffered == BLOCK_LEN {
                 // More input follows, so the buffered block is not the last.
                 self.counter += BLOCK_LEN as u128;
-                let block = self.buffer;
-                compress(&mut self.h, &block, self.counter, false);
+                compress(&mut self.h, &self.buffer, self.counter, false);
                 self.buffered = 0;
             }
             let take = min(BLOCK_LEN - self.buffered, input.len());
@@ -239,15 +245,21 @@ impl Blake2b {
         for byte in self.buffer.iter_mut().skip(self.buffered) {
             *byte = 0;
         }
-        let block = self.buffer;
-        compress(&mut self.h, &block, self.counter, true);
+        compress(&mut self.h, &self.buffer, self.counter, true);
 
         let mut out = Vec::with_capacity(self.digest_len);
-        for word in self.h {
+        for word in &self.h {
             out.extend_from_slice(&word.to_le_bytes());
         }
         out.truncate(self.digest_len);
         out
+    }
+}
+
+impl Drop for Blake2b {
+    fn drop(&mut self) {
+        scrub_words(&mut self.h);
+        scrub_slice(&mut self.buffer);
     }
 }
 

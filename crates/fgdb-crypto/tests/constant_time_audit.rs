@@ -284,6 +284,10 @@ fn the_reduction_stays_branchless() {
 fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     let source = std::fs::read_to_string(crate_root().join("src/zeroize.rs"))
         .expect("zeroize.rs is readable");
+    let argon = std::fs::read_to_string(crate_root().join("src/argon2id.rs"))
+        .expect("argon2id.rs is readable");
+    let blake = std::fs::read_to_string(crate_root().join("src/blake2b.rs"))
+        .expect("blake2b.rs is readable");
 
     fn code_lines(body: &str) -> Vec<&str> {
         body.lines()
@@ -292,12 +296,18 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
             .collect::<Vec<_>>()
     }
 
-    for forbidden_indirection in ["#[cfg", "#[cfg_attr", "macro_rules!", "include!"] {
-        assert!(
-            !source.contains(forbidden_indirection),
-            "zeroize.rs must keep its scrub authority unconditional and directly \
-             inspectable; found {forbidden_indirection}"
-        );
+    for (name, authority) in [
+        ("zeroize.rs", source.as_str()),
+        ("argon2id.rs", argon.as_str()),
+        ("blake2b.rs", blake.as_str()),
+    ] {
+        for forbidden_indirection in ["#[cfg", "#[cfg_attr", "macro_rules!", "include!"] {
+            assert!(
+                !authority.contains(forbidden_indirection),
+                "{name} must keep its scrub authority unconditional and directly \
+                 inspectable; found {forbidden_indirection}"
+            );
+        }
     }
 
     let mut compiled_secret = fgdb_crypto::zeroize::Secret::new([0xa5_u8; 2]);
@@ -312,6 +322,16 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     assert_eq!(
         compiled_slice, [0_u8; 2],
         "the production-selected scrub_slice must execute for every admitted length"
+    );
+    let mut compiled_words = [0xa5_a5_a5_a5_a5_a5_a5_a5_u64; 2];
+    fgdb_crypto::zeroize::scrub_words(&mut compiled_words);
+    assert_eq!(
+        compiled_words, [0_u64; 2],
+        "the production-selected scrub_words must execute for every admitted length"
+    );
+    assert!(
+        core::mem::needs_drop::<fgdb_crypto::blake2b::Blake2b>(),
+        "the production BLAKE2b state must carry scrub-on-drop glue"
     );
 
     let scrub_start = source
@@ -383,5 +403,133 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
             "compiler_fence(Ordering::SeqCst);",
         ],
         "the witnessed boundary must consist solely of zeroing then fencing"
+    );
+
+    let word_boundary_start = source
+        .find("#[inline(never)]\npub fn scrub_words")
+        .expect("the non-inlined word codegen boundary is present");
+    assert_eq!(
+        source
+            .matches("pub fn scrub_words(words: &mut [u64])")
+            .count(),
+        1,
+        "zeroize.rs must contain exactly one scrub_words authority"
+    );
+    let word_boundary = &source[word_boundary_start..];
+    let word_boundary =
+        &word_boundary[..word_boundary.find("\n}").unwrap_or(word_boundary.len())];
+    assert_eq!(
+        code_lines(word_boundary),
+        [
+            "#[inline(never)]",
+            "pub fn scrub_words(words: &mut [u64]) {",
+            "words.fill(0);",
+            "compiler_fence(Ordering::SeqCst);",
+        ],
+        "the witnessed word boundary must consist solely of zeroing then fencing"
+    );
+
+    assert!(
+        argon.contains("#[derive(Clone)]\nstruct Block([u64; BLOCK_WORDS]);"),
+        "Argon2 blocks must permit only explicit internal clones, never implicit Copy"
+    );
+    assert!(
+        !argon.contains("#[derive(Clone, Copy)]\nstruct Block")
+            && !argon.contains("impl Copy for Block"),
+        "Argon2 memory blocks must not become implicitly copyable secret state"
+    );
+    let block_drop_start = argon
+        .find("impl Drop for Block")
+        .expect("Argon2 blocks have automatic scrub-on-drop glue");
+    assert_eq!(
+        argon.matches("impl Drop for Block").count(),
+        1,
+        "argon2id.rs must contain exactly one Block Drop authority"
+    );
+    assert!(
+        argon[..block_drop_start].ends_with("\n\n"),
+        "the Block Drop authority must be an unconditional top-level item"
+    );
+    let block_drop = &argon[block_drop_start..];
+    let block_drop = &block_drop[..block_drop.find("\n}\n").unwrap_or(block_drop.len())];
+    assert_eq!(
+        code_lines(block_drop),
+        [
+            "impl Drop for Block {",
+            "fn drop(&mut self) {",
+            "scrub_words(&mut self.0);",
+            "}",
+        ],
+        "every original Argon2 block allocation must scrub its word storage on drop"
+    );
+
+    let bytes_drop_start = argon
+        .find("impl Drop for SensitiveBytes")
+        .expect("derived byte buffers have automatic scrub-on-drop glue");
+    assert_eq!(
+        argon.matches("impl Drop for SensitiveBytes").count(),
+        1,
+        "argon2id.rs must contain exactly one SensitiveBytes Drop authority"
+    );
+    assert!(
+        argon[..bytes_drop_start].ends_with("\n\n"),
+        "the SensitiveBytes Drop authority must be an unconditional top-level item"
+    );
+    let bytes_drop = &argon[bytes_drop_start..];
+    let bytes_drop = &bytes_drop[..bytes_drop.find("\n}\n").unwrap_or(bytes_drop.len())];
+    assert_eq!(
+        code_lines(bytes_drop),
+        [
+            "impl Drop for SensitiveBytes {",
+            "fn drop(&mut self) {",
+            "scrub_slice(&mut self.0);",
+            "}",
+        ],
+        "every derived Argon2 byte buffer must scrub its allocation on drop"
+    );
+
+    assert!(
+        !blake.contains("#[derive(Clone)]\npub struct Blake2b")
+            && !blake.contains("impl Clone for Blake2b"),
+        "BLAKE2b state must not offer a secret-state duplication API"
+    );
+    let blake_drop_start = blake
+        .find("impl Drop for Blake2b")
+        .expect("BLAKE2b state has automatic scrub-on-drop glue");
+    assert_eq!(
+        blake.matches("impl Drop for Blake2b").count(),
+        1,
+        "blake2b.rs must contain exactly one Blake2b Drop authority"
+    );
+    assert!(
+        blake[..blake_drop_start].ends_with("\n}\n\n"),
+        "the Blake2b Drop authority must be an unconditional top-level item"
+    );
+    let blake_drop = &blake[blake_drop_start..];
+    let blake_drop = &blake_drop[..blake_drop.find("\n}\n").unwrap_or(blake_drop.len())];
+    assert_eq!(
+        code_lines(blake_drop),
+        [
+            "impl Drop for Blake2b {",
+            "fn drop(&mut self) {",
+            "scrub_words(&mut self.h);",
+            "scrub_slice(&mut self.buffer);",
+            "}",
+        ],
+        "BLAKE2b drop must scrub both chaining words and buffered message bytes"
+    );
+
+    let compression_start = blake
+        .find("fn compress(h: &mut [u64; 8]")
+        .expect("BLAKE2b compression function is present");
+    let compression = &blake[compression_start..];
+    let compression = &compression[..compression
+        .find("\n}\n\n/// A streaming BLAKE2b instance")
+        .expect("BLAKE2b compression function remains directly inspectable")];
+    let compression_lines = code_lines(compression);
+    assert_eq!(
+        &compression_lines[compression_lines.len() - 2..],
+        ["scrub_words(&mut m);", "scrub_words(&mut v);"],
+        "BLAKE2b must scrub both secret-derived compression temporaries before return"
     );
 }

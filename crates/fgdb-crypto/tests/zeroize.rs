@@ -24,7 +24,7 @@
 //! treat the fence as REVIEWED, NOT WITNESSED, and do not let this file's green
 //! bar be read as covering it.
 
-use fgdb_crypto::zeroize::{Secret, scrub_slice};
+use fgdb_crypto::zeroize::{Secret, scrub_slice, scrub_words};
 
 /// Scrubbing zeroes the bytes. The directly observable half of the contract.
 #[test]
@@ -118,6 +118,23 @@ fn scrub_slice_zeroes_a_caller_owned_buffer() {
     let mut one = [0x22u8; 1];
     scrub_slice(&mut one);
     assert_eq!(one, [0u8; 1]);
+}
+
+/// The word-storage boundary used by Argon2 and BLAKE2b has the same directly
+/// observable overwrite behavior, including boundary lengths.
+#[test]
+fn scrub_words_zeroes_caller_owned_state() {
+    let mut state = vec![0xfeed_face_dead_beef_u64; 17];
+    scrub_words(&mut state);
+    assert!(
+        state.iter().all(|word| *word == 0),
+        "scrub_words left derived state behind"
+    );
+
+    scrub_words(&mut []);
+    let mut one = [u64::MAX];
+    scrub_words(&mut one);
+    assert_eq!(one, [0]);
 }
 
 /// Scrubbing twice is legal and idempotent — `scrub` then `drop` is the normal
