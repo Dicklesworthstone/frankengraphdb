@@ -487,4 +487,51 @@ mod tests {
             }
         }
     }
+
+    /// 256 same-family propertied entries must pack into two blocks and
+    /// each block must encode: a full 255-row locator column is lawful
+    /// (fgdb-hc04).
+    #[test]
+    fn a_full_property_patch_column_packs_and_encodes() {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let count = usize::try_from(MAX_PROPERTY_PATCH_ROWS).expect("fits") + 1;
+        let retained: Vec<(AdjacencyEntry, EdgePropertyRow)> = (1..=count as u128)
+            .map(|dst| {
+                (
+                    entry(dst),
+                    vec![(PropertyKeyId(dst as u64), CanonicalScalar::Int(dst as i64))],
+                )
+            })
+            .collect();
+        let (packed, packed_props) = pack_retained(
+            retained,
+            usize::try_from(crate::MAX_BLOCK_ENTRIES).expect("fits"),
+            usize::try_from(MAX_PROPERTY_PATCH_ROWS).expect("fits"),
+        );
+        assert_eq!(
+            packed.len(),
+            2,
+            "256 propertied entries split at the 255-row ceiling"
+        );
+        assert_eq!(packed_props.len(), 2);
+        for (block, props) in packed.iter().zip(&packed_props) {
+            let props = props
+                .as_ref()
+                .expect("every packed block here is propertied");
+            crate::edge_props::validate_block_patch_consistency(&props.locators, props.rows.len())
+                .expect("the packed column satisfies the joint bijection law");
+            crate::encode_block_with_properties(
+                0,
+                None,
+                block,
+                fgdb_types::ids::ObjectId([0xab; 32]),
+                &props.locators,
+                &props.rows,
+            )
+            .expect("a packed chunk at the locator ceiling must encode");
+        }
+        let total: usize = packed.iter().map(Vec::len).sum();
+        assert_eq!(total, count, "every retained edge survived the split");
+    }
 }
