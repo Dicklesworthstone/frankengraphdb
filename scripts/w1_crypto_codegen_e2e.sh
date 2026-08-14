@@ -77,6 +77,14 @@ else
   gate_diag "  source-linkage transcript: $EVIDENCE_DIR/source-linkage.log"
 fi
 
+if cargo test --offline --locked -p fgdb-crypto --doc \
+  >"$EVIDENCE_DIR/compile-fail.log" 2>&1; then
+  gate_pass "public secret owners remain non-cloneable and consuming at compile time"
+else
+  gate_fail "a secret owner regained a clone or reuse path"
+  gate_diag "  compile-fail transcript: $EVIDENCE_DIR/compile-fail.log"
+fi
+
 if CARGO_TARGET_DIR="$TARGET_DIR" cargo rustc --offline --locked --release \
   -p fgdb-crypto --lib -- --emit=obj >"$BUILD_LOG" 2>&1; then
   gate_pass "optimized fgdb-crypto production object compiled"

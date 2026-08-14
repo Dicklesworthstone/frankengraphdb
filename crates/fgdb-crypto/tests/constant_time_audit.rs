@@ -274,12 +274,13 @@ fn the_reduction_stays_branchless() {
     );
 }
 
-/// Every generic `Secret<N>` drop reaches the one release-codegen boundary.
+/// Every owned crypto-state class reaches a release-codegen boundary.
 ///
-/// The release-object gate can only prove something about the public
-/// `scrub_slice` symbol if `Secret::scrub` actually delegates to it. Keeping the
-/// linkage assertion beside the source audit makes the two halves mutually
-/// load-bearing: a surviving symbol that no secret calls is not evidence.
+/// The release-object gate can only prove something about the public byte and
+/// word boundaries if the production `Secret`, Argon2, and BLAKE2b authorities
+/// actually delegate to them. Keeping the linkage assertion beside the source
+/// audit makes the halves mutually load-bearing: a surviving symbol that no
+/// secret-derived storage calls is not evidence.
 #[test]
 fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     let source = std::fs::read_to_string(crate_root().join("src/zeroize.rs"))
@@ -416,8 +417,7 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         "zeroize.rs must contain exactly one scrub_words authority"
     );
     let word_boundary = &source[word_boundary_start..];
-    let word_boundary =
-        &word_boundary[..word_boundary.find("\n}").unwrap_or(word_boundary.len())];
+    let word_boundary = &word_boundary[..word_boundary.find("\n}").unwrap_or(word_boundary.len())];
     assert_eq!(
         code_lines(word_boundary),
         [
@@ -487,6 +487,47 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
         ],
         "every derived Argon2 byte buffer must scrub its allocation on drop"
     );
+    assert!(
+        !argon.contains("impl Clone for SensitiveBytes")
+            && !argon.contains("impl core::ops::Deref for SensitiveBytes")
+            && !argon.contains("impl core::ops::DerefMut for SensitiveBytes"),
+        "SensitiveBytes must not expose a clone or raw Vec method surface that can escape scrub ownership"
+    );
+
+    let argon_compression_start = argon
+        .find("fn compress(x: &Block, y: &Block)")
+        .expect("Argon2 compression function is present");
+    let argon_compression = &argon[argon_compression_start..];
+    let argon_compression = &argon_compression[..argon_compression
+        .find("\n}\n\n/// `H'^T(X)`")
+        .expect("Argon2 compression function remains directly inspectable")];
+    assert_eq!(
+        code_lines(argon_compression)
+            .into_iter()
+            .filter(|line| *line == "scrub_words(&mut v);")
+            .count(),
+        2,
+        "each Argon2 row/column scratch array must be scrubbed after its final use"
+    );
+    assert!(
+        argon_compression.contains(
+            "q.0[row * 16..row * 16 + 16].copy_from_slice(&v);\n        scrub_words(&mut v);"
+        ) && argon_compression.contains(
+            "q.0[16 * k + 2 * col + 1] = v[2 * k + 1];\n        }\n        scrub_words(&mut v);"
+        ),
+        "Argon2 must scrub each scratch array only after copying its result back"
+    );
+    for required_sensitive_path in [
+        "fn variable_hash(out_len: usize, input: &[u8]) -> SensitiveBytes",
+        "let h0 = SensitiveBytes::from_vec(h0_input.finalize());",
+        "let mut input = SensitiveBytes::with_capacity(72);",
+        "let final_block_bytes = Secret::new(final_block.into_bytes());",
+    ] {
+        assert!(
+            argon.contains(required_sensitive_path),
+            "Argon2 derived bytes escaped their scrub-on-drop owner: missing {required_sensitive_path}"
+        );
+    }
 
     assert!(
         !blake.contains("#[derive(Clone)]\npub struct Blake2b")
@@ -517,6 +558,10 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
             "}",
         ],
         "BLAKE2b drop must scrub both chaining words and buffered message bytes"
+    );
+    assert!(
+        blake.contains("let mut key_block = Secret::<BLOCK_LEN>::zeroed();"),
+        "the BLAKE2b padded key block must remain inside a scrub-on-drop Secret"
     );
 
     let compression_start = blake

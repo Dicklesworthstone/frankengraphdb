@@ -307,17 +307,21 @@ impl Drop for Block {
 /// for fixed-width keys rather than acquire a clonable secret `Vec` API.
 struct SensitiveBytes(Vec<u8>);
 
-impl core::ops::Deref for SensitiveBytes {
-    type Target = Vec<u8>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl SensitiveBytes {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
     }
-}
 
-impl core::ops::DerefMut for SensitiveBytes {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    fn from_vec(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -341,7 +345,7 @@ impl Block {
         block
     }
 
-    fn to_bytes(self) -> [u8; BLOCK_BYTES] {
+    fn into_bytes(self) -> [u8; BLOCK_BYTES] {
         let mut out = [0u8; BLOCK_BYTES];
         let (chunks, _) = out.as_chunks_mut::<8>();
         for (chunk, word) in chunks.iter_mut().zip(self.0.iter()) {
@@ -438,32 +442,36 @@ fn compress(x: &Block, y: &Block) -> Block {
 /// block. Getting this wrong yields plausible bytes for every length and the
 /// right bytes only at 64.
 fn variable_hash(out_len: usize, input: &[u8]) -> SensitiveBytes {
-    let mut prefixed = SensitiveBytes(Vec::with_capacity(4 + input.len()));
+    let mut prefixed = SensitiveBytes::with_capacity(4 + input.len());
     prefixed.extend_from_slice(&(out_len as u32).to_le_bytes());
     prefixed.extend_from_slice(input);
 
     if out_len <= 64 {
-        return SensitiveBytes(
-            blake2b(out_len, &prefixed).expect("out_len is within BLAKE2b's range"),
+        return SensitiveBytes::from_vec(
+            blake2b(out_len, prefixed.as_slice()).expect("out_len is within BLAKE2b's range"),
         );
     }
 
-    let mut out = SensitiveBytes(Vec::with_capacity(out_len));
-    let mut v = SensitiveBytes(blake2b(64, &prefixed).expect("64 is a legal digest length"));
-    out.extend_from_slice(&v[..32]);
+    let mut out = SensitiveBytes::with_capacity(out_len);
+    let mut v = SensitiveBytes::from_vec(
+        blake2b(64, prefixed.as_slice()).expect("64 is a legal digest length"),
+    );
+    out.extend_from_slice(&v.as_slice()[..32]);
 
     // Each further full block contributes its first 32 bytes.
     let r = out_len.div_ceil(32) - 2;
     for _ in 1..r {
-        v = SensitiveBytes(blake2b(64, &v).expect("64 is a legal digest length"));
-        out.extend_from_slice(&v[..32]);
+        v = SensitiveBytes::from_vec(
+            blake2b(64, v.as_slice()).expect("64 is a legal digest length"),
+        );
+        out.extend_from_slice(&v.as_slice()[..32]);
     }
 
     let tail = out_len - 32 * r;
-    let last = SensitiveBytes(
-        blake2b(tail, &v).expect("the tail is within BLAKE2b's range"),
+    let last = SensitiveBytes::from_vec(
+        blake2b(tail, v.as_slice()).expect("the tail is within BLAKE2b's range"),
     );
-    out.extend_from_slice(&last);
+    out.extend_from_slice(last.as_slice());
     out
 }
 
@@ -526,7 +534,7 @@ pub fn hash_into_with_secret(
         h0_input.update(&(field.len() as u32).to_le_bytes());
         h0_input.update(field);
     }
-    let h0 = SensitiveBytes(h0_input.finalize());
+    let h0 = SensitiveBytes::from_vec(h0_input.finalize());
 
     // Memory layout: m' is rounded DOWN to a multiple of 4*lanes so every slice
     // of every lane has the same length.
@@ -541,12 +549,12 @@ pub fn hash_into_with_secret(
     // The first two blocks of every lane come straight from H0.
     for (lane, _) in (0..lanes).map(|l| (l, ())) {
         for index in 0..2usize {
-            let mut input = SensitiveBytes(Vec::with_capacity(72));
-            input.extend_from_slice(&h0);
+            let mut input = SensitiveBytes::with_capacity(72);
+            input.extend_from_slice(h0.as_slice());
             input.extend_from_slice(&(index as u32).to_le_bytes());
             input.extend_from_slice(&(lane as u32).to_le_bytes());
-            let bytes = variable_hash(BLOCK_BYTES, &input);
-            memory[lane * lane_length + index] = Block::from_bytes(&bytes);
+            let bytes = variable_hash(BLOCK_BYTES, input.as_slice());
+            memory[lane * lane_length + index] = Block::from_bytes(bytes.as_slice());
         }
     }
 
@@ -577,9 +585,9 @@ pub fn hash_into_with_secret(
         final_block = final_block.xor(&memory[lane * lane_length + lane_length - 1]);
     }
 
-    let final_block_bytes = Secret::new(final_block.to_bytes());
+    let final_block_bytes = Secret::new(final_block.into_bytes());
     let tag = variable_hash(out.len(), final_block_bytes.expose());
-    out.copy_from_slice(&tag);
+    out.copy_from_slice(tag.as_slice());
     Ok(())
 }
 

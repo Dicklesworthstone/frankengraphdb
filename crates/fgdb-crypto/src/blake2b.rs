@@ -160,6 +160,20 @@ fn compress(h: &mut [u64; 8], block: &[u8; BLOCK_LEN], counter: u128, last: bool
 /// consumed the final block without its finalization flag, and every message
 /// whose length is an exact multiple of the block size would hash wrong. The
 /// buffer therefore lags one block behind the input on purpose.
+///
+/// The state is deliberately neither `Clone` nor `Copy`: keyed hashing and
+/// Argon2 H0 place secret-derived material in both `h` and `buffer`. Its `Drop`
+/// implementation scrubs that original storage, while compression scrubs its
+/// local message/scratch words before returning. The measured safe-code limits
+/// of those overwrites are documented by [`crate::zeroize`].
+///
+/// ```compile_fail
+/// use fgdb_crypto::blake2b::Blake2b;
+///
+/// let state = Blake2b::new(32).expect("registered digest width");
+/// let duplicate = state.clone();
+/// # let _ = duplicate;
+/// ```
 pub struct Blake2b {
     h: [u64; 8],
     buffer: [u8; BLOCK_LEN],

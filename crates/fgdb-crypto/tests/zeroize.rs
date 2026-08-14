@@ -13,16 +13,12 @@
 //! removed and this file would stay green, which is precisely the
 //! green-over-nothing shape the workspace keeps finding.
 //!
-//! **ONE GUARANTEE HERE IS UNTESTED, AND THIS IS THE MEASUREMENT SAYING SO.**
-//! `scrub` pairs its overwrite with a `compiler_fence`, and the fence is the
-//! part that stops the compiler deleting the overwrite as a dead store. Removing
-//! BOTH fences reds NOTHING in this file — measured, not assumed. That is not a
-//! gap someone forgot to close: a compiler_fence has no observable effect at the
-//! language level, so no test written in the language can detect its absence.
-//! Verifying it needs a different instrument (disassembly of an optimized
-//! build, or the codegen-inspection lane increment 5 owes). Until that exists,
-//! treat the fence as REVIEWED, NOT WITNESSED, and do not let this file's green
-//! bar be read as covering it.
+//! The fence has no observable language-level effect, so this file cannot prove
+//! it survives optimization. The separate live `w1_crypto_codegen_e2e` gate
+//! supplies that deliberately narrower instrument: on the pinned supported
+//! host/toolchain it requires the release object to retain unconditional
+//! memset-targeted byte and word boundaries. That remains measured artifact
+//! evidence, not a portable Rust-language zeroization theorem.
 
 use fgdb_crypto::zeroize::{Secret, scrub_slice, scrub_words};
 
