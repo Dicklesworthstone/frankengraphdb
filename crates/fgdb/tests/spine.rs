@@ -924,6 +924,122 @@ fn cas_expected_none_on_a_live_element_sets_the_property() {
     });
 }
 
+/// After compact republishes patches, a property write must still see the
+/// live row (merge_vertex / writer live stay aligned).
+#[test]
+fn set_property_after_compact_updates_the_live_row() {
+    let dir = scratch("compact-then-set");
+    under_lab(8232, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(
+            VId(1),
+            vec![LabelId(3)],
+            vec![(key, CanonicalScalar::Int(1))],
+        );
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+        db.compact(cx).await.expect("compacts");
+        let mut update = WriteBatch::new(KNOWS);
+        update.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(9)));
+        update.set_edge_property(EId(10), key, Some(CanonicalScalar::Int(8)));
+        db.write(cx, update)
+            .await
+            .expect("set after compact must see the live row");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(key, CanonicalScalar::Int(9))]
+        );
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(key, CanonicalScalar::Int(8))]
+        );
+        drop(db);
+        let db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert_eq!(
+            db.vertex(VId(1)).expect("reads").expect("live").props,
+            vec![(key, CanonicalScalar::Int(9))]
+        );
+        assert_eq!(
+            db.edge(EId(10)).expect("reads").expect("live").props,
+            vec![(key, CanonicalScalar::Int(8))]
+        );
+    });
+}
+
+/// Compact keeps tombstones (floor 0). Spent must survive the
+/// from_published rebuild — recreate of a committed-deleted id is
+/// IdentitySpent, not a resurrection.
+#[test]
+fn compact_does_not_unspend_a_committed_delete() {
+    let dir = scratch("compact-keeps-spent");
+    under_lab(8234, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut retire = WriteBatch::new(KNOWS);
+        retire.delete_edge(EId(10));
+        retire.delete_vertex(VId(1));
+        db.write(cx, retire).await.expect("retires");
+        db.compact(cx).await.expect("compacts");
+
+        let mut reuse_v = WriteBatch::new(KNOWS);
+        reuse_v.create_vertex(VId(1), vec![], vec![]);
+        let spent_v = db
+            .write(cx, reuse_v)
+            .await
+            .expect_err("compact must not unspend vid=1");
+        assert!(
+            matches!(
+                spent_v,
+                WriteError::IdentitySpent {
+                    elem: ElementId::Vertex(VId(1))
+                }
+            ),
+            "recreate vid=1 after compact must be IdentitySpent, got {spent_v:?}"
+        );
+
+        let mut extra = WriteBatch::new(KNOWS);
+        extra.create_vertex(VId(3), vec![], vec![]);
+        extra.add_edge(EId(10), VId(2), VId(3), vec![]);
+        let spent_e = db
+            .write(cx, extra)
+            .await
+            .expect_err("compact must not unspend eid=10");
+        assert!(
+            matches!(
+                spent_e,
+                WriteError::IdentitySpent {
+                    elem: ElementId::Edge(EId(10))
+                }
+            ),
+            "recreate eid=10 after compact must be IdentitySpent, got {spent_e:?}"
+        );
+
+        drop(db);
+        let mut db = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut again = WriteBatch::new(KNOWS);
+        again.create_vertex(VId(1), vec![], vec![]);
+        assert!(
+            matches!(
+                db.write(cx, again).await,
+                Err(WriteError::IdentitySpent {
+                    elem: ElementId::Vertex(VId(1))
+                })
+            ),
+            "reopen after compact must still spend vid=1"
+        );
+    });
+}
+
 /// A self-loop is incident once. Deleting the vertex must retire it
 /// without CascadeImageMismatch.
 #[test]
@@ -3372,6 +3488,57 @@ fn ensure_edge_by_triple_is_idempotent_even_under_a_new_eid() {
             "new triple (1, KNOWS, 3) must appear; neighbours={:?}",
             db.neighbours(VId(1), KNOWS).expect("reads")
         );
+    });
+}
+
+/// Deleting the only live edge of a triple must let `ensure_edge_by_triple`
+/// mint a new eid. `triple_is_live` has to honor `prefix_deleted_edges` for
+/// both a same-batch create-delete and a committed delete.
+#[test]
+fn ensure_edge_by_triple_after_deleting_the_only_edge_creates() {
+    let dir = scratch("ensure-after-delete-triple");
+    under_lab(8233, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+
+        let mut same = WriteBatch::new(KNOWS);
+        same.create_vertex(VId(1), vec![], vec![]);
+        same.create_vertex(VId(2), vec![], vec![]);
+        same.add_edge(EId(10), VId(1), VId(2), vec![]);
+        same.delete_edge(EId(10));
+        same.ensure_edge_by_triple(EId(11), VId(1), VId(2), vec![]);
+        db.write(cx, same)
+            .await
+            .expect("same-batch delete of the only triple plus ensure must create");
+        assert!(
+            db.edge(EId(10)).expect("reads").is_none(),
+            "eid=10 must fold away with its same-batch delete"
+        );
+        assert!(
+            db.edge(EId(11)).expect("reads").is_some(),
+            "eid=11 must be the live triple"
+        );
+        assert_eq!(
+            db.neighbours(VId(1), KNOWS).expect("reads"),
+            vec![VId(2)],
+            "the triple must exist under the new eid"
+        );
+
+        let mut next = WriteBatch::new(KNOWS);
+        next.delete_edge(EId(11));
+        next.ensure_edge_by_triple(EId(12), VId(1), VId(2), vec![]);
+        db.write(cx, next)
+            .await
+            .expect("committed delete plus ensure of a new eid must create");
+        assert!(
+            db.edge(EId(11)).expect("reads").is_none(),
+            "eid=11 must retire"
+        );
+        assert!(
+            db.edge(EId(12)).expect("reads").is_some(),
+            "eid=12 must be the live triple after the committed delete"
+        );
+        assert_eq!(db.neighbours(VId(1), KNOWS).expect("reads"), vec![VId(2)]);
     });
 }
 
