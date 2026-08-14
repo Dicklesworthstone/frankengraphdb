@@ -59,18 +59,26 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 before_version,
                 sorted_retired_incident_edges,
             } => {
-                for eid in &sorted_retired_incident_edges {
-                    absorb_edge(&mut edges, *eid);
-                }
-                let durable_cascade: Vec<EId> = sorted_retired_incident_edges
-                    .into_iter()
-                    .filter(|eid| edges.get(eid).is_none_or(|edge| !edge.cancelled))
-                    .collect();
-                let net = vertices.entry(vid).or_default();
-                if net.created.is_some() {
+                let created_here = vertices.get(&vid).is_some_and(|net| net.created.is_some());
+                if created_here {
+                    // The vertex never becomes durable. Same-batch incident
+                    // creates must cancel even if the cascade list omitted
+                    // them — apply never sees this DeleteVertex, so a leftover
+                    // CreateEdge is DanglingEndpoint (fgdb-chx6). A never-born
+                    // vertex also cannot cascade-own a basis eid.
+                    cancel_incident_created_edges(&mut edges, vid);
+                    let net = vertices.entry(vid).or_default();
                     *net = VertexNet::default();
                     net.cancelled = true;
                 } else {
+                    for eid in &sorted_retired_incident_edges {
+                        absorb_edge(&mut edges, *eid);
+                    }
+                    let durable_cascade: Vec<EId> = sorted_retired_incident_edges
+                        .into_iter()
+                        .filter(|eid| edges.get(eid).is_none_or(|edge| !edge.cancelled))
+                        .collect();
+                    let net = vertices.entry(vid).or_default();
                     net.deleted = Some(DeletedVertex {
                         before_version,
                         sorted_retired_incident_edges: durable_cascade,
@@ -92,6 +100,16 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
             } => {
                 let net = edges.entry(eid).or_default();
                 if net.cancelled || net.deleted.is_some() || net.cascade_owned {
+                    continue;
+                }
+                // Apply is tag-order: CreateEdge (0x02) before DeleteVertex
+                // (0x03). A create against an endpoint this batch already
+                // deleted or cancelled cannot become durable — emitting it
+                // either dangles (vertex rows cancelled) or is born before
+                // the cascade image is checked (fgdb-c3ru).
+                if vertex_endpoint_gone(&vertices, src) || vertex_endpoint_gone(&vertices, dst) {
+                    *net = EdgeNet::default();
+                    net.cancelled = true;
                     continue;
                 }
                 net.created = Some(CreatedEdge {
@@ -354,6 +372,25 @@ struct CreatedEdge {
     canonical_key: Option<CanonicalScalar>,
     props: Vec<(PropertyKeyId, CanonicalScalar)>,
     valid_time: Option<ValidTimePeriod>,
+}
+
+fn vertex_endpoint_gone(vertices: &BTreeMap<VId, VertexNet>, vid: VId) -> bool {
+    vertices
+        .get(&vid)
+        .is_some_and(|net| net.cancelled || net.deleted.is_some())
+}
+
+fn cancel_incident_created_edges(edges: &mut BTreeMap<EId, EdgeNet>, vid: VId) {
+    for net in edges.values_mut() {
+        let incident = net
+            .created
+            .as_ref()
+            .is_some_and(|created| created.src == vid || created.dst == vid);
+        if incident {
+            *net = EdgeNet::default();
+            net.cancelled = true;
+        }
+    }
 }
 
 fn absorb_edge(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId) {
@@ -718,6 +755,124 @@ mod tests {
                 eid: EId(10),
                 before_version: version,
             }]
+        );
+    }
+
+    fn create_edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
+        DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal: eid as u64,
+            src: VId(src),
+            relation: crate::RelationId(1),
+            dst: VId(dst),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        }
+    }
+
+    /// DeleteVertex then CreateEdge to that vertex must not emit the create:
+    /// apply would birth the edge before the cascade runs (fgdb-c3ru).
+    #[test]
+    fn create_edge_after_endpoint_delete_is_dropped() {
+        let version = ObjectId([0xaa; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            },
+            create_edge(10, 1, 2),
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn create_edge_after_cancelled_endpoint_is_dropped() {
+        let out = fold_target_disjoint(vec![
+            create_vertex(1, 1),
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0xbb; 32]),
+                sorted_retired_incident_edges: vec![],
+            },
+            create_edge(10, 1, 2),
+        ]);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn property_after_dropped_create_against_dead_endpoint_does_not_reemit() {
+        let version = ObjectId([0xcc; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            },
+            create_edge(10, 1, 2),
+            DeltaRow::Property {
+                elem: ElementId::Edge(EId(10)),
+                property: PropertyKeyId(1),
+                before: None,
+                after: Some(CanonicalScalar::Int(9)),
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            }]
+        );
+    }
+
+    /// CreateVertex + CreateEdge + DeleteVertex with an empty cascade must
+    /// still drop the edge: apply never sees the cancelled vertex (fgdb-chx6).
+    #[test]
+    fn cancelled_vertex_drops_incident_creates_even_without_a_cascade() {
+        let out = fold_target_disjoint(vec![
+            create_vertex(1, 1),
+            create_edge(10, 1, 2),
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0xdd; 32]),
+                sorted_retired_incident_edges: vec![],
+            },
+        ]);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn cancelled_vertex_does_not_swallow_a_basis_eid_from_a_hostile_cascade() {
+        let version = ObjectId([0xee; 32]);
+        let out = fold_target_disjoint(vec![
+            create_vertex(1, 1),
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+            DeltaRow::DeleteEdge {
+                eid: EId(10),
+                before_version: version,
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteEdge {
+                eid: EId(10),
+                before_version: version,
+            }],
+            "a never-born vertex must not cascade-own a basis eid"
         );
     }
 }
