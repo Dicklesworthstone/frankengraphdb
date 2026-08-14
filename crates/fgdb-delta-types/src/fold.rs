@@ -30,6 +30,12 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 valid_time,
             } => {
                 let net = vertices.entry(vid).or_default();
+                // Identities never recycle (§6.2). A prior delete or a
+                // same-batch create-delete already spent this VId; a later
+                // create must not wipe that and emit a resurrection (fgdb-iv5z).
+                if net.cancelled || net.deleted.is_some() {
+                    continue;
+                }
                 net.created = Some(CreatedVertex {
                     birth_ordinal,
                     labels: labels.clone(),
@@ -85,6 +91,9 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 valid_time,
             } => {
                 let net = edges.entry(eid).or_default();
+                if net.cancelled || net.deleted.is_some() || net.cascade_owned {
+                    continue;
+                }
                 net.created = Some(CreatedEdge {
                     birth_ordinal,
                     src,
@@ -635,6 +644,79 @@ mod tests {
                 vid: VId(1),
                 before_version: version,
                 sorted_retired_incident_edges: vec![EId(10)],
+            }]
+        );
+    }
+
+    fn create_vertex(vid: u128, ordinal: u64) -> DeltaRow {
+        DeltaRow::CreateVertex {
+            vid: VId(vid),
+            birth_ordinal: ordinal,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        }
+    }
+
+    #[test]
+    fn delete_then_create_keeps_the_basis_delete() {
+        let version = ObjectId([0x77; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            },
+            create_vertex(1, 9),
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn create_delete_create_stays_cancelled() {
+        let out = fold_target_disjoint(vec![
+            create_vertex(1, 1),
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: ObjectId([0x88; 32]),
+                sorted_retired_incident_edges: vec![],
+            },
+            create_vertex(1, 2),
+        ]);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn delete_edge_then_create_keeps_the_delete() {
+        let version = ObjectId([0x99; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::DeleteEdge {
+                eid: EId(10),
+                before_version: version,
+            },
+            DeltaRow::CreateEdge {
+                eid: EId(10),
+                birth_ordinal: 3,
+                src: VId(1),
+                relation: crate::RelationId(1),
+                dst: VId(2),
+                canonical_key: None,
+                props: vec![],
+                valid_time: None,
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![DeltaRow::DeleteEdge {
+                eid: EId(10),
+                before_version: version,
             }]
         );
     }
