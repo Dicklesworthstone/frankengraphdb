@@ -867,3 +867,271 @@ fn a_vertex_retirement_is_final() {
         Err(WriteError::UnknownVertex { vid: VId(1) })
     );
 }
+
+/// A format-ceiling seal must not turn a later same-seq content update into
+/// an empty-interval tombstone (fgdb-aubf).
+#[test]
+fn a_same_commit_edge_update_after_the_entry_ceiling_restates_the_live_row() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    let key = PropertyKeyId(7);
+    seed_vertices(&mut w, 1, &[1, 2]);
+    let ceiling = usize::try_from(fgdb_strata::MAX_BLOCK_ENTRIES).expect("fits");
+    for n in 1..=ceiling + 1 {
+        w.apply(keys(), seq, &create(n as u128, 1, 2))
+            .expect("creates up to and past the entry ceiling");
+    }
+    w.apply(
+        keys(),
+        seq,
+        &DeltaRow::Property {
+            elem: ElementId::Edge(EId(1)),
+            property: key,
+            before: None,
+            after: Some(CanonicalScalar::Int(9)),
+        },
+    )
+    .expect("same-seq update of a sealed creation must restate, not refuse");
+    assert_eq!(
+        w.live_edge_row(EId(1)).expect("still live"),
+        vec![(key, CanonicalScalar::Int(9))]
+    );
+    let (root, blocks, _) = w
+        .publish(keys(), seq)
+        .expect("the restated oversized family must still publish");
+    assert!(
+        blocks.len() >= 2,
+        "257 same-family entries cannot fit one block"
+    );
+    fgdb_strata::root::encode_root(&root).expect("the restated split root is lawful");
+}
+
+#[test]
+fn a_same_commit_vertex_update_after_the_patch_ceiling_restates_the_live_row() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    let key = PropertyKeyId(3);
+    let ceiling = usize::try_from(fgdb_strata::vertex::MAX_PATCH_ROWS).expect("fits");
+    for n in 1..=ceiling + 1 {
+        w.apply(keys(), seq, &create_vertex_bare(n as u128))
+            .expect("creates up to and past the patch ceiling");
+    }
+    w.apply(
+        keys(),
+        seq,
+        &DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: key,
+            before: None,
+            after: Some(CanonicalScalar::Int(4)),
+        },
+    )
+    .expect("same-seq update of a sealed vertex creation must restate, not refuse");
+    assert_eq!(
+        w.live_vertex_row(VId(1)).expect("still live").props,
+        vec![(key, CanonicalScalar::Int(4))]
+    );
+    let (root, _, patches) = w
+        .publish(keys(), seq)
+        .expect("the restated oversized vertex run must still publish");
+    assert!(
+        patches.len() >= 2,
+        "257 pending vertex rows cannot fit one patch"
+    );
+    fgdb_strata::root::encode_root(&root).expect("the restated split root is lawful");
+}
+
+/// Early-seal at 256 must not freeze a live same-seq creation: delete can
+/// only fold away while the row is still pending (fgdb-wlxe).
+#[test]
+fn a_same_commit_edge_delete_after_the_entry_ceiling_folds_away() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    seed_vertices(&mut w, 1, &[1, 2]);
+    let ceiling = usize::try_from(fgdb_strata::MAX_BLOCK_ENTRIES).expect("fits");
+    for n in 1..=ceiling + 1 {
+        w.apply(keys(), seq, &create(n as u128, 1, 2))
+            .expect("creates up to and past the entry ceiling");
+    }
+    w.apply(keys(), seq, &delete(1))
+        .expect("same-seq delete of a ceiling-straddling creation must fold away");
+    assert!(w.live_edge(EId(1)).is_none(), "eid=1 must not stay live");
+}
+
+#[test]
+fn a_same_commit_vertex_delete_after_the_patch_ceiling_folds_away() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    let ceiling = usize::try_from(fgdb_strata::vertex::MAX_PATCH_ROWS).expect("fits");
+    for n in 1..=ceiling + 1 {
+        w.apply(keys(), seq, &create_vertex_bare(n as u128))
+            .expect("creates up to and past the patch ceiling");
+    }
+    w.apply(keys(), seq, &delete_vertex_row(1, vec![]))
+        .expect("same-seq delete of a ceiling-straddling vertex must fold away");
+    assert!(
+        w.live_vertex_row(VId(1)).is_none(),
+        "vid=1 must not stay live"
+    );
+}
+
+/// Early-seal skip lets one family grow past MAX_BLOCK_ENTRIES. publish/seal
+/// must split that run into conforming blocks (fgdb-otcw); encode_block
+/// refuses a 257-entry family.
+#[test]
+fn a_same_commit_family_past_the_entry_ceiling_publishes_conforming_blocks() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    seed_vertices(&mut w, 1, &[1, 2]);
+    let ceiling = usize::try_from(fgdb_strata::MAX_BLOCK_ENTRIES).expect("fits");
+    let count = ceiling + 1;
+    for n in 1..=count {
+        w.apply(keys(), seq, &create(n as u128, 1, 2))
+            .expect("creates up to and past the entry ceiling");
+    }
+    let (root, blocks, _patches) = w
+        .publish(keys(), seq)
+        .expect("publish must split the oversized family");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "one family of {} propertyless entries is two blocks",
+        count
+    );
+    assert_eq!(root.blocks.len(), 2);
+    let mut eids: Vec<EId> = blocks
+        .iter()
+        .flat_map(|block| decode_block(&block.bytes).expect("each chunk decodes"))
+        .map(|entry| entry.eid)
+        .collect();
+    eids.sort();
+    assert_eq!(
+        eids,
+        (1..=count as u128).map(EId).collect::<Vec<_>>(),
+        "every created edge must survive the split"
+    );
+    fgdb_strata::root::encode_root(&root).expect("the split root is lawful");
+}
+
+/// The vertex half of fgdb-otcw: seal_vertices must chunk at MAX_PATCH_ROWS
+/// rather than handing encode_patch a 257-row run.
+#[test]
+fn a_same_commit_vertex_run_past_the_patch_ceiling_publishes_conforming_patches() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    let ceiling = usize::try_from(fgdb_strata::vertex::MAX_PATCH_ROWS).expect("fits");
+    let count = ceiling + 1;
+    for n in 1..=count {
+        w.apply(keys(), seq, &create_vertex_bare(n as u128))
+            .expect("creates up to and past the patch ceiling");
+    }
+    let (root, _blocks, patches) = w
+        .publish(keys(), seq)
+        .expect("publish must split the oversized vertex run");
+    assert_eq!(
+        patches.len(),
+        2,
+        "a {}-row pending map is two patches",
+        count
+    );
+    assert_eq!(root.vertex_patches.len(), 2);
+    let mut vids: Vec<VId> = patches
+        .iter()
+        .flat_map(|patch| {
+            fgdb_strata::vertex::decode_patch(&patch.bytes).expect("each chunk decodes")
+        })
+        .map(|row| row.vid)
+        .collect();
+    vids.sort();
+    assert_eq!(
+        vids,
+        (1..=count as u128).map(VId).collect::<Vec<_>>(),
+        "every created vertex must survive the split"
+    );
+    fgdb_strata::root::encode_root(&root).expect("the split root is lawful");
+}
+
+/// An explicit mid-commit seal freezes the creation. A later same-seq
+/// property restatement must not make a same-seq delete look foldable:
+/// folding would drop the restatement and leave the sealed live row as a
+/// ghost (the aubf restatement path).
+#[test]
+fn a_same_commit_delete_after_explicit_seal_and_restatement_is_refused() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    seed_vertices(&mut w, 1, &[1, 2]);
+    w.apply(keys(), seq, &create(10, 1, 2)).expect("creates");
+    w.seal(keys()).expect("explicit mid-commit seal");
+    w.apply(
+        keys(),
+        seq,
+        &DeltaRow::Property {
+            elem: ElementId::Edge(EId(10)),
+            property: PropertyKeyId(7),
+            before: None,
+            after: Some(CanonicalScalar::Int(9)),
+        },
+    )
+    .expect("restates the already-sealed same-seq creation");
+    assert_eq!(
+        w.apply(keys(), seq, &delete(10)),
+        Err(WriteError::Block(
+            fgdb_strata::BlockError::RetiredBeforeCreated {
+                at: 0,
+                created_at: seq,
+                retired_at: seq,
+            }
+        )),
+        "the sealed creation cannot fold away; empty interval is refused"
+    );
+    assert!(
+        w.live_edge(EId(10)).is_some(),
+        "the refused delete must leave the restated edge live"
+    );
+    let (root, blocks, _) = w.publish(keys(), seq).expect("publishes the restatement");
+    fgdb_strata::root::encode_root(&root).expect("lawful");
+    let decoded: Vec<Vec<_>> = blocks
+        .iter()
+        .map(|block| decode_block(&block.bytes).expect("decodes"))
+        .collect();
+    assert_eq!(
+        fgdb_strata::root::merge_neighbours(&decoded, VId(1), REL, seq).expect("merged"),
+        vec![VId(2)],
+        "last-wins keeps the restated live edge; the refused delete did not erase it"
+    );
+}
+
+#[test]
+fn a_same_commit_vertex_delete_after_explicit_seal_and_restatement_is_refused() {
+    let mut w = writer();
+    let seq = CommitSeq(1);
+    w.apply(keys(), seq, &create_vertex_bare(1))
+        .expect("creates");
+    w.seal_vertices(keys()).expect("explicit mid-commit seal");
+    w.apply(
+        keys(),
+        seq,
+        &DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: PropertyKeyId(3),
+            before: None,
+            after: Some(CanonicalScalar::Int(4)),
+        },
+    )
+    .expect("restates the already-sealed same-seq vertex");
+    assert_eq!(
+        w.apply(keys(), seq, &delete_vertex_row(1, vec![])),
+        Err(WriteError::Patch(
+            fgdb_strata::vertex::VertexPatchError::RetiredBeforeCreated {
+                at: 0,
+                created_at: seq,
+                retired_at: seq,
+            }
+        )),
+        "the sealed vertex cannot fold away; empty interval is refused"
+    );
+    assert!(
+        w.live_vertex_row(VId(1)).is_some(),
+        "the refused delete must leave the restated vertex live"
+    );
+}

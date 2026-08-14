@@ -306,6 +306,11 @@ pub struct BlockWriter {
     /// Every VId admitted while replaying this partition-local writer.
     spent_vertices: BTreeSet<VId>,
     sealed_patches: Vec<SealedPatch>,
+    /// Live identities whose same-seq creation has already been sealed in
+    /// this run. A later same-seq delete cannot fold those away — the
+    /// durable image already exists, and an empty interval is illegal.
+    sealed_live_edges: BTreeSet<(EId, CommitSeq)>,
+    sealed_live_vertices: BTreeSet<(VId, CommitSeq)>,
     last_seq: Option<CommitSeq>,
 }
 
@@ -384,6 +389,8 @@ impl BlockWriter {
             live_vertices,
             spent_vertices,
             sealed_patches,
+            sealed_live_edges: BTreeSet::new(),
+            sealed_live_vertices: BTreeSet::new(),
             last_seq: (frontier.0 > 0).then_some(frontier),
         })
     }
@@ -402,6 +409,8 @@ impl BlockWriter {
             live_vertices: BTreeMap::new(),
             spent_vertices: BTreeSet::new(),
             sealed_patches: Vec::new(),
+            sealed_live_edges: BTreeSet::new(),
+            sealed_live_vertices: BTreeSet::new(),
             last_seq: None,
         }
     }
@@ -498,6 +507,18 @@ impl BlockWriter {
     /// How many vertex rows are pending — the vertex half of the seal signal.
     pub fn pending_vertex_len(&self) -> usize {
         self.pending_vertices.len()
+    }
+
+    fn pending_has_live_at(&self, seq: CommitSeq) -> bool {
+        self.pending
+            .values()
+            .any(|pending| pending.entry.created_at == seq && pending.entry.retired_at.is_none())
+    }
+
+    fn pending_vertices_have_live_at(&self, seq: CommitSeq) -> bool {
+        self.pending_vertices
+            .values()
+            .any(|row| row.created_at == seq && row.retired_at.is_none())
     }
 
     /// Fold one row at `seq`, sealing early if it would collide with a pending key.
@@ -607,7 +628,8 @@ impl BlockWriter {
                     && self
                         .pending_vertices
                         .get(&(*vid, seq))
-                        .is_some_and(|pending| pending.retired_at.is_none());
+                        .is_some_and(|pending| pending.retired_at.is_none())
+                    && !self.sealed_live_vertices.contains(&(*vid, seq));
                 let tombstone = if same_commit_fold {
                     None
                 } else {
@@ -633,6 +655,7 @@ impl BlockWriter {
                             && self.pending_vertices.len()
                                 >= usize::try_from(crate::vertex::MAX_PATCH_ROWS)
                                     .unwrap_or(usize::MAX)
+                            && !self.pending_vertices_have_live_at(seq)
                         {
                             self.seal_vertices(keys)?;
                         }
@@ -670,9 +693,8 @@ impl BlockWriter {
                 crate::vertex::validate_patch_row(0, &row).map_err(WriteError::Patch)?;
                 if self.pending_vertices.len()
                     >= usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX)
+                    && !self.pending_vertices_have_live_at(seq)
                 {
-                    // A format ceiling, exactly like the block path: one more
-                    // row would create a patch no conforming reader accepts.
                     self.seal_vertices(keys)?;
                 }
                 self.pending_vertices.insert((*vid, seq), row.clone());
@@ -762,11 +784,9 @@ impl BlockWriter {
     /// commit has an empty visibility interval, which the durable format
     /// rightly refuses (`RetiredBeforeCreated`). Its fold is no entry — the
     /// edge is visible on no snapshot, so the pending creation and the live
-    /// record both simply go away (fgdb-zeay). The fold applies only while
-    /// the creation is still pending: once it has sealed, the interval can no
-    /// longer be folded away, and the format's refusal stands as the honest
-    /// answer to a pathological stream (16M+ rows between create and delete
-    /// in one commit — a typed refusal, never wrong bytes).
+    /// record both simply go away (fgdb-zeay). Early-seal must not freeze a
+    /// live same-seq creation: the format ceiling is 256, and publish already
+    /// splits oversized pending into conforming blocks (fgdb-wlxe).
     fn retirement_entry(
         &self,
         eid: EId,
@@ -778,7 +798,10 @@ impl BlockWriter {
                 .pending
                 .get(&(edge.src, edge.relation, edge.dst, eid, seq))
                 .is_some_and(|pending| pending.entry.retired_at.is_none());
-            if is_same_run {
+            // A restatement after an explicit seal is still pending, but the
+            // original live creation is already durable. Folding would leave
+            // that sealed row as a ghost (fgdb-6j7t).
+            if is_same_run && !self.sealed_live_edges.contains(&(eid, seq)) {
                 return Ok(None);
             }
         }
@@ -848,11 +871,15 @@ impl BlockWriter {
             entry.eid,
             entry.created_at,
         );
+        // publish/seal already splits oversized pending into conforming
+        // blocks. Early-seal must not freeze live rows of the commit still
+        // being applied — a later same-seq delete can only fold away while
+        // the creation is pending (fgdb-wlxe).
+        let apply_seq = entry.retired_at.unwrap_or(entry.created_at);
         if !self.pending.contains_key(&key)
             && self.pending.len() >= usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX)
+            && !self.pending_has_live_at(apply_seq)
         {
-            // This is a format ceiling, not an adaptive seal policy: allowing
-            // one more row would create a block no conforming reader accepts.
             self.seal(keys)?;
         }
         self.pending.insert(key, PendingStatement { entry, props });
@@ -886,17 +913,22 @@ impl BlockWriter {
         }
         let mut staged: Vec<StagedChunk> = Vec::with_capacity(by_descriptor.len());
         for statements in by_descriptor.into_values() {
-            // The locator addresses at most MAX_PROPERTY_PATCH_ROWS propertied
-            // entries per block — a FORMAT ceiling, so a descriptor run whose
-            // propertied count exceeds it splits into consecutive blocks,
-            // exactly as the entry-count ceiling splits a pending run.
-            let ceiling = usize::try_from(MAX_PROPERTY_PATCH_ROWS).unwrap_or(usize::MAX);
+            // Cut a family at the entry-count ceiling OR the hosted-patch
+            // row ceiling, whichever binds first — the same pair of format
+            // limits `compact::pack_retained` uses. Early-seal may leave
+            // more than MAX_BLOCK_ENTRIES pending so a later same-seq
+            // delete can still fold away (fgdb-wlxe / fgdb-otcw).
+            let entry_ceiling = usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX);
+            let property_ceiling = usize::try_from(MAX_PROPERTY_PATCH_ROWS).unwrap_or(usize::MAX);
             let mut chunk: Vec<PendingStatement> = Vec::new();
             let mut chunk_propertied = 0usize;
             let mut chunks: Vec<Vec<PendingStatement>> = Vec::new();
             for statement in statements {
                 let propertied = usize::from(!statement.props.is_empty());
-                if chunk_propertied + propertied > ceiling {
+                if !chunk.is_empty()
+                    && (chunk.len() == entry_ceiling
+                        || chunk_propertied + propertied > property_ceiling)
+                {
                     chunks.push(std::mem::take(&mut chunk));
                     chunk_propertied = 0;
                 }
@@ -999,6 +1031,12 @@ impl BlockWriter {
             });
         }
         let first = sealed.first().cloned();
+        for statement in self.pending.values() {
+            if statement.entry.retired_at.is_none() {
+                self.sealed_live_edges
+                    .insert((statement.entry.eid, statement.entry.created_at));
+            }
+        }
         self.pending.clear();
         self.sealed.extend(sealed);
         Ok(first)
@@ -1049,27 +1087,51 @@ impl BlockWriter {
             }
         }
         let statement_key = (current.src, current.relation, current.dst, eid, seq);
-        if current.created_at == seq
-            && self
+        if current.created_at == seq {
+            if self
                 .pending
                 .get(&statement_key)
                 .is_some_and(|pending| pending.entry.retired_at.is_none())
-        {
-            let entry = self
-                .pending
-                .get(&statement_key)
-                .expect("checked above")
-                .entry;
-            self.pending.insert(
-                statement_key,
-                PendingStatement {
-                    entry,
-                    props: successor_row.clone(),
+            {
+                let entry = self
+                    .pending
+                    .get(&statement_key)
+                    .expect("checked above")
+                    .entry;
+                self.pending.insert(
+                    statement_key,
+                    PendingStatement {
+                        entry,
+                        props: successor_row.clone(),
+                    },
+                );
+                self.live
+                    .entry(eid)
+                    .and_modify(|live| live.props = successor_row);
+                return Ok(());
+            }
+            // The same-commit creation already sealed (format ceiling).
+            // Restate the live statement; a tombstone at created_at == seq
+            // would be an empty interval (fgdb-aubf).
+            let restatement = AdjacencyEntry {
+                src: current.src,
+                relation: current.relation,
+                dst: current.dst,
+                eid,
+                created_at: seq,
+                retired_at: None,
+            };
+            self.push(keys, restatement, successor_row.clone())?;
+            self.live.insert(
+                eid,
+                LiveEdge {
+                    src: current.src,
+                    relation: current.relation,
+                    dst: current.dst,
+                    created_at: seq,
+                    props: successor_row,
                 },
             );
-            self.live
-                .entry(eid)
-                .and_modify(|live| live.props = successor_row);
             return Ok(());
         }
         // The retiring statement keeps ITS OWN row — that row is the content
@@ -1149,21 +1211,34 @@ impl BlockWriter {
                 }
             }
         }
-        if current.created_at == seq
-            && self
+        if current.created_at == seq {
+            if self
                 .pending_vertices
                 .get(&(vid, seq))
                 .is_some_and(|pending| pending.retired_at.is_none())
-        {
+            {
+                self.pending_vertices.insert((vid, seq), successor.clone());
+                self.live_vertices.insert(vid, successor);
+                return Ok(());
+            }
+            // Same-commit creation already sealed. Restate the live row
+            // rather than closing an empty interval (fgdb-aubf).
+            successor.created_at = seq;
+            successor.retired_at = None;
+            crate::vertex::validate_patch_row(0, &successor).map_err(WriteError::Patch)?;
+            if !self.pending_vertices.contains_key(&(vid, seq))
+                && self.pending_vertices.len()
+                    >= usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX)
+                && !self.pending_vertices_have_live_at(seq)
+            {
+                self.seal_vertices(keys)?;
+            }
             self.pending_vertices.insert((vid, seq), successor.clone());
             self.live_vertices.insert(vid, successor);
             return Ok(());
         }
         let mut tombstone = current;
         tombstone.retired_at = Some(seq);
-        // Sealed-in-this-commit creations reach here and refuse as
-        // RetiredBeforeCreated (an empty interval), the same honest format
-        // answer the edge path gives a pathological stream.
         crate::vertex::validate_patch_row(0, &tombstone).map_err(WriteError::Patch)?;
         successor.created_at = seq;
         successor.retired_at = None;
@@ -1174,6 +1249,7 @@ impl BlockWriter {
             + usize::from(!self.pending_vertices.contains_key(&successor_key));
         if self.pending_vertices.len() + incoming
             > usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX)
+            && !self.pending_vertices_have_live_at(seq)
         {
             self.seal_vertices(keys)?;
         }
@@ -1196,18 +1272,39 @@ impl BlockWriter {
         if self.pending_vertices.is_empty() {
             return Ok(None);
         }
+        // Early-seal may leave more than MAX_PATCH_ROWS pending so a later
+        // same-seq delete can still fold away. Encode every conforming
+        // chunk before committing so a mid-seal refusal leaves the map
+        // untouched — the same atomicity the single-patch path had.
         let rows: Vec<VertexRow> = self.pending_vertices.values().cloned().collect();
-        let bytes = encode_patch(&rows).map_err(WriteError::Patch)?;
-        let (first_seq, last_seq) = span_of_rows(&rows).expect("non-empty");
-        let sealed = SealedPatch {
-            patch_id: vertex_patch_id(keys.0, keys.1, &bytes),
-            bytes,
-            first_seq,
-            last_seq,
-        };
+        let ceiling = usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX);
+        let mut staged: Vec<Vec<VertexRow>> =
+            rows.chunks(ceiling).map(<[VertexRow]>::to_vec).collect();
+        staged.sort_by_key(|chunk| {
+            span_of_rows(chunk)
+                .map(|(first_seq, last_seq)| (last_seq, first_seq))
+                .unwrap_or((CommitSeq(0), CommitSeq(0)))
+        });
+        let mut sealed = Vec::with_capacity(staged.len());
+        for chunk in staged {
+            let bytes = encode_patch(&chunk).map_err(WriteError::Patch)?;
+            let (first_seq, last_seq) = span_of_rows(&chunk).expect("non-empty");
+            sealed.push(SealedPatch {
+                patch_id: vertex_patch_id(keys.0, keys.1, &bytes),
+                bytes,
+                first_seq,
+                last_seq,
+            });
+        }
+        let first = sealed.first().cloned();
+        for row in self.pending_vertices.values() {
+            if row.retired_at.is_none() {
+                self.sealed_live_vertices.insert((row.vid, row.created_at));
+            }
+        }
         self.pending_vertices.clear();
-        self.sealed_patches.push(sealed.clone());
-        Ok(Some(sealed))
+        self.sealed_patches.extend(sealed);
+        Ok(first)
     }
 
     /// Seal whatever remains and publish a root over every block and patch.
