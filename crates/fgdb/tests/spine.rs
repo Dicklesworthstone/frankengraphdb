@@ -339,6 +339,56 @@ fn a_same_batch_create_and_delete_leaves_no_element() {
     });
 }
 
+/// **BOTH ENDPOINTS IN ONE BATCH (fgdb-cczg).** NENF applies DeleteVertex
+/// in VId order. Deleting the larger endpoint first must still assign the
+/// shared edge to the smaller VId so the fold's incident-set check holds.
+#[test]
+fn deleting_both_endpoints_in_one_batch_retires_the_edge_once() {
+    let dir = scratch("dual-delete-cascade");
+    under_lab(8213, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.create_vertex(VId(3), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(11), VId(2), VId(3), vec![]);
+        db.write(cx, seed).await.expect("seeds");
+
+        let mut larger_first = WriteBatch::new(KNOWS);
+        larger_first.delete_vertex(VId(2));
+        larger_first.delete_vertex(VId(1));
+        db.write(cx, larger_first)
+            .await
+            .expect("larger endpoint first is still lawful");
+        assert!(db.vertex(VId(1)).expect("reads").is_none());
+        assert!(db.vertex(VId(2)).expect("reads").is_none());
+        assert!(db.edge(EId(10)).expect("reads").is_none());
+        assert!(
+            db.vertex(VId(3)).expect("reads").is_some(),
+            "vid=3 is not in the batch"
+        );
+        assert!(
+            db.edge(EId(11)).expect("reads").is_none(),
+            "deleting vid=2 must cascade the 2-3 edge"
+        );
+
+        let mut again = WriteBatch::new(KNOWS);
+        again.create_vertex(VId(4), vec![], vec![]);
+        again.create_vertex(VId(5), vec![], vec![]);
+        again.add_edge(EId(20), VId(4), VId(5), vec![]);
+        again.delete_vertex(VId(4));
+        again.delete_vertex(VId(5));
+        db.write(cx, again)
+            .await
+            .expect("smaller endpoint first is lawful");
+        assert!(db.vertex(VId(4)).expect("reads").is_none());
+        assert!(db.vertex(VId(5)).expect("reads").is_none());
+        assert!(db.edge(EId(20)).expect("reads").is_none());
+    });
+}
+
 /// **THE UPDATE LAW (fgdb-stb6): labels and properties CHANGE, the change is
 /// readable, and a reopen answers the updated state.** The before-images the
 /// durable rows carry are engine-derived and oracle-validated by the
