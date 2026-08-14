@@ -33,9 +33,21 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 // Identities never recycle (§6.2). A prior delete or a
                 // same-batch create-delete already spent this VId; a later
                 // create must not wipe that and emit a resurrection (fgdb-iv5z).
-                if net.cancelled || net.deleted.is_some() {
+                // A second Create of a still-born identity is AlreadyLive at
+                // apply. Last-wins used to replace the first birth and drop
+                // any Property/Label that had already folded into it.
+                if net.cancelled || net.deleted.is_some() || net.created.is_some() {
                     continue;
                 }
+                // Apply is tag-order: CreateVertex (0x01) before Label (0x05)
+                // and Property (0x06). A hostile update-before-create must
+                // bake into the birth the same way create-then-update does.
+                // Clearing the pending maps here used to drop that state, so
+                // fold(update, create) omitted rows apply of the byte-sorted
+                // pair would write.
+                let pending_labels = std::mem::take(&mut net.labels);
+                let pending_props = std::mem::take(&mut net.props);
+                let pending_valid_time = net.valid_time.take();
                 net.created = Some(CreatedVertex {
                     birth_ordinal,
                     labels: labels.clone(),
@@ -44,8 +56,17 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 });
                 net.cancelled = false;
                 net.deleted = None;
-                net.props.clear();
-                net.labels.clear();
+                if let Some(created) = net.created.as_mut() {
+                    for (label, (_, after)) in pending_labels {
+                        apply_label_list(&mut created.labels, label, after);
+                    }
+                    for (key, (_, after)) in pending_props {
+                        apply_prop_map(&mut created.props, key, after);
+                    }
+                    if let Some((_, after)) = pending_valid_time {
+                        created.valid_time = after;
+                    }
+                }
                 for label in labels {
                     net.labels.insert(label, (false, true));
                 }
@@ -109,7 +130,11 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 valid_time,
             } => {
                 let net = edges.entry(eid).or_default();
-                if net.cancelled || net.deleted.is_some() || net.cascade_owned {
+                if net.cancelled
+                    || net.deleted.is_some()
+                    || net.cascade_owned
+                    || net.created.is_some()
+                {
                     continue;
                 }
                 // Apply is tag-order: CreateEdge (0x02) before DeleteVertex
@@ -122,6 +147,8 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                     net.cancelled = true;
                     continue;
                 }
+                let pending_props = std::mem::take(&mut net.props);
+                let pending_valid_time = net.valid_time.take();
                 net.created = Some(CreatedEdge {
                     birth_ordinal,
                     src,
@@ -133,7 +160,14 @@ pub fn fold_target_disjoint(rows: Vec<DeltaRow>) -> Vec<DeltaRow> {
                 });
                 net.cancelled = false;
                 net.deleted = None;
-                net.props.clear();
+                if let Some(created) = net.created.as_mut() {
+                    for (key, (_, after)) in pending_props {
+                        apply_prop_map(&mut created.props, key, after);
+                    }
+                    if let Some((_, after)) = pending_valid_time {
+                        created.valid_time = after;
+                    }
+                }
                 for (key, value) in props {
                     net.props.insert(key, (None, Some(value)));
                 }
@@ -524,7 +558,7 @@ fn emit_valid_time(
 #[cfg(test)]
 mod tests {
     use super::fold_target_disjoint;
-    use crate::{DeltaRow, ElementId, PropertyKeyId};
+    use crate::{DeltaRow, ElementId, LabelId, PropertyKeyId};
     use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
 
     fn prop(vid: u128, before: i64, after: i64) -> DeltaRow {
@@ -674,6 +708,47 @@ mod tests {
                     sorted_retired_incident_edges: vec![EId(11)],
                 },
             ]
+        );
+    }
+
+    /// Claimed-map min VId is apply order only because `u128` vids encode
+    /// big-endian. Little-endian would apply VId(256) before VId(1) and the
+    /// stripped cascade would CascadeImageMismatch.
+    #[test]
+    fn a_shared_cascade_on_vid_256_still_belongs_to_vid_1_in_byte_order() {
+        let version = ObjectId([0x44; 32]);
+        let out = fold_target_disjoint(vec![
+            DeltaRow::DeleteVertex {
+                vid: VId(256),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+            DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: version,
+                sorted_retired_incident_edges: vec![EId(10)],
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                DeltaRow::DeleteVertex {
+                    vid: VId(1),
+                    before_version: version,
+                    sorted_retired_incident_edges: vec![EId(10)],
+                },
+                DeltaRow::DeleteVertex {
+                    vid: VId(256),
+                    before_version: version,
+                    sorted_retired_incident_edges: vec![],
+                },
+            ]
+        );
+        let first = out[0].canonical_bytes().expect("encodes");
+        let second = out[1].canonical_bytes().expect("encodes");
+        assert!(
+            first < second,
+            "encoded DeleteVertex VId(1) must sort before VId(256)"
         );
     }
 
@@ -956,5 +1031,188 @@ mod tests {
             },
         ]);
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// Apply is Create (0x01) then Property (0x06). Hostile update-before-create
+    /// must match create-then-update so the birth carries the net after.
+    #[test]
+    fn property_before_create_folds_the_same_as_create_then_property() {
+        let create = DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        };
+        let property = DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: PropertyKeyId(1),
+            before: None,
+            after: Some(CanonicalScalar::Int(5)),
+        };
+        let expected = vec![DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            valid_time: None,
+        }];
+        assert_eq!(
+            fold_target_disjoint(vec![create.clone(), property.clone()]),
+            expected
+        );
+        assert_eq!(
+            fold_target_disjoint(vec![property, create]),
+            expected,
+            "Property-before-Create must bake into the create"
+        );
+    }
+
+    #[test]
+    fn label_before_create_folds_the_same_as_create_then_label() {
+        let create = DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        };
+        let label = DeltaRow::LabelMembership {
+            vid: VId(1),
+            label: LabelId(3),
+            before: false,
+            after: true,
+        };
+        let expected = vec![DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![LabelId(3)],
+            props: vec![],
+            valid_time: None,
+        }];
+        assert_eq!(
+            fold_target_disjoint(vec![create.clone(), label.clone()]),
+            expected
+        );
+        assert_eq!(
+            fold_target_disjoint(vec![label, create]),
+            expected,
+            "Label-before-Create must bake into the create"
+        );
+    }
+
+    #[test]
+    fn property_before_create_edge_folds_the_same_as_create_then_property() {
+        let create = create_edge(10, 1, 2);
+        let property = DeltaRow::Property {
+            elem: ElementId::Edge(EId(10)),
+            property: PropertyKeyId(1),
+            before: None,
+            after: Some(CanonicalScalar::Int(7)),
+        };
+        let expected = vec![DeltaRow::CreateEdge {
+            eid: EId(10),
+            birth_ordinal: 10,
+            src: VId(1),
+            relation: crate::RelationId(1),
+            dst: VId(2),
+            canonical_key: None,
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            valid_time: None,
+        }];
+        assert_eq!(
+            fold_target_disjoint(vec![create.clone(), property.clone()]),
+            expected
+        );
+        assert_eq!(
+            fold_target_disjoint(vec![property, create]),
+            expected,
+            "Property-before-CreateEdge must bake into the create"
+        );
+    }
+
+    /// A second Create of a still-born identity is AlreadyLive at apply.
+    /// Last-wins replaced the first birth and dropped updates already baked
+    /// into it (the Property lives on `created`, not the shadow maps).
+    #[test]
+    fn a_second_create_keeps_the_first_birth_and_its_folded_updates() {
+        let first = DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        };
+        let property = DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: PropertyKeyId(1),
+            before: None,
+            after: Some(CanonicalScalar::Int(5)),
+        };
+        let second = DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 2,
+            labels: vec![LabelId(9)],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            valid_time: None,
+        };
+        let expected = vec![DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            valid_time: None,
+        }];
+        assert_eq!(
+            fold_target_disjoint(vec![first.clone(), property.clone(), second.clone()]),
+            expected,
+            "Property between two Creates must stay on the first birth"
+        );
+        assert_eq!(
+            fold_target_disjoint(vec![first, second]),
+            vec![create_vertex(1, 1)],
+            "the second Create must not replace the first birth"
+        );
+    }
+
+    #[test]
+    fn a_second_create_edge_keeps_the_first_birth_and_its_folded_updates() {
+        let first = create_edge(10, 1, 2);
+        let property = DeltaRow::Property {
+            elem: ElementId::Edge(EId(10)),
+            property: PropertyKeyId(1),
+            before: None,
+            after: Some(CanonicalScalar::Int(5)),
+        };
+        let second = DeltaRow::CreateEdge {
+            eid: EId(10),
+            birth_ordinal: 99,
+            src: VId(3),
+            relation: crate::RelationId(1),
+            dst: VId(4),
+            canonical_key: None,
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            valid_time: None,
+        };
+        let expected = vec![DeltaRow::CreateEdge {
+            eid: EId(10),
+            birth_ordinal: 10,
+            src: VId(1),
+            relation: crate::RelationId(1),
+            dst: VId(2),
+            canonical_key: None,
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            valid_time: None,
+        }];
+        assert_eq!(
+            fold_target_disjoint(vec![first.clone(), property, second.clone()]),
+            expected,
+            "Property between two CreateEdges must stay on the first birth"
+        );
+        assert_eq!(
+            fold_target_disjoint(vec![first, second]),
+            vec![create_edge(10, 1, 2)],
+            "the second CreateEdge must not replace endpoints"
+        );
     }
 }
