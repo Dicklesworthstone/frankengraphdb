@@ -75,7 +75,8 @@ fn round_trips_through_serialize_and_verify() {
     let bytes = original.serialize(&encoding.symbol_auth_key(&dek()));
     assert_eq!(bytes.len(), original.record_len() as usize);
 
-    let parsed = SymbolRecord::verify(&bytes, &encoding, &dek()).expect("authentic record");
+    let parsed =
+        SymbolRecord::verify(&bytes, &encoding, &dek(), &mut Vec::new()).expect("authentic record");
     assert_eq!(parsed, original, "verify must reconstruct the exact record");
     assert_eq!(parsed.payload, symbol_payload());
 }
@@ -103,7 +104,7 @@ fn a_short_payload_is_refused_even_when_authentic() {
     let short = SymbolRecord::for_encoding(&encoding, 1, 42, 0, vec![0u8; 1279]);
     let bytes = short.serialize(&encoding.symbol_auth_key(&dek()));
     assert_eq!(
-        SymbolRecord::verify(&bytes, &encoding, &dek()),
+        SymbolRecord::verify(&bytes, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::InconsistentLengths),
         "a payload shorter than symbol_size is damage, not a shape to admit"
     );
@@ -120,7 +121,7 @@ fn mac_covers_every_serialized_header_field() {
     for offset in 0..usize::from(HEADER_LEN_V1) {
         let mut corrupted = bytes.clone();
         corrupted[offset] ^= 0x01;
-        let outcome = SymbolRecord::verify(&corrupted, &encoding, &dek());
+        let outcome = SymbolRecord::verify(&corrupted, &encoding, &dek(), &mut Vec::new());
         assert!(
             outcome.is_err(),
             "header byte {offset} is outside the MAC transcript or the framing checks"
@@ -139,7 +140,7 @@ fn mac_covers_the_payload_and_itself() {
         let mut corrupted = bytes.clone();
         corrupted[offset] ^= 0x01;
         assert_eq!(
-            SymbolRecord::verify(&corrupted, &encoding, &dek()),
+            SymbolRecord::verify(&corrupted, &encoding, &dek(), &mut Vec::new()),
             Err(SymbolError::AuthenticationFailed),
             "flipping byte {offset} (payload or MAC) must fail authentication"
         );
@@ -157,11 +158,11 @@ fn a_record_from_another_encoding_is_rejected_as_foreign() {
     let bytes = record(&second).serialize(&second.symbol_auth_key(&dek()));
 
     // Well-formed and authentic under its OWN encoding...
-    assert!(SymbolRecord::verify(&bytes, &second, &dek()).is_ok());
+    assert!(SymbolRecord::verify(&bytes, &second, &dek(), &mut Vec::new()).is_ok());
     // ...and foreign under another, so symbols from different EncodingIds
     // can never mix inside one decode.
     assert_eq!(
-        SymbolRecord::verify(&bytes, &first, &dek()),
+        SymbolRecord::verify(&bytes, &first, &dek(), &mut Vec::new()),
         Err(SymbolError::ForeignEncoding)
     );
 }
@@ -177,7 +178,7 @@ fn a_mac_valid_wrong_kind_record_is_rejected_as_foreign() {
     let bytes = wrong_kind.serialize(&encoding.symbol_auth_key(&dek()));
 
     assert_eq!(
-        SymbolRecord::verify(&bytes, &encoding, &dek()),
+        SymbolRecord::verify(&bytes, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::ForeignEncoding)
     );
 }
@@ -195,7 +196,7 @@ fn symbol_keys_do_not_transfer_between_encodings() {
     let bytes = forged.serialize(&first.symbol_auth_key(&dek()));
 
     assert_eq!(
-        SymbolRecord::verify(&bytes, &second, &dek()),
+        SymbolRecord::verify(&bytes, &second, &dek(), &mut Vec::new()),
         Err(SymbolError::AuthenticationFailed),
         "a relabelled symbol must not authenticate under the target encoding's key"
     );
@@ -209,7 +210,7 @@ fn the_wrong_dek_cannot_authenticate() {
     let mut other_dek = dek();
     other_dek[0] ^= 0xff;
     assert_eq!(
-        SymbolRecord::verify(&bytes, &encoding, &other_dek),
+        SymbolRecord::verify(&bytes, &encoding, &other_dek, &mut Vec::new()),
         Err(SymbolError::AuthenticationFailed)
     );
 }
@@ -224,7 +225,7 @@ fn truncated_and_inconsistent_records_fail_closed() {
 
     for cut in 0..bytes.len() {
         assert!(
-            SymbolRecord::verify(&bytes[..cut], &encoding, &dek()).is_err(),
+            SymbolRecord::verify(&bytes[..cut], &encoding, &dek(), &mut Vec::new()).is_err(),
             "a record truncated to {cut} bytes must fail closed"
         );
     }
@@ -234,7 +235,7 @@ fn truncated_and_inconsistent_records_fail_closed() {
     let bad_len = (bytes.len() as u32 + 64).to_le_bytes();
     lying[8..12].copy_from_slice(&bad_len);
     assert_eq!(
-        SymbolRecord::verify(&lying, &encoding, &dek()),
+        SymbolRecord::verify(&lying, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::InconsistentLengths)
     );
 
@@ -244,7 +245,7 @@ fn truncated_and_inconsistent_records_fail_closed() {
     oversized.payload = vec![0u8; usize::from(encoding.descriptor().symbol_size) + 1];
     let oversized_bytes = oversized.serialize(&encoding.symbol_auth_key(&dek()));
     assert_eq!(
-        SymbolRecord::verify(&oversized_bytes, &encoding, &dek()),
+        SymbolRecord::verify(&oversized_bytes, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::InconsistentLengths)
     );
 
@@ -253,7 +254,7 @@ fn truncated_and_inconsistent_records_fail_closed() {
     let mut suffixed = bytes.clone();
     suffixed.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
     assert_eq!(
-        SymbolRecord::verify(&suffixed, &encoding, &dek()),
+        SymbolRecord::verify(&suffixed, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::InconsistentLengths)
     );
 }
@@ -268,14 +269,14 @@ fn unknown_framing_is_rejected_not_ignored() {
     let mut wrong_magic = bytes.clone();
     wrong_magic[0] = b'X';
     assert_eq!(
-        SymbolRecord::verify(&wrong_magic, &encoding, &dek()),
+        SymbolRecord::verify(&wrong_magic, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::UnsupportedFraming)
     );
 
     let mut future_version = bytes.clone();
     future_version[4..6].copy_from_slice(&2u16.to_le_bytes());
     assert_eq!(
-        SymbolRecord::verify(&future_version, &encoding, &dek()),
+        SymbolRecord::verify(&future_version, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::UnsupportedFraming)
     );
 
@@ -283,7 +284,7 @@ fn unknown_framing_is_rejected_not_ignored() {
     let profile_offset = usize::from(HEADER_LEN_V1) - 4;
     wrong_mac_profile[profile_offset..profile_offset + 2].copy_from_slice(&9u16.to_le_bytes());
     assert_eq!(
-        SymbolRecord::verify(&wrong_mac_profile, &encoding, &dek()),
+        SymbolRecord::verify(&wrong_mac_profile, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::UnsupportedFraming)
     );
 
@@ -291,7 +292,7 @@ fn unknown_framing_is_rejected_not_ignored() {
     let len_offset = usize::from(HEADER_LEN_V1) - 2;
     wrong_mac_len[len_offset..len_offset + 2].copy_from_slice(&32u16.to_le_bytes());
     assert_eq!(
-        SymbolRecord::verify(&wrong_mac_len, &encoding, &dek()),
+        SymbolRecord::verify(&wrong_mac_len, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::UnsupportedFraming)
     );
 }
@@ -305,7 +306,7 @@ fn a_symbol_outside_the_declared_block_count_is_rejected() {
     out_of_range.source_block = u32::from(encoding.descriptor().source_block_count);
     let bytes = out_of_range.serialize(&encoding.symbol_auth_key(&dek()));
     assert_eq!(
-        SymbolRecord::verify(&bytes, &encoding, &dek()),
+        SymbolRecord::verify(&bytes, &encoding, &dek(), &mut Vec::new()),
         Err(SymbolError::InconsistentLengths)
     );
 }

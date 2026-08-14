@@ -214,7 +214,7 @@ fn every_member_keeps_and_proves_its_own_identity() {
     let pack = sealed_pack();
     for locator in pack.locators() {
         let bytes = pack
-            .extract(locator.object_id, &k_oid(), &dek())
+            .extract(locator.object_id, &k_oid(), &dek(), &mut Vec::new())
             .expect("a member must extract and verify");
         assert_eq!(bytes.len() as u64, locator.length);
     }
@@ -234,7 +234,7 @@ fn locators_partition_the_pack_exactly() {
     }
     let unpacked = pack
         .protected()
-        .open(&dek())
+        .open(&dek(), &mut Vec::new())
         .expect("the pack must open")
         .len() as u64;
     assert_eq!(
@@ -250,7 +250,7 @@ fn a_non_member_is_refused() {
     let pack = sealed_pack();
     let stranger = member(200, 64);
     assert_eq!(
-        pack.extract(stranger.object_id(), &k_oid(), &dek()),
+        pack.extract(stranger.object_id(), &k_oid(), &dek(), &mut Vec::new()),
         Err(PackError::NotAMember)
     );
 }
@@ -264,7 +264,7 @@ fn the_wrong_dek_yields_no_member() {
     let mut wrong = dek();
     wrong[0] ^= 0xff;
     assert_eq!(
-        pack.extract(locator.object_id, &k_oid(), &wrong),
+        pack.extract(locator.object_id, &k_oid(), &wrong, &mut Vec::new(),),
         Err(PackError::MemberIdentityMismatch)
     );
 }
@@ -278,7 +278,7 @@ fn the_wrong_identity_key_fails_verification() {
     let mut wrong = k_oid();
     wrong[0] ^= 0xff;
     assert_eq!(
-        pack.extract(locator.object_id, &wrong, &dek()),
+        pack.extract(locator.object_id, &wrong, &dek(), &mut Vec::new()),
         Err(PackError::MemberIdentityMismatch)
     );
 }

@@ -243,7 +243,10 @@ fn an_undamaged_capsule_reads_back_exactly() {
             .await
             .expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(cx, oid).await.expect("reads"),
+            coordinator
+                .read_capsule(cx, oid, &mut Vec::new())
+                .await
+                .expect("reads"),
             plaintext()
         );
 
@@ -274,7 +277,10 @@ fn a_single_rotted_symbol_heals_invisibly() {
             .await
             .expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(cx, oid).await.expect("heals"),
+            coordinator
+                .read_capsule(cx, oid, &mut Vec::new())
+                .await
+                .expect("heals"),
             plaintext(),
             "one rotted symbol must be invisible, not merely survivable"
         );
@@ -297,7 +303,7 @@ fn rot_within_the_repair_budget_heals() {
             .expect("reopen");
         assert_eq!(
             coordinator
-                .read_capsule(cx, oid)
+                .read_capsule(cx, oid, &mut Vec::new())
                 .await
                 .expect("heals at the budget"),
             plaintext(),
@@ -323,7 +329,7 @@ fn rot_beyond_the_repair_budget_fails_closed() {
         let coordinator = CommitCoordinator::open(cx, &dir, keys())
             .await
             .expect("reopen");
-        let result = coordinator.read_capsule(cx, oid).await;
+        let result = coordinator.read_capsule(cx, oid, &mut Vec::new()).await;
         assert!(
             result.is_err(),
             "beyond the budget the read must FAIL, not return {} bytes",
@@ -349,7 +355,7 @@ fn the_repair_budget_is_the_exact_boundary() {
             CommitCoordinator::open(cx, &dir, keys())
                 .await
                 .expect("reopen")
-                .read_capsule(cx, oid)
+                .read_capsule(cx, oid, &mut Vec::new())
                 .await
                 .is_ok()
         })
@@ -363,7 +369,7 @@ fn the_repair_budget_is_the_exact_boundary() {
             CommitCoordinator::open(cx, &dir, keys())
                 .await
                 .expect("reopen")
-                .read_capsule(cx, oid)
+                .read_capsule(cx, oid, &mut Vec::new())
                 .await
                 .is_ok()
         })
@@ -398,7 +404,10 @@ fn rot_in_the_container_header_is_refused() {
             .await
             .expect("reopen");
         assert!(
-            coordinator.read_capsule(cx, oid).await.is_err(),
+            coordinator
+                .read_capsule(cx, oid, &mut Vec::new())
+                .await
+                .is_err(),
             "header damage is not recoverable and must not read as success"
         );
     });
@@ -420,7 +429,7 @@ fn a_destroyed_magic_is_refused() {
             .await
             .expect("reopen");
         assert!(matches!(
-            coordinator.read_capsule(cx, oid).await,
+            coordinator.read_capsule(cx, oid, &mut Vec::new()).await,
             Err(CommitError::Capsule(_))
         ));
     });
@@ -443,7 +452,10 @@ fn healed_bytes_still_recompute_their_identity() {
         let coordinator = CommitCoordinator::open(cx, &dir, keys())
             .await
             .expect("reopen");
-        let healed = coordinator.read_capsule(cx, oid).await.expect("heals");
+        let healed = coordinator
+            .read_capsule(cx, oid, &mut Vec::new())
+            .await
+            .expect("heals");
         assert_eq!(
             coordinator.capsule_id(&healed),
             oid,
@@ -471,12 +483,15 @@ fn healing_a_read_does_not_repair_the_file() {
             .await
             .expect("reopen");
         assert_eq!(
-            coordinator.read_capsule(cx, oid).await.expect("heals"),
+            coordinator
+                .read_capsule(cx, oid, &mut Vec::new())
+                .await
+                .expect("heals"),
             plaintext()
         );
         assert_eq!(
             coordinator
-                .read_capsule(cx, oid)
+                .read_capsule(cx, oid, &mut Vec::new())
                 .await
                 .expect("heals again"),
             plaintext()
@@ -539,7 +554,7 @@ fn rot_in_the_declared_repair_count_is_refused() {
             .expect("reopen");
         assert!(
             matches!(
-                coordinator.read_capsule(cx, oid).await,
+                coordinator.read_capsule(cx, oid, &mut Vec::new()).await,
                 Err(CommitError::Capsule(
                     fgdb_chronicle::capsule::CapsuleError::RepairBudgetMismatch { .. }
                 ))

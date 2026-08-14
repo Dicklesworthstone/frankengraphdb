@@ -11,8 +11,8 @@ use fgdb_chronicle::{
     CipherDescriptor, CryptoVerificationEvent, EncodedObject, EncodingDescriptor, IdentifiedObject,
     IdentityMismatch, LocationForm, PackBuilder, PackDomain, PackError, PackProtectionProfile,
     PlacementDescriptor, RecoveredObjectError, RootBootstrap, RootRecoveryError, RootSlot,
-    SymbolError, SymbolRecord, VerificationFailureClass, VerificationOperation, VerificationOutcome,
-    WriteKeyDomain,
+    SymbolError, SymbolRecord, VerificationFailureClass, VerificationOperation,
+    VerificationOutcome, WriteKeyDomain,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 
@@ -573,58 +573,59 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
         }
     }
 
-    let mut protect_once = |material: fgdb_crypto::FreshObjectProtectionMaterial,
-                            forbidden_prior: Option<(&[u8], &[u8; 24], &[u8])>| {
-        material.use_once(|material| {
-            assert_eq!(material.profile(), registered);
-            assert_eq!(
-                format!("{material:?}"),
-                "ObjectProtectionMaterialRef(redacted)",
-                "the borrowed DEK and nonce must not enter the registered gate transcript"
-            );
-            if let Some((prior_sealed, prior_nonce, prior_aad)) = forbidden_prior {
-                assert!(
-                    fgdb_crypto::xchacha20poly1305_open(
-                        material.dek(),
-                        prior_nonce,
-                        prior_aad,
-                        prior_sealed,
-                    )
-                    .is_err(),
-                    "fresh material reused the prior ciphertext's DEK"
+    let mut protect_once =
+        |material: fgdb_crypto::FreshObjectProtectionMaterial,
+         forbidden_prior: Option<(&[u8], &[u8; 24], &[u8])>| {
+            material.use_once(|material| {
+                assert_eq!(material.profile(), registered);
+                assert_eq!(
+                    format!("{material:?}"),
+                    "ObjectProtectionMaterialRef(redacted)",
+                    "the borrowed DEK and nonce must not enter the registered gate transcript"
                 );
-            }
-            let compressed = payload();
-            let mut cipher = descriptor(0x5a, compressed.len() as u64);
-            cipher.data_crypto_profile = registered.id();
-            cipher.dek_id = material.dek_id();
-            cipher.object_nonce = material.object_nonce();
-            let identified =
-                IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
-            let aad = fgdb_crypto::object_aead_aad(
-                &fgdb_crypto::Digest(identified.object_id().0),
-                &cipher.canonical_bytes(),
-            );
-            let protected = identified
-                .protect(material.dek(), cipher.clone(), &compressed)
-                .expect("fresh production material seals through the registered profile");
-            assert_eq!(protected.descriptor(), &cipher);
-            assert_eq!(
-                protected
-                    .open(material.dek(), &mut verification)
-                    .expect("fresh production material opens in its closure"),
-                compressed
-            );
-            (
-                protected.object_id(),
-                protected.ciphertext_id(),
-                cipher.dek_id,
-                cipher.object_nonce,
-                protected.protected_bytes().to_vec(),
-                aad,
-            )
-        })
-    };
+                if let Some((prior_sealed, prior_nonce, prior_aad)) = forbidden_prior {
+                    assert!(
+                        fgdb_crypto::xchacha20poly1305_open(
+                            material.dek(),
+                            prior_nonce,
+                            prior_aad,
+                            prior_sealed,
+                        )
+                        .is_err(),
+                        "fresh material reused the prior ciphertext's DEK"
+                    );
+                }
+                let compressed = payload();
+                let mut cipher = descriptor(0x5a, compressed.len() as u64);
+                cipher.data_crypto_profile = registered.id();
+                cipher.dek_id = material.dek_id();
+                cipher.object_nonce = material.object_nonce();
+                let identified =
+                    IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
+                let aad = fgdb_crypto::object_aead_aad(
+                    &fgdb_crypto::Digest(identified.object_id().0),
+                    &cipher.canonical_bytes(),
+                );
+                let protected = identified
+                    .protect(material.dek(), cipher.clone(), &compressed)
+                    .expect("fresh production material seals through the registered profile");
+                assert_eq!(protected.descriptor(), &cipher);
+                assert_eq!(
+                    protected
+                        .open(material.dek(), &mut verification)
+                        .expect("fresh production material opens in its closure"),
+                    compressed
+                );
+                (
+                    protected.object_id(),
+                    protected.ciphertext_id(),
+                    cipher.dek_id,
+                    cipher.object_nonce,
+                    protected.protected_bytes().to_vec(),
+                    aad,
+                )
+            })
+        };
     let refused_test_source =
         fgdb_crypto::CryptoCx::new(fgdb_crypto::SystemEntropy::from_path_for_test("/dev/zero"))
             .fresh_object_protection_material(registered)
@@ -848,11 +849,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
     )
     .expect("the forged EncodingId exactly matches the forged CiphertextId");
     assert_eq!(
-        forged_encoding.open_recovered(
-            protected.protected_bytes(),
-            &dek(),
-            &mut verification,
-        ),
+        forged_encoding.open_recovered(protected.protected_bytes(), &dek(), &mut verification,),
         Err(RecoveredObjectError::CiphertextIdentityMismatch),
         "durable recovery must recompute CiphertextId even when EncodingId was consistently rewritten"
     );
@@ -955,11 +952,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
             "placement descriptor field {field} is outside PlacementId"
         );
         assert_eq!(
-            encoded.verify_placement(
-                &mutation,
-                explicit_placed.placement_id(),
-                &mut verification,
-            ),
+            encoded.verify_placement(&mutation, explicit_placed.placement_id(), &mut verification,),
             Err(IdentityMismatch::PlacementId),
             "durable recovery accepted a rewritten placement field {field}"
         );
@@ -1116,7 +1109,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
         bootstrap
             .cipher_descriptor()
             .expect("registered bootstrap profile"),
-        cipher,
+        cipher.clone(),
         "root bootstrap must preserve the complete admitted cipher descriptor"
     );
     for bad_nonce_len in [0, 23, 25] {
@@ -1192,7 +1185,7 @@ fn registered_crypto_composition_is_profile_bound_and_fail_closed() {
         IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), b"other payload");
     let substituted = EncodedObject::reconstruct(
         wrong_object.object_id(),
-        cipher,
+        cipher.clone(),
         encoded.ciphertext_id(),
         encoding(1),
         encoded.encoding_id(),

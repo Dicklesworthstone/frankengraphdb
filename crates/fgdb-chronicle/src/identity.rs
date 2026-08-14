@@ -105,7 +105,7 @@ impl CryptoVerificationEvent {
 /// There is deliberately no no-op implementation. A production caller must
 /// choose where these bounded, secret-free records go, while tests can use a
 /// `Vec<CryptoVerificationEvent>` as an exact in-memory witness.
-pub trait CryptoVerificationSink {
+pub trait CryptoVerificationSink: Send {
     fn record(&mut self, event: CryptoVerificationEvent);
 }
 

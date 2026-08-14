@@ -41,7 +41,15 @@ fn recover_from(
     descriptor: &fgdb_chronicle::capsule::CapsuleDescriptor,
     object_id: ObjectId,
 ) -> Result<Vec<u8>, CapsuleError> {
-    recover(descriptor, symbols, object_id, &K_OID, NAMESPACE, &DEK)
+    recover(
+        descriptor,
+        symbols,
+        object_id,
+        &K_OID,
+        NAMESPACE,
+        &DEK,
+        &mut Vec::new(),
+    )
 }
 
 // ---------------------------------------------------------------------------

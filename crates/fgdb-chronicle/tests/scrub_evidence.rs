@@ -113,7 +113,7 @@ fn rot(symbol: &mut [u8], nth: usize) {
 #[test]
 fn a_healthy_object_scrubs_intact_with_a_decode_proof() {
     let f = fixture(8);
-    let report = scrub_object(&f.encoding, &f.symbols, target(&f), &dek());
+    let report = scrub_object(&f.encoding, &f.symbols, target(&f), &dek(), &mut Vec::new());
 
     assert_eq!(report.verdict, ScrubVerdict::Intact);
     assert!(!report.needs_maintenance(), "intact needs no action");
@@ -136,11 +136,17 @@ fn duplicate_esis_do_not_inflate_surviving_overhead() {
     let f = fixture(8);
     let mut baseline_symbols = f.symbols.clone();
     rot(&mut baseline_symbols[2], 0);
-    let baseline = scrub_object(&f.encoding, &baseline_symbols, target(&f), &dek());
+    let baseline = scrub_object(
+        &f.encoding,
+        &baseline_symbols,
+        target(&f),
+        &dek(),
+        &mut Vec::new(),
+    );
 
     let mut repeated = baseline_symbols;
     repeated.extend([f.symbols[3].clone(), f.symbols[3].clone()]);
-    let report = scrub_object(&f.encoding, &repeated, target(&f), &dek());
+    let report = scrub_object(&f.encoding, &repeated, target(&f), &dek(), &mut Vec::new());
 
     assert_eq!(report.symbols_authentic, baseline.symbols_authentic + 2);
     assert_eq!(
@@ -159,12 +165,12 @@ fn duplicate_esis_do_not_inflate_surviving_overhead() {
 fn conflicting_authenticated_esis_fail_closed() {
     let f = fixture(8);
     let mut records = f.symbols.clone();
-    let mut conflict = SymbolRecord::verify(&records[0], &f.encoding, &dek())
+    let mut conflict = SymbolRecord::verify(&records[0], &f.encoding, &dek(), &mut Vec::new())
         .expect("fixture symbol authenticates");
     conflict.payload[0] ^= 0x01;
     records.push(conflict.serialize(&f.encoding.symbol_auth_key(&dek())));
 
-    let report = scrub_object(&f.encoding, &records, target(&f), &dek());
+    let report = scrub_object(&f.encoding, &records, target(&f), &dek(), &mut Vec::new());
     assert_eq!(
         report.verdict,
         ScrubVerdict::Lost {
@@ -186,7 +192,7 @@ fn corruption_within_the_budget_reports_degraded_not_failure() {
     rot(&mut symbols[5], 1);
     rot(&mut symbols[9], 2);
 
-    let report = scrub_object(&f.encoding, &symbols, target(&f), &dek());
+    let report = scrub_object(&f.encoding, &symbols, target(&f), &dek(), &mut Vec::new());
 
     assert_eq!(
         report.verdict,
@@ -212,7 +218,7 @@ fn every_rotted_symbol_is_located_individually() {
         for (nth, symbol) in symbols.iter_mut().take(corrupt_count).enumerate() {
             rot(symbol, nth);
         }
-        let report = scrub_object(&f.encoding, &symbols, target(&f), &dek());
+        let report = scrub_object(&f.encoding, &symbols, target(&f), &dek(), &mut Vec::new());
         assert_eq!(
             report.corrupt_symbols(),
             corrupt_count,
@@ -233,7 +239,7 @@ fn corruption_beyond_the_budget_reports_lost_with_a_reason() {
         rot(symbol, nth);
     }
 
-    let report = scrub_object(&f.encoding, &symbols, target(&f), &dek());
+    let report = scrub_object(&f.encoding, &symbols, target(&f), &dek(), &mut Vec::new());
     assert_eq!(
         report.verdict,
         ScrubVerdict::Lost {
@@ -261,6 +267,7 @@ fn the_wrong_identity_is_lost_for_a_different_reason() {
             ..target(&f)
         },
         &dek(),
+        &mut Vec::new(),
     );
     assert_eq!(
         report.verdict,
@@ -281,8 +288,8 @@ fn the_wrong_identity_is_lost_for_a_different_reason() {
 #[test]
 fn the_decode_proof_attestation_is_deterministic() {
     let f = fixture(8);
-    let first = scrub_object(&f.encoding, &f.symbols, target(&f), &dek());
-    let second = scrub_object(&f.encoding, &f.symbols, target(&f), &dek());
+    let first = scrub_object(&f.encoding, &f.symbols, target(&f), &dek(), &mut Vec::new());
+    let second = scrub_object(&f.encoding, &f.symbols, target(&f), &dek(), &mut Vec::new());
     assert_eq!(first.decode_proof_hash, second.decode_proof_hash);
     assert_eq!(first, second, "the whole report is deterministic");
 }
@@ -292,11 +299,17 @@ fn the_decode_proof_attestation_is_deterministic() {
 #[test]
 fn different_symbol_sets_attest_differently() {
     let f = fixture(8);
-    let intact = scrub_object(&f.encoding, &f.symbols, target(&f), &dek());
+    let intact = scrub_object(&f.encoding, &f.symbols, target(&f), &dek(), &mut Vec::new());
 
     let mut degraded_symbols = f.symbols.clone();
     rot(&mut degraded_symbols[1], 0);
-    let degraded = scrub_object(&f.encoding, &degraded_symbols, target(&f), &dek());
+    let degraded = scrub_object(
+        &f.encoding,
+        &degraded_symbols,
+        target(&f),
+        &dek(),
+        &mut Vec::new(),
+    );
 
     assert_ne!(
         intact.decode_proof_hash, degraded.decode_proof_hash,

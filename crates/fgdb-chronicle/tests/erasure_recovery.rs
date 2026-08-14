@@ -130,7 +130,7 @@ fn target(f: &Fixture) -> RecoveryTarget<'static> {
 }
 
 fn recover(f: &Fixture, symbols: &[Vec<u8>]) -> Result<Vec<u8>, SymbolizeError> {
-    decode_object(&f.encoding, symbols, target(f), &dek())
+    decode_object(&f.encoding, symbols, target(f), &dek(), &mut Vec::new())
 }
 
 #[test]
@@ -301,6 +301,7 @@ fn recovered_bytes_must_recompute_the_requested_identity() {
             ..target(&f)
         },
         &dek(),
+        &mut Vec::new(),
     );
     assert_eq!(
         outcome,
@@ -320,6 +321,7 @@ fn recovered_bytes_must_recompute_the_requested_identity() {
                 ..target(&f)
             },
             &dek(),
+            &mut Vec::new(),
         ),
         Err(SymbolizeError::IdentityMismatch)
     );

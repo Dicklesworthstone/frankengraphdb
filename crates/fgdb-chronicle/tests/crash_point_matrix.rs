@@ -535,7 +535,7 @@ fn identical_payloads_reuse_a_read_only_capsule_and_both_markers_survive_restart
         );
         assert_eq!(
             coordinator
-                .read_capsule(cx, expected_oid)
+                .read_capsule(cx, expected_oid, &mut Vec::new())
                 .await
                 .expect("read shared capsule"),
             plaintext
@@ -550,7 +550,7 @@ fn identical_payloads_reuse_a_read_only_capsule_and_both_markers_survive_restart
         assert_eq!(capsule_file_count(&dir), 1);
         assert_eq!(
             reopened
-                .read_capsule(cx, expected_oid)
+                .read_capsule(cx, expected_oid, &mut Vec::new())
                 .await
                 .expect("recover shared capsule"),
             plaintext

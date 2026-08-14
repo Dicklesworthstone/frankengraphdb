@@ -115,7 +115,7 @@
 use asupersync::fs::{UnixVfs, Vfs};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
-use fgdb_chronicle::identity::IdentifiedObject;
+use fgdb_chronicle::identity::{CryptoVerificationEvent, IdentifiedObject};
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate};
 use fgdb_chronicle::{
     RootBootstrap, RootSelection, RootSlot, RootStore, store::StoreError as SlotStoreError,
@@ -1232,6 +1232,11 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// recovered marker chain, and a crash after D2 before the in-memory
     /// insert heals the same way (FG-INV-18).
     delta_index: LocalDeltaBatchIndex,
+    /// Secret-free verification records emitted while this handle reopened
+    /// Chronicle capsules. Retained on the handle so product callers can
+    /// forward them to the eventual observatory without a silent/no-op sink.
+    /// They are diagnostic evidence only, never recovery authority.
+    crypto_verification_events: Vec<CryptoVerificationEvent>,
 }
 
 impl Database<UnixVfs> {
@@ -1395,6 +1400,7 @@ impl<V: Vfs + Clone> Database<V> {
         let coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
         let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
+        let mut crypto_verification_events = Vec::new();
         // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
         // resolvable manifest. Before accepting it, bind verifies the selected
         // partition's V2 marker-chain commitment against Chronicle's recovered
@@ -1405,7 +1411,14 @@ impl<V: Vfs + Clone> Database<V> {
         // than being silently rebuilt over.
         let probe = RootStore::with_vfs(vfs.clone(), path);
         let (snapshot, writer) = if force_rebuild {
-            rebuild(cx, &coordinator, &store, &keys).await?
+            rebuild(
+                cx,
+                &coordinator,
+                &store,
+                &keys,
+                &mut crypto_verification_events,
+            )
+            .await?
         } else {
             match probe.current(cx).await {
                 Ok(slot) => {
@@ -1448,6 +1461,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 &store,
                                 &keys,
                                 record.root,
+                                &mut crypto_verification_events,
                             )
                             .await?
                         }
@@ -1460,7 +1474,14 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                 }
                 Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    rebuild(cx, &coordinator, &store, &keys).await?
+                    rebuild(
+                        cx,
+                        &coordinator,
+                        &store,
+                        &keys,
+                        &mut crypto_verification_events,
+                    )
+                    .await?
                 }
                 Err(error) => return Err(OpenError::Slot(error)),
             }
@@ -1543,7 +1564,12 @@ impl<V: Vfs + Clone> Database<V> {
         // checkpoint suffix the writer just folded. A suffix-only rebuild
         // would open a window starting at `published_at`, and the next
         // insert would see a gap (plan:397, FG-INV-18).
-        let delta_index = rebuild_delta_index(cx, &coordinator).await?;
+        let delta_index = rebuild_delta_index(
+            cx,
+            &coordinator,
+            &mut crypto_verification_events,
+        )
+        .await?;
         Ok(Self {
             coordinator,
             store,
@@ -1562,6 +1588,7 @@ impl<V: Vfs + Clone> Database<V> {
             receipts: PublishReceipts::new(),
             vfs,
             delta_index,
+            crypto_verification_events,
         })
     }
 
@@ -1570,6 +1597,14 @@ impl<V: Vfs + Clone> Database<V> {
     /// publication or a fresh [`Database::open`] is what yields `Healthy`.
     pub fn state(&self) -> DatabaseState {
         self.state
+    }
+
+    /// Secret-free crypto/identity verification evidence from this handle's
+    /// open/recovery work. The fixed records carry public descriptor facts and
+    /// typed outcomes only; no keys, nonces, plaintext, or ciphertext bytes.
+    #[must_use]
+    pub fn crypto_verification_events(&self) -> &[CryptoVerificationEvent] {
+        &self.crypto_verification_events
     }
 
     /// Consume this handle and return one rebuilt from the authoritative
@@ -3396,6 +3431,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     store: &BlockStore,
     keys: &DatabaseKeys,
     root_id: PartitionRootVersion,
+    crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
     let (root, blocks, block_props, patches) = store.reopen(cx, root_id)?;
     let published_at = root.published_at;
@@ -3467,6 +3503,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         &mut versions,
         &mut next_birth_ordinal,
         published_at,
+        crypto_verification_events,
     )
     .await?;
 
@@ -3523,6 +3560,7 @@ async fn rebuild<V: Vfs>(
     coordinator: &CommitCoordinator<V>,
     store: &BlockStore,
     keys: &DatabaseKeys,
+    crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut next_birth_ordinal = 0u64;
@@ -3535,6 +3573,7 @@ async fn rebuild<V: Vfs>(
         &mut versions,
         &mut next_birth_ordinal,
         CommitSeq(0),
+        crypto_verification_events,
     )
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
@@ -3561,6 +3600,7 @@ async fn rebuild<V: Vfs>(
 async fn rebuild_delta_index<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
+    crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<LocalDeltaBatchIndex, RebuildError> {
     let mut index = LocalDeltaBatchIndex::new();
     for entry in coordinator.chain().entries() {
@@ -3576,7 +3616,9 @@ async fn rebuild_delta_index<V: Vfs>(
                 capsule_oid: *capsule_ref,
             });
         }
-        let bytes = coordinator.read_capsule(cx, *capsule_ref).await?;
+        let bytes = coordinator
+            .read_capsule(cx, *capsule_ref, crypto_verification_events)
+            .await?;
         let recomputed = template_digest(&bytes);
         // The annotation must sit on the line immediately above the
         // comparison: UBS anchors it to the next line.
@@ -3654,6 +3696,7 @@ async fn fold_stream<V: Vfs>(
     versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
     next_birth_ordinal: &mut u64,
     after: CommitSeq,
+    crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<CommitSeq, RebuildError> {
     let mut frontier = after;
     let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
@@ -3675,7 +3718,9 @@ async fn fold_stream<V: Vfs>(
                 capsule_oid: *capsule_ref,
             });
         }
-        let bytes = coordinator.read_capsule(cx, *capsule_ref).await?;
+        let bytes = coordinator
+            .read_capsule(cx, *capsule_ref, crypto_verification_events)
+            .await?;
         let recomputed = template_digest(&bytes);
         // FG-INV-09's recompute-from-registered-bytes check. Skipping it would
         // turn silent corruption into silently different graph state, which is

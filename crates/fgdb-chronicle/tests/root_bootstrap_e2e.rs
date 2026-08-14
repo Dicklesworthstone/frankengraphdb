@@ -212,6 +212,7 @@ fn a_root_recovers_from_its_slot_and_symbols_alone() {
         K_OID,
         &dek(),
         tuple_from_recovered(&published.slot),
+        &mut Vec::new(),
     )
     .expect("a well-formed root must recover from its slot alone");
 
@@ -240,6 +241,7 @@ fn root_recovery_survives_symbol_loss_within_the_budget() {
             K_OID,
             &dek(),
             tuple_from_recovered(&published.slot),
+            &mut Vec::new(),
         )
         .is_ok(),
         "three losses inside an eight-symbol budget must recover"
@@ -263,6 +265,7 @@ fn a_rewritten_encoding_descriptor_is_refused_before_decoding() {
                 K_OID,
                 &dek(),
                 tuple_from_recovered(&published.slot),
+                &mut Vec::new(),
             ),
             Err(RootRecoveryError::DescriptorMismatch(_))
         ),
@@ -280,6 +283,7 @@ fn a_rewritten_encoding_descriptor_is_refused_before_decoding() {
             K_OID,
             &dek(),
             tuple_from_recovered(&published.slot),
+            &mut Vec::new(),
         ),
         Err(RootRecoveryError::DescriptorMismatch(_))
     ));
@@ -300,6 +304,7 @@ fn a_rewritten_placement_descriptor_is_refused() {
                 K_OID,
                 &dek(),
                 tuple_from_recovered(&published.slot),
+                &mut Vec::new(),
             ),
             Err(RootRecoveryError::DescriptorMismatch(_))
         ),
@@ -330,6 +335,7 @@ fn a_slot_naming_a_different_root_cannot_adopt_these_bytes() {
             K_OID,
             &dek(),
             tuple_from_recovered(&published.slot),
+            &mut Vec::new(),
         ),
         Err(RootRecoveryError::Recovery(SymbolizeError::Symbol(
             SymbolError::ForeignEncoding
@@ -355,6 +361,7 @@ fn a_root_from_another_incarnation_is_refused_even_though_authentic() {
             K_OID,
             &dek(),
             tuple_from_recovered(&lying_slot),
+            &mut Vec::new(),
         ),
         Err(RootRecoveryError::IdentityTupleMismatch),
         "an authentic root from another incarnation must never be adopted"
@@ -375,6 +382,7 @@ fn a_root_from_another_visibility_epoch_is_refused() {
             K_OID,
             &dek(),
             tuple_from_recovered(&lying_slot),
+            &mut Vec::new(),
         ),
         Err(RootRecoveryError::IdentityTupleMismatch)
     );
@@ -393,6 +401,7 @@ fn root_recovery_beyond_the_budget_fails_closed() {
             K_OID,
             &dek(),
             tuple_from_recovered(&published.slot),
+            &mut Vec::new(),
         )
         .is_err(),
         "too few symbols must fail closed, never return partial bytes"
@@ -413,6 +422,7 @@ fn the_wrong_identity_key_recovers_nothing() {
             &wrong,
             &dek(),
             tuple_from_recovered(&published.slot),
+            &mut Vec::new(),
         )
         .is_err(),
         "recovery without the database identity key must fail"
