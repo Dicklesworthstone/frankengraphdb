@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 16
+registry_epoch = 17
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -756,4 +756,89 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:key-destroy-certificate-publish-spec"
 source_location = "a15:2069"
 statement = "KeyDestroyCertificatePublishSpec is the sole ordered transition from DestroyedPendingCertificate to final Destroyed and installs the compact certificate-index edge only after the matching record, durable root, audit visibility advance, and quorum certificate exist."
+status = "registered"
+
+# --- F15A semantic backup (frozen ordinals 70-79). These ten explicit Local
+# --- members are classified in their confirmed source order. The structural
+# --- Role cohort and the restore/DirectoryBound members remain later F15
+# --- increments; Protocol dispatch inputs are not laundered into this table.
+
+[[classification]]
+type_name = "LocalBackupBarrierSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-barrier-spec"
+source_location = "a15:2117"
+statement = "LocalBackupBarrierSpec is the ordered Local backup barrier; exact current Local roots, coordinates, checkpoint/configuration/floor and generated closure are validated before apply creates the complete LocalBackupPinRecord source-retention lease."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupClosurePublishSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-closure-publish-spec"
+source_location = "a15:2121"
+statement = "LocalBackupClosurePublishSpec is the sole Pinned-to-ClosureCertified transition and byte-matches the pin, copy verification and Local closure certificate without dropping the source pin."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupSealSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-seal-spec"
+source_location = "a15:2121"
+statement = "LocalBackupSealSpec requires the exact pin/copy/certificate/manifest closure and alone selects Sealed; it cannot skip closure publication or perform external publication."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupPublicationAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-publication-authorize-spec"
+source_location = "a15:2121"
+statement = "LocalBackupPublicationAuthorizeSpec is the sole transition out of Sealed and creates the exact immutable publication operation record as AuthorizedUndispatchedRecipe without I/O."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupPublicationReceiptImportSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-publication-receipt-import-spec"
+source_location = "a15:2121"
+statement = "LocalBackupPublicationReceiptImportSpec consumes the portable dispatch terminal evidence and exact publication receipt and selects only the policy-matched pending transparency or pending grant state."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupGrantIssueImportSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-grant-issue-import-spec"
+source_location = "a15:2123"
+statement = "LocalBackupGrantIssueImportSpec byte-matches publication, optional required transparency, grant dispatch, Active grant and current authority observation; alone constructs the Local projection and installs Published."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupArtifactVerifySpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-artifact-verify-spec"
+source_location = "a15:2123"
+statement = "LocalBackupArtifactVerifySpec consumes the exact current-use guard and post-publication artifact proof and installs ArtifactVerified without releasing the source pin."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupReleaseSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-release-spec"
+source_location = "a15:2123"
+statement = "LocalBackupReleaseSpec is the sole Local pin-removing transition after exact publication, grant, artifact and Activated-hold lineage; it enters ReleasedPendingArchiveHoldCompletion, never final Released."
+status = "registered"
+
+[[classification]]
+type_name = "ArchiveSourceReleaseCompletionImportSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:archive-source-release-completion-import-spec"
+source_location = "a15:2107"
+statement = "ArchiveSourceReleaseCompletionImportSpec<Role> is the only ordered transition from ReleasedPendingArchiveHoldCompletion to compact Released after byte-matching the completed external CAS lineage; this row binds the Local instantiation."
+status = "registered"
+
+[[classification]]
+type_name = "LocalBackupAbortSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-backup-abort-spec"
+source_location = "a15:2139"
+statement = "LocalBackupAbortSpec is the only Local backup failure transition and is legal only with complete provider-linearizable no-publication evidence, exact cleanup completion and no-other-owner proof; unresolved SentUnknown forces roll-forward."
 status = "registered"
