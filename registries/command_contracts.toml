@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 16
+registry_epoch = 17
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -340,6 +340,301 @@ backup_restore_gc_classes = [ "semantic-gc" ]                             # [C][
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F15A semantic backup — frozen ordinals 70-79. This is the exact Local
+# backup cohort at L2117-L2125 in the owner-confirmed v1 order. It does not
+# include the later restore, DirectoryBound, or structural Role cohort, and
+# it never folds external dispatch/status work into the Semantic plane.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:local-backup-barrier-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0046
+input_schema_id = "LocalBackupBarrierSpec"
+input_wire_tag = 0x0046
+body_schema_id = "LocalBackupBarrierSpec"
+result_schema_id = "LocalBackupPinRecord"
+applied_record_schema_id = "LocalBackupPinRecord"
+handler_symbol = "fgdb_apply::local::local_backup_barrier_spec"
+transition_class = "Semantic"
+sequence_effects = "requires Operational and byte-exact current root, logical state, command/commit/Raft coordinates, checkpoint/vector, configuration, payload floor, prepared/certificate/history closure and archive/key-recovery/format profiles; atomically installs the complete generated Local source-retention pin"
+expected_state_schema_id = "LogicalStatePayload"
+authority_arm = "SourceUnspelled"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-barrier-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-closure-publish-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0047
+input_schema_id = "LocalBackupClosurePublishSpec"
+input_wire_tag = 0x0047
+body_schema_id = "LocalBackupClosurePublishSpec"
+result_schema_id = "LocalBackupClosureCertificate"
+applied_record_schema_id = "LocalBackupClosureCertificate"
+handler_symbol = "fgdb_apply::local::local_backup_closure_publish_spec"
+transition_class = "Semantic"
+sequence_effects = "is the only Pinned-to-ClosureCertified transition; byte-matches the pin, independent copy verification and closure certificate, retaining the source pin while installing only the certified closure reference"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "SameGroupCertificateHeader"
+authority_evidence_target_schema_id = "LocalBackupClosureCertificate"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-closure-publish-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-seal-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0048
+input_schema_id = "LocalBackupSealSpec"
+input_wire_tag = 0x0048
+body_schema_id = "LocalBackupSealSpec"
+result_schema_id = "BackupManifest"
+applied_record_schema_id = "BackupManifest"
+handler_symbol = "fgdb_apply::local::local_backup_seal_spec"
+transition_class = "Semantic"
+sequence_effects = "requires the exact pin, copy verification, closure certificate and already-constructed signed manifest; alone selects Sealed and cannot skip closure publication or perform external publication"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "BackupManifestSignatureSet"
+authority_evidence_target_schema_id = "BackupManifest"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-seal-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-publication-authorize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0049
+input_schema_id = "LocalBackupPublicationAuthorizeSpec"
+input_wire_tag = 0x0049
+body_schema_id = "LocalBackupPublicationAuthorizeSpec"
+result_schema_id = "BackupExternalOperationRecord<Local>"
+applied_record_schema_id = "BackupExternalOperationRecord<Local>"
+handler_symbol = "fgdb_apply::local::local_backup_publication_authorize_spec"
+transition_class = "Semantic"
+sequence_effects = "is the sole Sealed successor; validates the sealed manifest and immutable publication action recipe, then creates AuthorizedUndispatchedRecipe without constructing a full request or performing I/O"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "BackupExternalOperationRecord<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-publication-authorize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-publication-receipt-import-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x004a
+input_schema_id = "LocalBackupPublicationReceiptImportSpec"
+input_wire_tag = 0x004a
+body_schema_id = "LocalBackupPublicationReceiptImportSpec"
+result_schema_id = "BackupPublicationReceipt"
+applied_record_schema_id = "SourceUnspelled"
+handler_symbol = "fgdb_apply::local::local_backup_publication_receipt_import_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact portable publication dispatch terminal evidence and provider receipt, byte-matches the authorized request lineage, and selects only the manifest-policy-matched pending transparency or pending grant state"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "PortableBackupExternalOperationTerminalEvidence"
+authority_evidence_target_schema_id = "BackupPublicationReceipt"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-publication-receipt-import-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-grant-issue-import-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x004b
+input_schema_id = "LocalBackupGrantIssueImportSpec"
+input_wire_tag = 0x004b
+body_schema_id = "LocalBackupGrantIssueImportSpec"
+result_schema_id = "ArchiveGrantAuthorityProjection<Local>"
+applied_record_schema_id = "ArchiveGrantAuthorityProjection<Local>"
+handler_symbol = "fgdb_apply::local::local_backup_grant_issue_import_spec"
+transition_class = "Semantic"
+sequence_effects = "byte-matches the selected transparency policy, complete publication and grant dispatch lineages, Active grant and current authority observation; constructs the direct Local projection and alone installs Published"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "PortableBackupExternalOperationTerminalEvidence"
+authority_evidence_target_schema_id = "ArchiveRetentionGrant"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-grant-issue-import-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-artifact-verify-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x004c
+input_schema_id = "LocalBackupArtifactVerifySpec"
+input_wire_tag = 0x004c
+body_schema_id = "LocalBackupArtifactVerifySpec"
+result_schema_id = "BackupArtifactReopenProof<Local>"
+applied_record_schema_id = "SourceUnspelled"
+handler_symbol = "fgdb_apply::local::local_backup_artifact_verify_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the action-bound current archive-grant use guard and exact post-publication artifact proof, then alone installs ArtifactVerified without releasing the source pin"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "ArchiveGrantUseGuard<Local>"
+authority_evidence_target_schema_id = "BackupArtifactReopenProof<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-artifact-verify-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-release-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x004d
+input_schema_id = "LocalBackupReleaseSpec"
+input_wire_tag = 0x004d
+body_schema_id = "LocalBackupReleaseSpec"
+result_schema_id = "ArchiveSourceReleaseEvidence::Local"
+applied_record_schema_id = "ArchiveSourceReleaseCompletionOperationRecord"
+handler_symbol = "fgdb_apply::local::local_backup_release_spec"
+transition_class = "Semantic"
+sequence_effects = "requires the complete publication/transparency/grant/hold lineage, verified artifact, current Activated hold and fresh release observation; alone removes the Local pin and enters ReleasedPendingArchiveHoldCompletion, never final Released"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "ArchiveGrantAuthorityObservationImport<Local>"
+authority_evidence_target_schema_id = "ArchiveSourceReleaseHold"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-release-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:archive-source-release-completion-import-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x004e
+input_schema_id = "ArchiveSourceReleaseCompletionImportSpec<Local>"
+input_wire_tag = 0x004e
+body_schema_id = "ArchiveSourceReleaseCompletionImportSpec<Local>"
+result_schema_id = "ArchiveGrantAuthorityProjection<Local>"
+applied_record_schema_id = "ArchiveGrantAuthorityProjection<Local>"
+handler_symbol = "fgdb_apply::local::archive_source_release_completion_import_spec"
+transition_class = "Semantic"
+sequence_effects = "byte-matches the completion operation, Activated hold, portable dispatch terminal evidence, completion receipt, completed hold and current completed-head observation; alone creates the completed Local grant projection and enters compact Released"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "PortableArchiveSourceReleaseCompletionTerminalEvidence"
+authority_evidence_target_schema_id = "ArchiveSourceReleaseCompletionReceipt"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:archive-source-release-completion-import-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-backup-abort-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x004f
+input_schema_id = "LocalBackupAbortSpec"
+input_wire_tag = 0x004f
+body_schema_id = "LocalBackupAbortSpec"
+result_schema_id = "SourceUnspelled"
+applied_record_schema_id = "SourceUnspelled"
+handler_symbol = "fgdb_apply::local::local_backup_abort_spec"
+transition_class = "Semantic"
+sequence_effects = "requires complete provider-linearizable no-publication evidence plus exact cleanup completion and no-other-owner proof; alone installs AbortedBeforePublication and releases only enumerated Local pin/staging owners, while any ambiguous SentUnknown forces roll-forward"
+expected_state_schema_id = "SourceUnspelled"
+authority_arm = "BackupNoPublicationProof<Local>"
+authority_evidence_target_schema_id = "BackupStagingCleanupCompletion<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-backup-abort-spec"
+consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
+checkpoint_floor_classes = [ "semantic-backup" ]
+backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
 
 # =============================================================================
 # F5a checkpoint/floor/history-cut — frozen ordinals 22-24. These three
