@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F14 tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F15A tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -251,6 +251,19 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:local-gc-cancellation-authorize-spec",
         "cc:local:gc-physical-disposition-import-spec:completed",
         "cc:local:gc-physical-disposition-import-spec:cancelled",
+        // F15A Local semantic backup (frozen ordinals 0x0046-0x004f).
+        // External dispatch remains Protocol work; later F15 restore and
+        // structural Role members retain their frozen positions.
+        "cc:local:local-backup-barrier-spec",
+        "cc:local:local-backup-closure-publish-spec",
+        "cc:local:local-backup-seal-spec",
+        "cc:local:local-backup-publication-authorize-spec",
+        "cc:local:local-backup-publication-receipt-import-spec",
+        "cc:local:local-backup-grant-issue-import-spec",
+        "cc:local:local-backup-artifact-verify-spec",
+        "cc:local:local-backup-release-spec",
+        "cc:local:archive-source-release-completion-import-spec",
+        "cc:local:local-backup-abort-spec",
     ] {
         assert!(
             registry
@@ -261,8 +274,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 111,
-        "the population may only grow from the landed F1-F14 rows"
+        registry.contracts.len() >= 121,
+        "the population may only grow from the landed F1-F15A rows"
     );
 }
 
@@ -454,6 +467,180 @@ fn f14_semantic_gc_contracts_are_exact() {
             row.written_state_slots,
             ["SemanticPayload|Local|gc_semantic_state"]
         );
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+}
+
+/// Freeze the first Local backup cohort as one exact family increment. The
+/// table is intentionally independent of the TOML: deleting/reordering a
+/// member, inventing an inner arm, crossing Semantic into Protocol dispatch,
+/// or losing the sole backup-registry writer binding must red this test.
+#[test]
+fn f15a_local_backup_contracts_are_exact() {
+    let registry = registry();
+    let expected = [
+        (
+            "cc:local:local-backup-barrier-spec",
+            0x0046,
+            "LocalBackupBarrierSpec",
+            "LocalBackupPinRecord",
+            "LocalBackupPinRecord",
+            "LogicalStatePayload",
+            "SourceUnspelled",
+            None,
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_backup_barrier_spec",
+        ),
+        (
+            "cc:local:local-backup-closure-publish-spec",
+            0x0047,
+            "LocalBackupClosurePublishSpec",
+            "LocalBackupClosureCertificate",
+            "LocalBackupClosureCertificate",
+            "SourceUnspelled",
+            "SameGroupCertificateHeader",
+            Some("LocalBackupClosureCertificate"),
+            "SourceUnspelled",
+            "fgdb_apply::local::local_backup_closure_publish_spec",
+        ),
+        (
+            "cc:local:local-backup-seal-spec",
+            0x0048,
+            "LocalBackupSealSpec",
+            "BackupManifest",
+            "BackupManifest",
+            "SourceUnspelled",
+            "BackupManifestSignatureSet",
+            Some("BackupManifest"),
+            "SourceUnspelled",
+            "fgdb_apply::local::local_backup_seal_spec",
+        ),
+        (
+            "cc:local:local-backup-publication-authorize-spec",
+            0x0049,
+            "LocalBackupPublicationAuthorizeSpec",
+            "BackupExternalOperationRecord<Local>",
+            "BackupExternalOperationRecord<Local>",
+            "SourceUnspelled",
+            "AuthorityBoundHeader<Local>",
+            Some("BackupExternalOperationRecord<Local>"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_backup_publication_authorize_spec",
+        ),
+        (
+            "cc:local:local-backup-publication-receipt-import-spec",
+            0x004a,
+            "LocalBackupPublicationReceiptImportSpec",
+            "BackupPublicationReceipt",
+            "SourceUnspelled",
+            "SourceUnspelled",
+            "PortableBackupExternalOperationTerminalEvidence",
+            Some("BackupPublicationReceipt"),
+            "SourceUnspelled",
+            "fgdb_apply::local::local_backup_publication_receipt_import_spec",
+        ),
+        (
+            "cc:local:local-backup-grant-issue-import-spec",
+            0x004b,
+            "LocalBackupGrantIssueImportSpec",
+            "ArchiveGrantAuthorityProjection<Local>",
+            "ArchiveGrantAuthorityProjection<Local>",
+            "SourceUnspelled",
+            "PortableBackupExternalOperationTerminalEvidence",
+            Some("ArchiveRetentionGrant"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_backup_grant_issue_import_spec",
+        ),
+        (
+            "cc:local:local-backup-artifact-verify-spec",
+            0x004c,
+            "LocalBackupArtifactVerifySpec",
+            "BackupArtifactReopenProof<Local>",
+            "SourceUnspelled",
+            "SourceUnspelled",
+            "ArchiveGrantUseGuard<Local>",
+            Some("BackupArtifactReopenProof<Local>"),
+            "SourceUnspelled",
+            "fgdb_apply::local::local_backup_artifact_verify_spec",
+        ),
+        (
+            "cc:local:local-backup-release-spec",
+            0x004d,
+            "LocalBackupReleaseSpec",
+            "ArchiveSourceReleaseEvidence::Local",
+            "ArchiveSourceReleaseCompletionOperationRecord",
+            "SourceUnspelled",
+            "ArchiveGrantAuthorityObservationImport<Local>",
+            Some("ArchiveSourceReleaseHold"),
+            "SourceUnspelled",
+            "fgdb_apply::local::local_backup_release_spec",
+        ),
+        (
+            "cc:local:archive-source-release-completion-import-spec",
+            0x004e,
+            "ArchiveSourceReleaseCompletionImportSpec<Local>",
+            "ArchiveGrantAuthorityProjection<Local>",
+            "ArchiveGrantAuthorityProjection<Local>",
+            "SourceUnspelled",
+            "PortableArchiveSourceReleaseCompletionTerminalEvidence",
+            Some("ArchiveSourceReleaseCompletionReceipt"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::archive_source_release_completion_import_spec",
+        ),
+        (
+            "cc:local:local-backup-abort-spec",
+            0x004f,
+            "LocalBackupAbortSpec",
+            "SourceUnspelled",
+            "SourceUnspelled",
+            "SourceUnspelled",
+            "BackupNoPublicationProof<Local>",
+            Some("BackupStagingCleanupCompletion<Local>"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_backup_abort_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, applied, state, authority, target, gate, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F15A table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} must remain armless");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(
+            row.applied_record_schema_id, applied,
+            "{id} applied drifted"
+        );
+        assert_eq!(row.expected_state_schema_id, state, "{id} state drifted");
+        assert_eq!(row.authority_arm, authority, "{id} authority drifted");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            target,
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.terminal_audit_gate_arm, gate, "{id} gate drifted");
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|backup_registry_root"]
+        );
+        assert_eq!(
+            row.written_state_slots,
+            ["SemanticPayload|Local|backup_registry_root"]
+        );
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-backup"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-backup"]);
+        assert_eq!(row.posture_feature_predicate, "local");
         assert_eq!(row.status, "reserved", "{id} activated prematurely");
     }
 }

@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 50, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 51, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&46));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&47));
     assert_eq!(plane_counts.get("Protocol"), Some(&1));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&2));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 46);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 47);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 1);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -97,6 +97,31 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:local-gc-apply-quarantine-spec",
             "cc:local:local-gc-authorize-spec",
             "cc:local:local-gc-cancellation-authorize-spec",
+        ]
+    );
+
+    let backup_state = slots
+        .slots
+        .iter()
+        .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "backup_registry_root")
+        .expect("F15A Local backup registry slot");
+    assert_eq!(backup_state.role, "Local");
+    assert_eq!(backup_state.backing_registry, "state_payload_fields.toml");
+    assert_eq!(backup_state.stable_name, "backup_registry_root");
+    assert_eq!(backup_state.status, "reserved");
+    assert_eq!(
+        backup_state.transition_writer_contract_ids,
+        [
+            "cc:local:archive-source-release-completion-import-spec",
+            "cc:local:local-backup-abort-spec",
+            "cc:local:local-backup-artifact-verify-spec",
+            "cc:local:local-backup-barrier-spec",
+            "cc:local:local-backup-closure-publish-spec",
+            "cc:local:local-backup-grant-issue-import-spec",
+            "cc:local:local-backup-publication-authorize-spec",
+            "cc:local:local-backup-publication-receipt-import-spec",
+            "cc:local:local-backup-release-spec",
+            "cc:local:local-backup-seal-spec",
         ]
     );
 }

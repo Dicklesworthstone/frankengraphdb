@@ -111,6 +111,16 @@ fn source_forced_seed_population_is_present() {
         "LocalGcApplyQuarantineSpec",
         "LocalGcCancellationAuthorizeSpec",
         "GcPhysicalDispositionImportSpec",
+        "LocalBackupBarrierSpec",
+        "LocalBackupClosurePublishSpec",
+        "LocalBackupSealSpec",
+        "LocalBackupPublicationAuthorizeSpec",
+        "LocalBackupPublicationReceiptImportSpec",
+        "LocalBackupGrantIssueImportSpec",
+        "LocalBackupArtifactVerifySpec",
+        "LocalBackupReleaseSpec",
+        "ArchiveSourceReleaseCompletionImportSpec",
+        "LocalBackupAbortSpec",
     ] {
         assert!(
             registry
@@ -121,8 +131,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 76,
-        "the population may only grow from the landed F1-F14 rows"
+        registry.classifications.len() >= 86,
+        "the population may only grow from the landed F1-F15A rows"
     );
 }
 
@@ -201,6 +211,80 @@ fn f14_semantic_gc_classifications_are_exact() {
             .iter()
             .find(|row| row.type_name == type_name)
             .expect("exact F14 table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(row.source_location, source_location);
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F15A's ten explicit Local backup members are independently named inputs,
+/// in the owner-confirmed dense order. Pin each input to its exact contract
+/// and source anchor so a suffix guess or cross-role alias cannot substitute.
+#[test]
+fn f15a_local_backup_classifications_are_exact() {
+    let registry = registry();
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "LocalBackupBarrierSpec",
+            "cc:local:local-backup-barrier-spec",
+            "a15:2117",
+        ),
+        (
+            "LocalBackupClosurePublishSpec",
+            "cc:local:local-backup-closure-publish-spec",
+            "a15:2121",
+        ),
+        (
+            "LocalBackupSealSpec",
+            "cc:local:local-backup-seal-spec",
+            "a15:2121",
+        ),
+        (
+            "LocalBackupPublicationAuthorizeSpec",
+            "cc:local:local-backup-publication-authorize-spec",
+            "a15:2121",
+        ),
+        (
+            "LocalBackupPublicationReceiptImportSpec",
+            "cc:local:local-backup-publication-receipt-import-spec",
+            "a15:2121",
+        ),
+        (
+            "LocalBackupGrantIssueImportSpec",
+            "cc:local:local-backup-grant-issue-import-spec",
+            "a15:2123",
+        ),
+        (
+            "LocalBackupArtifactVerifySpec",
+            "cc:local:local-backup-artifact-verify-spec",
+            "a15:2123",
+        ),
+        (
+            "LocalBackupReleaseSpec",
+            "cc:local:local-backup-release-spec",
+            "a15:2123",
+        ),
+        (
+            "ArchiveSourceReleaseCompletionImportSpec",
+            "cc:local:archive-source-release-completion-import-spec",
+            "a15:2107",
+        ),
+        (
+            "LocalBackupAbortSpec",
+            "cc:local:local-backup-abort-spec",
+            "a15:2139",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F15A table must resolve every classification row");
         assert_eq!(row.class, "RegisteredCommandInput");
         assert_eq!(
             row.command_contract_id.as_deref(),
