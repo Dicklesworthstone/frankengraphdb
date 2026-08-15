@@ -12,10 +12,13 @@
 //!   registry-check appendix --root <repo-root>
 //!   registry-check appendix-generate --root <repo-root>
 //!   registry-check appendix-regenerate --root <repo-root>
+//!   registry-check durable-state-slots --root <repo-root>
 //!   registry-check all      --root <repo-root> [--manifest <path>]
 
 use registry_check::appendix_a;
 use registry_check::closure;
+use registry_check::command_contracts;
+use registry_check::durable_state_slots;
 use registry_check::hash::id_table_hash;
 use registry_check::identity;
 use registry_check::jsonl::{JsonValue, arr, b, event, n, s};
@@ -62,11 +65,12 @@ fn parse_args() -> Result<Args, String> {
 fn usage() -> String {
     concat!(
         "usage: registry-check ",
-        "<validate|lint|closure|hash|identity|appendix|appendix-generate|appendix-regenerate|all> ",
+        "<validate|lint|closure|hash|identity|appendix|appendix-generate|appendix-regenerate|durable-state-slots|all> ",
         "--root <repo-root> [--manifest <path>]\n",
         "  appendix           verify the Appendix A catalog, source, and checked-in projections\n",
         "  appendix-generate  render in memory and byte-verify the six Appendix A projections\n",
-        "  appendix-regenerate  verify Appendix A inputs, then write only its six projections"
+        "  appendix-regenerate  verify Appendix A inputs, then write only its six projections\n",
+        "  durable-state-slots  verify command refs/writers and plane-local projections"
     )
     .to_string()
 }
@@ -1546,6 +1550,46 @@ fn run_identity(root: &Path) -> Result<usize, String> {
     Ok(violations.len())
 }
 
+/// Validate the total durable-state-slot registry against command-contract
+/// references/writers and the four plane-local field projections.
+fn run_durable_state_slots(root: &Path) -> Result<usize, String> {
+    let contracts = command_contracts::load_from_repo(root).map_err(|error| error.to_string())?;
+    let (slots, backings) =
+        durable_state_slots::load_from_repo(root).map_err(|error| error.to_string())?;
+    let violations = durable_state_slots::validate(&slots, &backings, &contracts);
+    for violation in &violations {
+        println!(
+            "{}",
+            event(&[
+                ("event", s("durable_state_slot_violation")),
+                ("code", s(&violation.code)),
+                ("subject", s(&violation.subject)),
+                ("message", s(&violation.message)),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+    println!(
+        "{}",
+        event(&[
+            ("event", s("durable_state_slots_checked")),
+            ("slot_rows", n(slots.slots.len() as i64)),
+            ("backing_registries", n(backings.len() as i64)),
+            ("contract_rows", n(contracts.contracts.len() as i64)),
+            ("violations", n(violations.len() as i64)),
+            (
+                "outcome",
+                s(if violations.is_empty() {
+                    "pass"
+                } else {
+                    "fail"
+                }),
+            ),
+        ])
+    );
+    Ok(violations.len())
+}
+
 fn load(root: &Path) -> Result<Registries, String> {
     model::load_registries(&root.join("registries")).map_err(|e| e.to_string())
 }
@@ -1875,6 +1919,7 @@ fn run() -> Result<usize, String> {
         "appendix" => return run_appendix(&args.root),
         "appendix-generate" => return run_appendix_generate(&args.root),
         "appendix-regenerate" => return run_appendix_regenerate(&args.root),
+        "durable-state-slots" => return run_durable_state_slots(&args.root),
         _ => {}
     }
     let r = load(&args.root)?;
@@ -1892,6 +1937,7 @@ fn run() -> Result<usize, String> {
             failures += run_hash(&r);
             failures += run_identity(&args.root)?;
             failures += run_appendix(&args.root)?;
+            failures += run_durable_state_slots(&args.root)?;
             failures += run_lint(&r, &args.root)?;
             let manifest = args
                 .manifest

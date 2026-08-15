@@ -1,0 +1,8 @@
+# Canonical PreparedOwnership-plane field inventory.  The plane is currently
+# empty: no command-contract reservation names a PreparedOwnership slot yet.
+# registry-check requires this explicit empty projection and will reject a
+# future cross-plane row until its paired field row lands atomically.
+schema_version = 1
+registry_epoch = 1
+plane = "PreparedOwnership"
+field = []

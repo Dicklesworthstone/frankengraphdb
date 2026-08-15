@@ -370,6 +370,8 @@ coverage_of() {
     # would claim a gate that never opens either file.
     registries/command_contracts.toml)   echo "cargo test --workspace (tools/registry-check/tests/command_contracts.rs: schema, closed vocabularies, tag space, arm-slot uniqueness, live-row refusal, seed-population floor)" ;;
     registries/command_type_classification.toml) echo "cargo test --workspace (tools/registry-check/tests/command_type_classification.rs: schema, six-class vocabulary, contract-id coupling, plan-anchor naming, seed-population floor)" ;;
+    registries/durable_state_slots.toml|registries/state_payload_fields.toml|registries/protocol_state_fields.toml|registries/prepared_state_fields.toml|registries/consensus_state_fields.toml)
+                                         echo "registry-check all (durable-state-slot schema, command-ref/writer bijection, active-sentinel refusal, exact plane-local field projections)" ;;
     registries/*.toml)                   echo "registry-check all" ;;
     .beads/issues.jsonl)                 echo "architecture-check (parses every record; malformed line fails file:line)" ;;
     docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (generated document)" ;;

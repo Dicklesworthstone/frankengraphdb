@@ -1,0 +1,230 @@
+# Canonical SemanticPayload field inventory.
+#
+# This is deliberately a projection, not a second definition of field
+# semantics.  The authoritative type/reference/lifecycle recipes live in
+# durable_state_slots.toml.  Each row here only establishes that the named
+# role-local field exists in the SemanticPayload plane; registry-check holds
+# this inventory in exact bijection with the corresponding cross-plane rows.
+schema_version = 1
+registry_epoch = 1
+plane = "SemanticPayload"
+
+[[field]]
+role = "Local"
+slot_tag = "audit_continuity_record"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "audit_terminal_freeze_record"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "begin_idempotency_index"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "branch_epoch_boundary_hold_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "branch_merge_ledger_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "branch_registry"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "bulk_load_registry"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "checkpoint_floor"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "config_payload_floor"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "configuration_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "conflict_index"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "derived_build_registry"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "dp_request_index"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "escrow_rights_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "expiry_epoch_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "finalization_allocation_reservation"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "format_compatibility_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "format_first_target_escape_receipt"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "id_allocator_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "local_delta_batch_index"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "logical_state_payload"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "logical_state_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "privacy_ledger_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "recovery_checkpoint"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "remote_configuration_trust_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "remote_retention_consumer_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "remote_retention_obligation_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "resource_ledger_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "retention_map"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "revocation_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "security_policy_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "statement_index"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "terminal_admission_fence"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "terminal_certification_reservation_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "terminal_coordinate_hold_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "terminal_obligation_hold_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "time_authority_registry"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "time_subject_issuance_reservation_index"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "txn_allocation_binding_root"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "txn_outcome_index"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "txn_outcome_record"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "txn_outcome_summary"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "txn_ownership_lease"
+status = "reserved"
+
+[[field]]
+role = "Local"
+slot_tag = "txn_workspace_generation"
+status = "reserved"
