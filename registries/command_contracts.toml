@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 20
+registry_epoch = 21
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1061,6 +1061,101 @@ terminal_audit_gate_arm = "SourceUnspelled"
 payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
 publication_mode = "SinglePlane"
 construction_dag_recipe_id = "dag:cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+# =============================================================================
+# F15E terminal-pin release and source-access cleanup — frozen ordinals 94-96.
+# The owner-confirmed C5 ruling continues the structurally Local
+# Role:AuthorityOwningRole cohort in source order.  The pin release finalizer
+# follows the AuthorizedNeverArmed pair at plan line 2371; the cleanup
+# authorize/import pair follows at line 2381.  These rows reserve contracts
+# only; no Rust union, handler, or live capability is claimed.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:restore-terminal-pin-release-finalize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x005e
+input_schema_id = "RestoreTerminalPinReleaseFinalizeSpec<Local>"
+input_wire_tag = 0x005e
+body_schema_id = "RestoreTerminalPinReleaseFinalizeSpec<Local>"
+result_schema_id = "RestoreTerminalPinIndex<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_terminal_pin_release_finalize_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact pin-release completion, the matching Active or ReleaseAuthorized ledger entry and a current no-other-owner proof; atomically selects Released in RestoreTerminalPinIndex<Local> and only then permits LocalRestoreRegistryValue and RetentionMap to drop the exact terminal pin basis, never treating authorization or timeout as release completion"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreTerminalPinReleaseCompletion<Local,RestoreTerminalDisposition>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-terminal-pin-release-finalize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root", "SemanticPayload|Local|retention_map" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root", "SemanticPayload|Local|retention_map" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:restore-source-key-access-cleanup-authorize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x005f
+input_schema_id = "RestoreSourceKeyAccessCleanupAuthorizeSpec<Local>"
+input_wire_tag = 0x005f
+body_schema_id = "RestoreSourceKeyAccessCleanupAuthorizeSpec<Local>"
+result_schema_id = "RestoreSourceAccessRevocationOperationRecord<Local,ExactResourceKind>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_key_access_cleanup_authorize_spec"
+transition_class = "Semantic"
+sequence_effects = "selects one exact ExplicitRevocationPending resource in RestoreSourceKeyAccessCleanupProgress<Local>, freezes its provider head, contract body, operation/idempotency identity and resume recipe in RestoreSourceAccessRevocationOperationRecord<Local,ExactResourceKind>, and advances only that member to ExplicitRevocationAuthorized without inventing an attempt, receipt, provider result or successor progress"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceKeyAccessCleanupProgress<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-key-access-cleanup-authorize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:restore-source-key-access-cleanup-import-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0060
+input_schema_id = "RestoreSourceKeyAccessCleanupImportSpec<Local>"
+input_wire_tag = 0x0060
+body_schema_id = "RestoreSourceKeyAccessCleanupImportSpec<Local>"
+result_schema_id = "RestoreSourceKeyAccessCleanupProgress<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_key_access_cleanup_import_spec"
+transition_class = "Semantic"
+sequence_effects = "imports the exact canonical-plane terminal evidence for one previously authorized source-resource revocation, byte-matches its operation/request/status/receipt/provider-head lineage, and advances only that member to ExplicitRevocationTerminal while preserving the complete source-resource and required-Shard-closure bijection; timeout, missing import and digest-only done states remain nonterminal"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceAccessRevocationOperationRecord<Local,ExactResourceKind>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-key-access-cleanup-import-spec"
 consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 checkpoint_floor_classes = [ "semantic-restore" ]

@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F15D tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F15E tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -286,6 +286,11 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:restore-source-key-access-cleanup-finalize-spec",
         "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec",
         "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec",
+        // F15E terminal-pin release and source-access cleanup cohort (frozen
+        // ordinals 94-96).
+        "cc:local:restore-terminal-pin-release-finalize-spec",
+        "cc:local:restore-source-key-access-cleanup-authorize-spec",
+        "cc:local:restore-source-key-access-cleanup-import-spec",
     ] {
         assert!(
             registry
@@ -296,8 +301,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 135,
-        "the population may only grow from the landed F1-F15D rows"
+        registry.contracts.len() >= 138,
+        "the population may only grow from the landed F1-F15E rows"
     );
 }
 
@@ -1128,6 +1133,167 @@ fn f15d_authority_owning_restore_lease_contracts_are_exact() {
         assert!(
             release.sequence_effects.contains(required),
             "release law lost {required:?}"
+        );
+    }
+}
+
+/// F15E continues the owner-frozen structural Local cohort in exact source
+/// order. Pin the complete three-row interval and the load-bearing distinction
+/// between releasing a terminal pin and authorizing/importing one source-key
+/// revocation. Deletion, tag drift, slot elision, or treating authorization as
+/// terminal evidence must all red this selector.
+#[test]
+fn f15e_terminal_pin_and_source_cleanup_contracts_are_exact() {
+    let registry = registry();
+    let interval: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| (0x005e..=0x0060).contains(&row.outer_wire_tag))
+        .collect();
+    assert_eq!(
+        interval.len(),
+        3,
+        "the F15E outer-tag interval must contain exactly three armless rows"
+    );
+
+    let expected = [
+        (
+            "cc:local:restore-terminal-pin-release-finalize-spec",
+            0x005e,
+            "RestoreTerminalPinReleaseFinalizeSpec<Local>",
+            "RestoreTerminalPinIndex<Local>",
+            "RestoreTerminalPinReleaseCompletion<Local,RestoreTerminalDisposition>",
+            "fgdb_apply::local::restore_terminal_pin_release_finalize_spec",
+        ),
+        (
+            "cc:local:restore-source-key-access-cleanup-authorize-spec",
+            0x005f,
+            "RestoreSourceKeyAccessCleanupAuthorizeSpec<Local>",
+            "RestoreSourceAccessRevocationOperationRecord<Local,ExactResourceKind>",
+            "RestoreSourceKeyAccessCleanupProgress<Local>",
+            "fgdb_apply::local::restore_source_key_access_cleanup_authorize_spec",
+        ),
+        (
+            "cc:local:restore-source-key-access-cleanup-import-spec",
+            0x0060,
+            "RestoreSourceKeyAccessCleanupImportSpec<Local>",
+            "RestoreSourceKeyAccessCleanupProgress<Local>",
+            "RestoreSourceAccessRevocationOperationRecord<Local,ExactResourceKind>",
+            "fgdb_apply::local::restore_source_key_access_cleanup_import_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, authority_target, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F15E table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} invented an inner arm");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(row.applied_record_schema_id, "LocalRestoreRegistryValue");
+        assert_eq!(row.expected_state_schema_id, "LocalRestoreRegistryValue");
+        assert_eq!(row.authority_arm, "AuthorityBoundHeader<Local>");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            Some(authority_target),
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.terminal_audit_freeze_arm, "SourceUnspelled");
+        assert_eq!(row.terminal_audit_gate_arm, "SourceUnspelled");
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-restore"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-restore"]);
+        assert_eq!(row.posture_feature_predicate, "local");
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+
+    let pin = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id == "cc:local:restore-terminal-pin-release-finalize-spec"
+        })
+        .expect("terminal-pin finalizer exists");
+    assert_eq!(
+        pin.consumed_state_slots,
+        [
+            "SemanticPayload|Local|restore_registry_root",
+            "SemanticPayload|Local|retention_map",
+        ]
+    );
+    assert_eq!(pin.written_state_slots, pin.consumed_state_slots);
+    for required in [
+        "pin-release completion",
+        "no-other-owner proof",
+        "selects Released",
+        "only then permits",
+        "never treating authorization or timeout as release completion",
+    ] {
+        assert!(
+            pin.sequence_effects.contains(required),
+            "terminal-pin law lost {required:?}"
+        );
+    }
+
+    for id in [
+        "cc:local:restore-source-key-access-cleanup-authorize-spec",
+        "cc:local:restore-source-key-access-cleanup-import-spec",
+    ] {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("source cleanup row exists");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(row.written_state_slots, row.consumed_state_slots);
+    }
+
+    let authorize = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id == "cc:local:restore-source-key-access-cleanup-authorize-spec"
+        })
+        .expect("cleanup authorize row exists");
+    for required in [
+        "ExplicitRevocationPending",
+        "ExplicitRevocationAuthorized",
+        "without inventing an attempt, receipt, provider result or successor progress",
+    ] {
+        assert!(
+            authorize.sequence_effects.contains(required),
+            "cleanup-authorize law lost {required:?}"
+        );
+    }
+
+    let import = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id == "cc:local:restore-source-key-access-cleanup-import-spec"
+        })
+        .expect("cleanup import row exists");
+    for required in [
+        "terminal evidence",
+        "ExplicitRevocationTerminal",
+        "complete source-resource and required-Shard-closure bijection",
+        "timeout, missing import and digest-only done states remain nonterminal",
+    ] {
+        assert!(
+            import.sequence_effects.contains(required),
+            "cleanup-import law lost {required:?}"
         );
     }
 }

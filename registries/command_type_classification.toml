@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 20
+registry_epoch = 21
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -966,4 +966,32 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec"
 source_location = "a18:2353"
 statement = "RestoreSourceLeaseReleaseAuthorizedNeverArmedFinalizeSpec<Role> is the symmetric pre-Arm release finalizer for administrative cancellation or invalidated authority; lease expiry alone does not force it."
+status = "registered"
+
+# --- F15E terminal-pin release and source-access cleanup cohort (frozen
+# --- ordinals 94-96). The generic plan members instantiate structurally for
+# --- Local under the owner-confirmed C5 ruling; all remain reserved commands.
+
+[[classification]]
+type_name = "RestoreTerminalPinReleaseFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-terminal-pin-release-finalize-spec"
+source_location = "a18:2371"
+statement = "RestoreTerminalPinReleaseFinalizeSpec consumes a completed per-member pin release, the matching Active or ReleaseAuthorized entry and a current no-other-owner proof; only durable apply selects Released and permits the registry to drop the basis."
+status = "registered"
+
+[[classification]]
+type_name = "RestoreSourceKeyAccessCleanupAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-key-access-cleanup-authorize-spec"
+source_location = "a18:2381"
+statement = "RestoreSourceKeyAccessCleanupAuthorizeSpec<Role> uses the universal dispatch authority to freeze one exact explicit source-resource revocation operation and advance only that cleanup-progress member to Authorized."
+status = "registered"
+
+[[classification]]
+type_name = "RestoreSourceKeyAccessCleanupImportSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-key-access-cleanup-import-spec"
+source_location = "a18:2381"
+statement = "RestoreSourceKeyAccessCleanupImportSpec<Role> imports and byte-matches one authorized source-resource revocation's terminal lineage before advancing that cleanup-progress member to its typed terminal disposition."
 status = "registered"

@@ -135,6 +135,9 @@ fn source_forced_seed_population_is_present() {
         "RestoreSourceKeyAccessCleanupFinalizeSpec",
         "RestoreSourceLeaseRenewAuthorizedNeverArmedFinalizeSpec",
         "RestoreSourceLeaseReleaseAuthorizedNeverArmedFinalizeSpec",
+        "RestoreTerminalPinReleaseFinalizeSpec",
+        "RestoreSourceKeyAccessCleanupAuthorizeSpec",
+        "RestoreSourceKeyAccessCleanupImportSpec",
     ] {
         assert!(
             registry
@@ -145,8 +148,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 100,
-        "the population may only grow from the landed F1-F15D rows"
+        registry.classifications.len() >= 103,
+        "the population may only grow from the landed F1-F15E rows"
     );
 }
 
@@ -441,6 +444,48 @@ fn f15d_authority_owning_restore_lease_classifications_are_exact() {
             .iter()
             .find(|row| row.type_name == type_name)
             .expect("exact F15D table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(
+            row.source_location, source_location,
+            "{type_name} source anchor drifted"
+        );
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F15E's next three structurally Local members must remain distinct command
+/// inputs with exact first-occurrence anchors. This kills suffix inference,
+/// cleanup authorize/import aliasing, and pin-finalizer reassignment.
+#[test]
+fn f15e_terminal_pin_and_source_cleanup_classifications_are_exact() {
+    let registry = registry();
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "RestoreTerminalPinReleaseFinalizeSpec",
+            "cc:local:restore-terminal-pin-release-finalize-spec",
+            "a18:2371",
+        ),
+        (
+            "RestoreSourceKeyAccessCleanupAuthorizeSpec",
+            "cc:local:restore-source-key-access-cleanup-authorize-spec",
+            "a18:2381",
+        ),
+        (
+            "RestoreSourceKeyAccessCleanupImportSpec",
+            "cc:local:restore-source-key-access-cleanup-import-spec",
+            "a18:2381",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F15E table must resolve every classification row");
         assert_eq!(row.class, "RegisteredCommandInput");
         assert_eq!(
             row.command_contract_id.as_deref(),

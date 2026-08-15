@@ -100,6 +100,24 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         ]
     );
 
+    let retention_map = slots
+        .slots
+        .iter()
+        .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "retention_map")
+        .expect("retention map slot");
+    assert_eq!(retention_map.role, "Local");
+    assert_eq!(retention_map.backing_registry, "state_payload_fields.toml");
+    assert_eq!(retention_map.status, "reserved");
+    assert_eq!(
+        retention_map.transition_writer_contract_ids,
+        [
+            "cc:local:branch-retire-finalize-spec",
+            "cc:local:checkpoint-install-spec",
+            "cc:local:history-cut-activation-spec",
+            "cc:local:restore-terminal-pin-release-finalize-spec",
+        ]
+    );
+
     let backup_state = slots
         .slots
         .iter()
@@ -129,7 +147,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         .slots
         .iter()
         .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "restore_registry_root")
-        .expect("F15B-F15D Local restore registry slot");
+        .expect("F15B-F15E Local restore registry slot");
     assert_eq!(restore_state.role, "Local");
     assert_eq!(restore_state.backing_registry, "state_payload_fields.toml");
     assert_eq!(restore_state.stable_name, "restore_registry_root");
@@ -148,9 +166,12 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:local-restore-service-prepare-spec",
             "cc:local:local-restore-service-promotion-spec",
             "cc:local:restore-abandon-spec:local",
+            "cc:local:restore-source-key-access-cleanup-authorize-spec",
             "cc:local:restore-source-key-access-cleanup-finalize-spec",
+            "cc:local:restore-source-key-access-cleanup-import-spec",
             "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec",
             "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec",
+            "cc:local:restore-terminal-pin-release-finalize-spec",
         ]
     );
 }
