@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F15C tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F15D tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -280,6 +280,12 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:directory-bound-finalize-operational-authority-spec",
         "cc:local:directory-bound-abandon-apply-spec",
         "cc:local:directory-bound-abandon-receipt-import-spec",
+        // F15D first authority-owning restore/lease cleanup cohort (frozen
+        // ordinals 0x005b-0x005d). These structurally Local instantiations
+        // are armless; later C5 members retain their source-order positions.
+        "cc:local:restore-source-key-access-cleanup-finalize-spec",
+        "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec",
+        "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec",
     ] {
         assert!(
             registry
@@ -290,8 +296,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 132,
-        "the population may only grow from the landed F1-F15C rows"
+        registry.contracts.len() >= 135,
+        "the population may only grow from the landed F1-F15D rows"
     );
 }
 
@@ -971,6 +977,159 @@ fn f15c_directory_bound_restore_contracts_are_exact() {
             .sequence_effects
             .contains("materializes the Local authority-owning tombstone")
     );
+}
+
+/// Freeze the first structurally Local authority-owning cleanup cohort after
+/// F15C. The literal table pins the dense tag order, authority/evidence
+/// pairing, and distinct cleanup versus pre-Arm renew/release terminal laws.
+#[test]
+fn f15d_authority_owning_restore_lease_contracts_are_exact() {
+    let registry = registry();
+    assert_eq!(
+        registry
+            .contracts
+            .iter()
+            .filter(|row| {
+                row.role == "Local" && (0x005b..=0x005d).contains(&row.outer_wire_tag)
+            })
+            .count(),
+        3,
+        "the F15D outer-tag interval must contain exactly its three armless rows"
+    );
+    let expected = [
+        (
+            "cc:local:restore-source-key-access-cleanup-finalize-spec",
+            0x005b,
+            "RestoreSourceKeyAccessCleanupFinalizeSpec<Local>",
+            "RestoreSourceKeyAccessCleanupRecord<Local>",
+            "RestoreSourceKeyAccessCleanupProgress<Local>",
+            "fgdb_apply::local::restore_source_key_access_cleanup_finalize_spec",
+        ),
+        (
+            "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec",
+            0x005c,
+            "RestoreSourceLeaseRenewAuthorizedNeverArmedFinalizeSpec<Local>",
+            "RestoreLeaseOperationTerminalRecord<Local,Renew>",
+            "RestoreSourceLeaseRenewOperationRecord<Local>",
+            "fgdb_apply::local::restore_source_lease_renew_authorized_never_armed_finalize_spec",
+        ),
+        (
+            "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec",
+            0x005d,
+            "RestoreSourceLeaseReleaseAuthorizedNeverArmedFinalizeSpec<Local>",
+            "RestoreLeaseOperationTerminalRecord<Local,Release>",
+            "RestoreSourceLeaseReleaseOperationRecord<Local>",
+            "fgdb_apply::local::restore_source_lease_release_authorized_never_armed_finalize_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, authority_target, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F15D table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} invented an inner arm");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(
+            row.applied_record_schema_id, "LocalRestoreRegistryValue",
+            "{id} applied record drifted"
+        );
+        assert_eq!(
+            row.expected_state_schema_id, "LocalRestoreRegistryValue",
+            "{id} expected state drifted"
+        );
+        assert_eq!(row.authority_arm, "AuthorityBoundHeader<Local>");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            Some(authority_target),
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.terminal_audit_freeze_arm, "SourceUnspelled");
+        assert_eq!(row.terminal_audit_gate_arm, "SourceUnspelled");
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(
+            row.written_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-restore"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-restore"]);
+        assert_eq!(row.posture_feature_predicate, "local");
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+
+    let cleanup = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id == "cc:local:restore-source-key-access-cleanup-finalize-spec"
+        })
+        .expect("cleanup finalizer row exists");
+    for required in [
+        "zero unresolved renewal",
+        "cleanup accumulator",
+        "cleanup record",
+        "AwaitingSourceRelease",
+        "RenewalClosed",
+        "terminal pin basis",
+    ] {
+        assert!(
+            cleanup.sequence_effects.contains(required),
+            "cleanup law lost {required:?}"
+        );
+    }
+
+    let renew = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id
+                == "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec"
+        })
+        .expect("renew AuthorizedNeverArmed row exists");
+    for required in [
+        "zero-attempt-membership proof",
+        "AuthorizedNeverArmed",
+        "unchanged lease to Current",
+        "without inventing DispatchNeverSentProof",
+    ] {
+        assert!(
+            renew.sequence_effects.contains(required),
+            "renew law lost {required:?}"
+        );
+    }
+
+    let release = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id
+                == "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec"
+        })
+        .expect("release AuthorizedNeverArmed row exists");
+    for required in [
+        "zero-attempt-membership proof",
+        "AuthorizedNeverArmed",
+        "unchanged RenewalClosed lease state",
+        "lease expiry alone never forces this path",
+    ] {
+        assert!(
+            release.sequence_effects.contains(required),
+            "release law lost {required:?}"
+        );
+    }
 }
 
 /// An armed member's rows share the member's outer tag and differ only by

@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 19
+registry_epoch = 20
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -970,6 +970,102 @@ written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 checkpoint_floor_classes = [ "semantic-restore" ]
 backup_restore_gc_classes = [ "semantic-restore" ]
 posture_feature_predicate = "local-directory-bound"
+format_epoch_range = "v1.."
+status = "reserved"
+
+# =============================================================================
+# F15D authority-owning restore/lease cleanup — frozen ordinals 91-93. The
+# owner-confirmed C5 ruling includes the structurally Local instantiation of
+# every Role:AuthorityOwningRole member in source order. This first bounded
+# tranche therefore follows F15C with cleanup finalization and the symmetric
+# renew/release AuthorizedNeverArmed finalizers from plan lines 2351-2353.
+# These rows reserve contracts only; no Rust union, handler, or live capability
+# is claimed.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:restore-source-key-access-cleanup-finalize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x005b
+input_schema_id = "RestoreSourceKeyAccessCleanupFinalizeSpec<Local>"
+input_wire_tag = 0x005b
+body_schema_id = "RestoreSourceKeyAccessCleanupFinalizeSpec<Local>"
+result_schema_id = "RestoreSourceKeyAccessCleanupRecord<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_key_access_cleanup_finalize_spec"
+transition_class = "Semantic"
+sequence_effects = "requires the complete source-resource and required-Shard-closure disposition bijection, zero pending/authorized/SentUnknown/import-pending explicit revocations and zero unresolved renewal; constructs the checked cleanup accumulator, cleanup record, stable lease-release body and renewal-close record, then atomically enters AwaitingSourceRelease plus RenewalClosed while retaining the exact terminal pin basis"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceKeyAccessCleanupProgress<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-key-access-cleanup-finalize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x005c
+input_schema_id = "RestoreSourceLeaseRenewAuthorizedNeverArmedFinalizeSpec<Local>"
+input_wire_tag = 0x005c
+body_schema_id = "RestoreSourceLeaseRenewAuthorizedNeverArmedFinalizeSpec<Local>"
+result_schema_id = "RestoreLeaseOperationTerminalRecord<Local,Renew>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_lease_renew_authorized_never_armed_finalize_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact renew operation record, current zero-attempt-membership proof, current ineligibility evidence and permanent operation/request nonreuse tombstone; appends the distinct AuthorizedNeverArmed terminal-history member and returns the unchanged lease to Current and the frozen restore phase without inventing DispatchNeverSentProof"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceLeaseRenewOperationRecord<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x005d
+input_schema_id = "RestoreSourceLeaseReleaseAuthorizedNeverArmedFinalizeSpec<Local>"
+input_wire_tag = 0x005d
+body_schema_id = "RestoreSourceLeaseReleaseAuthorizedNeverArmedFinalizeSpec<Local>"
+result_schema_id = "RestoreLeaseOperationTerminalRecord<Local,Release>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_lease_release_authorized_never_armed_finalize_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact release operation record, current zero-attempt-membership proof, current administrative-cancellation or invalidated-authority evidence and permanent operation/request nonreuse tombstone; appends the distinct AuthorizedNeverArmed terminal-history member and restores the unchanged RenewalClosed lease state and frozen restore phase, while lease expiry alone never forces this path"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceLeaseReleaseOperationRecord<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
 format_epoch_range = "v1.."
 status = "reserved"
 

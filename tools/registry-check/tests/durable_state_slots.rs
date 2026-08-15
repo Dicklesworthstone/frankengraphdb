@@ -129,7 +129,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         .slots
         .iter()
         .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "restore_registry_root")
-        .expect("F15B/F15C Local restore registry slot");
+        .expect("F15B-F15D Local restore registry slot");
     assert_eq!(restore_state.role, "Local");
     assert_eq!(restore_state.backing_registry, "state_payload_fields.toml");
     assert_eq!(restore_state.stable_name, "restore_registry_root");
@@ -148,6 +148,9 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:local-restore-service-prepare-spec",
             "cc:local:local-restore-service-promotion-spec",
             "cc:local:restore-abandon-spec:local",
+            "cc:local:restore-source-key-access-cleanup-finalize-spec",
+            "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec",
+            "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec",
         ]
     );
 }
