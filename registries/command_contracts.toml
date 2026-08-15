@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 25
+registry_epoch = 26
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -219,6 +219,69 @@ consumed_state_slots = [ "Bootstrap|Meta|pending_restore_creation_guard" ] # [C]
 written_state_slots = [ "Bootstrap|Meta|restore_bridge_origin", "SemanticPayload|Meta|global_state_root" ]  # [C][F]
 checkpoint_floor_classes = [ "genesis-or-restore-first-root" ]            # [C][F]
 backup_restore_gc_classes = [ "restore-bridge" ]                          # [C][F]
+posture_feature_predicate = "sharded"                                     # [S] Meta exists in W12 sharded posture
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# META F2 begin reservation and terminalization — frozen Global ordinals 2-3.
+# These are distinct Global bodies, not role-specialized copies of the Local
+# schemas. Both mutate the exact begin-idempotency and outcome-directory roots;
+# terminalization additionally requires the prebuilt MetaBeginTerminal audit
+# freeze. They remain reserved until generated union arms and handlers exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-begin-reservation-spec"             # [C]
+role = "Meta"                                                             # [S]
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                    # [S] L1770
+outer_wire_tag = 0x0002                                                    # [S] frozen dense Meta ordinal 2
+input_schema_id = "GlobalBeginReservationSpec"                            # [S] L1710 exact body
+input_wire_tag = 0x0002                                                    # [C] = outer (armless)
+body_schema_id = "GlobalBeginReservationSpec"                             # [S]
+result_schema_id = "GlobalBeginReservationRecord"                         # [S] L1710 apply result
+applied_record_schema_id = "GlobalBeginIdempotencyIndex"                  # [S] L1710 Reserved installation
+handler_symbol = "fgdb_apply::meta::global_begin_reservation_spec"        # [C][F]
+transition_class = "Semantic"                                             # [S] L1770 Meta semantic family
+sequence_effects = "orders BEGIN; apply atomically installs Reserved and GlobalOutcomeDirectoryValue::BeginStaging with the same capability replay, and BEGIN_ACCEPTED is forbidden until both are visible"  # [S] L1710
+expected_state_schema_id = "WeakAbsenceProof"                             # [S-derived] expected_begin_index_absence_proof
+authority_arm = "AuthorityBoundHeader<Meta>"                              # [S] L1710 exact member
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze member in the reservation body
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"               # [S] L1710 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-begin-reservation-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|global_begin_idempotency_index_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "sharded"                                     # [S] Meta exists in W12 sharded posture
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:global-begin-terminal-spec"                # [C]
+role = "Meta"                                                             # [S]
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                    # [S] L1770
+outer_wire_tag = 0x0003                                                    # [S] frozen dense Meta ordinal 3
+input_schema_id = "GlobalBeginTerminalSpec"                               # [S] L1714 exact body
+input_wire_tag = 0x0003                                                    # [C] = outer (armless)
+body_schema_id = "GlobalBeginTerminalSpec"                                # [S]
+result_schema_id = "NeverRegisteredTerminalRecord"                        # [S] L1714 exact Meta result
+applied_record_schema_id = "GlobalBeginIdempotencyIndex"                  # [S] L1714 NeverRegisteredDetailed installation
+handler_symbol = "fgdb_apply::meta::global_begin_terminal_spec"           # [C][F]
+transition_class = "Semantic"                                             # [S] L1770 Meta semantic family
+sequence_effects = "alone consumes Reserved; resolves the exact pending operation ticket when present and atomically installs byte-identical NeverRegisteredDetailed entries in the begin index and outcome directory without creating an attempt"  # [S] L1714
+expected_state_schema_id = "GlobalBeginReservationRecord"                 # [S] L1714 reservation_ref
+authority_arm = "AuthorityBoundHeader<Meta>"                              # [S-derived] inherited from the exact reservation
+terminal_audit_freeze_arm = "AuditFreezeField::Required<MetaBeginTerminal>"  # [S] L1714 exact member
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1714 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-begin-terminal-spec"     # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_begin_idempotency_index_root" ]  # [C][F]
+written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [C][F]
+checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
 posture_feature_predicate = "sharded"                                     # [S] Meta exists in W12 sharded posture
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

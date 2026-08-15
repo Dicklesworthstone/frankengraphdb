@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 56, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 59, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&50));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&53));
     assert_eq!(plane_counts.get("Protocol"), Some(&1));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 50);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 53);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 1);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -266,6 +266,58 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         .filter(|field| field.role == "Meta" && field.slot_tag == "global_state_root")
         .count();
     assert_eq!(projected_meta_root, 1);
+
+    for slot_tag in [
+        "global_begin_idempotency_index_root",
+        "global_outcome_directory_root",
+    ] {
+        let slot = slots
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.plane == "SemanticPayload" && slot.role == "Meta" && slot.slot_tag == slot_tag
+            })
+            .expect("Meta F2 state slot");
+        assert_eq!(slot.stable_name, slot_tag);
+        assert_eq!(slot.backing_registry, "state_payload_fields.toml");
+        assert_eq!(slot.status, "reserved");
+        assert_eq!(
+            slot.transition_writer_contract_ids,
+            [
+                "cc:meta:global-begin-reservation-spec",
+                "cc:meta:global-begin-terminal-spec",
+            ]
+        );
+
+        let projected = backings["state_payload_fields.toml"]
+            .fields
+            .iter()
+            .filter(|field| field.role == "Meta" && field.slot_tag == slot_tag)
+            .count();
+        assert_eq!(projected, 1, "{slot_tag} backing projection must be unique");
+    }
+
+    let audit_ticket_index = slots
+        .slots
+        .iter()
+        .find(|slot| {
+            slot.plane == "SemanticPayload"
+                && slot.role == "Meta"
+                && slot.slot_tag == "audit_ticket_index_root"
+        })
+        .expect("Meta F2 audit ticket index slot");
+    assert_eq!(audit_ticket_index.stable_name, "audit_ticket_index_root");
+    assert_eq!(
+        audit_ticket_index.transition_writer_contract_ids,
+        ["cc:meta:global-begin-terminal-spec"]
+    );
+    assert_eq!(audit_ticket_index.status, "reserved");
+    let projected_audit_ticket_index = backings["state_payload_fields.toml"]
+        .fields
+        .iter()
+        .filter(|field| field.role == "Meta" && field.slot_tag == "audit_ticket_index_root")
+        .count();
+    assert_eq!(projected_audit_ticket_index, 1);
 }
 
 #[test]

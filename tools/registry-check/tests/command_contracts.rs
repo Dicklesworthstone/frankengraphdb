@@ -102,6 +102,10 @@ fn phase_b_seed_rows_are_present() {
         // Meta F1 begins the separate GlobalSequenceNeutralSpec<Tag> tag
         // namespace at its own frozen ordinal 0x0001.
         "cc:meta:recovery-bridge-spec",
+        // Meta F2 continues that namespace with the two exact BEGIN lineage
+        // bodies at frozen ordinals 0x0002-0x0003.
+        "cc:meta:global-begin-reservation-spec",
+        "cc:meta:global-begin-terminal-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
         // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
@@ -320,8 +324,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 148,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1 rows"
+        registry.contracts.len() >= 150,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F2 rows"
     );
 }
 
@@ -400,6 +404,137 @@ fn meta_f1_guarded_recovery_contract_is_exact() {
     assert_ne!(local.outer_command_union, row.outer_command_union);
     assert_ne!(local.result_schema_id, row.result_schema_id);
     assert_ne!(local.applied_record_schema_id, row.applied_record_schema_id);
+}
+
+/// Meta F2 is a two-member armless family in the independent Global tag
+/// namespace. Both members update the same begin-index/outcome-directory
+/// lineage, while terminalization alone carries the required prebuilt audit
+/// freeze and must never create an attempt.
+#[test]
+fn meta_f2_begin_lineage_contracts_are_exact() {
+    let registry = registry();
+    let expected = [
+        (
+            "cc:meta:global-begin-reservation-spec",
+            0x0002,
+            "GlobalBeginReservationSpec",
+            "GlobalBeginReservationRecord",
+            "WeakAbsenceProof",
+            "Forbidden",
+            "LifecycleScaffoldingNotRequired",
+            "fgdb_apply::meta::global_begin_reservation_spec",
+        ),
+        (
+            "cc:meta:global-begin-terminal-spec",
+            0x0003,
+            "GlobalBeginTerminalSpec",
+            "NeverRegisteredTerminalRecord",
+            "GlobalBeginReservationRecord",
+            "AuditFreezeField::Required<MetaBeginTerminal>",
+            "TerminalAuditGate",
+            "fgdb_apply::meta::global_begin_terminal_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, expected_state, freeze, gate, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("Meta F2 row");
+        assert_eq!(row.role, "Meta", "{id} role drifted");
+        assert_eq!(
+            row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>",
+            "{id} union drifted"
+        );
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} invented an inner arm");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(
+            row.applied_record_schema_id, "GlobalBeginIdempotencyIndex",
+            "{id} applied index drifted"
+        );
+        assert_eq!(
+            row.expected_state_schema_id, expected_state,
+            "{id} expected state drifted"
+        );
+        assert_eq!(row.authority_arm, "AuthorityBoundHeader<Meta>");
+        assert_eq!(row.terminal_audit_freeze_arm, freeze);
+        assert_eq!(row.terminal_audit_gate_arm, gate);
+        assert_eq!(row.handler_symbol, handler);
+        assert_eq!(row.transition_class, "Semantic");
+        assert_eq!(row.publication_mode, "SinglePlane");
+        if id.ends_with("reservation-spec") {
+            assert_eq!(
+                row.consumed_state_slots,
+                ["SemanticPayload|Meta|global_begin_idempotency_index_root"]
+            );
+            assert_eq!(
+                row.written_state_slots,
+                [
+                    "SemanticPayload|Meta|global_begin_idempotency_index_root",
+                    "SemanticPayload|Meta|global_outcome_directory_root",
+                ]
+            );
+        } else {
+            assert_eq!(
+                row.consumed_state_slots,
+                [
+                    "SemanticPayload|Meta|audit_ticket_index_root",
+                    "SemanticPayload|Meta|global_begin_idempotency_index_root",
+                ]
+            );
+            assert_eq!(
+                row.written_state_slots,
+                [
+                    "SemanticPayload|Meta|audit_ticket_index_root",
+                    "SemanticPayload|Meta|global_begin_idempotency_index_root",
+                    "SemanticPayload|Meta|global_outcome_directory_root",
+                ]
+            );
+        }
+        assert_eq!(row.checkpoint_floor_classes, ["txn-attempt"]);
+        assert_eq!(row.backup_restore_gc_classes, ["txn-lifecycle"]);
+        assert_eq!(row.posture_feature_predicate, "sharded");
+        assert_eq!(row.status, "reserved");
+    }
+
+    let meta_f2_tags: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| {
+            row.role == "Meta"
+                && row.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && (row.outer_wire_tag == 0x0002 || row.outer_wire_tag == 0x0003)
+        })
+        .map(|row| (row.outer_wire_tag, row.command_contract_id.as_str()))
+        .collect();
+    assert_eq!(
+        meta_f2_tags,
+        [
+            (0x0002, "cc:meta:global-begin-reservation-spec"),
+            (0x0003, "cc:meta:global-begin-terminal-spec"),
+        ]
+    );
+
+    let terminal = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:global-begin-terminal-spec")
+        .expect("Meta terminal row");
+    assert!(
+        terminal
+            .sequence_effects
+            .contains("resolves the exact pending operation ticket")
+    );
+    assert!(
+        terminal
+            .sequence_effects
+            .contains("without creating an attempt")
+    );
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These

@@ -147,6 +147,8 @@ fn source_forced_seed_population_is_present() {
         "ShardingFreezeSpec",
         "ShardingUnfreezeSpec",
         "BeginRoleTransitionSpec",
+        "GlobalBeginReservationSpec",
+        "GlobalBeginTerminalSpec",
     ] {
         assert!(
             registry
@@ -157,8 +159,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 112,
-        "the population may only grow from the landed F1-F16 rows"
+        registry.classifications.len() >= 114,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F2 rows"
     );
 }
 
@@ -704,6 +706,51 @@ fn recovery_bridge_generic_classification_covers_both_role_contracts_once() {
             .expect("both concrete role contracts must exist");
         assert_eq!(contract.input_schema_id, input);
         assert_eq!(contract.outer_command_union, union);
+    }
+}
+
+/// Unlike generic RecoveryBridgeSpec<Role>, the two Meta F2 bodies are
+/// independently addressable Global types. Pin the exact type-to-contract and
+/// source map so neither can be aliased to its similarly named Local body.
+#[test]
+fn meta_f2_begin_classifications_are_exact_and_role_distinct() {
+    let registry = registry();
+    for (type_name, contract_id, source_location) in [
+        (
+            "GlobalBeginReservationSpec",
+            "cc:meta:global-begin-reservation-spec",
+            "a07:1710",
+        ),
+        (
+            "GlobalBeginTerminalSpec",
+            "cc:meta:global-begin-terminal-spec",
+            "a07:1714",
+        ),
+    ] {
+        let rows: Vec<_> = registry
+            .classifications
+            .iter()
+            .filter(|row| row.type_name == type_name)
+            .collect();
+        assert_eq!(rows.len(), 1, "{type_name} must classify exactly once");
+        let row = rows[0];
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(row.command_contract_id.as_deref(), Some(contract_id));
+        assert_eq!(row.source_location, source_location);
+        assert_eq!(row.status, "registered");
+
+        let contract = contracts()
+            .contracts
+            .into_iter()
+            .find(|contract| contract.command_contract_id == contract_id)
+            .expect("classified Meta contract");
+        assert_eq!(contract.role, "Meta");
+        assert_eq!(contract.input_schema_id, type_name);
+        assert_eq!(
+            contract.outer_command_union,
+            "GlobalSequenceNeutralSpec<Tag>"
+        );
+        assert!(!contract.command_contract_id.contains("cc:local:"));
     }
 }
 

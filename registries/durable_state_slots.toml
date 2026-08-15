@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 11
+registry_epoch = 12
 
 
 [[slot]]
@@ -148,6 +148,70 @@ target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
 transition_writer_contract_ids = [ "cc:meta:recovery-bridge-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+# Meta F2 BEGIN lineage. The plan names these as distinct GlobalStatePayload
+# roots and requires both reservation and never-registered terminalization to
+# update the same two-key lineage atomically. Terminalization alone may resolve
+# a PendingUnclaimed operation ticket as part of that same semantic mutation.
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "audit_ticket_index_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "audit_ticket_index_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-begin-terminal-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_begin_idempotency_index_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_begin_idempotency_index_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_outcome_directory_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_outcome_directory_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

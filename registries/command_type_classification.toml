@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 24
+registry_epoch = 25
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -229,6 +229,22 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:local-begin-terminal-spec"
 source_location = "a03:1482"
 statement = "LocalBeginTerminalSpec alone consumes Reserved and creates LocalNeverRegisteredRecord plus NeverRegisteredDetailed."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalBeginReservationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-begin-reservation-spec"
+source_location = "a07:1710"
+statement = "GlobalBeginReservationSpec atomically installs Reserved plus GlobalOutcomeDirectoryValue::BeginStaging before BEGIN_ACCEPTED."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalBeginTerminalSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-begin-terminal-spec"
+source_location = "a07:1714"
+statement = "GlobalBeginTerminalSpec alone consumes the exact Meta reservation and installs the NeverRegisteredDetailed begin-index and outcome-directory lineage."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,
