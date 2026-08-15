@@ -76,6 +76,11 @@ impl SealedBlock {
     }
 }
 
+type EncodedEdgeSeal = (
+    Vec<SealedBlock>,
+    BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+);
+
 /// One staged adjacency statement: the entry and its properties.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingStatement {
@@ -923,13 +928,7 @@ impl BlockWriter {
     fn encode_pending_edges(
         &self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
-    ) -> Result<
-        (
-            Vec<SealedBlock>,
-            BTreeMap<(VId, RelationId), DeltaBlockVersion>,
-        ),
-        WriteError,
-    > {
+    ) -> Result<EncodedEdgeSeal, WriteError> {
         let mut by_descriptor: BTreeMap<(VId, RelationId), Vec<PendingStatement>> = BTreeMap::new();
         for statement in self.pending.values().cloned() {
             by_descriptor
