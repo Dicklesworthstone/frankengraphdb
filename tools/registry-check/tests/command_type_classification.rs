@@ -144,6 +144,9 @@ fn source_forced_seed_population_is_present() {
         "RestoreSourceLeaseReleaseSpec",
         "RestoreSourceLeaseReleaseFinalizeSpec",
         "RestoreSourceLeaseReleaseNoEffectFinalizeSpec",
+        "ShardingFreezeSpec",
+        "ShardingUnfreezeSpec",
+        "BeginRoleTransitionSpec",
     ] {
         assert!(
             registry
@@ -154,8 +157,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 109,
-        "the population may only grow from the landed F1-F15G rows"
+        registry.classifications.len() >= 112,
+        "the population may only grow from the landed F1-F16 rows"
     );
 }
 
@@ -596,6 +599,54 @@ fn f15g_source_lease_release_classifications_are_exact() {
             .iter()
             .find(|row| row.type_name == type_name)
             .expect("exact F15G table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(
+            row.source_location, source_location,
+            "{type_name} source anchor drifted"
+        );
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F16 closes the frozen Local type-to-contract map without classifying the
+/// Protocol-only audit advancement as a semantic command.
+#[test]
+fn f16_sharding_role_transition_classifications_are_exact() {
+    let registry = registry();
+    assert!(
+        registry
+            .classifications
+            .iter()
+            .all(|row| row.type_name != "AuditVisibilityAdvanceSpec"),
+        "Protocol audit advancement entered the Local semantic classification tranche"
+    );
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "ShardingFreezeSpec",
+            "cc:local:sharding-freeze-spec",
+            "a04:1594",
+        ),
+        (
+            "ShardingUnfreezeSpec",
+            "cc:local:sharding-unfreeze-spec",
+            "a04:1594",
+        ),
+        (
+            "BeginRoleTransitionSpec",
+            "cc:local:begin-role-transition-spec",
+            "a04:1598",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F16 table must resolve every classification row");
         assert_eq!(row.class, "RegisteredCommandInput");
         assert_eq!(
             row.command_contract_id.as_deref(),

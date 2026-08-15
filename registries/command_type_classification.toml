@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 23
+registry_epoch = 24
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -1052,4 +1052,32 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:restore-source-lease-release-no-effect-finalize-spec"
 source_location = "a18:2413"
 statement = "RestoreSourceLeaseReleaseNoEffectFinalizeSpec<Role> proves the archive head remains the exact Active predecessor, preserves AwaitingSourceRelease plus Current, and records a permanent zero-effect tombstone without releasing any pin."
+status = "registered"
+
+# --- F16 sharding freeze/unfreeze/role-transition initiation cohort (frozen
+# --- ordinals 103-105). AuditVisibilityAdvanceSpec remains a Protocol-plane
+# --- maintenance input and is deliberately absent from this semantic table.
+
+[[classification]]
+type_name = "ShardingFreezeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:sharding-freeze-spec"
+source_location = "a04:1594"
+statement = "ShardingFreezeSpec rejects new work, drains every active transaction, constructs the FreezePendingAudit record and exposes its candidate only through exact gap-free audit visibility advancement."
+status = "registered"
+
+[[classification]]
+type_name = "ShardingUnfreezeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:sharding-unfreeze-spec"
+source_location = "a04:1594"
+statement = "ShardingUnfreezeSpec is the sole later semantic command allowed behind freeze; it is legal only from FrozenVisible before Begin and invalidates the plan generation."
+status = "registered"
+
+[[classification]]
+type_name = "BeginRoleTransitionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:begin-role-transition-spec"
+source_location = "a04:1598"
+statement = "BeginRoleTransitionSpec is the final old-Local entry: acceptance installs terminal Raft seals and apply selects RoleTransitionLocked plus the old-Local side of every precommitted authority transfer."
 status = "registered"

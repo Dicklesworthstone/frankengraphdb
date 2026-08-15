@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F15G tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F16 tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -302,6 +302,11 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:restore-source-lease-release-spec",
         "cc:local:restore-source-lease-release-finalize-spec",
         "cc:local:restore-source-lease-release-no-effect-finalize-spec",
+        // F16 sharding freeze/unfreeze/role-transition initiation (frozen
+        // ordinals 103-105). Audit visibility remains Protocol maintenance.
+        "cc:local:sharding-freeze-spec",
+        "cc:local:sharding-unfreeze-spec",
+        "cc:local:begin-role-transition-spec",
     ] {
         assert!(
             registry
@@ -312,8 +317,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 144,
-        "the population may only grow from the landed F1-F15G rows"
+        registry.contracts.len() >= 147,
+        "the population may only grow from the landed F1-F16 rows"
     );
 }
 
@@ -1607,6 +1612,155 @@ fn f15g_source_lease_release_contracts_are_exact() {
         assert!(
             no_effect.sequence_effects.contains(required),
             "release-no-effect law lost {required:?}"
+        );
+    }
+}
+
+/// F16 is the final Local semantic cohort. It binds freeze to an empty audit
+/// predecessor and a future-free candidate, keeps unfreeze legal only before
+/// Begin, and makes Begin terminal at Raft acceptance without inventing a
+/// consensus apply slot or admitting Protocol audit advancement as semantic.
+#[test]
+fn f16_sharding_role_transition_contracts_are_exact() {
+    let registry = registry();
+    let interval: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| (0x0067..=0x0069).contains(&row.outer_wire_tag))
+        .collect();
+    assert_eq!(
+        interval.len(),
+        3,
+        "the F16 outer-tag interval must contain exactly three armless rows"
+    );
+    assert!(
+        registry
+            .contracts
+            .iter()
+            .all(|row| row.input_schema_id != "AuditVisibilityAdvanceSpec<Local>"),
+        "Protocol audit advancement entered the Local semantic union"
+    );
+
+    let expected = [
+        (
+            "cc:local:sharding-freeze-spec",
+            0x0067,
+            "ShardingFreezeSpec",
+            "ShardingFreezeSpec",
+            "ShardingFreezeRecord",
+            "LogicalStatePayload",
+            "TerminalAuditGate",
+            "fgdb_apply::local::sharding_freeze_spec",
+            vec!["SemanticPayload|Local|sharding_migration_state"],
+        ),
+        (
+            "cc:local:sharding-unfreeze-spec",
+            0x0068,
+            "ShardingUnfreezeSpec",
+            "SourceUnspelled",
+            "SourceUnspelled",
+            "ShardingMigrationState",
+            "SourceUnspelled",
+            "fgdb_apply::local::sharding_unfreeze_spec",
+            vec!["SemanticPayload|Local|sharding_migration_state"],
+        ),
+        (
+            "cc:local:begin-role-transition-spec",
+            0x0069,
+            "BeginRoleTransitionSpec",
+            "BeginRoleTransitionSpec",
+            "BeginRoleTransitionRecord",
+            "ShardingMigrationState",
+            "StructurallyInapplicable{ShardingRoleTransitionAuthority}",
+            "fgdb_apply::local::begin_role_transition_spec",
+            vec![
+                "SemanticPayload|Local|remote_retention_obligation_root",
+                "SemanticPayload|Local|sharding_migration_state",
+            ],
+        ),
+    ];
+
+    for (id, tag, input, body, result, state, audit_gate, handler, slots) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F16 table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} invented an inner arm");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, body, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(row.applied_record_schema_id, "ShardingMigrationState");
+        assert_eq!(row.expected_state_schema_id, state, "{id} state drifted");
+        assert_eq!(row.authority_arm, "SourceUnspelled");
+        assert_eq!(row.authority_evidence_target_schema_id, None);
+        assert_eq!(row.terminal_audit_freeze_arm, "SourceUnspelled");
+        assert_eq!(row.terminal_audit_gate_arm, audit_gate);
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        let expected_slots: Vec<String> = slots.into_iter().map(str::to_owned).collect();
+        assert_eq!(row.consumed_state_slots, expected_slots);
+        assert_eq!(row.written_state_slots, row.consumed_state_slots);
+        assert_eq!(row.checkpoint_floor_classes, ["role-transition"]);
+        assert_eq!(row.backup_restore_gc_classes, ["role-transition"]);
+        assert_eq!(row.posture_feature_predicate, "local");
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+
+    let freeze = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:local:sharding-freeze-spec")
+        .expect("freeze row exists");
+    for required in [
+        "empty predecessor audit pipeline",
+        "drains every active transaction",
+        "names no future payload/root",
+        "AuditVisibilityAdvanceSpec<Local> makes the candidate FrozenVisible",
+    ] {
+        assert!(
+            freeze.sequence_effects.contains(required),
+            "freeze law lost {required:?}"
+        );
+    }
+
+    let unfreeze = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:local:sharding-unfreeze-spec")
+        .expect("unfreeze row exists");
+    for required in [
+        "only from FrozenVisible before BeginRoleTransitionSpec",
+        "invalidates the current ShardingRoleTransitionPlan generation",
+        "newly audited plan and ShardingFreezeSpec",
+    ] {
+        assert!(
+            unfreeze.sequence_effects.contains(required),
+            "unfreeze law lost {required:?}"
+        );
+    }
+
+    let begin = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:local:begin-role-transition-spec")
+        .expect("begin row exists");
+    for required in [
+        "before any voter acknowledges Begin AppendEntries at index I",
+        "terminal RaftRoleTransitionSeal",
+        "quorum acceptance is roll-forward-only",
+        "installs RoleTransitionLocked",
+        "old-Local side of every authority transfer",
+        "quorum-durable seals plus quorum apply through Begin",
+    ] {
+        assert!(
+            begin.sequence_effects.contains(required),
+            "begin law lost {required:?}"
         );
     }
 }

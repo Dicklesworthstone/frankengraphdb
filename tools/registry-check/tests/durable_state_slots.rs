@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 52, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 53, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&48));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&49));
     assert_eq!(plane_counts.get("Protocol"), Some(&1));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&2));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 48);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 49);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 1);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -116,6 +116,22 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:history-cut-activation-spec",
             "cc:local:restore-source-lease-release-finalize-spec",
             "cc:local:restore-terminal-pin-release-finalize-spec",
+        ]
+    );
+    let remote_retention = slots
+        .slots
+        .iter()
+        .find(|slot| {
+            slot.plane == "SemanticPayload" && slot.slot_tag == "remote_retention_obligation_root"
+        })
+        .expect("remote retention obligation slot");
+    assert_eq!(
+        remote_retention.transition_writer_contract_ids,
+        [
+            "cc:local:begin-role-transition-spec",
+            "cc:local:remote-retention-control-spec:acquire-grant",
+            "cc:local:remote-retention-control-spec:apply-authority-release",
+            "cc:local:remote-retention-control-spec:publish-authority-release-ack",
         ]
     );
     let backup_state = slots
@@ -178,6 +194,24 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:restore-source-lease-renew-finalize-spec",
             "cc:local:restore-source-lease-renew-no-effect-finalize-spec",
             "cc:local:restore-terminal-pin-release-finalize-spec",
+        ]
+    );
+
+    let sharding_state = slots
+        .slots
+        .iter()
+        .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "sharding_migration_state")
+        .expect("F16 sharding migration state slot");
+    assert_eq!(sharding_state.role, "Local");
+    assert_eq!(sharding_state.backing_registry, "state_payload_fields.toml");
+    assert_eq!(sharding_state.stable_name, "sharding_migration_state");
+    assert_eq!(sharding_state.status, "reserved");
+    assert_eq!(
+        sharding_state.transition_writer_contract_ids,
+        [
+            "cc:local:begin-role-transition-spec",
+            "cc:local:sharding-freeze-spec",
+            "cc:local:sharding-unfreeze-spec",
         ]
     );
 }

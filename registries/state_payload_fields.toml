@@ -186,6 +186,11 @@ status = "reserved"
 
 [[field]]
 role = "Local"
+slot_tag = "sharding_migration_state"
+status = "reserved"
+
+[[field]]
+role = "Local"
 slot_tag = "statement_index"
 status = "reserved"
 

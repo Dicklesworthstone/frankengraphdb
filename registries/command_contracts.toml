@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 23
+registry_epoch = 24
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1351,6 +1351,98 @@ consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 checkpoint_floor_classes = [ "semantic-restore" ]
 backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+# =============================================================================
+# F16 sharding freeze/unfreeze/role-transition initiation — frozen ordinals
+# 103-105. These are the final Local SequenceNeutralSpec members in the
+# owner-confirmed v1 order. Audit visibility remains Protocol maintenance and
+# the RaftRoleTransitionSeal is an acceptance-side consensus precondition, not
+# a fabricated semantic apply-handler slot. These rows reserve contracts only;
+# no Rust union, handler, dispatch implementation or live capability is claimed.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:sharding-freeze-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0067
+input_schema_id = "ShardingFreezeSpec"
+input_wire_tag = 0x0067
+body_schema_id = "ShardingFreezeSpec"
+result_schema_id = "ShardingFreezeRecord"
+applied_record_schema_id = "ShardingMigrationState"
+handler_symbol = "fgdb_apply::local::sharding_freeze_spec"
+transition_class = "Semantic"
+sequence_effects = "requires Operational, an audited blocker-free role-transition plan, the exact Local applied/visible root and logical/commit/HLC prefixes, a complete drain inventory and an empty predecessor audit pipeline; rejects new work, cancels unadmitted work, drains every active transaction, constructs a ShardingFreezeRecord with FreezePendingAudit that names no future payload/root, and permits no later semantic command except ShardingUnfreezeSpec until exact gap-free AuditVisibilityAdvanceSpec<Local> makes the candidate FrozenVisible"
+expected_state_schema_id = "LogicalStatePayload"
+authority_arm = "SourceUnspelled"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:sharding-freeze-spec"
+consumed_state_slots = [ "SemanticPayload|Local|sharding_migration_state" ]
+written_state_slots = [ "SemanticPayload|Local|sharding_migration_state" ]
+checkpoint_floor_classes = [ "role-transition" ]
+backup_restore_gc_classes = [ "role-transition" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:sharding-unfreeze-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0068
+input_schema_id = "ShardingUnfreezeSpec"
+input_wire_tag = 0x0068
+body_schema_id = "SourceUnspelled"
+result_schema_id = "SourceUnspelled"
+applied_record_schema_id = "ShardingMigrationState"
+handler_symbol = "fgdb_apply::local::sharding_unfreeze_spec"
+transition_class = "Semantic"
+sequence_effects = "is legal only from FrozenVisible before BeginRoleTransitionSpec, invalidates the current ShardingRoleTransitionPlan generation, restores the Local semantic migration state without reopening a hidden post-freeze tail, and requires a newly audited plan and ShardingFreezeSpec before any later transition attempt"
+expected_state_schema_id = "ShardingMigrationState"
+authority_arm = "SourceUnspelled"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:sharding-unfreeze-spec"
+consumed_state_slots = [ "SemanticPayload|Local|sharding_migration_state" ]
+written_state_slots = [ "SemanticPayload|Local|sharding_migration_state" ]
+checkpoint_floor_classes = [ "role-transition" ]
+backup_restore_gc_classes = [ "role-transition" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:begin-role-transition-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0069
+input_schema_id = "BeginRoleTransitionSpec"
+input_wire_tag = 0x0069
+body_schema_id = "BeginRoleTransitionSpec"
+result_schema_id = "BeginRoleTransitionRecord"
+applied_record_schema_id = "ShardingMigrationState"
+handler_symbol = "fgdb_apply::local::begin_role_transition_spec"
+transition_class = "Semantic"
+sequence_effects = "requires the exact plan, FrozenVisible freeze record and portable visibility certificate, ready certificate, frozen root/head/prefix, legacy authority-transfer set and migration-floor recipe; before any voter acknowledges Begin AppendEntries at index I it durably installs the terminal RaftRoleTransitionSeal and thereafter rejects extensions beyond I; quorum acceptance is roll-forward-only, and apply advances to Lf/Cf/Hf, installs RoleTransitionLocked, applies the precommitted old-Local side of every authority transfer and requires quorum-durable seals plus quorum apply through Begin"
+expected_state_schema_id = "ShardingMigrationState"
+authority_arm = "SourceUnspelled"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "StructurallyInapplicable{ShardingRoleTransitionAuthority}"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:begin-role-transition-spec"
+consumed_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root", "SemanticPayload|Local|sharding_migration_state" ]
+written_state_slots = [ "SemanticPayload|Local|remote_retention_obligation_root", "SemanticPayload|Local|sharding_migration_state" ]
+checkpoint_floor_classes = [ "role-transition" ]
+backup_restore_gc_classes = [ "role-transition" ]
 posture_feature_predicate = "local"
 format_epoch_range = "v1.."
 status = "reserved"

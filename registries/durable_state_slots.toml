@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 9
+registry_epoch = 10
 
 
 [[slot]]
@@ -743,7 +743,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:local:remote-retention-control-spec:acquire-grant", "cc:local:remote-retention-control-spec:apply-authority-release", "cc:local:remote-retention-control-spec:publish-authority-release-ack" ]
+transition_writer_contract_ids = [ "cc:local:begin-role-transition-spec", "cc:local:remote-retention-control-spec:acquire-grant", "cc:local:remote-retention-control-spec:apply-authority-release", "cc:local:remote-retention-control-spec:publish-authority-release-ack" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -864,6 +864,26 @@ target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
 transition_writer_contract_ids = [ "cc:local:local-statement-abort-spec", "cc:local:local-statement-publication-spec", "cc:local:local-statement-registration-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "sharding_migration_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "sharding_migration_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:begin-role-transition-spec", "cc:local:sharding-freeze-spec", "cc:local:sharding-unfreeze-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
