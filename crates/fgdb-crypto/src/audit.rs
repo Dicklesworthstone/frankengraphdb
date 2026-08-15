@@ -14,8 +14,8 @@
 //! only makes substitution, omission, stale-scope reuse, and unresolved
 //! findings fail closed once those decisions exist.
 
-use crate::aead::ObjectAeadProfile;
-use crate::argon2id::{PassphraseKdfProfile, Variant};
+use crate::aead::REGISTERED_OBJECT_AEAD_PROFILES;
+use crate::argon2id::{REGISTERED_PASSPHRASE_KDF_PROFILES, Variant};
 use crate::blake3::{Hasher, hash};
 use crate::{
     SYMBOL_AUTH_DOMAIN, SYMBOL_AUTH_KEY_BYTES, SYMBOL_AUTH_PROFILE_BLAKE3_128,
@@ -38,7 +38,9 @@ pub const EXTERNAL_CRYPTO_AUDIT_ARTIFACT_LEN: usize = 222;
 pub const REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION: u16 = 1;
 
 /// Exact number of V1 crypto profiles bound into release-audit evidence.
-pub const REGISTERED_CRYPTO_PROFILE_COUNT: u16 = 3;
+pub const REGISTERED_CRYPTO_PROFILE_COUNT: u16 = REGISTERED_OBJECT_AEAD_PROFILES.len() as u16
+    + REGISTERED_PASSPHRASE_KDF_PROFILES.len() as u16
+    + 1;
 
 /// Stable registered engagement-plan identity.
 pub const EXTERNAL_CRYPTO_AUDIT_ENGAGEMENT_ID: &str = "fgdb.crypto.external-audit.v1";
@@ -160,11 +162,12 @@ pub fn external_crypto_audit_plan_digest() -> [u8; 32] {
 /// Digest the exact closed crypto-profile inventory implemented by this crate.
 ///
 /// The transcript is deliberately derived from the public profile rows rather
-/// than supplied by a release caller.  Changing an algorithm, parameter,
-/// width, domain, profile ID, row order, or row count therefore invalidates
-/// old external-audit evidence.  The three V1 rows are object AEAD,
-/// passphrase KDF, and symbol authentication; a future signing profile must be
-/// added here and necessarily changes this digest.
+/// than supplied by a release caller. Numeric profile lookup and this
+/// transcript consume the same authoritative ordered inventories. Changing an
+/// algorithm, parameter, width, domain, profile ID, row order, or row count
+/// therefore invalidates old external-audit evidence. The three V1 rows are
+/// object AEAD, passphrase KDF, and symbol authentication; a future signing
+/// profile must be added here and necessarily changes this digest.
 #[must_use]
 pub fn registered_crypto_profile_set_digest() -> [u8; 32] {
     let mut hasher = Hasher::new();
@@ -172,26 +175,34 @@ pub fn registered_crypto_profile_set_digest() -> [u8; 32] {
     hasher.update(&REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION.to_le_bytes());
     hasher.update(&REGISTERED_CRYPTO_PROFILE_COUNT.to_le_bytes());
 
-    let aead = ObjectAeadProfile::XChaCha20Poly1305V1;
-    update_profile_header(&mut hasher, 1, aead.id(), b"xchacha20-poly1305-ietf");
-    hasher.update(&32_u16.to_le_bytes());
-    hasher.update(&aead.nonce_len().to_le_bytes());
-    hasher.update(&aead.tag_len().to_le_bytes());
+    for aead in REGISTERED_OBJECT_AEAD_PROFILES {
+        update_profile_header(&mut hasher, 1, aead.id(), aead.algorithm_name().as_bytes());
+        hasher.update(&aead.key_len().to_le_bytes());
+        hasher.update(&aead.nonce_len().to_le_bytes());
+        hasher.update(&aead.tag_len().to_le_bytes());
+    }
 
-    let kdf = PassphraseKdfProfile::Argon2idRfc9106SecondV1.spec();
-    update_profile_header(&mut hasher, 2, kdf.profile_id, b"argon2id");
-    hasher.update(&kdf.argon2_version.to_le_bytes());
-    let variant_code = match kdf.variant {
-        Variant::Argon2d => 0_u32,
-        Variant::Argon2i => 1_u32,
-        Variant::Argon2id => 2_u32,
-    };
-    hasher.update(&variant_code.to_le_bytes());
-    hasher.update(&kdf.params.memory_kib.to_le_bytes());
-    hasher.update(&kdf.params.passes.to_le_bytes());
-    hasher.update(&kdf.params.lanes.to_le_bytes());
-    hasher.update(&kdf.salt_len.to_le_bytes());
-    hasher.update(&kdf.kek_len.to_le_bytes());
+    for profile in REGISTERED_PASSPHRASE_KDF_PROFILES {
+        let kdf = profile.spec();
+        update_profile_header(
+            &mut hasher,
+            2,
+            kdf.profile_id,
+            profile.algorithm_name().as_bytes(),
+        );
+        hasher.update(&kdf.argon2_version.to_le_bytes());
+        let variant_code = match kdf.variant {
+            Variant::Argon2d => 0_u32,
+            Variant::Argon2i => 1_u32,
+            Variant::Argon2id => 2_u32,
+        };
+        hasher.update(&variant_code.to_le_bytes());
+        hasher.update(&kdf.params.memory_kib.to_le_bytes());
+        hasher.update(&kdf.params.passes.to_le_bytes());
+        hasher.update(&kdf.params.lanes.to_le_bytes());
+        hasher.update(&kdf.salt_len.to_le_bytes());
+        hasher.update(&kdf.kek_len.to_le_bytes());
+    }
 
     update_profile_header(
         &mut hasher,

@@ -35,10 +35,32 @@ pub enum ObjectAeadProfile {
     XChaCha20Poly1305V1,
 }
 
+/// Complete ordered object-AEAD profile inventory admitted by this build.
+///
+/// Numeric lookup and external-audit profile hashing both consume this array.
+/// Adding an enum variant without adding it here therefore does not register a
+/// durable profile, while adding a row here necessarily changes the audited
+/// profile-set transcript.
+pub const REGISTERED_OBJECT_AEAD_PROFILES: [ObjectAeadProfile; 1] =
+    [ObjectAeadProfile::XChaCha20Poly1305V1];
+
 impl ObjectAeadProfile {
+    /// Canonical primitive name bound into external-audit evidence.
+    pub const fn algorithm_name(self) -> &'static str {
+        match self {
+            Self::XChaCha20Poly1305V1 => "xchacha20-poly1305-ietf",
+        }
+    }
+
     pub const fn id(self) -> u16 {
         match self {
             Self::XChaCha20Poly1305V1 => DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305,
+        }
+    }
+
+    pub const fn key_len(self) -> u16 {
+        match self {
+            Self::XChaCha20Poly1305V1 => 32,
         }
     }
 
@@ -57,10 +79,15 @@ impl ObjectAeadProfile {
 
 /// Resolve a durable numeric profile ID through the closed V1 registry.
 pub const fn registered_object_aead_profile(id: u16) -> Option<ObjectAeadProfile> {
-    match id {
-        DATA_CRYPTO_PROFILE_XCHACHA20_POLY1305 => Some(ObjectAeadProfile::XChaCha20Poly1305V1),
-        _ => None,
+    let mut index = 0;
+    while index < REGISTERED_OBJECT_AEAD_PROFILES.len() {
+        let profile = REGISTERED_OBJECT_AEAD_PROFILES[index];
+        if profile.id() == id {
+            return Some(profile);
+        }
+        index += 1;
     }
+    None
 }
 
 /// Authentication failure. Deliberately carries no detail: a decrypt error

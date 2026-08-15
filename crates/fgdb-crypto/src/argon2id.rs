@@ -179,7 +179,22 @@ pub enum PassphraseKdfProfile {
     Argon2idRfc9106SecondV1,
 }
 
+/// Complete ordered passphrase-KDF profile inventory admitted by this build.
+///
+/// This is the single source for durable numeric lookup and external-audit
+/// profile hashing. A future row cannot become live without also entering the
+/// audit transcript.
+pub const REGISTERED_PASSPHRASE_KDF_PROFILES: [PassphraseKdfProfile; 1] =
+    [PassphraseKdfProfile::Argon2idRfc9106SecondV1];
+
 impl PassphraseKdfProfile {
+    /// Canonical primitive name bound into external-audit evidence.
+    pub const fn algorithm_name(self) -> &'static str {
+        match self {
+            Self::Argon2idRfc9106SecondV1 => "argon2id",
+        }
+    }
+
     /// The complete immutable registry row selected by this profile.
     pub const fn spec(self) -> PassphraseKdfProfileSpec {
         match self {
@@ -206,12 +221,15 @@ impl PassphraseKdfProfile {
 
 /// Resolve a durable numeric profile ID through the closed V1 registry.
 pub const fn registered_passphrase_kdf_profile(id: u16) -> Option<PassphraseKdfProfile> {
-    match id {
-        PASSPHRASE_KDF_PROFILE_ARGON2ID_RFC9106_SECOND => {
-            Some(PassphraseKdfProfile::Argon2idRfc9106SecondV1)
+    let mut index = 0;
+    while index < REGISTERED_PASSPHRASE_KDF_PROFILES.len() {
+        let profile = REGISTERED_PASSPHRASE_KDF_PROFILES[index];
+        if profile.id() == id {
+            return Some(profile);
         }
-        _ => None,
+        index += 1;
     }
+    None
 }
 
 /// Why profile-bound passphrase derivation was refused.

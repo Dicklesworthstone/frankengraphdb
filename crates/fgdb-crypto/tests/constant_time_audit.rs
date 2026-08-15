@@ -217,8 +217,10 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         EXTERNAL_CRYPTO_AUDIT_RELEASE_GATE, EXTERNAL_CRYPTO_AUDIT_SCHEMA_VERSION,
         ExternalCryptoAuditEvidence, REGISTERED_CRYPTO_PROFILE_COUNT,
         REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN,
+        REGISTERED_OBJECT_AEAD_PROFILES, REGISTERED_PASSPHRASE_KDF_PROFILES,
         admit_external_crypto_audit, external_crypto_audit_plan_digest,
-        registered_crypto_profile_set_digest,
+        registered_crypto_profile_set_digest, registered_object_aead_profile,
+        registered_passphrase_kdf_profile,
     };
 
     fn digest(byte: u8) -> [u8; 32] {
@@ -266,7 +268,44 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
     assert!(AuditCoverage::REQUIRED.is_complete());
     assert_ne!(external_crypto_audit_plan_digest(), [0; 32]);
     assert_eq!(REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, 1);
+    assert_eq!(
+        usize::from(REGISTERED_CRYPTO_PROFILE_COUNT),
+        REGISTERED_OBJECT_AEAD_PROFILES.len() + REGISTERED_PASSPHRASE_KDF_PROFILES.len() + 1
+    );
     assert_eq!(REGISTERED_CRYPTO_PROFILE_COUNT, 3);
+
+    let resolved_aead_profiles: Vec<_> = (0..=u16::MAX)
+        .filter_map(|id| registered_object_aead_profile(id).map(|profile| (id, profile)))
+        .collect();
+    let inventoried_aead_profiles: Vec<_> = REGISTERED_OBJECT_AEAD_PROFILES
+        .iter()
+        .copied()
+        .map(|profile| (profile.id(), profile))
+        .collect();
+    assert_eq!(resolved_aead_profiles, inventoried_aead_profiles);
+    assert!(
+        inventoried_aead_profiles
+            .windows(2)
+            .all(|rows| rows[0].0 < rows[1].0),
+        "object-AEAD inventory IDs must be unique and canonically ordered"
+    );
+
+    let resolved_kdf_profiles: Vec<_> = (0..=u16::MAX)
+        .filter_map(|id| registered_passphrase_kdf_profile(id).map(|profile| (id, profile)))
+        .collect();
+    let inventoried_kdf_profiles: Vec<_> = REGISTERED_PASSPHRASE_KDF_PROFILES
+        .iter()
+        .copied()
+        .map(|profile| (profile.id(), profile))
+        .collect();
+    assert_eq!(resolved_kdf_profiles, inventoried_kdf_profiles);
+    assert!(
+        inventoried_kdf_profiles
+            .windows(2)
+            .all(|rows| rows[0].0 < rows[1].0),
+        "passphrase-KDF inventory IDs must be unique and canonically ordered"
+    );
+
     let registered_profile_set = registered_crypto_profile_set_digest();
     assert_eq!(
         registered_profile_set,
