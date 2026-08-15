@@ -1357,7 +1357,6 @@ mod tests {
 
     use super::*;
     use asupersync::lab::{LabRunReport, run_async_under_lab};
-    use asupersync::runtime::JoinError;
     use asupersync::{CancelKind, CancelReason};
 
     fn assert_clean_lab_report(report: &LabRunReport) {
@@ -1412,9 +1411,10 @@ mod tests {
                 })
                 .expect("lab child spawn must be available");
             let joined = handle.join(&root).await;
-            assert!(
-                matches!(joined, Err(JoinError::Cancelled(_))),
-                "cancelled lab child returned unexpected join result: {joined:?}"
+            assert_eq!(
+                joined,
+                Ok(()),
+                "a child that acknowledged cancellation and completed cleanup must preserve its returned value"
             );
         });
         assert_clean_lab_report(&report);

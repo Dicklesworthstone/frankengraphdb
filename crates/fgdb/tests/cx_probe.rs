@@ -1,8 +1,8 @@
 //! **The production-runtime `Cx` an external crate obtains, and what that
 //! permits us to measure.**
 //!
-//! Beads fgdb-r8fa / fgdb-uz0o / fgdb-p95p. Pinned asupersync v0.4.3 revision
-//! `3b34c9b0` makes `Runtime::request_cx_with_budget` public. Every test here now
+//! Beads fgdb-r8fa / fgdb-uz0o / fgdb-p95p. Pinned asupersync v0.4.4 revision
+//! `fffc0a4c` makes `Runtime::request_cx_with_budget` public. Every test here now
 //! obtains its root context from that runtime boundary with default features
 //! disabled; `Cx::for_testing` and `test-internals` are absent from this package.
 //!

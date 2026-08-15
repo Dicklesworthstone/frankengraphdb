@@ -23,4 +23,4 @@ publish = false
 fgdb-types = { path = "../fgdb-types" }
 
 [dev-dependencies]
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "3b34c9b0a14c55eb814cf4aaeceeba3be0c0a72e", default-features = false, features = ["test-internals"] }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "fffc0a4c3f1ef45da54af35b7aa720978db0dffc", default-features = false, features = ["test-internals"] }

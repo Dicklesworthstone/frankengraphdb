@@ -23,7 +23,7 @@
 //!
 //! # Production runtime authority
 //!
-//! Pinned asupersync v0.4.3 revision `3b34c9b0` exposes
+//! Pinned asupersync v0.4.4 revision `fffc0a4c` exposes
 //! `Runtime::request_cx_with_budget` as its ambient-free production boundary.
 //! This example uses that path with default features disabled: the `Cx` inherits
 //! the runtime's drivers and capability mask, then `PurposeContexts` narrows it
