@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F15F tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F15G tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -297,6 +297,11 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:restore-source-lease-renew-authorize-spec",
         "cc:local:restore-source-lease-renew-finalize-spec",
         "cc:local:restore-source-lease-renew-no-effect-finalize-spec",
+        // F15G source-lease release (frozen ordinals 100-102). The physical
+        // dispatch initializer is Protocol-only and deliberately absent.
+        "cc:local:restore-source-lease-release-spec",
+        "cc:local:restore-source-lease-release-finalize-spec",
+        "cc:local:restore-source-lease-release-no-effect-finalize-spec",
     ] {
         assert!(
             registry
@@ -307,8 +312,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 141,
-        "the population may only grow from the landed F1-F15F rows"
+        registry.contracts.len() >= 144,
+        "the population may only grow from the landed F1-F15G rows"
     );
 }
 
@@ -1441,6 +1446,167 @@ fn f15f_source_lease_renewal_contracts_are_exact() {
         assert!(
             no_effect.sequence_effects.contains(required),
             "renew-no-effect law lost {required:?}"
+        );
+    }
+}
+
+/// F15G pins the semantic release state machine without laundering its
+/// Protocol dispatch initializer into SequenceNeutralSpec. Authorization must
+/// remain an undispatched stable recipe, success must prove the provider's
+/// terminal successor before cutting the lease, and no-effect finalization
+/// must preserve the active predecessor and terminal pin.
+#[test]
+fn f15g_source_lease_release_contracts_are_exact() {
+    let registry = registry();
+    let interval: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| (0x0064..=0x0066).contains(&row.outer_wire_tag))
+        .collect();
+    assert_eq!(
+        interval.len(),
+        3,
+        "the F15G outer-tag interval must contain exactly three armless rows"
+    );
+    for row in registry.contracts.iter().filter(|row| {
+        row.input_schema_id == "RestoreSourceLeaseReleaseDispatchInitializeSpec<Local>"
+    }) {
+        assert_ne!(
+            row.outer_command_union, "SequenceNeutralSpec<Tag>",
+            "the Protocol-only release dispatch initializer entered SequenceNeutralSpec"
+        );
+        assert_eq!(
+            row.transition_class, "Maintenance",
+            "a future dispatch-initializer row must retain its Protocol maintenance plane"
+        );
+    }
+
+    let expected = [
+        (
+            "cc:local:restore-source-lease-release-spec",
+            0x0064,
+            "RestoreSourceLeaseReleaseSpec<Local>",
+            "RestoreSourceLeaseReleaseOperationRecord<Local>",
+            "RestoreLeaseReleaseEligibility<Local>",
+            "TerminalAuditGate",
+            "fgdb_apply::local::restore_source_lease_release_spec",
+        ),
+        (
+            "cc:local:restore-source-lease-release-finalize-spec",
+            0x0065,
+            "RestoreSourceLeaseReleaseFinalizeSpec<Local>",
+            "LocalRestoreTerminalTombstone",
+            "RestoreSourceLeaseReleaseOperationRecord<Local>",
+            "SourceUnspelled",
+            "fgdb_apply::local::restore_source_lease_release_finalize_spec",
+        ),
+        (
+            "cc:local:restore-source-lease-release-no-effect-finalize-spec",
+            0x0066,
+            "RestoreSourceLeaseReleaseNoEffectFinalizeSpec<Local>",
+            "RestoreLeaseOperationTerminalRecord<Local,Release>",
+            "RestoreSourceLeaseReleaseOperationRecord<Local>",
+            "SourceUnspelled",
+            "fgdb_apply::local::restore_source_lease_release_no_effect_finalize_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, authority_target, audit_gate, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F15G table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} invented an inner arm");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(row.applied_record_schema_id, "LocalRestoreRegistryValue");
+        assert_eq!(row.expected_state_schema_id, "LocalRestoreRegistryValue");
+        assert_eq!(row.authority_arm, "AuthorityBoundHeader<Local>");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            Some(authority_target),
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.terminal_audit_freeze_arm, "SourceUnspelled");
+        assert_eq!(row.terminal_audit_gate_arm, audit_gate);
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        let expected_slots = if id == "cc:local:restore-source-lease-release-finalize-spec" {
+            vec![
+                "SemanticPayload|Local|restore_registry_root".to_owned(),
+                "SemanticPayload|Local|retention_map".to_owned(),
+            ]
+        } else {
+            vec!["SemanticPayload|Local|restore_registry_root".to_owned()]
+        };
+        assert_eq!(row.consumed_state_slots, expected_slots);
+        assert_eq!(row.written_state_slots, row.consumed_state_slots);
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-restore"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-restore"]);
+        assert_eq!(row.posture_feature_predicate, "local");
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+
+    let authorize = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:local:restore-source-lease-release-spec")
+        .expect("release authorize row exists");
+    for required in [
+        "Live-or-Expired action-bound release eligibility",
+        "AuthorizedUndispatchedRecipe",
+        "stable action body excludes eligibility",
+        "names no future publication evidence, full request, attempt or receipt",
+    ] {
+        assert!(
+            authorize.sequence_effects.contains(required),
+            "release-authorize law lost {required:?}"
+        );
+    }
+
+    let finalize = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id == "cc:local:restore-source-lease-release-finalize-spec"
+        })
+        .expect("release finalize row exists");
+    for required in [
+        "Released, AlreadyReleased or AlreadyExpired",
+        "full signed no-successor proof",
+        "removes the canonical lease edge only with audit-visible apply",
+        "enters ReleasedTerminal",
+    ] {
+        assert!(
+            finalize.sequence_effects.contains(required),
+            "release-finalize law lost {required:?}"
+        );
+    }
+
+    let no_effect = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id
+                == "cc:local:restore-source-lease-release-no-effect-finalize-spec"
+        })
+        .expect("release no-effect row exists");
+    for required in [
+        "archive head remains the exact Active predecessor",
+        "preserves AwaitingSourceRelease plus the old Current lease",
+        "fresh operation ID plus current eligibility",
+        "never releases a terminal pin or pretends the source lease ended",
+    ] {
+        assert!(
+            no_effect.sequence_effects.contains(required),
+            "release-no-effect law lost {required:?}"
         );
     }
 }

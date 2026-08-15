@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 22
+registry_epoch = 23
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -1023,4 +1023,33 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:restore-source-lease-renew-no-effect-finalize-spec"
 source_location = "a18:2395"
 statement = "RestoreSourceLeaseRenewNoEffectFinalizeSpec<Role> consumes the typed zero-effect terminal lineage, preserves the old Current lease and appends a permanent NoEffect operation record that forbids resend."
+status = "registered"
+
+# --- F15G source-lease release cohort (frozen ordinals 100-102). The generic
+# --- plan members instantiate structurally for Local under the owner-confirmed
+# --- C5 ruling. The physical dispatch initializer is a Protocol maintenance
+# --- input and therefore does not acquire a semantic classification row here.
+
+[[classification]]
+type_name = "RestoreSourceLeaseReleaseSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-lease-release-spec"
+source_location = "a18:2405"
+statement = "RestoreSourceLeaseReleaseSpec<Role> requires exact completion, cleanup, canonicalized prebootstrap and Live-or-Expired action-bound lease evidence, then creates only an AuthorizedUndispatchedRecipe operation record with stable retry bytes."
+status = "registered"
+
+[[classification]]
+type_name = "RestoreSourceLeaseReleaseFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-lease-release-finalize-spec"
+source_location = "a18:2413"
+statement = "RestoreSourceLeaseReleaseFinalizeSpec<Role> consumes the exact terminal release lineage and no-successor proof, constructs the compact summary, terminal common and role tombstone, and removes the canonical lease edge only with audit-visible apply."
+status = "registered"
+
+[[classification]]
+type_name = "RestoreSourceLeaseReleaseNoEffectFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-lease-release-no-effect-finalize-spec"
+source_location = "a18:2413"
+statement = "RestoreSourceLeaseReleaseNoEffectFinalizeSpec<Role> proves the archive head remains the exact Active predecessor, preserves AwaitingSourceRelease plus Current, and records a permanent zero-effect tombstone without releasing any pin."
 status = "registered"

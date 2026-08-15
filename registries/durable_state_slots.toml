@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 8
+registry_epoch = 9
 
 
 [[slot]]
@@ -783,7 +783,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:local:branch-retire-finalize-spec", "cc:local:checkpoint-install-spec", "cc:local:history-cut-activation-spec", "cc:local:restore-terminal-pin-release-finalize-spec" ]
+transition_writer_contract_ids = [ "cc:local:branch-retire-finalize-spec", "cc:local:checkpoint-install-spec", "cc:local:history-cut-activation-spec", "cc:local:restore-source-lease-release-finalize-spec", "cc:local:restore-terminal-pin-release-finalize-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -803,7 +803,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:local:directory-bound-abandon-apply-spec", "cc:local:directory-bound-abandon-receipt-import-spec", "cc:local:directory-bound-enter-promotion-pending-spec", "cc:local:directory-bound-finalize-operational-authority-spec", "cc:local:local-restore-abandon-finalize-spec", "cc:local:local-restore-abandonment-pin-install-spec", "cc:local:local-restore-activation-spec", "cc:local:local-restore-service-completion-spec", "cc:local:local-restore-service-prepare-spec", "cc:local:local-restore-service-promotion-spec", "cc:local:restore-abandon-spec:local", "cc:local:restore-source-key-access-cleanup-authorize-spec", "cc:local:restore-source-key-access-cleanup-finalize-spec", "cc:local:restore-source-key-access-cleanup-import-spec", "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec", "cc:local:restore-source-lease-renew-authorize-spec", "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec", "cc:local:restore-source-lease-renew-finalize-spec", "cc:local:restore-source-lease-renew-no-effect-finalize-spec", "cc:local:restore-terminal-pin-release-finalize-spec" ]
+transition_writer_contract_ids = [ "cc:local:directory-bound-abandon-apply-spec", "cc:local:directory-bound-abandon-receipt-import-spec", "cc:local:directory-bound-enter-promotion-pending-spec", "cc:local:directory-bound-finalize-operational-authority-spec", "cc:local:local-restore-abandon-finalize-spec", "cc:local:local-restore-abandonment-pin-install-spec", "cc:local:local-restore-activation-spec", "cc:local:local-restore-service-completion-spec", "cc:local:local-restore-service-prepare-spec", "cc:local:local-restore-service-promotion-spec", "cc:local:restore-abandon-spec:local", "cc:local:restore-source-key-access-cleanup-authorize-spec", "cc:local:restore-source-key-access-cleanup-finalize-spec", "cc:local:restore-source-key-access-cleanup-import-spec", "cc:local:restore-source-lease-release-authorized-never-armed-finalize-spec", "cc:local:restore-source-lease-release-finalize-spec", "cc:local:restore-source-lease-release-no-effect-finalize-spec", "cc:local:restore-source-lease-release-spec", "cc:local:restore-source-lease-renew-authorize-spec", "cc:local:restore-source-lease-renew-authorized-never-armed-finalize-spec", "cc:local:restore-source-lease-renew-finalize-spec", "cc:local:restore-source-lease-renew-no-effect-finalize-spec", "cc:local:restore-terminal-pin-release-finalize-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

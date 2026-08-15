@@ -141,6 +141,9 @@ fn source_forced_seed_population_is_present() {
         "RestoreSourceLeaseRenewAuthorizeSpec",
         "RestoreSourceLeaseRenewFinalizeSpec",
         "RestoreSourceLeaseRenewNoEffectFinalizeSpec",
+        "RestoreSourceLeaseReleaseSpec",
+        "RestoreSourceLeaseReleaseFinalizeSpec",
+        "RestoreSourceLeaseReleaseNoEffectFinalizeSpec",
     ] {
         assert!(
             registry
@@ -151,8 +154,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 106,
-        "the population may only grow from the landed F1-F15F rows"
+        registry.classifications.len() >= 109,
+        "the population may only grow from the landed F1-F15G rows"
     );
 }
 
@@ -531,6 +534,68 @@ fn f15f_source_lease_renewal_classifications_are_exact() {
             .iter()
             .find(|row| row.type_name == type_name)
             .expect("exact F15F table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(
+            row.source_location, source_location,
+            "{type_name} source anchor drifted"
+        );
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F15G's exact map binds only the three semantic release transitions. The
+/// dispatch initializer is a physical/Protocol input and must not be inferred
+/// into this table merely because its stable name ends in Spec.
+#[test]
+fn f15g_source_lease_release_classifications_are_exact() {
+    let registry = registry();
+    if let Some(row) = registry
+        .classifications
+        .iter()
+        .find(|row| row.type_name == "RestoreSourceLeaseReleaseDispatchInitializeSpec")
+    {
+        let contract_id = row
+            .command_contract_id
+            .as_deref()
+            .expect("a future dispatch-initializer classification must bind a contract");
+        let contracts = contracts();
+        let contract = contracts
+            .contracts
+            .iter()
+            .find(|contract| contract.command_contract_id == contract_id)
+            .expect("a future dispatch-initializer classification must resolve");
+        assert_eq!(
+            contract.transition_class, "Maintenance",
+            "the Protocol-only dispatch initializer must retain its maintenance plane"
+        );
+    }
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "RestoreSourceLeaseReleaseSpec",
+            "cc:local:restore-source-lease-release-spec",
+            "a18:2405",
+        ),
+        (
+            "RestoreSourceLeaseReleaseFinalizeSpec",
+            "cc:local:restore-source-lease-release-finalize-spec",
+            "a18:2413",
+        ),
+        (
+            "RestoreSourceLeaseReleaseNoEffectFinalizeSpec",
+            "cc:local:restore-source-lease-release-no-effect-finalize-spec",
+            "a18:2413",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F15G table must resolve every classification row");
         assert_eq!(row.class, "RegisteredCommandInput");
         assert_eq!(
             row.command_contract_id.as_deref(),
