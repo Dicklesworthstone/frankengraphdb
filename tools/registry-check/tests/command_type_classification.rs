@@ -128,6 +128,10 @@ fn source_forced_seed_population_is_present() {
         "LocalRestoreAbandonFinalizeSpec",
         "LocalRestoreAbandonmentPinInstallSpec",
         "RestoreAbandonSpec",
+        "DirectoryBoundEnterPromotionPendingSpec",
+        "DirectoryBoundFinalizeOperationalAuthoritySpec",
+        "DirectoryBoundAbandonApplySpec",
+        "DirectoryBoundAbandonReceiptImportSpec",
     ] {
         assert!(
             registry
@@ -138,8 +142,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 93,
-        "the population may only grow from the landed F1-F15B rows"
+        registry.classifications.len() >= 97,
+        "the population may only grow from the landed F1-F15C rows"
     );
 }
 
@@ -351,6 +355,50 @@ fn f15b_local_restore_classifications_are_exact() {
             .iter()
             .find(|row| row.type_name == type_name)
             .expect("exact F15B table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(row.source_location, source_location);
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F15C's four DirectoryBound members are separately addressable ordered
+/// inputs, not certificate/result shapes. Pin their exact contract roots and
+/// the two normative plan anchors so suffix inference cannot classify them.
+#[test]
+fn f15c_directory_bound_restore_classifications_are_exact() {
+    let registry = registry();
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "DirectoryBoundEnterPromotionPendingSpec",
+            "cc:local:directory-bound-enter-promotion-pending-spec",
+            "a20:2588",
+        ),
+        (
+            "DirectoryBoundFinalizeOperationalAuthoritySpec",
+            "cc:local:directory-bound-finalize-operational-authority-spec",
+            "a20:2588",
+        ),
+        (
+            "DirectoryBoundAbandonApplySpec",
+            "cc:local:directory-bound-abandon-apply-spec",
+            "a18:2446",
+        ),
+        (
+            "DirectoryBoundAbandonReceiptImportSpec",
+            "cc:local:directory-bound-abandon-receipt-import-spec",
+            "a18:2446",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F15C table must resolve every classification row");
         assert_eq!(row.class, "RegisteredCommandInput");
         assert_eq!(
             row.command_contract_id.as_deref(),

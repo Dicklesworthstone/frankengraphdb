@@ -129,7 +129,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         .slots
         .iter()
         .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "restore_registry_root")
-        .expect("F15B Local restore registry slot");
+        .expect("F15B/F15C Local restore registry slot");
     assert_eq!(restore_state.role, "Local");
     assert_eq!(restore_state.backing_registry, "state_payload_fields.toml");
     assert_eq!(restore_state.stable_name, "restore_registry_root");
@@ -137,6 +137,10 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
     assert_eq!(
         restore_state.transition_writer_contract_ids,
         [
+            "cc:local:directory-bound-abandon-apply-spec",
+            "cc:local:directory-bound-abandon-receipt-import-spec",
+            "cc:local:directory-bound-enter-promotion-pending-spec",
+            "cc:local:directory-bound-finalize-operational-authority-spec",
             "cc:local:local-restore-abandon-finalize-spec",
             "cc:local:local-restore-abandonment-pin-install-spec",
             "cc:local:local-restore-activation-spec",

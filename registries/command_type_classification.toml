@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 18
+registry_epoch = 19
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -901,4 +901,41 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:restore-abandon-spec"
 source_location = "a18:2433"
 statement = "RestoreAbandonSpec is the closed Local|ShardedMeta ordered union; the Local arm requires a hidden target, exact no-target-observation proof, closed Local authority profile, prebuilt pin pending owner and ReleaseRequired source lease, then remains hidden in AbandonAuthorizedHidden."
+status = "registered"
+
+# --- F15C DirectoryBound restore authority (frozen ordinals 87-90). All four
+# --- are armless ordered Local Semantic inputs. They reserve the inode-fenced
+# --- pending/final-authority and two-step abandonment transitions without
+# --- claiming an external-continuity action or a live runtime handler.
+
+[[classification]]
+type_name = "DirectoryBoundEnterPromotionPendingSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:directory-bound-enter-promotion-pending-spec"
+source_location = "a20:2588"
+statement = "DirectoryBoundEnterPromotionPendingSpec consumes the exact creation evidence, hidden prepare certificate, profile-matched reservation or zero-catalog basis and live inode publication authority; only its durable RootSlot successor permits the pending receipt."
+status = "registered"
+
+[[classification]]
+type_name = "DirectoryBoundFinalizeOperationalAuthoritySpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:directory-bound-finalize-operational-authority-spec"
+source_location = "a20:2588"
+statement = "DirectoryBoundFinalizeOperationalAuthoritySpec consumes the profile-matched activation or embedded admission lineage and exact pending state; only its durable RootSlot successor permits the distinct operational-authority receipt."
+status = "registered"
+
+[[classification]]
+type_name = "DirectoryBoundAbandonApplySpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:directory-bound-abandon-apply-spec"
+source_location = "a18:2446"
+statement = "DirectoryBoundAbandonApplySpec is the inode-fenced Local abandonment apply; it enters AbandonedAuthorityAppliedAwaitingReceipt with only the assigned apply identity, skeleton, pending owner and recipes, never its future receipt or tombstone."
+status = "registered"
+
+[[classification]]
+type_name = "DirectoryBoundAbandonReceiptImportSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:directory-bound-abandon-receipt-import-spec"
+source_location = "a18:2446"
+statement = "DirectoryBoundAbandonReceiptImportSpec consumes the durable DirectoryBound receipt plus exact awaiting-root publication evidence; it alone materializes the Local authority-owning tombstone and enters AbandonedAwaitingTerminalPin."
 status = "registered"

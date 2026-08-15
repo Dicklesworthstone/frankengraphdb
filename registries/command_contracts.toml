@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 18
+registry_epoch = 19
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -845,6 +845,131 @@ written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 checkpoint_floor_classes = [ "semantic-restore" ]
 backup_restore_gc_classes = [ "semantic-restore" ]
 posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+# =============================================================================
+# F15C DirectoryBound restore authority — frozen ordinals 87-90. These four
+# armless Local transitions are the owner-confirmed continuation after F15B:
+# enter the inode-fenced promotion-pending boundary, finalize the operational
+# authority boundary, apply DirectoryBound abandonment without fabricating its
+# future receipt/tombstone, then import the durable abandonment receipt. These
+# rows reserve contracts only; no Rust union, handler, or live capability is
+# claimed.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:directory-bound-enter-promotion-pending-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0057
+input_schema_id = "DirectoryBoundEnterPromotionPendingSpec"
+input_wire_tag = 0x0057
+body_schema_id = "DirectoryBoundEnterPromotionPendingSpec"
+result_schema_id = "DirectoryBoundPromotionPendingReceipt"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::directory_bound_enter_promotion_pending_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact DirectoryBound creation evidence, hidden Local prepare certificate, profile-matched catalog reservation or zero-catalog applicability evidence, live inode lease/sequencer and predecessor slot; RootSlot-publishes DirectoryBoundPromotionPending as the irreversible no-downgrade boundary before a pending receipt may issue"
+expected_state_schema_id = "WeakStateIdentity"
+authority_arm = "DirectoryBoundCreationEvidence<Local>"
+authority_evidence_target_schema_id = "DirectoryBoundCreationEvidence<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:directory-bound-enter-promotion-pending-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local-directory-bound"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:directory-bound-finalize-operational-authority-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0058
+input_schema_id = "DirectoryBoundFinalizeOperationalAuthoritySpec"
+input_wire_tag = 0x0058
+body_schema_id = "DirectoryBoundFinalizeOperationalAuthoritySpec"
+result_schema_id = "DirectoryBoundOperationalAuthorityReceipt"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::directory_bound_finalize_operational_authority_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the profile-matched activation or embedded admission evidence plus the exact current pending lineage, revalidates the same creation evidence, inode lease, sequencer, fixed continuity digest and predecessor slot, then RootSlot-publishes DirectoryBoundOperationalReceiptRequired before the distinct operational-authority receipt may issue"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "DirectoryBoundCreationEvidence<Local>"
+authority_evidence_target_schema_id = "DirectoryBoundPromotionPendingReceipt"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:directory-bound-finalize-operational-authority-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local-directory-bound"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:directory-bound-abandon-apply-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0059
+input_schema_id = "DirectoryBoundAbandonApplySpec"
+input_wire_tag = 0x0059
+body_schema_id = "DirectoryBoundAbandonApplySpec"
+result_schema_id = "SourceUnspelled"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::directory_bound_abandon_apply_spec"
+transition_class = "Semantic"
+sequence_effects = "under the exact authority-bound abandon lineage and inode fence, clears restore_state_ref, selects RecoveryAbandoned and enters AbandonedAuthorityAppliedAwaitingReceipt; the applied result carries only its assigned identity, skeleton, pending owner, current source-lease owner and acyclic recipes, never the future tombstone, result digest or abandonment receipt"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreAbandonOperationRecord<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:directory-bound-abandon-apply-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local-directory-bound"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:directory-bound-abandon-receipt-import-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x005a
+input_schema_id = "DirectoryBoundAbandonReceiptImportSpec"
+input_wire_tag = 0x005a
+body_schema_id = "DirectoryBoundAbandonReceiptImportSpec"
+result_schema_id = "AuthorityOwningRestoreAbandonmentTombstone<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::directory_bound_abandon_receipt_import_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact DirectoryBound abandonment receipt, awaiting-receipt root, skeleton, pending owner and result publication evidence; fills only the DirectoryBound holes, materializes the Local authority-owning tombstone naming the earlier apply result and receipt, and enters AbandonedAwaitingTerminalPin"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "DirectoryBoundAbandonmentReceipt"
+authority_evidence_target_schema_id = "DirectoryBoundAbandonmentReceipt"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:directory-bound-abandon-receipt-import-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local-directory-bound"
 format_epoch_range = "v1.."
 status = "reserved"
 

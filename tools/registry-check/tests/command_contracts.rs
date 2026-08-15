@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F15B tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F15C tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -274,6 +274,12 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:local-restore-abandon-finalize-spec",
         "cc:local:local-restore-abandonment-pin-install-spec",
         "cc:local:restore-abandon-spec:local",
+        // F15C DirectoryBound restore authority (frozen ordinals
+        // 0x0057-0x005a). All four members are armless and Local-only.
+        "cc:local:directory-bound-enter-promotion-pending-spec",
+        "cc:local:directory-bound-finalize-operational-authority-spec",
+        "cc:local:directory-bound-abandon-apply-spec",
+        "cc:local:directory-bound-abandon-receipt-import-spec",
     ] {
         assert!(
             registry
@@ -284,8 +290,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 128,
-        "the population may only grow from the landed F1-F15B rows"
+        registry.contracts.len() >= 132,
+        "the population may only grow from the landed F1-F15C rows"
     );
 }
 
@@ -818,6 +824,153 @@ fn f15b_local_restore_contracts_are_exact() {
         assert_eq!(row.posture_feature_predicate, "local");
         assert_eq!(row.status, "reserved", "{id} activated prematurely");
     }
+}
+
+/// Freeze the four armless DirectoryBound members after F15B. Besides dense
+/// tags, this pins the two post-publication receipt types and the asymmetric
+/// abandonment law: apply cannot claim its future receipt/tombstone, whereas
+/// receipt import alone may materialize the tombstone.
+#[test]
+fn f15c_directory_bound_restore_contracts_are_exact() {
+    let registry = registry();
+    assert_eq!(
+        registry
+            .contracts
+            .iter()
+            .filter(|row| {
+                row.role == "Local" && (0x0057..=0x005a).contains(&row.outer_wire_tag)
+            })
+            .count(),
+        4,
+        "the F15C outer-tag interval must contain exactly its four armless rows"
+    );
+    let expected = [
+        (
+            "cc:local:directory-bound-enter-promotion-pending-spec",
+            0x0057,
+            "DirectoryBoundEnterPromotionPendingSpec",
+            "DirectoryBoundPromotionPendingReceipt",
+            "LocalRestoreRegistryValue",
+            "WeakStateIdentity",
+            "DirectoryBoundCreationEvidence<Local>",
+            Some("DirectoryBoundCreationEvidence<Local>"),
+            "SourceUnspelled",
+            "fgdb_apply::local::directory_bound_enter_promotion_pending_spec",
+        ),
+        (
+            "cc:local:directory-bound-finalize-operational-authority-spec",
+            0x0058,
+            "DirectoryBoundFinalizeOperationalAuthoritySpec",
+            "DirectoryBoundOperationalAuthorityReceipt",
+            "LocalRestoreRegistryValue",
+            "LocalRestoreRegistryValue",
+            "DirectoryBoundCreationEvidence<Local>",
+            Some("DirectoryBoundPromotionPendingReceipt"),
+            "SourceUnspelled",
+            "fgdb_apply::local::directory_bound_finalize_operational_authority_spec",
+        ),
+        (
+            "cc:local:directory-bound-abandon-apply-spec",
+            0x0059,
+            "DirectoryBoundAbandonApplySpec",
+            "SourceUnspelled",
+            "LocalRestoreRegistryValue",
+            "LocalRestoreRegistryValue",
+            "AuthorityBoundHeader<Local>",
+            Some("RestoreAbandonOperationRecord<Local>"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::directory_bound_abandon_apply_spec",
+        ),
+        (
+            "cc:local:directory-bound-abandon-receipt-import-spec",
+            0x005a,
+            "DirectoryBoundAbandonReceiptImportSpec",
+            "AuthorityOwningRestoreAbandonmentTombstone<Local>",
+            "LocalRestoreRegistryValue",
+            "LocalRestoreRegistryValue",
+            "DirectoryBoundAbandonmentReceipt",
+            Some("DirectoryBoundAbandonmentReceipt"),
+            "SourceUnspelled",
+            "fgdb_apply::local::directory_bound_abandon_receipt_import_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, applied, state, authority, target, gate, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F15C table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} invented an inner arm");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(
+            row.applied_record_schema_id, applied,
+            "{id} applied drifted"
+        );
+        assert_eq!(row.expected_state_schema_id, state, "{id} state drifted");
+        assert_eq!(row.authority_arm, authority, "{id} authority drifted");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            target,
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.terminal_audit_gate_arm, gate, "{id} gate drifted");
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(
+            row.written_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-restore"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-restore"]);
+        assert_eq!(row.posture_feature_predicate, "local-directory-bound");
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+
+    let apply = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:local:directory-bound-abandon-apply-spec")
+        .expect("DirectoryBound abandon apply row exists");
+    assert_eq!(apply.result_schema_id, "SourceUnspelled");
+    assert!(
+        !apply
+            .sequence_effects
+            .contains("materializes the Local authority-owning tombstone")
+    );
+    assert!(
+        apply
+            .sequence_effects
+            .contains("never the future tombstone")
+    );
+
+    let import = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id == "cc:local:directory-bound-abandon-receipt-import-spec"
+        })
+        .expect("DirectoryBound abandon receipt-import row exists");
+    assert_eq!(
+        import.result_schema_id,
+        "AuthorityOwningRestoreAbandonmentTombstone<Local>"
+    );
+    assert!(
+        import
+            .sequence_effects
+            .contains("materializes the Local authority-owning tombstone")
+    );
 }
 
 /// An armed member's rows share the member's outer tag and differ only by
