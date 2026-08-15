@@ -32,6 +32,12 @@
 # The creation-time PreOrderArtifact population stands unchanged; the
 # population only grows.
 #
+# META F3 CONTINUATION (2026-08-15). GlobalAttemptRegistrationSpec is the first
+# registered-attempt member in the independent Global command namespace. Its
+# classification lands atomically with Global ordinal 4 and resolves to the
+# exact reserved command-contract row; this remains registry metadata, not a
+# claim that the generated Global union arm or runtime handler exists.
+#
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
 # member (LocalAttemptRegistrationSpec, TxnOwnershipTransitionSpec,
@@ -69,7 +75,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 25
+registry_epoch = 26
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -245,6 +251,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-begin-terminal-spec"
 source_location = "a07:1714"
 statement = "GlobalBeginTerminalSpec alone consumes the exact Meta reservation and installs the NeverRegisteredDetailed begin-index and outcome-directory lineage."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalAttemptRegistrationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-attempt-registration-spec"
+source_location = "a09:1716"
+statement = "GlobalAttemptRegistrationSpec is the sequence-neutral Meta registration input; apply atomically binds Reserved to BoundDetailed and creates the first visible registered attempt, conflict, workspace, outcome, and audit-claim lineage."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,

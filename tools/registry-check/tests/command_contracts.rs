@@ -106,6 +106,8 @@ fn phase_b_seed_rows_are_present() {
         // bodies at frozen ordinals 0x0002-0x0003.
         "cc:meta:global-begin-reservation-spec",
         "cc:meta:global-begin-terminal-spec",
+        // Meta F3 starts the registered-attempt lineage at Global ordinal 4.
+        "cc:meta:global-attempt-registration-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
         // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
@@ -324,7 +326,7 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 150,
+        registry.contracts.len() >= 151,
         "the population may only grow from the landed Local F1-F16 plus Meta F1-F2 rows"
     );
 }
@@ -534,6 +536,75 @@ fn meta_f2_begin_lineage_contracts_are_exact() {
         terminal
             .sequence_effects
             .contains("without creating an attempt")
+    );
+}
+
+/// Meta F3 begins with one armless registration member. The body contains
+/// several predecessor-state choices, but none is a command-union arm: the
+/// frozen Global tag remains uniquely owned by this one contract row.
+#[test]
+fn meta_f3_attempt_registration_contract_is_exact_and_atomic() {
+    let registry = registry();
+    let row = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:global-attempt-registration-spec")
+        .expect("Meta F3 attempt-registration row");
+
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x0004);
+    assert_eq!(row.input_wire_tag, 0x0004);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "GlobalAttemptRegistrationSpec");
+    assert_eq!(row.body_schema_id, "GlobalAttemptRegistrationSpec");
+    assert_eq!(row.result_schema_id, "GlobalAttemptRegistration");
+    assert_eq!(row.applied_record_schema_id, "GlobalBeginIdempotencyIndex");
+    assert_eq!(row.expected_state_schema_id, "GlobalBeginReservationRecord");
+    assert_eq!(row.authority_arm, "AuthorityBoundHeader<Meta>");
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(
+        row.terminal_audit_gate_arm,
+        "LifecycleScaffoldingNotRequired"
+    );
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::global_attempt_registration_spec"
+    );
+    assert_eq!(row.transition_class, "Semantic");
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(
+        row.consumed_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_begin_idempotency_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+        ]
+    );
+    assert_eq!(row.written_state_slots, row.consumed_state_slots);
+    assert_eq!(row.checkpoint_floor_classes, ["txn-attempt"]);
+    assert_eq!(row.backup_restore_gc_classes, ["txn-lifecycle"]);
+    assert_eq!(row.posture_feature_predicate, "sharded");
+    assert_eq!(row.status, "reserved");
+    assert!(row.sequence_effects.contains("PendingUnclaimed"));
+    assert!(row.sequence_effects.contains("workspace generation zero"));
+    assert!(row.sequence_effects.contains("no participant read"));
+
+    let global_tag_four: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x0004
+        })
+        .map(|candidate| candidate.command_contract_id.as_str())
+        .collect();
+    assert_eq!(
+        global_tag_four,
+        ["cc:meta:global-attempt-registration-spec"]
     );
 }
 

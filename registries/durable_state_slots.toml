@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 12
+registry_epoch = 13
 
 
 [[slot]]
@@ -156,10 +156,11 @@ gc_class = "ReservedPendingActivation"
 role_transition_class = "ReservedPendingActivation"
 status = "reserved"
 
-# Meta F2 BEGIN lineage. The plan names these as distinct GlobalStatePayload
-# roots and requires both reservation and never-registered terminalization to
-# update the same two-key lineage atomically. Terminalization alone may resolve
-# a PendingUnclaimed operation ticket as part of that same semantic mutation.
+# Meta F2/F3 BEGIN-to-registration lineage. The plan names these as distinct
+# GlobalStatePayload roots: reservation and never-registered terminalization
+# update the same two-key lineage atomically, while F3 registration consumes
+# and advances the bound BEGIN lineage. Terminalization alone may resolve a
+# PendingUnclaimed operation ticket as part of that same semantic mutation.
 [[slot]]
 plane = "SemanticPayload"
 role = "Meta"
@@ -171,7 +172,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-begin-terminal-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-terminal-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -191,7 +192,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -211,7 +212,50 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+# Meta F3 attempt registration. Both roots are named GlobalStatePayload fields;
+# registration installs the Active attempt-family selector and conflict
+# membership in the same publication that binds the F2 BEGIN lineage.
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_attempt_index_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_attempt_index_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_conflict_index_ref"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_conflict_index_ref"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

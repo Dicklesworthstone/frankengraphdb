@@ -149,6 +149,7 @@ fn source_forced_seed_population_is_present() {
         "BeginRoleTransitionSpec",
         "GlobalBeginReservationSpec",
         "GlobalBeginTerminalSpec",
+        "GlobalAttemptRegistrationSpec",
     ] {
         assert!(
             registry
@@ -159,8 +160,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 114,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F2 rows"
+        registry.classifications.len() >= 115,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F3 rows"
     );
 }
 
@@ -752,6 +753,39 @@ fn meta_f2_begin_classifications_are_exact_and_role_distinct() {
         );
         assert!(!contract.command_contract_id.contains("cc:local:"));
     }
+}
+
+#[test]
+fn meta_f3_attempt_registration_classification_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .classifications
+        .iter()
+        .filter(|row| row.type_name == "GlobalAttemptRegistrationSpec")
+        .collect();
+    assert_eq!(rows.len(), 1, "the Global registration type is singular");
+    let row = rows[0];
+    assert_eq!(row.class, "RegisteredCommandInput");
+    assert_eq!(
+        row.command_contract_id.as_deref(),
+        Some("cc:meta:global-attempt-registration-spec")
+    );
+    assert_eq!(row.source_location, "a09:1716");
+    assert_eq!(row.status, "registered");
+
+    let contract = contracts()
+        .contracts
+        .into_iter()
+        .find(|contract| contract.command_contract_id == "cc:meta:global-attempt-registration-spec")
+        .expect("classified Meta F3 contract");
+    assert_eq!(contract.role, "Meta");
+    assert_eq!(contract.input_schema_id, "GlobalAttemptRegistrationSpec");
+    assert_eq!(
+        contract.outer_command_union,
+        "GlobalSequenceNeutralSpec<Tag>"
+    );
+    assert_eq!(contract.outer_wire_tag, 0x0004);
+    assert_eq!(contract.inner_wire_tag, None);
 }
 
 /// The load-bearing test: open every cited plan line and require the
