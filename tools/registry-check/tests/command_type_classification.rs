@@ -661,6 +661,52 @@ fn f16_sharding_role_transition_classifications_are_exact() {
     }
 }
 
+/// RecoveryBridgeSpec<Role> is one generic normative input-looking type, so
+/// §5.1 permits exactly one classification row even though the two generated
+/// command unions carry distinct Local and Meta concrete contract rows. This
+/// pins the cross-role extension without laundering a duplicate type class.
+#[test]
+fn recovery_bridge_generic_classification_covers_both_role_contracts_once() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .classifications
+        .iter()
+        .filter(|row| row.type_name == "RecoveryBridgeSpec")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "generic type must be classified exactly once"
+    );
+    assert_eq!(rows[0].class, "RegisteredCommandInput");
+    assert_eq!(
+        rows[0].command_contract_id.as_deref(),
+        Some("cc:local:recovery-bridge-spec")
+    );
+
+    let contracts = contracts();
+    for (id, input, union) in [
+        (
+            "cc:local:recovery-bridge-spec",
+            "RecoveryBridgeSpec<Local>",
+            "SequenceNeutralSpec<Tag>",
+        ),
+        (
+            "cc:meta:recovery-bridge-spec",
+            "RecoveryBridgeSpec<Meta>",
+            "GlobalSequenceNeutralSpec<Tag>",
+        ),
+    ] {
+        let contract = contracts
+            .contracts
+            .iter()
+            .find(|contract| contract.command_contract_id == id)
+            .expect("both concrete role contracts must exist");
+        assert_eq!(contract.input_schema_id, input);
+        assert_eq!(contract.outer_command_union, union);
+    }
+}
+
 /// The load-bearing test: open every cited plan line and require the
 /// classified type to be named there. A class whose anchor does not name the
 /// type is a choice, not a derivation.

@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 53, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 56, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&49));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&50));
     assert_eq!(plane_counts.get("Protocol"), Some(&1));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
-    assert_eq!(plane_counts.get("Bootstrap"), Some(&2));
+    assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 49);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 50);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 1);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -214,6 +214,58 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:sharding-unfreeze-spec",
         ]
     );
+
+    let meta_guard = slots
+        .slots
+        .iter()
+        .find(|slot| {
+            slot.plane == "Bootstrap"
+                && slot.role == "Meta"
+                && slot.slot_tag == "pending_restore_creation_guard"
+        })
+        .expect("Meta F1 pending restore creation guard slot");
+    assert!(meta_guard.transition_writer_contract_ids.is_empty());
+    assert_eq!(meta_guard.backing_registry, "bootstrap_frames.toml");
+    assert_eq!(meta_guard.status, "reserved");
+
+    let meta_origin = slots
+        .slots
+        .iter()
+        .find(|slot| {
+            slot.plane == "Bootstrap"
+                && slot.role == "Meta"
+                && slot.slot_tag == "restore_bridge_origin"
+        })
+        .expect("Meta F1 recovery origin slot");
+    assert_eq!(
+        meta_origin.transition_writer_contract_ids,
+        ["cc:meta:recovery-bridge-spec"]
+    );
+    assert_eq!(meta_origin.backing_registry, "bootstrap_frames.toml");
+
+    let meta_root = slots
+        .slots
+        .iter()
+        .find(|slot| {
+            slot.plane == "SemanticPayload"
+                && slot.role == "Meta"
+                && slot.slot_tag == "global_state_root"
+        })
+        .expect("Meta F1 global state root slot");
+    assert_eq!(meta_root.stable_name, "global_state_root");
+    assert_eq!(meta_root.backing_registry, "state_payload_fields.toml");
+    assert_eq!(
+        meta_root.transition_writer_contract_ids,
+        ["cc:meta:recovery-bridge-spec"]
+    );
+    assert_eq!(meta_root.status, "reserved");
+
+    let projected_meta_root = backings["state_payload_fields.toml"]
+        .fields
+        .iter()
+        .filter(|field| field.role == "Meta" && field.slot_tag == "global_state_root")
+        .count();
+    assert_eq!(projected_meta_root, 1);
 }
 
 #[test]

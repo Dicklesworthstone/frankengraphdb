@@ -99,6 +99,9 @@ fn phase_b_seed_rows_are_present() {
     for id in [
         // F1/F2 (87cf892)
         "cc:local:recovery-bridge-spec",
+        // Meta F1 begins the separate GlobalSequenceNeutralSpec<Tag> tag
+        // namespace at its own frozen ordinal 0x0001.
+        "cc:meta:recovery-bridge-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
         // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
@@ -317,9 +320,86 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 147,
-        "the population may only grow from the landed F1-F16 rows"
+        registry.contracts.len() >= 148,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1 rows"
     );
+}
+
+/// Meta F1 is the role-specialized recovery bridge, not a copy of the Local
+/// result/state triple. It starts the independent Global tag namespace and
+/// consumes only the Meta pending-creation guard before publishing the first
+/// Global root and RecoveryBridge origin.
+#[test]
+fn meta_f1_guarded_recovery_contract_is_exact() {
+    let registry = registry();
+    let row = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:recovery-bridge-spec")
+        .expect("Meta F1 recovery bridge row");
+
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x0001);
+    assert_eq!(row.input_wire_tag, 0x0001);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "RecoveryBridgeSpec<Meta>");
+    assert_eq!(row.body_schema_id, "RecoveryBridgeSpec<Meta>");
+    assert_eq!(row.result_schema_id, "GlobalControlRecord");
+    assert_eq!(row.applied_record_schema_id, "GlobalStateRoot");
+    assert_eq!(row.handler_symbol, "fgdb_apply::meta::recovery_bridge_spec");
+    assert_eq!(row.transition_class, "Semantic");
+    assert_eq!(
+        row.expected_state_schema_id,
+        "PendingRestoreCreationGuard<Meta>"
+    );
+    assert_eq!(row.authority_arm, "RecoveryBridgeAuthority<Meta>");
+    assert_eq!(row.authority_evidence_target_schema_id, None);
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(
+        row.terminal_audit_gate_arm,
+        "StructurallyInapplicable{RecoverySystemAuthority}"
+    );
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(
+        row.consumed_state_slots,
+        ["Bootstrap|Meta|pending_restore_creation_guard"]
+    );
+    assert_eq!(
+        row.written_state_slots,
+        [
+            "Bootstrap|Meta|restore_bridge_origin",
+            "SemanticPayload|Meta|global_state_root",
+        ]
+    );
+    assert_eq!(
+        row.checkpoint_floor_classes,
+        ["genesis-or-restore-first-root"]
+    );
+    assert_eq!(row.backup_restore_gc_classes, ["restore-bridge"]);
+    assert_eq!(row.posture_feature_predicate, "sharded");
+    assert_eq!(row.status, "reserved");
+
+    let global_tag_one: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x0001
+        })
+        .collect();
+    assert_eq!(global_tag_one.len(), 1, "Meta tag 1 must be unambiguous");
+
+    let local = registry
+        .contracts
+        .iter()
+        .find(|candidate| candidate.command_contract_id == "cc:local:recovery-bridge-spec")
+        .expect("Local recovery bridge remains present");
+    assert_eq!(local.outer_wire_tag, 0x0001);
+    assert_ne!(local.outer_command_union, row.outer_command_union);
+    assert_ne!(local.result_schema_id, row.result_schema_id);
+    assert_ne!(local.applied_record_schema_id, row.applied_record_schema_id);
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These

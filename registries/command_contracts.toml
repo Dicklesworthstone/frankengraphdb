@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 24
+registry_epoch = 25
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -184,6 +184,42 @@ written_state_slots = [ "SemanticPayload|Local|begin_idempotency_index", "Semant
 checkpoint_floor_classes = [ "txn-attempt" ]                              # [C][F]
 backup_restore_gc_classes = [ "txn-lifecycle" ]                           # [C][F]
 posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# META F1 guarded-recovery-bootstrap — frozen Global ordinal 1. The Meta tag
+# namespace is independent from the Local SequenceNeutralSpec<Tag> namespace;
+# this is the first GlobalSequenceNeutralSpec<Tag> member in the confirmed
+# round-10 order. RecoveryBridgeSpec<Role> is one generic input type (already
+# classified once), while this row fixes its exact Meta body/result/state
+# triple. It remains reserved until the generated union and handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:recovery-bridge-spec"                      # [C]
+role = "Meta"                                                             # [S] AuthorityOwningRole includes Meta (L330)
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                    # [S] L1770/L1914
+outer_wire_tag = 0x0001                                                    # [S] frozen dense Meta ordinal 1
+input_schema_id = "RecoveryBridgeSpec<Meta>"                              # [S] L1658/L2561
+input_wire_tag = 0x0001                                                    # [C] = outer (armless)
+body_schema_id = "RecoveryBridgeSpec<Meta>"                               # [S] L2561 exact role-specialized body
+result_schema_id = "GlobalControlRecord"                                  # [S] L1658 RecoveryBridge origin
+applied_record_schema_id = "GlobalStateRoot"                              # [S] L1658 first guarded Meta root
+handler_symbol = "fgdb_apply::meta::recovery_bridge_spec"                 # [C][F]
+transition_class = "Semantic"                                              # [S] L1770 Meta semantic union
+sequence_effects = "sole legal first ordered command of a restored Meta incarnation; creates GlobalControlOrigin::RecoveryBridge with topology and assigned global origin; forbidden after any Prior or LocalActivationBridge origin exists"  # [S] L1658/L2561-L2563
+expected_state_schema_id = "PendingRestoreCreationGuard<Meta>"            # [S] L2563 sole Meta consumer guard
+authority_arm = "RecoveryBridgeAuthority<Meta>"                           # [S] L2555/L2561
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze member in L2561 body
+terminal_audit_gate_arm = "StructurallyInapplicable{RecoverySystemAuthority}"  # [S] L2561 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S] semantic first-root publication
+construction_dag_recipe_id = "dag:cc:meta:recovery-bridge-spec"           # [C][F]
+consumed_state_slots = [ "Bootstrap|Meta|pending_restore_creation_guard" ] # [C][F]
+written_state_slots = [ "Bootstrap|Meta|restore_bridge_origin", "SemanticPayload|Meta|global_state_root" ]  # [C][F]
+checkpoint_floor_classes = [ "genesis-or-restore-first-root" ]            # [C][F]
+backup_restore_gc_classes = [ "restore-bridge" ]                          # [C][F]
+posture_feature_predicate = "sharded"                                     # [S] Meta exists in W12 sharded posture
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]
 
