@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 17
+registry_epoch = 18
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -841,4 +841,64 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:local-backup-abort-spec"
 source_location = "a15:2139"
 statement = "LocalBackupAbortSpec is the only Local backup failure transition and is legal only with complete provider-linearizable no-publication evidence, exact cleanup completion and no-other-owner proof; unresolved SentUnknown forces roll-forward."
+status = "registered"
+
+# --- F15B semantic restore (frozen ordinals 80-86). RestoreAbandonSpec is
+# --- an armed family and therefore binds the member-root contract id; the
+# --- Local role-valid arm is the sole contract row in this increment.
+
+[[classification]]
+type_name = "LocalRestoreActivationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-restore-activation-spec"
+source_location = "a20:2603"
+statement = "LocalRestoreActivationSpec consumes the exact Local ready certificate and hidden-state/configuration/checkpoint/floor/promotion-authority basis; it alone moves Reconciling to VisibilityCommitted and permits the gap-free activation certificate without exposing service."
+status = "registered"
+
+[[classification]]
+type_name = "LocalRestoreServicePrepareSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-restore-service-prepare-spec"
+source_location = "a20:2603"
+statement = "LocalRestoreServicePrepareSpec consumes the activation certificate and one closed promotion-authority profile recipe; it alone selects ServicePreparedHidden and permits the gap-free prepare certificate."
+status = "registered"
+
+[[classification]]
+type_name = "LocalRestoreServicePromotionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-restore-service-promotion-spec"
+source_location = "a20:2605"
+statement = "LocalRestoreServicePromotionSpec requires exact prepare, Local manifest, composite receipt, profile-stage lineage and hidden-state equality; after durable semantic visibility it enters PromotedAwaitingReopen and retains the source lease."
+status = "registered"
+
+[[classification]]
+type_name = "LocalRestoreServiceCompletionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-restore-service-completion-spec"
+source_location = "a20:2605"
+statement = "LocalRestoreServiceCompletionSpec consumes the exact promotion lineage, installed seal and fresh independent reopen proof; it alone selects Operational and AwaitingSourceAccessCleanup without dropping the source lease or terminal pin."
+status = "registered"
+
+[[classification]]
+type_name = "LocalRestoreAbandonFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-restore-abandon-finalize-spec"
+source_location = "a18:2453"
+statement = "For ExternalCas, LocalRestoreAbandonFinalizeSpec consumes exact canonical profile terminal evidence, clears restore_state_ref, selects RecoveryAbandoned, materializes the Local no-resurrection tombstone and enters AbandonedAwaitingTerminalPin."
+status = "registered"
+
+[[classification]]
+type_name = "LocalRestoreAbandonmentPinInstallSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-restore-abandonment-pin-install-spec"
+source_location = "a18:2381"
+statement = "LocalRestoreAbandonmentPinInstallSpec consumes durable abandonment publication evidence, the published tombstone, exact abandoned physical inventory, pin durability receipt and no-other-owner proof; it installs the abandoned terminal pin basis and cleanup progress generation zero."
+status = "registered"
+
+[[classification]]
+type_name = "RestoreAbandonSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-abandon-spec"
+source_location = "a18:2433"
+statement = "RestoreAbandonSpec is the closed Local|ShardedMeta ordered union; the Local arm requires a hidden target, exact no-target-observation proof, closed Local authority profile, prebuilt pin pending owner and ReleaseRequired source lease, then remains hidden in AbandonAuthorizedHidden."
 status = "registered"

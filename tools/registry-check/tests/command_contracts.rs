@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F15A tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F15B tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -264,6 +264,16 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:local-backup-release-spec",
         "cc:local:archive-source-release-completion-import-spec",
         "cc:local:local-backup-abort-spec",
+        // F15B Local semantic restore (frozen ordinals 0x0050-0x0056).
+        // RestoreAbandonSpec is armed; this role-valid projection contains
+        // exactly its first/source-ordered Local arm.
+        "cc:local:local-restore-activation-spec",
+        "cc:local:local-restore-service-prepare-spec",
+        "cc:local:local-restore-service-promotion-spec",
+        "cc:local:local-restore-service-completion-spec",
+        "cc:local:local-restore-abandon-finalize-spec",
+        "cc:local:local-restore-abandonment-pin-install-spec",
+        "cc:local:restore-abandon-spec:local",
     ] {
         assert!(
             registry
@@ -274,8 +284,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 121,
-        "the population may only grow from the landed F1-F15A rows"
+        registry.contracts.len() >= 128,
+        "the population may only grow from the landed F1-F15B rows"
     );
 }
 
@@ -645,6 +655,171 @@ fn f15a_local_backup_contracts_are_exact() {
     }
 }
 
+/// Freeze the exact Local restore cohort after F15A. This table independently
+/// pins dense order, the single role-valid RestoreAbandonSpec arm, semantic
+/// plane, state root, authority evidence, and forward-declared handler seam.
+#[test]
+fn f15b_local_restore_contracts_are_exact() {
+    let registry = registry();
+    assert_eq!(
+        registry
+            .contracts
+            .iter()
+            .filter(|row| {
+                row.role == "Local" && (0x0050..=0x0056).contains(&row.outer_wire_tag)
+            })
+            .count(),
+        7,
+        "the F15B outer-tag interval must contain exactly its seven role-valid rows"
+    );
+    let expected = [
+        (
+            "cc:local:local-restore-activation-spec",
+            0x0050,
+            None,
+            "LocalRestoreActivationSpec",
+            "LocalRestoreActivationCertificate",
+            "LocalRestoreRegistryValue",
+            "WeakStateIdentity",
+            "SameGroupCertificateHeader",
+            Some("LocalRestoreReadyCertificate"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_restore_activation_spec",
+        ),
+        (
+            "cc:local:local-restore-service-prepare-spec",
+            0x0051,
+            None,
+            "LocalRestoreServicePrepareSpec",
+            "LocalRestoreServicePrepareCertificate",
+            "LocalRestoreRegistryValue",
+            "WeakStateIdentity",
+            "SameGroupCertificateHeader",
+            Some("LocalRestoreActivationCertificate"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_restore_service_prepare_spec",
+        ),
+        (
+            "cc:local:local-restore-service-promotion-spec",
+            0x0052,
+            None,
+            "LocalRestoreServicePromotionSpec",
+            "RestorePromotionRootSeal<Local>",
+            "LocalRestoreRegistryValue",
+            "WeakStateIdentity",
+            "RestoreServicePromotionReceipt",
+            Some("RestoreServicePromotionManifest"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_restore_service_promotion_spec",
+        ),
+        (
+            "cc:local:local-restore-service-completion-spec",
+            0x0053,
+            None,
+            "LocalRestoreServiceCompletionSpec",
+            "PortableSemanticVisibilityCertificate<Local>",
+            "LocalRestoreRegistryValue",
+            "LocalRestoreRegistryValue",
+            "LocalRestoreIndependentReopenProof",
+            Some("RestorePromotionRootSeal<Local>"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_restore_service_completion_spec",
+        ),
+        (
+            "cc:local:local-restore-abandon-finalize-spec",
+            0x0054,
+            None,
+            "LocalRestoreAbandonFinalizeSpec",
+            "AuthorityOwningRestoreAbandonmentTombstone<Local>",
+            "LocalRestoreRegistryValue",
+            "LocalRestoreRegistryValue",
+            "RestoreAbandonOperationRecord<Local>",
+            Some("RestoreAbandonmentReceipt"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::local_restore_abandon_finalize_spec",
+        ),
+        (
+            "cc:local:local-restore-abandonment-pin-install-spec",
+            0x0055,
+            None,
+            "LocalRestoreAbandonmentPinInstallSpec",
+            "RestoreTerminalPinBasis<Local>",
+            "LocalRestoreRegistryValue",
+            "LocalRestoreRegistryValue",
+            "RestoreTerminalPinDurabilityReceipt<Local,Abandoned>",
+            Some("RestoreTerminalPhysicalInventory<Local,Abandoned>"),
+            "SourceUnspelled",
+            "fgdb_apply::local::local_restore_abandonment_pin_install_spec",
+        ),
+        (
+            "cc:local:restore-abandon-spec:local",
+            0x0056,
+            Some(0x0001),
+            "RestoreAbandonSpec",
+            "RestoreAbandonOperationRecord<Local>",
+            "LocalRestoreRegistryValue",
+            "WeakStateIdentity",
+            "RestoreAbandonAuthorityProfile<Local>",
+            Some("RestoreNoTargetObservationProof<Local>"),
+            "TerminalAuditGate",
+            "fgdb_apply::local::restore_abandon_spec::local",
+        ),
+    ];
+
+    for (id, tag, inner, input, result, applied, state, authority, target, gate, handler) in
+        expected
+    {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F15B table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, inner, "{id} inner tag drifted");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(
+            row.body_schema_id,
+            if inner.is_some() {
+                "RestoreAbandonSpec::Local"
+            } else {
+                input
+            },
+            "{id} body drifted"
+        );
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(
+            row.applied_record_schema_id, applied,
+            "{id} applied drifted"
+        );
+        assert_eq!(row.expected_state_schema_id, state, "{id} state drifted");
+        assert_eq!(row.authority_arm, authority, "{id} authority drifted");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            target,
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.terminal_audit_gate_arm, gate, "{id} gate drifted");
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(
+            row.written_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-restore"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-restore"]);
+        assert_eq!(row.posture_feature_predicate, "local");
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+}
+
 /// An armed member's rows share the member's outer tag and differ only by
 /// inner_wire_tag: the arm-slot law keys on (role, union, outer, inner), so
 /// this shape validates clean while a same-inner duplicate or an
@@ -668,6 +843,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:bulk-load-transition-spec", 5),
         ("cc:local:derived-build-transition-spec", 6),
         ("cc:local:gc-physical-disposition-import-spec", 2),
+        ("cc:local:restore-abandon-spec", 1),
     ] {
         let family: Vec<_> = registry
             .contracts

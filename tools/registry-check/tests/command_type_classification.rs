@@ -121,6 +121,13 @@ fn source_forced_seed_population_is_present() {
         "LocalBackupReleaseSpec",
         "ArchiveSourceReleaseCompletionImportSpec",
         "LocalBackupAbortSpec",
+        "LocalRestoreActivationSpec",
+        "LocalRestoreServicePrepareSpec",
+        "LocalRestoreServicePromotionSpec",
+        "LocalRestoreServiceCompletionSpec",
+        "LocalRestoreAbandonFinalizeSpec",
+        "LocalRestoreAbandonmentPinInstallSpec",
+        "RestoreAbandonSpec",
     ] {
         assert!(
             registry
@@ -131,8 +138,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 86,
-        "the population may only grow from the landed F1-F15A rows"
+        registry.classifications.len() >= 93,
+        "the population may only grow from the landed F1-F15B rows"
     );
 }
 
@@ -285,6 +292,65 @@ fn f15a_local_backup_classifications_are_exact() {
             .iter()
             .find(|row| row.type_name == type_name)
             .expect("exact F15A table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(row.source_location, source_location);
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F15B's seven Local restore members are exact registered inputs. The final
+/// closed union binds its member-root contract id; only its Local arm is
+/// inhabitable in SequenceNeutralSpec<Tag>.
+#[test]
+fn f15b_local_restore_classifications_are_exact() {
+    let registry = registry();
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "LocalRestoreActivationSpec",
+            "cc:local:local-restore-activation-spec",
+            "a20:2603",
+        ),
+        (
+            "LocalRestoreServicePrepareSpec",
+            "cc:local:local-restore-service-prepare-spec",
+            "a20:2603",
+        ),
+        (
+            "LocalRestoreServicePromotionSpec",
+            "cc:local:local-restore-service-promotion-spec",
+            "a20:2605",
+        ),
+        (
+            "LocalRestoreServiceCompletionSpec",
+            "cc:local:local-restore-service-completion-spec",
+            "a20:2605",
+        ),
+        (
+            "LocalRestoreAbandonFinalizeSpec",
+            "cc:local:local-restore-abandon-finalize-spec",
+            "a18:2453",
+        ),
+        (
+            "LocalRestoreAbandonmentPinInstallSpec",
+            "cc:local:local-restore-abandonment-pin-install-spec",
+            "a18:2381",
+        ),
+        (
+            "RestoreAbandonSpec",
+            "cc:local:restore-abandon-spec",
+            "a18:2433",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F15B table must resolve every classification row");
         assert_eq!(row.class, "RegisteredCommandInput");
         assert_eq!(
             row.command_contract_id.as_deref(),

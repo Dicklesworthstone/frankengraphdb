@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 17
+registry_epoch = 18
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -632,6 +632,218 @@ consumed_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
 written_state_slots = [ "SemanticPayload|Local|backup_registry_root" ]
 checkpoint_floor_classes = [ "semantic-backup" ]
 backup_restore_gc_classes = [ "semantic-backup" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+# =============================================================================
+# F15B semantic restore — frozen ordinals 80-86. This is the exact Local
+# restore cohort in the owner-confirmed v1 order: activation, service prepare,
+# promotion, completion, ExternalCas abandon finalization, abandonment-pin
+# installation, then the Local arm of RestoreAbandonSpec. DirectoryBound and
+# the structural Role cohort remain later F15 increments. These rows reserve
+# contracts only; no Rust union, handler, or live capability is claimed.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:local-restore-activation-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0050
+input_schema_id = "LocalRestoreActivationSpec"
+input_wire_tag = 0x0050
+body_schema_id = "LocalRestoreActivationSpec"
+result_schema_id = "LocalRestoreActivationCertificate"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::local_restore_activation_spec"
+transition_class = "Semantic"
+sequence_effects = "byte-matches the Local ready certificate, exact hidden restore state, configuration/checkpoint/floor and selected promotion-authority basis; alone moves Reconciling to VisibilityCommitted and permits the gap-free activation certificate without exposing service"
+expected_state_schema_id = "WeakStateIdentity"
+authority_arm = "SameGroupCertificateHeader"
+authority_evidence_target_schema_id = "LocalRestoreReadyCertificate"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-restore-activation-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-restore-service-prepare-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0051
+input_schema_id = "LocalRestoreServicePrepareSpec"
+input_wire_tag = 0x0051
+body_schema_id = "LocalRestoreServicePrepareSpec"
+result_schema_id = "LocalRestoreServicePrepareCertificate"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::local_restore_service_prepare_spec"
+transition_class = "Semantic"
+sequence_effects = "requires the exact activation certificate, hidden restore state, configuration/endpoint set and one closed promotion-authority profile recipe; alone selects ServicePreparedHidden and permits the gap-free prepare certificate"
+expected_state_schema_id = "WeakStateIdentity"
+authority_arm = "SameGroupCertificateHeader"
+authority_evidence_target_schema_id = "LocalRestoreActivationCertificate"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-restore-service-prepare-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-restore-service-promotion-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0052
+input_schema_id = "LocalRestoreServicePromotionSpec"
+input_wire_tag = 0x0052
+body_schema_id = "LocalRestoreServicePromotionSpec"
+result_schema_id = "RestorePromotionRootSeal<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::local_restore_service_promotion_spec"
+transition_class = "Semantic"
+sequence_effects = "requires exact prepare, manifest, composite receipt, profile-stage lineage and hidden-state equality; after durable Local visibility it selects OperationalPendingIndependentReopen::Unsealed and PromotedAwaitingReopen while retaining the source lease and terminal pin"
+expected_state_schema_id = "WeakStateIdentity"
+authority_arm = "RestoreServicePromotionReceipt"
+authority_evidence_target_schema_id = "RestoreServicePromotionManifest"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-restore-service-promotion-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-restore-service-completion-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0053
+input_schema_id = "LocalRestoreServiceCompletionSpec"
+input_wire_tag = 0x0053
+body_schema_id = "LocalRestoreServiceCompletionSpec"
+result_schema_id = "PortableSemanticVisibilityCertificate<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::local_restore_service_completion_spec"
+transition_class = "Semantic"
+sequence_effects = "requires the exact promotion record and receipt, installed Local promotion seal, fresh independent reopen proof, PromotedAwaitingReopen registry state and Sealed pending state; alone selects Operational and AwaitingSourceAccessCleanup without dropping the source lease or terminal pin"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "LocalRestoreIndependentReopenProof"
+authority_evidence_target_schema_id = "RestorePromotionRootSeal<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-restore-service-completion-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-restore-abandon-finalize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0054
+input_schema_id = "LocalRestoreAbandonFinalizeSpec"
+input_wire_tag = 0x0054
+body_schema_id = "LocalRestoreAbandonFinalizeSpec"
+result_schema_id = "AuthorityOwningRestoreAbandonmentTombstone<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::local_restore_abandon_finalize_spec"
+transition_class = "Semantic"
+sequence_effects = "for ExternalCas only, consumes the exact canonical profile terminal evidence, clears restore_state_ref, selects RecoveryAbandoned, materializes the Local no-resurrection tombstone and enters AbandonedAwaitingTerminalPin without beginning cleanup"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "RestoreAbandonOperationRecord<Local>"
+authority_evidence_target_schema_id = "RestoreAbandonmentReceipt"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-restore-abandon-finalize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:local-restore-abandonment-pin-install-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0055
+input_schema_id = "LocalRestoreAbandonmentPinInstallSpec"
+input_wire_tag = 0x0055
+body_schema_id = "LocalRestoreAbandonmentPinInstallSpec"
+result_schema_id = "RestoreTerminalPinBasis<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::local_restore_abandonment_pin_install_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes durable abandonment publication evidence, the published Local tombstone, exact abandoned physical inventory, new pin durability receipt and no-other-owner proof; atomically installs the Abandoned terminal pin basis, creates cleanup progress generation zero and enters AwaitingSourceAccessCleanup"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "RestoreTerminalPinDurabilityReceipt<Local,Abandoned>"
+authority_evidence_target_schema_id = "RestoreTerminalPhysicalInventory<Local,Abandoned>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:local-restore-abandonment-pin-install-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:restore-abandon-spec:local"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0056
+input_schema_id = "RestoreAbandonSpec"
+input_wire_tag = 0x0056
+inner_wire_tag = 0x0001
+body_schema_id = "RestoreAbandonSpec::Local"
+result_schema_id = "RestoreAbandonOperationRecord<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_abandon_spec::local"
+transition_class = "Semantic"
+sequence_effects = "the Local arm requires a hidden target, exact no-target-observation proof, one closed Local authority profile, prebuilt abandonment pin pending owner and ReleaseRequired source-lease disposition; apply remains hidden and enters AbandonAuthorizedHidden"
+expected_state_schema_id = "WeakStateIdentity"
+authority_arm = "RestoreAbandonAuthorityProfile<Local>"
+authority_evidence_target_schema_id = "RestoreNoTargetObservationProof<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-abandon-spec:local"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
 posture_feature_predicate = "local"
 format_epoch_range = "v1.."
 status = "reserved"
