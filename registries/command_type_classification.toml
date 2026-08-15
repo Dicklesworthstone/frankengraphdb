@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 21
+registry_epoch = 22
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -994,4 +994,33 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:restore-source-key-access-cleanup-import-spec"
 source_location = "a18:2381"
 statement = "RestoreSourceKeyAccessCleanupImportSpec<Role> imports and byte-matches one authorized source-resource revocation's terminal lineage before advancing that cleanup-progress member to its typed terminal disposition."
+status = "registered"
+
+# --- F15F source-lease renewal cohort (frozen ordinals 97-99). The generic
+# --- plan members instantiate structurally for Local under the owner-confirmed
+# --- C5 ruling; authorization, applied finalization and no-effect finalization
+# --- remain three distinct reserved commands.
+
+[[classification]]
+type_name = "RestoreSourceLeaseRenewAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-lease-renew-authorize-spec"
+source_location = "a18:2393"
+statement = "RestoreSourceLeaseRenewAuthorizeSpec<Role> requires fresh action-bound current lease and grant observations plus exact lineage and time evidence, then creates only an AuthorizedUndispatchedRecipe operation record and names no successor."
+status = "registered"
+
+[[classification]]
+type_name = "RestoreSourceLeaseRenewFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-lease-renew-finalize-spec"
+source_location = "a18:2395"
+statement = "RestoreSourceLeaseRenewFinalizeSpec<Role> consumes the exact Applied terminal lineage and successor proofs, constructs generation g+1 and restores the frozen phase with the new Current lease record."
+status = "registered"
+
+[[classification]]
+type_name = "RestoreSourceLeaseRenewNoEffectFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:restore-source-lease-renew-no-effect-finalize-spec"
+source_location = "a18:2395"
+statement = "RestoreSourceLeaseRenewNoEffectFinalizeSpec<Role> consumes the typed zero-effect terminal lineage, preserves the old Current lease and appends a permanent NoEffect operation record that forbids resend."
 status = "registered"

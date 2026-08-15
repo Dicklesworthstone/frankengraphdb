@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F15E tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F15F tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -291,6 +291,12 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:restore-terminal-pin-release-finalize-spec",
         "cc:local:restore-source-key-access-cleanup-authorize-spec",
         "cc:local:restore-source-key-access-cleanup-import-spec",
+        // F15F source-lease renewal (frozen ordinals 97-99). Authorization
+        // remains recipe-only; applied and no-effect terminal paths are
+        // separate armless transitions.
+        "cc:local:restore-source-lease-renew-authorize-spec",
+        "cc:local:restore-source-lease-renew-finalize-spec",
+        "cc:local:restore-source-lease-renew-no-effect-finalize-spec",
     ] {
         assert!(
             registry
@@ -301,8 +307,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 138,
-        "the population may only grow from the landed F1-F15E rows"
+        registry.contracts.len() >= 141,
+        "the population may only grow from the landed F1-F15F rows"
     );
 }
 
@@ -1294,6 +1300,147 @@ fn f15e_terminal_pin_and_source_cleanup_contracts_are_exact() {
         assert!(
             import.sequence_effects.contains(required),
             "cleanup-import law lost {required:?}"
+        );
+    }
+}
+
+/// F15F continues the owner-frozen structural Local cohort with the complete
+/// renewal state machine from plan lines 2393-2395. Pin the distinct recipe,
+/// applied-successor, and no-effect results so a generic "renew finalize" row
+/// cannot erase the fresh-observation law, mint a successor before dispatch,
+/// or turn a zero-effect status into generation g+1.
+#[test]
+fn f15f_source_lease_renewal_contracts_are_exact() {
+    let registry = registry();
+    let interval: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| (0x0061..=0x0063).contains(&row.outer_wire_tag))
+        .collect();
+    assert_eq!(
+        interval.len(),
+        3,
+        "the F15F outer-tag interval must contain exactly three armless rows"
+    );
+
+    let expected = [
+        (
+            "cc:local:restore-source-lease-renew-authorize-spec",
+            0x0061,
+            "RestoreSourceLeaseRenewAuthorizeSpec<Local>",
+            "RestoreSourceLeaseRenewOperationRecord<Local>",
+            "RestoreSourceLeaseAuthorityObservationImport<Local>",
+            "TerminalAuditGate",
+            "fgdb_apply::local::restore_source_lease_renew_authorize_spec",
+        ),
+        (
+            "cc:local:restore-source-lease-renew-finalize-spec",
+            0x0062,
+            "RestoreSourceLeaseRenewFinalizeSpec<Local>",
+            "RestoreSourceLeaseRecord<Local>",
+            "RestoreSourceLeaseRenewOperationRecord<Local>",
+            "SourceUnspelled",
+            "fgdb_apply::local::restore_source_lease_renew_finalize_spec",
+        ),
+        (
+            "cc:local:restore-source-lease-renew-no-effect-finalize-spec",
+            0x0063,
+            "RestoreSourceLeaseRenewNoEffectFinalizeSpec<Local>",
+            "RestoreLeaseOperationTerminalRecord<Local,Renew>",
+            "RestoreSourceLeaseRenewOperationRecord<Local>",
+            "SourceUnspelled",
+            "fgdb_apply::local::restore_source_lease_renew_no_effect_finalize_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, authority_target, audit_gate, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F15F table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} invented an inner arm");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(row.applied_record_schema_id, "LocalRestoreRegistryValue");
+        assert_eq!(row.expected_state_schema_id, "LocalRestoreRegistryValue");
+        assert_eq!(row.authority_arm, "AuthorityBoundHeader<Local>");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            Some(authority_target),
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.terminal_audit_freeze_arm, "SourceUnspelled");
+        assert_eq!(row.terminal_audit_gate_arm, audit_gate);
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|restore_registry_root"]
+        );
+        assert_eq!(row.written_state_slots, row.consumed_state_slots);
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-restore"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-restore"]);
+        assert_eq!(row.posture_feature_predicate, "local");
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+
+    let authorize = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:local:restore-source-lease-renew-authorize-spec")
+        .expect("renew authorize row exists");
+    for required in [
+        "fresh challenged action-bound observation imports",
+        "AuthorizedUndispatchedRecipe",
+        "names no successor, attempt, full request, receipt or provider result",
+        "no lineage proof without a fresh current grant observation",
+    ] {
+        assert!(
+            authorize.sequence_effects.contains(required),
+            "renew-authorize law lost {required:?}"
+        );
+    }
+
+    let finalize = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:local:restore-source-lease-renew-finalize-spec")
+        .expect("renew finalize row exists");
+    for required in [
+        "Applied or AlreadyApplied",
+        "fresh grant observation/import lineage",
+        "generation g+1",
+        "restores the frozen phase with Current",
+    ] {
+        assert!(
+            finalize.sequence_effects.contains(required),
+            "renew-finalize law lost {required:?}"
+        );
+    }
+
+    let no_effect = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id == "cc:local:restore-source-lease-renew-no-effect-finalize-spec"
+        })
+        .expect("renew no-effect row exists");
+    for required in [
+        "expired-NotRegistered",
+        "no successor lease was installed",
+        "preserves the old Current lease record",
+        "permanently forbids resend",
+    ] {
+        assert!(
+            no_effect.sequence_effects.contains(required),
+            "renew-no-effect law lost {required:?}"
         );
     }
 }

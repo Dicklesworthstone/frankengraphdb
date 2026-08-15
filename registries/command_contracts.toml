@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 21
+registry_epoch = 22
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1156,6 +1156,101 @@ terminal_audit_gate_arm = "SourceUnspelled"
 payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
 publication_mode = "SinglePlane"
 construction_dag_recipe_id = "dag:cc:local:restore-source-key-access-cleanup-import-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+# =============================================================================
+# F15F source-lease renewal — frozen ordinals 97-99.  The owner-confirmed C5
+# ruling continues the structurally Local Role:AuthorityOwningRole cohort in
+# source order.  Authorization freezes only an undispatched operation recipe;
+# applied and no-effect finalization are distinct transitions at plan lines
+# 2393-2395.  These rows reserve contracts only; no Rust union, handler, or
+# live capability is claimed.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:restore-source-lease-renew-authorize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0061
+input_schema_id = "RestoreSourceLeaseRenewAuthorizeSpec<Local>"
+input_wire_tag = 0x0061
+body_schema_id = "RestoreSourceLeaseRenewAuthorizeSpec<Local>"
+result_schema_id = "RestoreSourceLeaseRenewOperationRecord<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_lease_renew_authorize_spec"
+transition_class = "Semantic"
+sequence_effects = "is the sole transition that freezes the exact current lease and grant heads, fresh challenged action-bound observation imports, current descendant lineage, successor window/profile, operation ID and idempotency key into RestoreSourceLeaseRenewOperationRecord<Local>::AuthorizedUndispatchedRecipe; it names no successor, attempt, full request, receipt or provider result, and no lineage proof without a fresh current grant observation may authorize renewal"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceLeaseAuthorityObservationImport<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "TerminalAuditGate"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-lease-renew-authorize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:restore-source-lease-renew-finalize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0062
+input_schema_id = "RestoreSourceLeaseRenewFinalizeSpec<Local>"
+input_wire_tag = 0x0062
+body_schema_id = "RestoreSourceLeaseRenewFinalizeSpec<Local>"
+result_schema_id = "RestoreSourceLeaseRecord<Local>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_lease_renew_finalize_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact renew operation record, typed Applied or AlreadyApplied receipt, portable terminal evidence, action-typed terminal import, fresh grant observation/import lineage, LeaseWindowSuccessorProof and signed lease-lineage proof; constructs exactly generation g+1 with the returned portable state digest, appends the Applied terminal record and restores the frozen phase with Current"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceLeaseRenewOperationRecord<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-lease-renew-finalize-spec"
+consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
+checkpoint_floor_classes = [ "semantic-restore" ]
+backup_restore_gc_classes = [ "semantic-restore" ]
+posture_feature_predicate = "local"
+format_epoch_range = "v1.."
+status = "reserved"
+
+[[contract]]
+command_contract_id = "cc:local:restore-source-lease-renew-no-effect-finalize-spec"
+role = "Local"
+outer_command_union = "SequenceNeutralSpec<Tag>"
+outer_wire_tag = 0x0063
+input_schema_id = "RestoreSourceLeaseRenewNoEffectFinalizeSpec<Local>"
+input_wire_tag = 0x0063
+body_schema_id = "RestoreSourceLeaseRenewNoEffectFinalizeSpec<Local>"
+result_schema_id = "RestoreLeaseOperationTerminalRecord<Local,Renew>"
+applied_record_schema_id = "LocalRestoreRegistryValue"
+handler_symbol = "fgdb_apply::local::restore_source_lease_renew_no_effect_finalize_spec"
+transition_class = "Semantic"
+sequence_effects = "consumes the exact typed refusal, conflict or expired-NotRegistered no-effect tombstone plus action-typed terminal evidence and import; proves no successor lease was installed, preserves the old Current lease record and frozen phase, appends the exact NoEffect terminal record and permanently forbids resend under that operation identity"
+expected_state_schema_id = "LocalRestoreRegistryValue"
+authority_arm = "AuthorityBoundHeader<Local>"
+authority_evidence_target_schema_id = "RestoreSourceLeaseRenewOperationRecord<Local>"
+terminal_audit_freeze_arm = "SourceUnspelled"
+terminal_audit_gate_arm = "SourceUnspelled"
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"
+publication_mode = "SinglePlane"
+construction_dag_recipe_id = "dag:cc:local:restore-source-lease-renew-no-effect-finalize-spec"
 consumed_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 written_state_slots = [ "SemanticPayload|Local|restore_registry_root" ]
 checkpoint_floor_classes = [ "semantic-restore" ]

@@ -138,6 +138,9 @@ fn source_forced_seed_population_is_present() {
         "RestoreTerminalPinReleaseFinalizeSpec",
         "RestoreSourceKeyAccessCleanupAuthorizeSpec",
         "RestoreSourceKeyAccessCleanupImportSpec",
+        "RestoreSourceLeaseRenewAuthorizeSpec",
+        "RestoreSourceLeaseRenewFinalizeSpec",
+        "RestoreSourceLeaseRenewNoEffectFinalizeSpec",
     ] {
         assert!(
             registry
@@ -148,8 +151,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 103,
-        "the population may only grow from the landed F1-F15E rows"
+        registry.classifications.len() >= 106,
+        "the population may only grow from the landed F1-F15F rows"
     );
 }
 
@@ -486,6 +489,48 @@ fn f15e_terminal_pin_and_source_cleanup_classifications_are_exact() {
             .iter()
             .find(|row| row.type_name == type_name)
             .expect("exact F15E table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(
+            row.source_location, source_location,
+            "{type_name} source anchor drifted"
+        );
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F15F's exact type-to-contract map keeps the three renewal phases distinct.
+/// The anchors deliberately split authorize from both terminal paths so a
+/// suffix guess or one generic finalize binding cannot pass.
+#[test]
+fn f15f_source_lease_renewal_classifications_are_exact() {
+    let registry = registry();
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "RestoreSourceLeaseRenewAuthorizeSpec",
+            "cc:local:restore-source-lease-renew-authorize-spec",
+            "a18:2393",
+        ),
+        (
+            "RestoreSourceLeaseRenewFinalizeSpec",
+            "cc:local:restore-source-lease-renew-finalize-spec",
+            "a18:2395",
+        ),
+        (
+            "RestoreSourceLeaseRenewNoEffectFinalizeSpec",
+            "cc:local:restore-source-lease-renew-no-effect-finalize-spec",
+            "a18:2395",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F15F table must resolve every classification row");
         assert_eq!(row.class, "RegisteredCommandInput");
         assert_eq!(
             row.command_contract_id.as_deref(),
