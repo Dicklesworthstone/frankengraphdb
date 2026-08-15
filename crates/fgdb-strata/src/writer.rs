@@ -643,16 +643,13 @@ impl BlockWriter {
                 // edges gone and the vertex live when `seal_vertices`
                 // refused (the same half-applied shape preflight exists
                 // to prevent on the edge list).
-                if let Some(retired) = &tombstone {
+                let need_vertex_seal = tombstone.as_ref().is_some_and(|retired| {
                     let key = (*vid, retired.created_at);
-                    if !self.pending_vertices.contains_key(&key)
+                    !self.pending_vertices.contains_key(&key)
                         && self.pending_vertices.len()
                             >= usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX)
                         && !self.pending_vertices_have_live_at(seq)
-                    {
-                        self.seal_vertices(keys)?;
-                    }
-                }
+                });
                 // Same law on the edge half: if the cascade's tombstones
                 // would trip the entry ceiling on a *later* `push`, seal
                 // first. Otherwise the first `retire` stages, the next
@@ -665,10 +662,21 @@ impl BlockWriter {
                         incoming += usize::from(!self.pending.contains_key(&key));
                     }
                 }
-                if self.pending.len() + incoming
+                let need_edge_seal = self.pending.len() + incoming
                     > usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX)
-                    && !self.pending_has_live_at(seq)
-                {
+                    && !self.pending_has_live_at(seq);
+                // DeleteVertex is the only apply arm that may pre-seal BOTH
+                // maps. Committing the vertex seal and then refusing the
+                // edge seal used to leave pending vertices durable while
+                // apply returned a no-op-shaped error.
+                if need_vertex_seal && need_edge_seal {
+                    let vertex_sealed = self.encode_pending_vertices(keys)?;
+                    let (edge_sealed, next_heads) = self.encode_pending_edges(keys)?;
+                    self.commit_vertex_seal(vertex_sealed);
+                    self.commit_edge_seal(edge_sealed, next_heads);
+                } else if need_vertex_seal {
+                    self.seal_vertices(keys)?;
+                } else if need_edge_seal {
                     self.seal(keys)?;
                 }
                 for eid in sorted_retired_incident_edges {
@@ -911,17 +919,17 @@ impl BlockWriter {
         Ok(())
     }
 
-    /// Seal pending rows into their descriptor-local V3 blocks.  The writer is
-    /// partition-local, while §6.2 blocks are descriptor-local, so this is the
-    /// boundary where one replay fold fans into immutable blocks; no descriptor
-    /// field may be smuggled back into an entry to avoid that split.
-    pub fn seal(
-        &mut self,
+    /// Encode pending edge statements without committing them.
+    fn encode_pending_edges(
+        &self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
-    ) -> Result<Option<SealedBlock>, WriteError> {
-        if self.pending.is_empty() {
-            return Ok(None);
-        }
+    ) -> Result<
+        (
+            Vec<SealedBlock>,
+            BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+        ),
+        WriteError,
+    > {
         let mut by_descriptor: BTreeMap<(VId, RelationId), Vec<PendingStatement>> = BTreeMap::new();
         for statement in self.pending.values().cloned() {
             by_descriptor
@@ -1060,7 +1068,14 @@ impl BlockWriter {
                 property_patch,
             });
         }
-        let first = sealed.first().cloned();
+        Ok((sealed, next_heads))
+    }
+
+    fn commit_edge_seal(
+        &mut self,
+        sealed: Vec<SealedBlock>,
+        next_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+    ) {
         for statement in self.pending.values() {
             if statement.entry.retired_at.is_none() {
                 self.sealed_live_edges
@@ -1070,6 +1085,22 @@ impl BlockWriter {
         self.chain_heads = next_heads;
         self.pending.clear();
         self.sealed.extend(sealed);
+    }
+
+    /// Seal pending rows into their descriptor-local V3 blocks.  The writer is
+    /// partition-local, while §6.2 blocks are descriptor-local, so this is the
+    /// boundary where one replay fold fans into immutable blocks; no descriptor
+    /// field may be smuggled back into an entry to avoid that split.
+    pub fn seal(
+        &mut self,
+        keys: (&[u8; 32], DatabaseSecurityNamespaceId),
+    ) -> Result<Option<SealedBlock>, WriteError> {
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        let (sealed, next_heads) = self.encode_pending_edges(keys)?;
+        let first = sealed.first().cloned();
+        self.commit_edge_seal(sealed, next_heads);
         Ok(first)
     }
 
@@ -1310,18 +1341,11 @@ impl BlockWriter {
         Ok(())
     }
 
-    /// Seal pending vertex rows into one canonical patch.
-    ///
-    /// The vertex counterpart of [`BlockWriter::seal`]: partition-local rows
-    /// leave the mutable staging map as one immutable, content-addressed
-    /// object. A failed seal leaves the staged rows exactly as they were.
-    pub fn seal_vertices(
-        &mut self,
+    /// Encode pending vertex rows without committing them.
+    fn encode_pending_vertices(
+        &self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
-    ) -> Result<Option<SealedPatch>, WriteError> {
-        if self.pending_vertices.is_empty() {
-            return Ok(None);
-        }
+    ) -> Result<Vec<SealedPatch>, WriteError> {
         // Early-seal may leave more than MAX_PATCH_ROWS pending so a later
         // same-seq delete can still fold away. Encode every conforming
         // chunk before committing so a mid-seal refusal leaves the map
@@ -1346,7 +1370,10 @@ impl BlockWriter {
                 last_seq,
             });
         }
-        let first = sealed.first().cloned();
+        Ok(sealed)
+    }
+
+    fn commit_vertex_seal(&mut self, sealed: Vec<SealedPatch>) {
         for row in self.pending_vertices.values() {
             if row.retired_at.is_none() {
                 self.sealed_live_vertices.insert((row.vid, row.created_at));
@@ -1354,6 +1381,23 @@ impl BlockWriter {
         }
         self.pending_vertices.clear();
         self.sealed_patches.extend(sealed);
+    }
+
+    /// Seal pending vertex rows into one canonical patch.
+    ///
+    /// The vertex counterpart of [`BlockWriter::seal`]: partition-local rows
+    /// leave the mutable staging map as one immutable, content-addressed
+    /// object. A failed seal leaves the staged rows exactly as they were.
+    pub fn seal_vertices(
+        &mut self,
+        keys: (&[u8; 32], DatabaseSecurityNamespaceId),
+    ) -> Result<Option<SealedPatch>, WriteError> {
+        if self.pending_vertices.is_empty() {
+            return Ok(None);
+        }
+        let sealed = self.encode_pending_vertices(keys)?;
+        let first = sealed.first().cloned();
+        self.commit_vertex_seal(sealed);
         Ok(first)
     }
 
@@ -1755,6 +1799,125 @@ mod tests {
         assert_eq!(
             writer.pending_len(),
             ceiling - 1,
+            "the planted illegal families stay; the cascade added nothing"
+        );
+    }
+
+    /// DeleteVertex used to `seal_vertices` first and only then `seal` the
+    /// cascade. A refusing edge seal left the vertex pending map already
+    /// published — apply returned Err while the writer was not as it was.
+    #[test]
+    fn a_failed_cascade_seal_does_not_commit_a_prior_vertex_seal() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        let rel = RelationId(1);
+        for vid in [1_u128, 2] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateVertex {
+                        vid: VId(vid),
+                        birth_ordinal: u64::try_from(vid).expect("test vid fits"),
+                        labels: vec![],
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("vertices");
+        }
+        for (eid, src, dst) in [(10_u128, 1_u128, 2_u128), (11, 2, 1)] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateEdge {
+                        eid: EId(eid),
+                        birth_ordinal: u64::try_from(eid).expect("test eid fits"),
+                        src: VId(src),
+                        relation: rel,
+                        dst: VId(dst),
+                        canonical_key: None,
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("edge");
+        }
+        writer.seal(keys()).expect("edge births durable");
+        writer.seal_vertices(keys()).expect("vertex births durable");
+        let patches_before = writer.sealed_patches().len();
+
+        let vertex_ceiling = usize::try_from(MAX_PATCH_ROWS).unwrap();
+        for i in 0..vertex_ceiling {
+            let vid = VId(2000 + i as u128);
+            writer.pending_vertices.insert(
+                (vid, CommitSeq(1)),
+                VertexRow {
+                    vid,
+                    birth_ordinal: 1,
+                    created_at: CommitSeq(1),
+                    retired_at: None,
+                    labels: vec![],
+                    props: vec![],
+                },
+            );
+        }
+        assert_eq!(writer.pending_vertex_len(), vertex_ceiling);
+
+        let edge_ceiling = usize::try_from(MAX_BLOCK_ENTRIES).unwrap();
+        for i in 0..(edge_ceiling - 1) {
+            let src = VId(1000 + i as u128);
+            writer.pending.insert(
+                (src, rel, VId(3), EId(1000 + i as u128), CommitSeq(0)),
+                PendingStatement {
+                    entry: AdjacencyEntry {
+                        src,
+                        relation: rel,
+                        dst: VId(3),
+                        eid: EId(1000 + i as u128),
+                        created_at: CommitSeq(0),
+                        retired_at: None,
+                    },
+                    props: vec![],
+                },
+            );
+        }
+        assert_eq!(writer.pending_len(), edge_ceiling - 1);
+
+        let refusal = writer.apply(
+            keys(),
+            CommitSeq(2),
+            &DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: fgdb_types::ids::ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(10), EId(11)],
+            },
+        );
+        assert_eq!(
+            refusal,
+            Err(WriteError::Block(BlockError::CreatedAtZero { at: 0 }))
+        );
+        assert!(
+            writer.is_vertex_live(VId(2)),
+            "the refused delete must leave the vertex live"
+        );
+        assert!(
+            writer.live_edge(EId(10)).is_some() && writer.live_edge(EId(11)).is_some(),
+            "neither cascade member may retire if the paired edge seal refuses"
+        );
+        assert_eq!(
+            writer.pending_vertex_len(),
+            vertex_ceiling,
+            "a refused dual pre-seal must not publish the vertex pending map"
+        );
+        assert_eq!(
+            writer.sealed_patches().len(),
+            patches_before,
+            "a refused dual pre-seal must not grow the sealed patch list"
+        );
+        assert_eq!(
+            writer.pending_len(),
+            edge_ceiling - 1,
             "the planted illegal families stay; the cascade added nothing"
         );
     }
