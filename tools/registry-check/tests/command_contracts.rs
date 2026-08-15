@@ -4,7 +4,7 @@
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
 //! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
-//! F1-F13 tranche rows (all `reserved` — see the registry header). The single-defect
+//! F1-F14 tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -244,6 +244,13 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:key-destroy-authorize-spec",
         "cc:local:key-destroy-finalize-spec",
         "cc:local:key-destroy-certificate-publish-spec",
+        // F14 semantic GC authorization (frozen ordinals 0x0042-0x0045).
+        // Proposal construction is pre-order; physical work is Protocol.
+        "cc:local:local-gc-authorize-spec",
+        "cc:local:local-gc-apply-quarantine-spec",
+        "cc:local:local-gc-cancellation-authorize-spec",
+        "cc:local:gc-physical-disposition-import-spec:completed",
+        "cc:local:gc-physical-disposition-import-spec:cancelled",
     ] {
         assert!(
             registry
@@ -254,8 +261,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 106,
-        "the population may only grow from the landed F1-F13 rows"
+        registry.contracts.len() >= 111,
+        "the population may only grow from the landed F1-F14 rows"
     );
 }
 
@@ -341,6 +348,116 @@ fn f13_key_destroy_contracts_are_exact() {
     }
 }
 
+/// Freeze the complete F14 reservation, including the Appendix-pinned arm
+/// tags. The literal table is independent of the TOML so deleting an arm,
+/// swapping Completed/Cancelled, laundering physical work into Semantic, or
+/// weakening the Local cancellation authority reds this test.
+#[test]
+fn f14_semantic_gc_contracts_are_exact() {
+    let registry = registry();
+    let expected = [
+        (
+            "cc:local:local-gc-authorize-spec",
+            0x0042,
+            None,
+            "LocalGcAuthorizeSpec",
+            "GcDecisionRecord",
+            "GcDecisionRecord",
+            "WeakStateIdentity",
+            "SourceUnspelled",
+            None,
+            "fgdb_apply::local::local_gc_authorize_spec",
+        ),
+        (
+            "cc:local:local-gc-apply-quarantine-spec",
+            0x0043,
+            None,
+            "LocalGcApplyQuarantineSpec",
+            "LocalGcReclaimAuthorizationRecord",
+            "GcSemanticState<Local>",
+            "WeakStateIdentity",
+            "GcDecisionRecordDecision::Accepted",
+            Some("GcDecisionRecord"),
+            "fgdb_apply::local::local_gc_apply_quarantine_spec",
+        ),
+        (
+            "cc:local:local-gc-cancellation-authorize-spec",
+            0x0044,
+            None,
+            "LocalGcCancellationAuthorizeSpec",
+            "LocalGcCancellationAuthorizationRecord",
+            "LocalGcCancellationAuthorizationRecord",
+            "GcSemanticState<Local>",
+            "PortableGcPhysicalTerminalEvidence",
+            Some("PortableGcPhysicalTerminalEvidence"),
+            "fgdb_apply::local::local_gc_cancellation_authorize_spec",
+        ),
+        (
+            "cc:local:gc-physical-disposition-import-spec:completed",
+            0x0045,
+            Some(0x0001),
+            "GcPhysicalDispositionImportSpec<Local>",
+            "GcSemanticState<Local>",
+            "GcSemanticState<Local>",
+            "GcSemanticState<Local>",
+            "PortableGcPhysicalTerminalEvidence",
+            Some("PortableGcPhysicalTerminalEvidence"),
+            "fgdb_apply::local::gc_physical_disposition_import_spec::completed",
+        ),
+        (
+            "cc:local:gc-physical-disposition-import-spec:cancelled",
+            0x0045,
+            Some(0x0002),
+            "GcPhysicalDispositionImportSpec<Local>",
+            "GcSemanticState<Local>",
+            "GcSemanticState<Local>",
+            "GcSemanticState<Local>",
+            "GcCancellationAuthorityFor<Local>::LocalStandalone",
+            Some("LocalGcCancellationAuthorizationRecord"),
+            "fgdb_apply::local::gc_physical_disposition_import_spec::cancelled",
+        ),
+    ];
+
+    for (id, outer, inner, input, result, applied, state, authority, target, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F14 table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(row.outer_command_union, "SequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, outer, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, outer, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, inner, "{id} inner tag drifted");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(
+            row.applied_record_schema_id, applied,
+            "{id} applied drifted"
+        );
+        assert_eq!(row.expected_state_schema_id, state, "{id} state drifted");
+        assert_eq!(row.authority_arm, authority, "{id} authority drifted");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            target,
+            "{id} authority target drifted"
+        );
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|gc_semantic_state"]
+        );
+        assert_eq!(
+            row.written_state_slots,
+            ["SemanticPayload|Local|gc_semantic_state"]
+        );
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
+}
+
 /// An armed member's rows share the member's outer tag and differ only by
 /// inner_wire_tag: the arm-slot law keys on (role, union, outer, inner), so
 /// this shape validates clean while a same-inner duplicate or an
@@ -363,6 +480,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
         ("cc:local:audit-terminal-freeze-spec", 3),
         ("cc:local:bulk-load-transition-spec", 5),
         ("cc:local:derived-build-transition-spec", 6),
+        ("cc:local:gc-physical-disposition-import-spec", 2),
     ] {
         let family: Vec<_> = registry
             .contracts

@@ -69,13 +69,51 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 15
+registry_epoch = 16
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
 class = "PreOrderArtifact"
 source_location = "a10:1918"
 statement = "TxnSubmissionSpec is not an ordered input: transaction submission is the pre-order construction pipeline that yields CommitCommand."
+status = "registered"
+
+# --- F14 semantic GC authorization (frozen ordinals 66-69). GcProposal is
+# --- pre-order evidence, while physical initialize/dispatch/status/receipt
+# --- work is Protocol maintenance. Only these four exact ordered Local
+# --- Semantic inputs gain RegisteredCommandInput rows; the disposition import
+# --- has two contract arms under its one classified member root.
+
+[[classification]]
+type_name = "LocalGcAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-gc-authorize-spec"
+source_location = "a14:2045"
+statement = "LocalGcAuthorizeSpec is the ordered Local semantic authorization carrying GcProposal; followers recompute the candidate and apply exactly one stable GcDecisionRecord, while an Accepted decision alone never authorizes physical work."
+status = "registered"
+
+[[classification]]
+type_name = "LocalGcApplyQuarantineSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-gc-apply-quarantine-spec"
+source_location = "a14:2047"
+statement = "LocalGcApplyQuarantineSpec consumes an Accepted decision plus exact current-root/reachability/disjointness and plan-family witnesses; Semantic apply installs LocalGcReclaimAuthorizationRecord and Quarantined state only, never a Protocol operation."
+status = "registered"
+
+[[classification]]
+type_name = "LocalGcCancellationAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:local-gc-cancellation-authorize-spec"
+source_location = "a14:2055"
+statement = "LocalGcCancellationAuthorizeSpec requires complete Protocol NoStartFenced evidence, the exact member-target-family no-start bijection, unchanged physical roots, and the terminal audit gate; apply creates the standalone Local cancellation authority without importing disposition."
+status = "registered"
+
+[[classification]]
+type_name = "GcPhysicalDispositionImportSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:gc-physical-disposition-import-spec"
+source_location = "a14:2055"
+statement = "GcPhysicalDispositionImportSpec<Local> is the source-ordered Completed|Cancelled Semantic union; only it imports portable terminal evidence into PhysicalCompletedPendingCut or CancelledBeforePhysicalStart, and the Cancelled arm requires exact LocalStandalone cancellation authority."
 status = "registered"
 
 # --- F5a checkpoint/floor/history-cut prefix. These are separately ordered

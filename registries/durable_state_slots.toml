@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 2
+registry_epoch = 3
 
 
 [[slot]]
@@ -504,6 +504,26 @@ target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
 transition_writer_contract_ids = [  ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Local"
+slot_tag = "gc_semantic_state"
+backing_registry = "state_payload_fields.toml"
+stable_name = "gc_semantic_state"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:local:gc-physical-disposition-import-spec:cancelled", "cc:local:gc-physical-disposition-import-spec:completed", "cc:local:local-gc-apply-quarantine-spec", "cc:local:local-gc-authorize-spec", "cc:local:local-gc-cancellation-authorize-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

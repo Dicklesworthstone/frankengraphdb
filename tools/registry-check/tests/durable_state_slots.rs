@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 49, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 50, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&45));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&46));
     assert_eq!(plane_counts.get("Protocol"), Some(&1));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&2));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 45);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 46);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 1);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -78,6 +78,25 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:key-destroy-authorize-spec",
             "cc:local:key-destroy-certificate-publish-spec",
             "cc:local:key-destroy-finalize-spec",
+        ]
+    );
+
+    let gc_state = slots
+        .slots
+        .iter()
+        .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "gc_semantic_state")
+        .expect("F14 semantic GC slot");
+    assert_eq!(gc_state.role, "Local");
+    assert_eq!(gc_state.backing_registry, "state_payload_fields.toml");
+    assert_eq!(gc_state.status, "reserved");
+    assert_eq!(
+        gc_state.transition_writer_contract_ids,
+        [
+            "cc:local:gc-physical-disposition-import-spec:cancelled",
+            "cc:local:gc-physical-disposition-import-spec:completed",
+            "cc:local:local-gc-apply-quarantine-spec",
+            "cc:local:local-gc-authorize-spec",
+            "cc:local:local-gc-cancellation-authorize-spec",
         ]
     );
 }

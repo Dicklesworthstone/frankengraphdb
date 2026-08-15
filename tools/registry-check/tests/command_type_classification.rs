@@ -107,6 +107,10 @@ fn source_forced_seed_population_is_present() {
         "KeyDestroyAuthorizeSpec",
         "KeyDestroyFinalizeSpec",
         "KeyDestroyCertificatePublishSpec",
+        "LocalGcAuthorizeSpec",
+        "LocalGcApplyQuarantineSpec",
+        "LocalGcCancellationAuthorizeSpec",
+        "GcPhysicalDispositionImportSpec",
     ] {
         assert!(
             registry
@@ -117,8 +121,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 72,
-        "the population may only grow from the landed F1-F13 rows"
+        registry.classifications.len() >= 76,
+        "the population may only grow from the landed F1-F14 rows"
     );
 }
 
@@ -160,6 +164,50 @@ fn f13_key_destroy_classifications_are_exact() {
             row.source_location, source_location,
             "{type_name} source anchor drifted"
         );
+        assert_eq!(row.status, "registered");
+    }
+}
+
+/// F14's four member roots are the exact command-classification authority.
+/// The disposition union classifies once at its member root; its two inner
+/// contracts remain the command registry's responsibility.
+#[test]
+fn f14_semantic_gc_classifications_are_exact() {
+    let registry = registry();
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "LocalGcAuthorizeSpec",
+            "cc:local:local-gc-authorize-spec",
+            "a14:2045",
+        ),
+        (
+            "LocalGcApplyQuarantineSpec",
+            "cc:local:local-gc-apply-quarantine-spec",
+            "a14:2047",
+        ),
+        (
+            "LocalGcCancellationAuthorizeSpec",
+            "cc:local:local-gc-cancellation-authorize-spec",
+            "a14:2055",
+        ),
+        (
+            "GcPhysicalDispositionImportSpec",
+            "cc:local:gc-physical-disposition-import-spec",
+            "a14:2055",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F14 table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(row.source_location, source_location);
         assert_eq!(row.status, "registered");
     }
 }
