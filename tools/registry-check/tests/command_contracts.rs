@@ -3,8 +3,8 @@
 //! Every validation rule in `registry_check::command_contracts` gets a test
 //! that takes a well-formed row, breaks exactly one thing, and asserts the
 //! exact violation code. The registry shipped deliberately empty until the
-//! owner-confirmed v1 tag freeze opened Phase B; it now carries the F1/F2
-//! seed rows (all `reserved` — see the registry header). The single-defect
+//! owner-confirmed v1 tag freeze opened Phase B; it now carries the landed
+//! F1-F13 tranche rows (all `reserved` — see the registry header). The single-defect
 //! mutations still run against a synthetic row whose own clean baseline is
 //! asserted first: a fixture control only proves the reader works on the
 //! fixture, so the baseline assert is what licenses the mutations.
@@ -238,6 +238,12 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:derived-build-transition-spec:begin-validation",
         "cc:local:derived-build-transition-spec:publish-ready",
         "cc:local:derived-build-transition-spec:abort",
+        // F13 keys (frozen ordinals 0x003f-0x0041). Three armless ordered
+        // semantic transitions; proposal construction and physical dispatch
+        // remain pre-order/Protocol work, respectively.
+        "cc:local:key-destroy-authorize-spec",
+        "cc:local:key-destroy-finalize-spec",
+        "cc:local:key-destroy-certificate-publish-spec",
     ] {
         assert!(
             registry
@@ -248,9 +254,91 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 103,
-        "the population may only grow from the landed F1-F12 rows"
+        registry.contracts.len() >= 106,
+        "the population may only grow from the landed F1-F13 rows"
     );
+}
+
+/// Freeze the complete F13 reservation, not merely its population. These
+/// literals are independent of the TOML rows: deleting a member, moving one
+/// to another tag/plane, weakening its authority/result, inventing an inner
+/// arm, or routing it through another state class must red this test.
+#[test]
+fn f13_key_destroy_contracts_are_exact() {
+    let registry = registry();
+    let expected = [
+        (
+            "cc:local:key-destroy-authorize-spec",
+            0x003f,
+            "KeyDestroyAuthorizeSpec",
+            "KeyReferenceQuarantine",
+            "ExternalKeyDestructionOperationRecord",
+            "WeakStateIdentity",
+            "KeyDestructionAuthorization",
+            "fgdb_apply::local::key_destroy_authorize_spec",
+        ),
+        (
+            "cc:local:key-destroy-finalize-spec",
+            0x0040,
+            "KeyDestroyFinalizeSpec",
+            "KeyDestroyRecord",
+            "KeyDestroyRecord",
+            "KeyReferenceQuarantine",
+            "PortableKeyDestructionDispatchTerminalEvidence",
+            "fgdb_apply::local::key_destroy_finalize_spec",
+        ),
+        (
+            "cc:local:key-destroy-certificate-publish-spec",
+            0x0041,
+            "KeyDestroyCertificatePublishSpec",
+            "SourceUnspelled",
+            "SourceUnspelled",
+            "WeakStateIdentity",
+            "SameGroupCertificateHeader",
+            "fgdb_apply::local::key_destroy_certificate_publish_spec",
+        ),
+    ];
+
+    for (id, tag, input, result, applied, state, authority, handler) in expected {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("exact F13 table must resolve every contract row");
+        assert_eq!(row.role, "Local", "{id} role drifted");
+        assert_eq!(
+            row.outer_command_union, "SequenceNeutralSpec<Tag>",
+            "{id} union drifted"
+        );
+        assert_eq!(row.outer_wire_tag, tag, "{id} outer tag drifted");
+        assert_eq!(row.input_wire_tag, tag, "{id} input tag drifted");
+        assert_eq!(row.inner_wire_tag, None, "{id} must remain armless");
+        assert_eq!(row.input_schema_id, input, "{id} input drifted");
+        assert_eq!(row.body_schema_id, input, "{id} body drifted");
+        assert_eq!(row.result_schema_id, result, "{id} result drifted");
+        assert_eq!(
+            row.applied_record_schema_id, applied,
+            "{id} applied record drifted"
+        );
+        assert_eq!(
+            row.expected_state_schema_id, state,
+            "{id} expected state drifted"
+        );
+        assert_eq!(row.authority_arm, authority, "{id} authority drifted");
+        assert_eq!(row.handler_symbol, handler, "{id} handler drifted");
+        assert_eq!(row.transition_class, "Semantic", "{id} plane drifted");
+        assert_eq!(row.publication_mode, "SinglePlane", "{id} mode drifted");
+        assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Local|key_lifecycle_state"]
+        );
+        assert_eq!(
+            row.written_state_slots,
+            ["SemanticPayload|Local|key_lifecycle_state"]
+        );
+        assert_eq!(row.status, "reserved", "{id} activated prematurely");
+    }
 }
 
 /// An armed member's rows share the member's outer tag and differ only by

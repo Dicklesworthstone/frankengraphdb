@@ -48,21 +48,38 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 48, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 49, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&44));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&45));
     assert_eq!(plane_counts.get("Protocol"), Some(&1));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&2));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 44);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 45);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 1);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
+
+    let key_state = slots
+        .slots
+        .iter()
+        .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "key_lifecycle_state")
+        .expect("F13 key lifecycle slot");
+    assert_eq!(key_state.role, "Local");
+    assert_eq!(key_state.backing_registry, "state_payload_fields.toml");
+    assert_eq!(key_state.status, "reserved");
+    assert_eq!(
+        key_state.transition_writer_contract_ids,
+        [
+            "cc:local:key-destroy-authorize-spec",
+            "cc:local:key-destroy-certificate-publish-spec",
+            "cc:local:key-destroy-finalize-spec",
+        ]
+    );
 }
 
 #[test]

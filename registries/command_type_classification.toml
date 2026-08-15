@@ -69,7 +69,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 14
+registry_epoch = 15
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -690,4 +690,32 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:derived-build-transition-spec"
 source_location = "a10:1918"
 statement = "Required Local semantic rows include DerivedBuildTransitionSpec<Local>; per L643 it has exactly Reserve, PublishSnapshotProgress, PublishCatchupProgress, BeginValidation, PublishReady, and Abort — every progress update is monotone/idempotent, owns its bounded closure, and advertises its exact watermark; the validation certificate names no future activation."
+status = "registered"
+
+# --- F13 keys (frozen ordinals 63-65). KeyDestroyProposal remains a
+# --- PreOrderArtifact from the creation population; only the three exact
+# --- ordered Local semantic transitions gain RegisteredCommandInput rows.
+
+[[classification]]
+type_name = "KeyDestroyAuthorizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:key-destroy-authorize-spec"
+source_location = "a15:2059"
+statement = "KeyDestroyAuthorizeSpec is the ordered Local authorization carrying KeyDestroyProposal; apply atomically installs the no-new-reference quarantine plus one immutable authorization recipe per and only per target plan, then moves the key to DestroyPending before physical dispatch."
+status = "registered"
+
+[[classification]]
+type_name = "KeyDestroyFinalizeSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:key-destroy-finalize-spec"
+source_location = "a15:2067"
+statement = "KeyDestroyFinalizeSpec consumes the exact quarantine publication, proposal/recipe/Protocol-terminal/typed-receipt bijection and current zero-reference proof; apply selects DestroyedPendingCertificate and creates compact KeyDestroyRecord."
+status = "registered"
+
+[[classification]]
+type_name = "KeyDestroyCertificatePublishSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:local:key-destroy-certificate-publish-spec"
+source_location = "a15:2069"
+statement = "KeyDestroyCertificatePublishSpec is the sole ordered transition from DestroyedPendingCertificate to final Destroyed and installs the compact certificate-index edge only after the matching record, durable root, audit visibility advance, and quorum certificate exist."
 status = "registered"

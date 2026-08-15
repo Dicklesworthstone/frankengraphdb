@@ -79,10 +79,10 @@
 #     binds the member-root id; the classification validator resolves a root
 #     iff a contract row carries an id of the form "{root}:{arm}".
 #
-# SCOPE BOUNDARY. invariants.toml line 312 names this registry AND
-# `state_payload_fields.toml` ("roots every written state class"). That third
-# registry is NOT created by this increment; its absence is unchanged and its
-# construction needs its own bead.
+# CROSS-INDEX BOUNDARY. durable_state_slots.toml and its plane-local backing
+# projections now exist and are live registry-check inputs. Every consumed or
+# written state ref below must therefore resolve there in the same landing; a
+# reserved command row never licenses a dangling or overloaded state class.
 #
 # Row schema — verbatim from plan §5.1 line 294; a key marked `?` is optional,
 # every other key is required on every row. No row may carry a key outside this
@@ -123,7 +123,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 14
+registry_epoch = 15
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -3318,6 +3318,100 @@ consumed_state_slots = [ "SemanticPayload|Local|derived_build_registry" ] # [C][
 written_state_slots = [ "SemanticPayload|Local|derived_build_registry" ]  # [C][F]
 checkpoint_floor_classes = [ "derived-build" ]                            # [C][F]
 backup_restore_gc_classes = [ "derived-build" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+# =============================================================================
+# F13 keys — frozen ordinals 63-65. Three armless members in the round-10
+# frozen order. KeyDestroyProposal is pre-order evidence, not a fourth command;
+# physical dispatch/receipt import remains Protocol maintenance. These rows
+# reserve only the ordered Local semantic transitions spelled at L2059/L2067/
+# L2069. They stay reserved until the Rust union/body/triple/handlers exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:local:key-destroy-authorize-spec"              # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x003f                                                   # [S] frozen dense ordinal 63
+input_schema_id = "KeyDestroyAuthorizeSpec"                              # [S] L2059 ordered Local authorization
+input_wire_tag = 0x003f                                                   # [C] = outer (armless)
+body_schema_id = "KeyDestroyAuthorizeSpec"                               # [S]
+result_schema_id = "KeyReferenceQuarantine"                              # [S] L2059 apply installs the quarantine
+applied_record_schema_id = "ExternalKeyDestructionOperationRecord"       # [S] L2059 installs one immutable authorization recipe per plan
+handler_symbol = "fgdb_apply::local::key_destroy_authorize_spec"         # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 exact Local semantic key transition
+sequence_effects = "validates the proposal's exact RetainedDecryptOnly basis, current two-slot/configuration/floor/root inventory, zero-reference proof, external acknowledgements, threshold authorization, and sorted target-plan bijection; atomically installs one KeyReferenceQuarantine plus one immutable AuthorizedUndispatchedRecipe per and only per plan, then selects DestroyPending before any physical request"  # [S] L2059
+expected_state_schema_id = "WeakStateIdentity"                           # [S] KeyDestroyProposal.basis_state plus expected_key_state
+authority_arm = "KeyDestructionAuthorization"                            # [S] proposal.threshold_authorization_ref
+authority_evidence_target_schema_id = "KeyDestructionAuthorization"      # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: wrapper arm is not separately spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] KeyDestroyProposal.terminal_audit_gate
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S] physical dispatch is a later Protocol transition
+construction_dag_recipe_id = "dag:cc:local:key-destroy-authorize-spec"   # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|key_lifecycle_state" ]    # [S-derived] RetainedDecryptOnly basis
+written_state_slots = [ "SemanticPayload|Local|key_lifecycle_state" ]     # [S-derived] DestroyPending quarantine/recipe root
+checkpoint_floor_classes = [ "key-lifecycle" ]                           # [C][F]
+backup_restore_gc_classes = [ "key-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:key-destroy-finalize-spec"               # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0040                                                   # [S] frozen dense ordinal 64
+input_schema_id = "KeyDestroyFinalizeSpec"                               # [S] L2067 exact body
+input_wire_tag = 0x0040                                                   # [C] = outer (armless)
+body_schema_id = "KeyDestroyFinalizeSpec"                                # [S]
+result_schema_id = "KeyDestroyRecord"                                    # [S] L2067 creates the compact result
+applied_record_schema_id = "KeyDestroyRecord"                            # [S] the compact durable result of apply
+handler_symbol = "fgdb_apply::local::key_destroy_finalize_spec"          # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 exact Local semantic key transition
+sequence_effects = "requires current payload/root/configuration equality or a registered quarantine-preserving successor proof, the exact quarantine publication evidence, proposal/recipe/Protocol-terminal/typed-receipt target bijection, and a fresh zero-retaining-reference/no-new-reference recomputation; selects DestroyedPendingCertificate and creates the compact KeyDestroyRecord with no strong path back to heavy proposal, receipt, inventory, floor, or Protocol objects"  # [S] L2067
+expected_state_schema_id = "KeyReferenceQuarantine"                      # [S] expected_quarantine_ref and DestroyPending state
+authority_arm = "PortableKeyDestructionDispatchTerminalEvidence"         # [S] authenticated complete dispatch-terminal authority
+authority_evidence_target_schema_id = "PortableKeyDestructionDispatchTerminalEvidence"  # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: wrapper arm is not separately spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] direct body member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S] consumes portable evidence, never raw Protocol refs
+construction_dag_recipe_id = "dag:cc:local:key-destroy-finalize-spec"    # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|key_lifecycle_state" ]    # [S-derived] DestroyPending quarantine/recipe state
+written_state_slots = [ "SemanticPayload|Local|key_lifecycle_state" ]     # [S-derived] DestroyedPendingCertificate + compact result
+checkpoint_floor_classes = [ "key-lifecycle" ]                           # [C][F]
+backup_restore_gc_classes = [ "key-lifecycle" ]                           # [C][F]
+posture_feature_predicate = "always"                                      # [C]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:local:key-destroy-certificate-publish-spec"    # [C]
+role = "Local"                                                            # [S]
+outer_command_union = "SequenceNeutralSpec<Tag>"                          # [S]
+outer_wire_tag = 0x0041                                                   # [S] frozen dense ordinal 65
+input_schema_id = "KeyDestroyCertificatePublishSpec"                    # [S] L2069 exact body
+input_wire_tag = 0x0041                                                   # [C] = outer (armless)
+body_schema_id = "KeyDestroyCertificatePublishSpec"                     # [S]
+result_schema_id = "SourceUnspelled"                                     # T6: final Destroyed state has no separately named result schema
+applied_record_schema_id = "SourceUnspelled"                             # T6: compact certificate-index edge has no spelled schema name
+handler_symbol = "fgdb_apply::local::key_destroy_certificate_publish_spec"  # [C][F]
+transition_class = "Semantic"                                             # [S] L1918 exact Local semantic key transition
+sequence_effects = "after the KeyDestroyRecord, its resulting durable root, required audit visibility advance, and quorum-issued matching KeyDestructionCertificate exist, this sole transition verifies the expected DestroyedPendingCertificate generation/state, installs the compact certificate-index edge, and selects final Destroyed; missing certificate, target receipt, or any reachable/obligated key use fails closed"  # [S] L2069
+expected_state_schema_id = "WeakStateIdentity"                           # [S] expected_current_state + DestroyedPendingCertificate tag/generation
+authority_arm = "SameGroupCertificateHeader"                             # [S-derived] carried by KeyDestructionCertificate
+authority_evidence_target_schema_id = "KeyDestructionCertificate"        # [S] exact certificate_ref
+terminal_audit_freeze_arm = "SourceUnspelled"                             # T6: wrapper arm is not separately spelled
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] direct body member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:local:key-destroy-certificate-publish-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Local|key_lifecycle_state" ]    # [S-derived] DestroyedPendingCertificate state and compact result
+written_state_slots = [ "SemanticPayload|Local|key_lifecycle_state" ]     # [S-derived] Destroyed state + certificate index edge
+checkpoint_floor_classes = [ "key-lifecycle" ]                           # [C][F]
+backup_restore_gc_classes = [ "key-lifecycle" ]                           # [C][F]
 posture_feature_predicate = "always"                                      # [C]
 format_epoch_range = "v1.."                                               # [C]
 status = "reserved"                                                       # [S]

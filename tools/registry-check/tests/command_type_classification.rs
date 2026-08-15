@@ -104,6 +104,9 @@ fn source_forced_seed_population_is_present() {
         "AuditCompletenessTransitionSpec",
         "BulkLoadTransitionSpec",
         "DerivedBuildTransitionSpec",
+        "KeyDestroyAuthorizeSpec",
+        "KeyDestroyFinalizeSpec",
+        "KeyDestroyCertificatePublishSpec",
     ] {
         assert!(
             registry
@@ -114,9 +117,51 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 69,
-        "the population may only grow from the landed F1-F12 rows"
+        registry.classifications.len() >= 72,
+        "the population may only grow from the landed F1-F13 rows"
     );
+}
+
+/// F13's type-to-contract map is the classification authority. Pin it as a
+/// complete literal table so a suffix-based guess, wrong command root, stale
+/// anchor, or status rewrite cannot hide behind the generic resolver.
+#[test]
+fn f13_key_destroy_classifications_are_exact() {
+    let registry = registry();
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "KeyDestroyAuthorizeSpec",
+            "cc:local:key-destroy-authorize-spec",
+            "a15:2059",
+        ),
+        (
+            "KeyDestroyFinalizeSpec",
+            "cc:local:key-destroy-finalize-spec",
+            "a15:2067",
+        ),
+        (
+            "KeyDestroyCertificatePublishSpec",
+            "cc:local:key-destroy-certificate-publish-spec",
+            "a15:2069",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact F13 table must resolve every classification row");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(
+            row.source_location, source_location,
+            "{type_name} source anchor drifted"
+        );
+        assert_eq!(row.status, "registered");
+    }
 }
 
 /// The load-bearing test: open every cited plan line and require the
