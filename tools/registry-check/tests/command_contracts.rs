@@ -329,6 +329,8 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:begin-role-transition-spec",
         // Meta F11 is the first cumulative attempt-history compaction phase.
         "cc:meta:never-registered-floor-spec",
+        // Meta F12 is the evidence-bound paired lookup expiry transition.
+        "cc:meta:global-outcome-expiry-spec",
     ] {
         assert!(
             registry
@@ -1500,6 +1502,92 @@ fn meta_f11_never_registered_floor_contract_is_exact() {
         .map(|candidate| candidate.command_contract_id.as_str())
         .collect();
     assert_eq!(exact_ordinal, ["cc:meta:never-registered-floor-spec"]);
+}
+
+/// Expiry is a paired lookup tombstone rewrite, not another compaction phase
+/// and not permission to erase the authenticated terminal summary. Pin every
+/// boundary that distinguishes valid expired bytes from invalid or hidden
+/// inputs and every state root this reserved handler may mutate.
+#[test]
+fn meta_f12_global_outcome_expiry_contract_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| row.command_contract_id == "cc:meta:global-outcome-expiry-spec")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "Meta global outcome expiry must classify once"
+    );
+    let row = rows[0];
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x0011);
+    assert_eq!(row.input_wire_tag, 0x0011);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "GlobalOutcomeExpirySpec");
+    assert_eq!(row.body_schema_id, "GlobalOutcomeExpirySpec");
+    assert_eq!(row.result_schema_id, "GlobalOutcomeDirectoryValue");
+    assert_eq!(row.applied_record_schema_id, "GlobalBeginIdempotencyIndex");
+    assert_eq!(row.expected_state_schema_id, "GlobalOutcomeDirectoryValue");
+    assert_eq!(row.authority_arm, "TimeValidationEvidence");
+    assert_eq!(
+        row.authority_evidence_target_schema_id.as_deref(),
+        Some("TimeValidationEvidence")
+    );
+    assert_eq!(row.terminal_audit_freeze_arm, "Required<MetaControl>");
+    assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::global_outcome_expiry_spec"
+    );
+    assert_eq!(
+        row.consumed_state_slots,
+        [
+            "SemanticPayload|Meta|global_begin_idempotency_index_root",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+        ]
+    );
+    assert_eq!(row.written_state_slots, row.consumed_state_slots);
+    assert_eq!(
+        row.checkpoint_floor_classes,
+        ["txn-attempt-compaction", "retention-cut"]
+    );
+    assert_eq!(
+        row.backup_restore_gc_classes,
+        ["txn-attempt-compaction", "retention-cut"]
+    );
+    for required in [
+        "Expired TimeValidationEvidence",
+        "agreement among the two compact leaves and capability replay identity",
+        "closed verifier/profile and begin-retry/lookup floors",
+        "exact activated retention cut",
+        "drops the replay edge only in this transition",
+        "preserves TokenExpired versus NotVisibleOrUnknown",
+        "retains the internal TerminalAttemptSummaryRoot leaf",
+        "fabricates no attempt identity",
+    ] {
+        assert!(
+            row.sequence_effects.contains(required),
+            "global expiry law lost {required:?}"
+        );
+    }
+    assert_eq!(row.status, "reserved");
+
+    let exact_ordinal: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x0011
+        })
+        .map(|candidate| candidate.command_contract_id.as_str())
+        .collect();
+    assert_eq!(exact_ordinal, ["cc:meta:global-outcome-expiry-spec"]);
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These

@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# NeverRegisteredFloorSpec at ordinal 16; every Global row remains reserved
+# GlobalOutcomeExpirySpec at ordinal 17; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 35
+registry_epoch = 36
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -769,6 +769,44 @@ consumed_state_slots = [ "Consensus|Meta|meta_certificate_ledger", "PreparedOwne
 written_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_ref", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1796/L1802 exact atomic successors
 checkpoint_floor_classes = [ "txn-attempt-compaction" ]                    # [S] L1802 MetaAttemptCompactionProtocolFloor
 backup_restore_gc_classes = [ "txn-attempt-compaction" ]                  # [S] L1802 retained through activated checkpoint/cut and independent floors
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F12 global outcome expiry — frozen Global ordinal 17. This is the
+# separately ordered, evidence-bound transition that removes replayability
+# only after both compact lookup leaves, the replay identity, the time verdict,
+# verifier/profile and lookup floors, and the activated retention cut agree.
+# It leaves the internal terminal summary intact and never invents an attempt.
+# The row remains reserved until its generated union/body/result triple and
+# handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-outcome-expiry-spec"                # [C]
+role = "Meta"                                                              # [S] L1798 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0011                                                      # [S] frozen dense Meta ordinal 17
+input_schema_id = "GlobalOutcomeExpirySpec"                                # [S] L1798 full body
+input_wire_tag = 0x0011                                                      # [C] = outer (armless)
+body_schema_id = "GlobalOutcomeExpirySpec"                                 # [S]
+result_schema_id = "GlobalOutcomeDirectoryValue"                           # [S-derived] CompactedTerminal/NeverRegisteredCompacted -> ExpiredTombstone
+applied_record_schema_id = "GlobalBeginIdempotencyIndex"                   # [S] the paired BEGIN lookup receives its permanent tombstone atomically
+handler_symbol = "fgdb_apply::meta::global_outcome_expiry_spec"            # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "requires Expired TimeValidationEvidence for the replay object's exact window, agreement among the two compact leaves and capability replay identity, closed verifier/profile and begin-retry/lookup floors, and the exact activated retention cut; atomically rewrites only the begin-index and outcome-directory leaves to permanent ExpiredTombstone values carrying the same scoped-key, token, capability, and expiry-evidence commitments; drops the replay edge only in this transition, permanently prevents key/token reuse, preserves TokenExpired versus NotVisibleOrUnknown, retains the internal TerminalAttemptSummaryRoot leaf, and fabricates no attempt identity"  # [S] L1798
+expected_state_schema_id = "GlobalOutcomeDirectoryValue"                  # [S] expected_outcome_directory_entry
+authority_arm = "TimeValidationEvidence"                                  # [S] exact evidence-authorized action
+authority_evidence_target_schema_id = "TimeValidationEvidence"            # [S] time_validation_evidence_ref
+terminal_audit_freeze_arm = "Required<MetaControl>"                       # [S] L1798 verbatim
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1798 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-outcome-expiry-spec"     # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1798 exact paired compact-leaf bases; evidence/floors/cut are typed referenced objects
+written_state_slots = [ "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1798 exact atomic tombstone successors
+checkpoint_floor_classes = [ "txn-attempt-compaction", "retention-cut" ] # [S] L1798 activated cut and closed retry/lookup floors
+backup_restore_gc_classes = [ "txn-attempt-compaction", "retention-cut" ]  # [S] replay/bundle edges drop only after the cut
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]

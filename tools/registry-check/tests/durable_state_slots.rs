@@ -287,6 +287,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
+                "cc:meta:global-outcome-expiry-spec",
                 "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-publication-spec",
@@ -299,6 +300,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
+                "cc:meta:global-outcome-expiry-spec",
                 "cc:meta:never-registered-floor-spec",
             ]
         };

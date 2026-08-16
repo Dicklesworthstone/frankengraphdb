@@ -49,7 +49,8 @@
 # GlobalTerminalCompletionSpec follows at ordinal 15 and alone advances one
 # exact pending Sharded outcome to TerminalReady after validating every frozen
 # postcondition artifact. NeverRegisteredFloorSpec follows at ordinal 16 and
-# performs only the first cumulative attempt-history compaction phase.
+# performs only the first cumulative attempt-history compaction phase;
+# GlobalOutcomeExpirySpec is the separate ordinal-17 replay-expiry control.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -88,13 +89,21 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 33
+registry_epoch = 34
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
 class = "PreOrderArtifact"
 source_location = "a10:1918"
 statement = "TxnSubmissionSpec is not an ordered input: transaction submission is the pre-order construction pipeline that yields CommitCommand."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalOutcomeExpirySpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-outcome-expiry-spec"
+source_location = "a08:1798"
+statement = "GlobalOutcomeExpirySpec is the separate evidence-bound Meta transition that atomically replaces both compact lookup leaves with permanent ExpiredTombstone values, drops only the replay edge, preserves the internal summary, and prevents key/token reuse."
 status = "registered"
 
 # --- F14 semantic GC authorization (frozen ordinals 66-69). GcProposal is
