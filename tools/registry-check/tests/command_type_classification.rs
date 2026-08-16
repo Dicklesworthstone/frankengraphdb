@@ -162,6 +162,7 @@ fn source_forced_seed_population_is_present() {
         "NeverRegisteredFloorSpec",
         "GlobalGcAuthorizationSpec",
         "MetaGcApplyQuarantineSpec",
+        "GlobalGcCancellationPrepareSpec",
     ] {
         assert!(
             registry
@@ -172,8 +173,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 127,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F17A rows"
+        registry.classifications.len() >= 128,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F17B rows"
     );
 }
 
@@ -1428,6 +1429,46 @@ fn meta_f17a_distributed_gc_classifications_are_exact() {
         );
         assert_eq!(contract.input_wire_tag, 0x0019);
     }
+}
+
+/// The F17B type binding must resolve exactly once to the new armless Meta
+/// member. Later source-grounded tranches may extend the registry independently.
+#[test]
+fn meta_f17b_gc_cancellation_prepare_classification_is_exact() {
+    let registry = registry();
+    let contracts = contracts();
+    let rows: Vec<_> = registry
+        .classifications
+        .iter()
+        .filter(|row| row.type_name == "GlobalGcCancellationPrepareSpec")
+        .collect();
+    assert_eq!(rows.len(), 1);
+    let row = rows[0];
+    assert_eq!(row.class, "RegisteredCommandInput");
+    assert_eq!(
+        row.command_contract_id.as_deref(),
+        Some("cc:meta:global-gc-cancellation-prepare-spec")
+    );
+    assert_eq!(row.source_location, "a08:1816");
+    assert_eq!(row.status, "registered");
+
+    let contract_rows: Vec<_> = contracts
+        .contracts
+        .iter()
+        .filter(|contract| {
+            contract.command_contract_id == "cc:meta:global-gc-cancellation-prepare-spec"
+        })
+        .collect();
+    assert_eq!(contract_rows.len(), 1);
+    let contract = contract_rows[0];
+    assert_eq!(contract.role, "Meta");
+    assert_eq!(
+        contract.outer_command_union,
+        "GlobalSequenceNeutralSpec<Tag>"
+    );
+    assert_eq!(contract.outer_wire_tag, 0x001a);
+    assert_eq!(contract.input_wire_tag, 0x001a);
+    assert_eq!(contract.inner_wire_tag, None);
 }
 
 /// Role specialization creates concrete Local and Meta contract families, not

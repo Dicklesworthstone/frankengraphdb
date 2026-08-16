@@ -1116,6 +1116,45 @@ format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]
 
 # =============================================================================
+# META F17B distributed-GC cancellation entrance — frozen Global ordinal 26.
+# This is intentionally the one fully spelled next source member: it advances
+# only Executing -> CancellationPreparing and creates the prepare record whose
+# later audit-visible publication permits a quorum prepare certificate. The
+# later authorize/completion-required/progress/completion commands are named by
+# the plan but do not yet have complete bodies, so this tranche does not guess
+# their tags or schemas. The row remains reserved until its generated union,
+# body/result triple, and apply handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-gc-cancellation-prepare-spec"      # [C]
+role = "Meta"                                                              # [S] L1816 exact Meta cancellation-prepare input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x001a                                                      # [S] frozen dense Meta ordinal 26
+input_schema_id = "GlobalGcCancellationPrepareSpec"                        # [S] L1816 full body
+input_wire_tag = 0x001a                                                      # [C] = outer (armless)
+body_schema_id = "GlobalGcCancellationPrepareSpec"                         # [S]
+result_schema_id = "GlobalGcCancellationPrepareRecord"                     # [S] L1816 exact created record
+applied_record_schema_id = "GlobalGcCancellationPrepareRecord"             # [S]
+handler_symbol = "fgdb_apply::meta::global_gc_cancellation_prepare_spec"    # [C][F]
+transition_class = "Semantic"                                               # [S] L1770 distributed-GC semantic family
+sequence_effects = "requires the exact GlobalGcAuthorizationRecord, current global coordination state Executing, fresh cancellation nonce, complete required-participant commitment, and expected latest progress generation; atomically selects CancellationPreparing and creates GlobalGcCancellationPrepareRecord only; a GlobalGcCancellationPrepareCertificate may be created only after that exact record is applied and audit-visible, and this command neither fences a participant nor authorizes cancellation"  # [S] L1816-L1818
+expected_state_schema_id = "GcSemanticState<Meta>"                         # [S-derived] expected_global_gc_state:Executing
+authority_arm = "GlobalGcAuthorizationRecord"                              # [S] authorization_record_ref
+authority_evidence_target_schema_id = "GlobalGcAuthorizationRecord"        # [S]
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1816 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S] participant fencing is later Protocol work
+construction_dag_recipe_id = "dag:cc:meta:global-gc-cancellation-prepare-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]        # [S-derived] Executing/current-progress basis
+written_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]         # [S-derived] CancellationPreparing
+checkpoint_floor_classes = [ "semantic-gc" ]                              # [S] in-flight coordination survives floors
+backup_restore_gc_classes = [ "semantic-gc" ]                             # [S] prepare record/participant closure remains rooted
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
 # F14 semantic GC authorization — frozen ordinals 66-69. The first three
 # members are armless. GcPhysicalDispositionImportSpec<Local> is ARMED with
 # the Appendix-A/source-ordered Completed=0x0001 and Cancelled=0x0002 arms.

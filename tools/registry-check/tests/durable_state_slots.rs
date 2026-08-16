@@ -122,6 +122,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:meta:gc-physical-disposition-import-spec:cancelled",
             "cc:meta:gc-physical-disposition-import-spec:completed",
             "cc:meta:global-gc-authorization-spec",
+            "cc:meta:global-gc-cancellation-prepare-spec",
             "cc:meta:meta-gc-apply-quarantine-spec",
         ]
     );
@@ -780,7 +781,7 @@ fn writer_set_is_derived_not_advisory() {
         .expect("Meta F17A GC slot");
     meta_gc
         .transition_writer_contract_ids
-        .retain(|writer| !writer.ends_with("global-gc-authorization-spec"));
+        .retain(|writer| !writer.ends_with("global-gc-cancellation-prepare-spec"));
     assert!(codes(&slots, &backings, &contracts).contains("slot_writer_set_mismatch"));
 }
 

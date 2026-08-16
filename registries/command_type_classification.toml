@@ -175,6 +175,18 @@ source_location = "a08:1812"
 statement = "MetaGcApplyQuarantineSpec consumes the exact global authorization, current Meta preflight/root/reachability/disjointness evidence and complete generation-zero operation family; Semantic apply installs only the Meta reclaim authorization and Quarantined state, never Protocol work."
 status = "registered"
 
+# --- META F17B distributed-GC cancellation entrance. Only the fully spelled
+# --- prepare command is classified here; later named global mode/progress/
+# --- terminal commands remain unclassified until their exact bodies are frozen.
+
+[[classification]]
+type_name = "GlobalGcCancellationPrepareSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-gc-cancellation-prepare-spec"
+source_location = "a08:1816"
+statement = "GlobalGcCancellationPrepareSpec is the sole ordered Executing-to-CancellationPreparing transition; it creates the prepare record whose applied and audit-visible publication is required before quorum certification, while participant fences and cancellation authorization remain later transitions."
+status = "registered"
+
 # --- F14 semantic GC authorization (frozen ordinals 66-69). GcProposal is
 # --- pre-order evidence, while physical initialize/dispatch/status/receipt
 # --- work is Protocol maintenance. Only these four exact ordered Local

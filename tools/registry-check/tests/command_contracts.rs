@@ -341,8 +341,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 163,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F11 rows"
+        registry.contracts.len() >= 164,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F17B rows"
     );
 }
 
@@ -2151,6 +2151,76 @@ fn meta_f17a_distributed_gc_semantic_contracts_are_exact() {
         assert!(
             cancelled.sequence_effects.contains(required),
             "cancelled disposition law lost {required:?}"
+        );
+    }
+}
+
+/// F17B advances only the first fenced-cancellation edge. Pinning ordinal 26
+/// as one armless member prevents a catalog pass from collapsing participant
+/// Protocol fencing or later mode selection into this Semantic transition.
+#[test]
+fn meta_f17b_gc_cancellation_prepare_contract_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| {
+            row.role == "Meta"
+                && row.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && row.outer_wire_tag == 0x001a
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "Meta ordinal 26 is one armless member");
+    let row = rows[0];
+    assert_eq!(
+        row.command_contract_id,
+        "cc:meta:global-gc-cancellation-prepare-spec"
+    );
+    assert_eq!(row.input_wire_tag, 0x001a);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "GlobalGcCancellationPrepareSpec");
+    assert_eq!(row.body_schema_id, "GlobalGcCancellationPrepareSpec");
+    assert_eq!(row.result_schema_id, "GlobalGcCancellationPrepareRecord");
+    assert_eq!(
+        row.applied_record_schema_id,
+        "GlobalGcCancellationPrepareRecord"
+    );
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::global_gc_cancellation_prepare_spec"
+    );
+    assert_eq!(row.transition_class, "Semantic");
+    assert_eq!(row.expected_state_schema_id, "GcSemanticState<Meta>");
+    assert_eq!(row.authority_arm, "GlobalGcAuthorizationRecord");
+    assert_eq!(
+        row.authority_evidence_target_schema_id.as_deref(),
+        Some("GlobalGcAuthorizationRecord")
+    );
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+    assert_eq!(
+        row.consumed_state_slots,
+        ["SemanticPayload|Meta|gc_semantic_state"]
+    );
+    assert_eq!(
+        row.written_state_slots,
+        ["SemanticPayload|Meta|gc_semantic_state"]
+    );
+    assert_eq!(row.checkpoint_floor_classes, ["semantic-gc"]);
+    assert_eq!(row.backup_restore_gc_classes, ["semantic-gc"]);
+    assert_eq!(row.posture_feature_predicate, "sharded");
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(row.status, "reserved");
+    for required in [
+        "current global coordination state Executing",
+        "expected latest progress generation",
+        "selects CancellationPreparing",
+        "only after that exact record is applied and audit-visible",
+        "neither fences a participant nor authorizes cancellation",
+    ] {
+        assert!(
+            row.sequence_effects.contains(required),
+            "cancellation-prepare law lost {required:?}"
         );
     }
 }
