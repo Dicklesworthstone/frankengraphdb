@@ -53,7 +53,9 @@
 # GlobalOutcomeExpirySpec is the separate ordinal-17 replay-expiry control.
 # ClosedAttemptCompactionSpec and GlobalClosedAttemptFloorPublishSpec then
 # preserve the build/attest/publish split at ordinals 18-19, followed by the
-# four-phase MetaConfigurationTransitionSpec input at ordinal 20.
+# four-phase MetaConfigurationTransitionSpec input at ordinal 20. The Meta
+# shard-reconfiguration family follows in source order: authorization at
+# ordinal 21 and the inseparable topology/trust adoption CAS at ordinal 22.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -131,6 +133,22 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:meta-configuration-transition-spec"
 source_location = "a08:1804"
 statement = "MetaConfigurationTransitionSpec is the ordered Meta semantic input whose four explicit phases construct a same-routing TopologyState successor, bind the paired configuration floor, and delay old-configuration release until prepared, certificate, remote, Raft, snapshot, apply, and GC ownership has transferred."
+status = "registered"
+
+[[classification]]
+type_name = "ShardReconfigurationAuthorizationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:shard-reconfiguration-authorization-spec"
+source_location = "a08:1806"
+statement = "ShardReconfigurationAuthorizationSpec is the ordered Meta authorization input that fixes one canonical old/joint/new Shard membership transition and its exact current imported-trust selector without advancing topology or trust."
+status = "registered"
+
+[[classification]]
+type_name = "ShardConfigurationAdoptionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:shard-configuration-adoption-spec"
+source_location = "a08:1808"
+statement = "ShardConfigurationAdoptionSpec is the ordered Meta adoption input that consumes certified old-and-new quorum evidence and atomically advances the topology shard entry together with the RemoteConfigurationTrustRoot selector and generation."
 status = "registered"
 
 # --- F14 semantic GC authorization (frozen ordinals 66-69). GcProposal is

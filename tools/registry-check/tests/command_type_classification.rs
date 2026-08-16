@@ -1281,6 +1281,55 @@ fn meta_f15_configuration_transition_classification_is_exact() {
     assert_eq!(contract.inner_wire_tag, None);
 }
 
+#[test]
+fn meta_f16_shard_reconfiguration_classifications_are_exact() {
+    let registry = registry();
+    let contracts = contracts();
+    for (type_name, id, source, ordinal) in [
+        (
+            "ShardReconfigurationAuthorizationSpec",
+            "cc:meta:shard-reconfiguration-authorization-spec",
+            "a08:1806",
+            0x0015,
+        ),
+        (
+            "ShardConfigurationAdoptionSpec",
+            "cc:meta:shard-configuration-adoption-spec",
+            "a08:1808",
+            0x0016,
+        ),
+    ] {
+        let rows: Vec<_> = registry
+            .classifications
+            .iter()
+            .filter(|row| row.type_name == type_name)
+            .collect();
+        assert_eq!(rows.len(), 1, "{type_name} must classify once");
+        let row = rows[0];
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(row.command_contract_id.as_deref(), Some(id));
+        assert_eq!(row.source_location, source);
+        assert_eq!(row.status, "registered");
+
+        let contract_rows: Vec<_> = contracts
+            .contracts
+            .iter()
+            .filter(|contract| contract.command_contract_id == id)
+            .collect();
+        assert_eq!(contract_rows.len(), 1, "{id} must resolve once");
+        let contract = contract_rows[0];
+        assert_eq!(contract.role, "Meta");
+        assert_eq!(contract.input_schema_id, type_name);
+        assert_eq!(
+            contract.outer_command_union,
+            "GlobalSequenceNeutralSpec<Tag>"
+        );
+        assert_eq!(contract.outer_wire_tag, ordinal);
+        assert_eq!(contract.input_wire_tag, ordinal);
+        assert_eq!(contract.inner_wire_tag, None);
+    }
+}
+
 /// Role specialization creates concrete Local and Meta contract families, not
 /// duplicate input-looking types. Pin the singular generic classifications
 /// and require both role-valid command roots to exist with their exact unions.

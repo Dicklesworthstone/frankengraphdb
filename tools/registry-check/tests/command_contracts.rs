@@ -1851,6 +1851,130 @@ fn meta_f15_configuration_transition_contract_is_exact() {
     );
 }
 
+/// The two source-ordered Meta membership controls are deliberately asymmetric:
+/// authorization publishes a record without mutating the selected topology or
+/// imported trust, while adoption must CAS both selectors or neither. Freeze
+/// that distinction and the dense ordinals so a half-adoption cannot pass.
+#[test]
+fn meta_f16_shard_reconfiguration_contracts_are_exact() {
+    let registry = registry();
+    let expected = [
+        (
+            "cc:meta:shard-reconfiguration-authorization-spec",
+            0x0015,
+            "ShardReconfigurationAuthorizationSpec",
+            "ShardReconfigurationAuthorizationRecord",
+            "ShardReconfigurationAuthorizationRecord",
+            "fgdb_apply::meta::shard_reconfiguration_authorization_spec",
+            Vec::<&str>::new(),
+        ),
+        (
+            "cc:meta:shard-configuration-adoption-spec",
+            0x0016,
+            "ShardConfigurationAdoptionSpec",
+            "TopologyState",
+            "TopologyState",
+            "fgdb_apply::meta::shard_configuration_adoption_spec",
+            vec![
+                "SemanticPayload|Meta|remote_configuration_trust_root",
+                "SemanticPayload|Meta|topology_state_ref",
+            ],
+        ),
+    ];
+    for (id, ordinal, input, result, applied, handler, written) in expected {
+        let rows: Vec<_> = registry
+            .contracts
+            .iter()
+            .filter(|row| row.command_contract_id == id)
+            .collect();
+        assert_eq!(rows.len(), 1, "{id} must classify once");
+        let row = rows[0];
+        assert_eq!(row.role, "Meta");
+        assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, ordinal);
+        assert_eq!(row.input_wire_tag, ordinal);
+        assert_eq!(row.inner_wire_tag, None);
+        assert_eq!(row.input_schema_id, input);
+        assert_eq!(row.body_schema_id, input);
+        assert_eq!(row.result_schema_id, result);
+        assert_eq!(row.applied_record_schema_id, applied);
+        assert_eq!(row.handler_symbol, handler);
+        assert_eq!(row.transition_class, "Semantic");
+        assert_eq!(row.expected_state_schema_id, "WeakStateIdentity");
+        assert_eq!(row.authority_arm, "SourceUnspelled");
+        assert_eq!(row.authority_evidence_target_schema_id, None);
+        assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+        assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+        assert_eq!(row.publication_mode, "SinglePlane");
+        assert_eq!(
+            row.consumed_state_slots,
+            [
+                "SemanticPayload|Meta|remote_configuration_trust_root",
+                "SemanticPayload|Meta|topology_state_ref",
+            ]
+        );
+        assert_eq!(row.written_state_slots, written);
+        assert_eq!(row.checkpoint_floor_classes, ["shard-configuration"]);
+        assert_eq!(row.backup_restore_gc_classes, ["shard-configuration"]);
+        assert_eq!(row.posture_feature_predicate, "sharded");
+        assert_eq!(row.status, "reserved");
+    }
+
+    let authorization = registry
+        .contracts
+        .iter()
+        .find(|row| {
+            row.command_contract_id
+                .ends_with("shard-reconfiguration-authorization-spec")
+        })
+        .expect("Meta F16 authorization");
+    for required in [
+        "one ShardReconfigurationAuthorizationRecord",
+        "neither changes topology nor advances imported trust",
+        "must consume this exact certified authorization",
+    ] {
+        assert!(
+            authorization.sequence_effects.contains(required),
+            "authorization law lost {required:?}"
+        );
+    }
+
+    let adoption = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:shard-configuration-adoption-spec")
+        .expect("Meta F16 adoption");
+    for required in [
+        "atomically CASes both the topology shard entry and RemoteConfigurationTrustRoot",
+        "neither may advance alone",
+        "six-stage release of old-configuration grants and membership",
+        "reject with no partial adoption",
+    ] {
+        assert!(
+            adoption.sequence_effects.contains(required),
+            "adoption law lost {required:?}"
+        );
+    }
+
+    let exact_ordinals: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| {
+            row.role == "Meta"
+                && row.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && matches!(row.outer_wire_tag, 0x0015 | 0x0016)
+        })
+        .map(|row| (row.outer_wire_tag, row.command_contract_id.as_str()))
+        .collect();
+    assert_eq!(
+        exact_ordinals,
+        [
+            (0x0015, "cc:meta:shard-reconfiguration-authorization-spec"),
+            (0x0016, "cc:meta:shard-configuration-adoption-spec"),
+        ]
+    );
+}
+
 /// Freeze the complete F13 reservation, not merely its population. These
 /// literals are independent of the TOML rows: deleting a member, moving one
 /// to another tag/plane, weakening its authority/result, inventing an inner

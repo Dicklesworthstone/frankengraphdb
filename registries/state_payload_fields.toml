@@ -266,6 +266,11 @@ status = "reserved"
 
 [[field]]
 role = "Meta"
+slot_tag = "remote_configuration_trust_root"
+status = "reserved"
+
+[[field]]
+role = "Meta"
 slot_tag = "meta_config_payload_floor_ref"
 status = "reserved"
 

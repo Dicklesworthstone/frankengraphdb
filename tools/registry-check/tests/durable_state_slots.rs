@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 77, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 78, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&68));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&69));
     assert_eq!(plane_counts.get("Protocol"), Some(&2));
     assert_eq!(plane_counts.get("PreparedOwnership"), Some(&1));
     assert_eq!(plane_counts.get("Consensus"), Some(&2));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 68);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 69);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 2);
     assert_eq!(backings["prepared_state_fields.toml"].fields.len(), 1);
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 2);
@@ -277,10 +277,15 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             .expect("Meta F15 configuration state slot");
         assert_eq!(slot.stable_name, slot_tag);
         assert_eq!(slot.backing_registry, "state_payload_fields.toml");
-        assert_eq!(
-            slot.transition_writer_contract_ids,
-            ["cc:meta:meta-configuration-transition-spec"]
-        );
+        let expected_writers = if slot_tag == "topology_state_ref" {
+            vec![
+                "cc:meta:meta-configuration-transition-spec",
+                "cc:meta:shard-configuration-adoption-spec",
+            ]
+        } else {
+            vec!["cc:meta:meta-configuration-transition-spec"]
+        };
+        assert_eq!(slot.transition_writer_contract_ids, expected_writers);
         assert_eq!(slot.status, "reserved");
         let projected = backings["state_payload_fields.toml"]
             .fields
@@ -289,6 +294,38 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             .count();
         assert_eq!(projected, 1, "{slot_tag} backing projection must be unique");
     }
+
+    let meta_remote_trust = slots
+        .slots
+        .iter()
+        .find(|slot| {
+            slot.plane == "SemanticPayload"
+                && slot.role == "Meta"
+                && slot.slot_tag == "remote_configuration_trust_root"
+        })
+        .expect("Meta F16 imported remote configuration trust selector");
+    assert_eq!(
+        meta_remote_trust.stable_name,
+        "remote_configuration_trust_root"
+    );
+    assert_eq!(
+        meta_remote_trust.backing_registry,
+        "state_payload_fields.toml"
+    );
+    assert_eq!(
+        meta_remote_trust.transition_writer_contract_ids,
+        ["cc:meta:shard-configuration-adoption-spec"]
+    );
+    assert_eq!(meta_remote_trust.status, "reserved");
+    let projected_meta_remote_trust = backings["state_payload_fields.toml"]
+        .fields
+        .iter()
+        .filter(|field| field.role == "Meta" && field.slot_tag == "remote_configuration_trust_root")
+        .count();
+    assert_eq!(
+        projected_meta_remote_trust, 1,
+        "Meta F16 trust selector backing projection must be unique"
+    );
 
     for slot_tag in [
         "global_begin_idempotency_index_root",

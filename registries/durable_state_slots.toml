@@ -156,9 +156,10 @@ gc_class = "ReservedPendingActivation"
 role_transition_class = "ReservedPendingActivation"
 status = "reserved"
 
-# Meta F15 configuration transition. The topology selector and paired payload
-# floor advance atomically; prepared and certificate roots are proof inputs
-# and remain owned by their respective planes.
+# Meta F15 configuration transition and F16 shard-configuration adoption. The
+# Meta configuration transition advances the topology selector with its paired
+# payload floor. Shard adoption instead advances topology atomically with the
+# imported remote-configuration trust selector below.
 [[slot]]
 plane = "SemanticPayload"
 role = "Meta"
@@ -170,7 +171,27 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:meta-configuration-transition-spec" ]
+transition_writer_contract_ids = [ "cc:meta:meta-configuration-transition-spec", "cc:meta:shard-configuration-adoption-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "remote_configuration_trust_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "remote_configuration_trust_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:shard-configuration-adoption-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

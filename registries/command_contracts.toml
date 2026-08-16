@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# MetaConfigurationTransitionSpec at ordinal 20; every Global row remains reserved
+# ShardConfigurationAdoptionSpec at ordinal 22; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -920,6 +920,71 @@ consumed_state_slots = [ "Consensus|Meta|meta_certificate_ledger", "PreparedOwne
 written_state_slots = [ "SemanticPayload|Meta|meta_config_payload_floor_ref", "SemanticPayload|Meta|topology_state_ref" ]  # [S] L1804 exact semantic successors
 checkpoint_floor_classes = [ "meta-configuration" ]                        # [S] paired checkpoint/floor and retirement cut
 backup_restore_gc_classes = [ "meta-configuration" ]                       # [S] old ownership survives through all acknowledgements
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F16 shard-reconfiguration authority — frozen Global ordinals 21-22.
+# Authorization fixes the sole permitted old/joint/new transition and its
+# current imported-trust selector without mutating either selector. Adoption
+# later consumes the certified Shard result and atomically advances both the
+# topology entry and RemoteConfigurationTrustRoot; neither half may move alone.
+# Both rows remain reserved until generated union/body/result triples and apply
+# handlers exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:shard-reconfiguration-authorization-spec"  # [C]
+role = "Meta"                                                              # [S] L1806 exact Meta authorization input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0015                                                      # [S] frozen dense Meta ordinal 21
+input_schema_id = "ShardReconfigurationAuthorizationSpec"                  # [S] L1806 full body
+input_wire_tag = 0x0015                                                      # [C] = outer (armless)
+body_schema_id = "ShardReconfigurationAuthorizationSpec"                   # [S]
+result_schema_id = "ShardReconfigurationAuthorizationRecord"               # [S] L1806 exact applied record
+applied_record_schema_id = "ShardReconfigurationAuthorizationRecord"       # [S]
+handler_symbol = "fgdb_apply::meta::shard_reconfiguration_authorization_spec"  # [C][F]
+transition_class = "Semantic"                                               # [S] Meta-authorized membership control
+sequence_effects = "byte-matches the shard, current TopologyState, old imported configuration, exact Meta remote-trust generation and selected predecessor evidence, canonical joint and final configuration bytes and digests, transition nonce, payload predicates, and every required checkpoint, floor, remote, prepared, and certificate obligation; creates the one ShardReconfigurationAuthorizationRecord that fixes the permitted transition and current trust selector; it neither changes topology nor advances imported trust, and a later ShardConfigurationTransitionSpec must consume this exact certified authorization"  # [S] L1806
+expected_state_schema_id = "WeakStateIdentity"                             # [S-derived] exact topology/trust selector basis
+authority_arm = "SourceUnspelled"                                         # [S] no singular authority union member is named
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1806 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S] Meta Semantic record only
+construction_dag_recipe_id = "dag:cc:meta:shard-reconfiguration-authorization-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|remote_configuration_trust_root", "SemanticPayload|Meta|topology_state_ref" ]  # [S] L1806 exact selector bases
+written_state_slots = []                                                    # [S] authorization fixes a record but changes neither selector
+checkpoint_floor_classes = [ "shard-configuration" ]                       # [S] required checkpoint/floor obligations
+backup_restore_gc_classes = [ "shard-configuration" ]                      # [S] old owners remain rooted through adoption/release
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:shard-configuration-adoption-spec"          # [C]
+role = "Meta"                                                              # [S] L1808 exact Meta adoption input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0016                                                      # [S] frozen dense Meta ordinal 22
+input_schema_id = "ShardConfigurationAdoptionSpec"                         # [S] L1808 full body
+input_wire_tag = 0x0016                                                      # [C] = outer (armless)
+body_schema_id = "ShardConfigurationAdoptionSpec"                          # [S]
+result_schema_id = "TopologyState"                                         # [S] L1808 atomically CASes the topology shard entry
+applied_record_schema_id = "TopologyState"                                 # [S] authoritative routed successor
+handler_symbol = "fgdb_apply::meta::shard_configuration_adoption_spec"     # [C][F]
+transition_class = "Semantic"                                               # [S] Meta topology/trust transition
+sequence_effects = "consumes the exact authorization GlobalControlRecord, certified ShardConfigurationAdoptionEvidence, current TopologyState and old imported shard configuration, expected RemoteConfigurationTrustRoot generation and selected predecessor evidence, authenticated successor RemoteAuthorityConfigurationEvidence and digest, and complete RemoteGrantRetirementPlan; verifies the direct old-to-successor trust transition and atomically CASes both the topology shard entry and RemoteConfigurationTrustRoot selector and generation; neither may advance alone, and only this applied adoption permits the six-stage release of old-configuration grants and membership; stale generation, anchor, topology, signature domain, or successor bytes reject with no partial adoption"  # [S] L1808
+expected_state_schema_id = "WeakStateIdentity"                             # [S-derived] exact topology/trust CAS basis
+authority_arm = "SourceUnspelled"                                         # [S] no singular authority union member is named
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1808 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S] one atomic Meta Semantic successor
+construction_dag_recipe_id = "dag:cc:meta:shard-configuration-adoption-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|remote_configuration_trust_root", "SemanticPayload|Meta|topology_state_ref" ]  # [S] L1808 exact CAS bases
+written_state_slots = [ "SemanticPayload|Meta|remote_configuration_trust_root", "SemanticPayload|Meta|topology_state_ref" ]  # [S] L1808 inseparable successors
+checkpoint_floor_classes = [ "shard-configuration" ]                       # [S] topology/trust/configuration floors
+backup_restore_gc_classes = [ "shard-configuration" ]                      # [S] old grants remain until six-stage completion
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]
