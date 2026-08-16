@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# GlobalOutcomeExpirySpec at ordinal 17; every Global row remains reserved
+# ClosedAttemptCompactionSpec at ordinal 18; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 36
+registry_epoch = 37
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -807,6 +807,45 @@ consumed_state_slots = [ "SemanticPayload|Meta|global_begin_idempotency_index_ro
 written_state_slots = [ "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1798 exact atomic tombstone successors
 checkpoint_floor_classes = [ "txn-attempt-compaction", "retention-cut" ] # [S] L1798 activated cut and closed retry/lookup floors
 backup_restore_gc_classes = [ "txn-attempt-compaction", "retention-cut" ]  # [S] replay/bundle edges drop only after the cut
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F13 closed-attempt compaction build — frozen Global ordinal 18. This is
+# the unsigned build phase: it verifies an exact TerminalReady, audit-visible
+# closed-attempt set and all heavy closure evidence, extends the authenticated
+# terminal summary, creates the compact floor record, and inserts that record
+# into the pending root. It does not advance the authoritative floor, rewrite
+# detailed lookup indexes, create the quorum attestation, or release heavy
+# evidence. The row remains reserved until its generated union/body/result
+# triple and handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:closed-attempt-compaction-spec"           # [C]
+role = "Meta"                                                              # [S] L1800 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0012                                                      # [S] frozen dense Meta ordinal 18
+input_schema_id = "ClosedAttemptCompactionSpec"                            # [S] L1800 full body
+input_wire_tag = 0x0012                                                      # [C] = outer (armless)
+body_schema_id = "ClosedAttemptCompactionSpec"                             # [S]
+result_schema_id = "ClosedAttemptCompactionFloorRecord"                    # [S] L1800 exact unsigned compact record
+applied_record_schema_id = "PendingAttemptCompactionRoot"                  # [S] L1800 exact insertion target
+handler_symbol = "fgdb_apply::meta::closed_attempt_compaction_spec"        # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "verifies every selected attempt is TerminalReady and audit-visible; requires complete decision and certificate publication, admitted shard acknowledgements, committed delta publication or the exact no-delta proof, terminal statements and outputs, result retention, workspace and remote-grant release, overlap closure, and no untransferred independent obligation; extends the authenticated TerminalAttemptSummaryRoot with byte-identical TerminalPublicOutcome leaves; creates the unsigned ClosedAttemptCompactionFloorRecord and inserts it into PendingAttemptCompactionRoot; does not advance GlobalAttemptCompactionFloor, rewrite detailed attempt/begin/outcome/conflict indexes, manufacture an attestation, or release heavy evidence"  # [S] L1800-L1802
+expected_state_schema_id = "WeakStateIdentity"                             # [S] L1800 basis_global_state
+authority_arm = "ClosedAttemptEvidenceBundle"                              # [S] L1800 exact evidence_bundle_ref
+authority_evidence_target_schema_id = "ClosedAttemptEvidenceBundle"        # [S]
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] no freeze member in the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1800 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:closed-attempt-compaction-spec" # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_ref", "SemanticPayload|Meta|global_attempt_compaction_pending_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1800 exact basis digests plus prior summary authority
+written_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_pending_root" ]  # [S] L1800 build only; publication performs all detailed rewrites and floor advance
+checkpoint_floor_classes = [ "txn-attempt-compaction" ]                    # [S] L1800-L1802
+backup_restore_gc_classes = [ "txn-attempt-compaction" ]                  # [S] heavy evidence remains rooted through PublishClosed and a later cut
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]

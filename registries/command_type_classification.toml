@@ -89,7 +89,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 34
+registry_epoch = 35
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -104,6 +104,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-outcome-expiry-spec"
 source_location = "a08:1798"
 statement = "GlobalOutcomeExpirySpec is the separate evidence-bound Meta transition that atomically replaces both compact lookup leaves with permanent ExpiredTombstone values, drops only the replay edge, preserves the internal summary, and prevents key/token reuse."
+status = "registered"
+
+[[classification]]
+type_name = "ClosedAttemptCompactionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:closed-attempt-compaction-spec"
+source_location = "a08:1800"
+statement = "ClosedAttemptCompactionSpec is the separately ordered Meta build phase that verifies the complete heavy closure, creates an unsigned compact floor record, and inserts it into PendingAttemptCompactionRoot without advancing the authoritative floor or rewriting detailed indexes."
 status = "registered"
 
 # --- F14 semantic GC authorization (frozen ordinals 66-69). GcProposal is

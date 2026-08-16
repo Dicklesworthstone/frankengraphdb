@@ -1157,6 +1157,45 @@ fn meta_f12_global_outcome_expiry_classification_is_exact() {
     assert_eq!(contract.inner_wire_tag, None);
 }
 
+#[test]
+fn meta_f13_closed_attempt_compaction_classification_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .classifications
+        .iter()
+        .filter(|row| row.type_name == "ClosedAttemptCompactionSpec")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "ClosedAttemptCompactionSpec must classify once"
+    );
+    let row = rows[0];
+    assert_eq!(row.class, "RegisteredCommandInput");
+    assert_eq!(
+        row.command_contract_id.as_deref(),
+        Some("cc:meta:closed-attempt-compaction-spec")
+    );
+    assert_eq!(row.source_location, "a08:1800");
+    assert_eq!(row.status, "registered");
+
+    let contracts = contracts();
+    let contract = contracts
+        .contracts
+        .iter()
+        .find(|contract| contract.command_contract_id == "cc:meta:closed-attempt-compaction-spec")
+        .expect("classified Meta F13 contract");
+    assert_eq!(contract.role, "Meta");
+    assert_eq!(contract.input_schema_id, "ClosedAttemptCompactionSpec");
+    assert_eq!(
+        contract.outer_command_union,
+        "GlobalSequenceNeutralSpec<Tag>"
+    );
+    assert_eq!(contract.outer_wire_tag, 0x0012);
+    assert_eq!(contract.input_wire_tag, 0x0012);
+    assert_eq!(contract.inner_wire_tag, None);
+}
+
 /// Role specialization creates concrete Local and Meta contract families, not
 /// duplicate input-looking types. Pin the singular generic classifications
 /// and require both role-valid command roots to exist with their exact unions.
