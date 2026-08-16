@@ -42,7 +42,7 @@ use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -543,6 +543,32 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
                 db.manifest().expect("healthy manifest"),
                 "the read view did not pin the authenticated manifest"
             );
+            assert!(
+                std::ptr::eq(
+                    db.delta_index().expect("healthy delta window"),
+                    pinned.delta_index()
+                ),
+                "read-view acquisition cloned the delta window instead of sharing the published generation"
+            );
+            let pinned_delta_frontier = pinned.delta_frontier();
+            let pinned_delta_sequences = pinned
+                .delta_since(CommitSeq::ORIGIN)
+                .expect("the full pinned delta suffix is retained")
+                .map(|batch| batch.commit_seq())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                pinned_delta_frontier,
+                pinned.frontier(),
+                "the published graph and delta cuts disagree before compaction"
+            );
+            assert_eq!(
+                pinned_delta_sequences,
+                expected
+                    .iter()
+                    .map(|(sequence, _)| *sequence)
+                    .collect::<Vec<_>>(),
+                "the pinned delta suffix is not the exact 65-commit graph history"
+            );
 
             // Keep a real OS reader actively traversing the old generation
             // until the exclusive writer has finished publishing the compacted
@@ -556,6 +582,16 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
             let (ready_tx, ready_rx) = mpsc::sync_channel(0);
             let reader = std::thread::spawn(move || {
                 let assert_pinned_history = || {
+                    assert_eq!(pinned.delta_frontier(), pinned_delta_frontier);
+                    assert_eq!(
+                        pinned
+                            .delta_since(CommitSeq::ORIGIN)
+                            .expect("pinned delta suffix remains readable")
+                            .map(|batch| batch.commit_seq())
+                            .collect::<Vec<_>>(),
+                        pinned_delta_sequences,
+                        "the pinned delta cut moved during compaction"
+                    );
                     for (sequence, value) in &reader_expected {
                         let edge = pinned
                             .edge_at(EId(10), *sequence)
@@ -594,6 +630,24 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
                 "compaction increased referenced blocks from {blocks_before} to {}",
                 root_after.blocks.len()
             );
+            assert_eq!(
+                db.delta_frontier()
+                    .expect("healthy compacted delta frontier"),
+                duplicate.delta_frontier(),
+                "compaction changed the delta frontier while preserving graph history"
+            );
+            assert_eq!(
+                db.delta_index().expect("healthy compacted delta window"),
+                duplicate.delta_index(),
+                "compaction changed the ordered delta window"
+            );
+            assert!(
+                !std::ptr::eq(
+                    db.delta_index().expect("healthy compacted delta window"),
+                    duplicate.delta_index()
+                ),
+                "compaction did not publish a replacement graph-and-delta generation"
+            );
             assert_history(&db);
             drop(db);
 
@@ -603,6 +657,11 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
                 .await
                 .expect("reopens compacted generation");
             assert_eq!(db.partition_root().expect("healthy root"), compacted_root);
+            assert_eq!(
+                db.delta_index().expect("rebuilds delta window"),
+                duplicate.delta_index(),
+                "cold reopen did not reconstruct the compacted generation's exact delta cut"
+            );
             assert_history(&db);
         }
     });
@@ -638,6 +697,22 @@ fn a_pinned_read_snapshot_survives_a_successor_write() {
             let pinned_root = pinned.partition_root();
             let pinned_manifest = pinned.manifest();
             assert_eq!(pinned.frontier(), first_seq);
+            assert_eq!(pinned.delta_frontier(), first_seq);
+            assert!(
+                std::ptr::eq(
+                    db.delta_index().expect("healthy delta window"),
+                    pinned.delta_index()
+                ),
+                "the pinned view must share the first generation's delta index"
+            );
+            assert_eq!(
+                pinned
+                    .delta_since(CommitSeq::ORIGIN)
+                    .expect("first generation suffix")
+                    .map(|batch| batch.commit_seq())
+                    .collect::<Vec<_>>(),
+                vec![first_seq]
+            );
             assert_eq!(pinned.neighbours(VId(1), KNOWS).unwrap(), vec![VId(2)]);
             assert_eq!(pinned.in_neighbours(VId(2), KNOWS).unwrap(), vec![VId(1)]);
             assert_eq!(pinned.vertices().unwrap().len(), 2);
@@ -665,8 +740,41 @@ fn a_pinned_read_snapshot_survives_a_successor_write() {
             assert_eq!(db.vertices().unwrap().len(), 3);
             assert_eq!(db.edges().unwrap().len(), 2);
             assert!(db.vertex(VId(3)).unwrap().is_some());
+            assert_eq!(db.frontier().expect("new graph frontier"), successor_seq);
+            assert_eq!(
+                db.delta_frontier().expect("new delta frontier"),
+                successor_seq
+            );
+            assert_eq!(
+                db.delta_since(CommitSeq::ORIGIN)
+                    .expect("successor delta suffix")
+                    .map(|batch| batch.commit_seq())
+                    .collect::<Vec<_>>(),
+                vec![first_seq, successor_seq]
+            );
+            assert!(
+                !std::ptr::eq(
+                    db.delta_index().expect("new delta index"),
+                    pinned.delta_index()
+                ),
+                "a successor write mutated the pinned graph-and-delta generation in place"
+            );
 
             assert_eq!(pinned.frontier(), first_seq);
+            assert_eq!(pinned.delta_frontier(), first_seq);
+            assert_eq!(
+                pinned
+                    .delta_since(CommitSeq::ORIGIN)
+                    .expect("old delta suffix remains readable")
+                    .map(|batch| batch.commit_seq())
+                    .collect::<Vec<_>>(),
+                vec![first_seq]
+            );
+            assert!(matches!(
+                pinned.delta_since(successor_seq),
+                Err(fgdb::ReadError::BeyondFrontier { asked, frontier })
+                    if asked == successor_seq && frontier == first_seq
+            ));
             assert_eq!(pinned.partition_root(), pinned_root);
             assert_eq!(pinned.manifest(), pinned_manifest);
             assert_eq!(pinned.vertices().unwrap().len(), 2);

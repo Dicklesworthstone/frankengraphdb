@@ -1043,6 +1043,30 @@ struct Snapshot {
     /// every emitted image against the oracle's own chains, so a drift in
     /// either implementation is a refusal, not a silent agreement.
     versions: std::collections::BTreeMap<ElementId, ObjectId>,
+    /// The ordered local delta window derived from the same Chronicle cut as
+    /// every graph field above. Keeping it inside the immutable generation is
+    /// what makes a pinned view one coherent graph-and-delta publication:
+    /// writes build a successor off-side, and compaction carries this exact
+    /// window into its replacement generation.
+    delta_index: LocalDeltaBatchIndex,
+}
+
+fn read_error_from_index(error: IndexError) -> ReadError {
+    match error {
+        IndexError::BeyondFrontier { asked, frontier } => {
+            ReadError::BeyondFrontier { asked, frontier }
+        }
+        IndexError::CursorRetired {
+            asked,
+            retained_after,
+            frontier,
+        } => ReadError::DeltaCursorRetired {
+            asked,
+            retained_after,
+            frontier,
+        },
+        other => ReadError::DeltaWindow(other),
+    }
 }
 
 impl Snapshot {
@@ -1139,6 +1163,32 @@ impl EmbeddedReadView {
     #[must_use]
     pub fn partition_root(&self) -> PartitionRootVersion {
         self.snapshot.root
+    }
+
+    /// The ordered delta window belonging to this exact graph generation.
+    ///
+    /// The returned reference points into the same shared [`Snapshot`] as the
+    /// graph reads; no batch or index clone occurs when a view is acquired.
+    #[must_use]
+    pub fn delta_index(&self) -> &LocalDeltaBatchIndex {
+        &self.snapshot.delta_index
+    }
+
+    /// The delta frontier of this exact graph generation.
+    #[must_use]
+    pub fn delta_frontier(&self) -> CommitSeq {
+        self.snapshot.delta_index.frontier()
+    }
+
+    /// Retained committed batches strictly after `after`, in commit order.
+    pub fn delta_since(
+        &self,
+        after: CommitSeq,
+    ) -> Result<impl Iterator<Item = &LogicalDeltaBatch> + '_, ReadError> {
+        self.snapshot
+            .delta_index
+            .since(after)
+            .map_err(read_error_from_index)
     }
 
     /// The live destinations of `src` over `relation` at this view's frontier.
@@ -1403,11 +1453,6 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// `UnixVfs`. Strata's `BlockStore` does not yet accept a VFS; callers of
     /// `open_with_vfs` must not infer that its object files are faulted too.
     vfs: V,
-    /// Derived window over committed delta batches (plan:397). Never
-    /// authoritative and never persisted: every open rebuilds it from the
-    /// recovered marker chain, and a crash after D2 before the in-memory
-    /// insert heals the same way (FG-INV-18).
-    delta_index: LocalDeltaBatchIndex,
     /// Secret-free verification records emitted while this handle reopened
     /// Chronicle capsules. Retained on the handle so product callers can
     /// forward them to the eventual observatory without a silent/no-op sink.
@@ -1586,7 +1631,7 @@ impl<V: Vfs + Clone> Database<V> {
         // slot that is foreign, malformed, or unaccountable refuses rather
         // than being silently rebuilt over.
         let probe = RootStore::with_vfs(vfs.clone(), path);
-        let (snapshot, writer) = if force_rebuild {
+        let (mut snapshot, writer) = if force_rebuild {
             rebuild(
                 cx,
                 &coordinator,
@@ -1742,6 +1787,7 @@ impl<V: Vfs + Clone> Database<V> {
         // insert would see a gap (plan:397, FG-INV-18).
         let delta_index =
             rebuild_delta_index(cx, &coordinator, &mut crypto_verification_events).await?;
+        snapshot.delta_index = delta_index;
         let published_frontier = snapshot.frontier;
         Ok(Self {
             coordinator,
@@ -1758,7 +1804,6 @@ impl<V: Vfs + Clone> Database<V> {
             // state without a second trust-bearing constructor (fgdb-gieu).
             receipts: PublishReceipts::new(),
             vfs,
-            delta_index,
             crypto_verification_events,
         })
     }
@@ -2477,7 +2522,8 @@ impl<V: Vfs + Clone> Database<V> {
             capsule.template_digest.0,
             CommittedMarker::attest(marker_ref, cx),
         );
-        self.delta_index
+        let mut next_delta_index = self.snapshot.delta_index.clone();
+        next_delta_index
             .insert(batch)
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
@@ -2793,6 +2839,7 @@ impl<V: Vfs + Clone> Database<V> {
             manifest,
             next_birth_ordinal,
             versions: new_versions,
+            delta_index: next_delta_index,
         });
         self.state = DatabaseState::Healthy {
             published_frontier: self.snapshot.frontier,
@@ -2926,7 +2973,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// the retained snapshot is still one commit behind.
     pub fn delta_index(&self) -> Result<&LocalDeltaBatchIndex, ReadError> {
         self.ensure_readable()?;
-        Ok(&self.delta_index)
+        Ok(&self.snapshot.delta_index)
     }
 
     /// How far the derived delta window reaches. After a successful write
@@ -2936,7 +2983,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// ask for the window without importing the snapshot's vocabulary.
     pub fn delta_frontier(&self) -> Result<CommitSeq, ReadError> {
         self.ensure_readable()?;
-        Ok(self.delta_index.frontier())
+        Ok(self.snapshot.delta_index.frontier())
     }
 
     /// The retained committed batches strictly after `after`, in commit order.
@@ -2951,21 +2998,10 @@ impl<V: Vfs + Clone> Database<V> {
         after: CommitSeq,
     ) -> Result<impl Iterator<Item = &LogicalDeltaBatch> + '_, ReadError> {
         self.ensure_readable()?;
-        self.delta_index.since(after).map_err(|error| match error {
-            IndexError::BeyondFrontier { asked, frontier } => {
-                ReadError::BeyondFrontier { asked, frontier }
-            }
-            IndexError::CursorRetired {
-                asked,
-                retained_after,
-                frontier,
-            } => ReadError::DeltaCursorRetired {
-                asked,
-                retained_after,
-                frontier,
-            },
-            other => ReadError::DeltaWindow(other),
-        })
+        self.snapshot
+            .delta_index
+            .since(after)
+            .map_err(read_error_from_index)
     }
 
     /// Consolidate the partition's durable history: fewer blocks, the SAME
@@ -3107,7 +3143,7 @@ impl<V: Vfs + Clone> Database<V> {
         let next_birth_ordinal = self.snapshot.next_birth_ordinal;
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("a healthy handle's frontier is on its own recovered chain");
-        let (snapshot, writer) = publish_and_snapshot(
+        let (mut snapshot, writer) = publish_and_snapshot(
             cx,
             &self.store,
             &self.keys,
@@ -3117,6 +3153,7 @@ impl<V: Vfs + Clone> Database<V> {
             next_birth_ordinal,
             published_chain_hash,
         )?;
+        snapshot.delta_index = self.snapshot.delta_index.clone();
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
         let manifest_records = [ManifestRecord {
@@ -3706,6 +3743,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             manifest,
             next_birth_ordinal,
             versions,
+            delta_index: LocalDeltaBatchIndex::new(),
         },
         writer,
     ))
@@ -4011,9 +4049,36 @@ fn publish_and_snapshot(
             manifest,
             next_birth_ordinal,
             versions,
+            delta_index: LocalDeltaBatchIndex::new(),
         },
         writer,
     ))
+}
+
+#[cfg(test)]
+mod delta_read_error_laws {
+    use super::*;
+
+    #[test]
+    fn the_shared_delta_cursor_mapper_preserves_a_retired_cut_exactly() {
+        let asked = CommitSeq(3);
+        let retained_after = CommitSeq(7);
+        let frontier = CommitSeq(11);
+        assert!(matches!(
+            read_error_from_index(IndexError::CursorRetired {
+                asked,
+                retained_after,
+                frontier,
+            }),
+            ReadError::DeltaCursorRetired {
+                asked: found_asked,
+                retained_after: found_retained_after,
+                frontier: found_frontier,
+            } if found_asked == asked
+                && found_retained_after == retained_after
+                && found_frontier == frontier
+        ));
+    }
 }
 
 #[cfg(test)]

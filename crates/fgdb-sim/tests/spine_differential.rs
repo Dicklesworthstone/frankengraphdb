@@ -640,6 +640,18 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             let published_neighbours = published_view
                 .neighbours(VId(1), KNOWS)
                 .expect("issued view reads its pinned generation");
+            let published_delta_frontier = published_view.delta_frontier();
+            let published_delta_sequences = published_view
+                .delta_since(CommitSeq::ORIGIN)
+                .expect("published generation retains its full delta suffix")
+                .map(|batch| batch.commit_seq())
+                .collect::<Vec<_>>();
+            assert_eq!(published_delta_frontier, published_view.frontier());
+            assert_eq!(published_delta_sequences, vec![CommitSeq(1)]);
+            assert!(std::ptr::eq(
+                db.delta_index().expect("healthy delta window"),
+                published_view.delta_index()
+            ));
 
             let mut second = WriteBatch::new(KNOWS);
             second.create_vertex(
@@ -722,6 +734,20 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             assert_recovery_fence(stage, recovery, db.edges_at(recovery.published_frontier));
             assert_eq!(published_view.frontier(), recovery.published_frontier);
             assert_eq!(
+                published_view.delta_frontier(),
+                published_delta_frontier,
+                "{stage:?}: a pre-fence view's delta frontier moved after D2"
+            );
+            assert_eq!(
+                published_view
+                    .delta_since(CommitSeq::ORIGIN)
+                    .expect("pre-fence delta suffix remains readable")
+                    .map(|batch| batch.commit_seq())
+                    .collect::<Vec<_>>(),
+                published_delta_sequences,
+                "{stage:?}: a pre-fence view absorbed the uncertain commit's delta batch"
+            );
+            assert_eq!(
                 published_view
                     .neighbours(VId(1), KNOWS)
                     .expect("pre-fence view remains readable"),
@@ -768,6 +794,18 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             let engine_neighbours = engine.neighbours(VId(1), KNOWS).expect("reads");
             let engine_vertices = engine.vertices().expect("reads");
             let engine_edges = engine.edges().expect("reads");
+            let engine_delta_frontier = engine.delta_frontier().expect("rebuilds delta frontier");
+            let engine_delta_sequences = engine
+                .delta_since(CommitSeq::ORIGIN)
+                .expect("rebuilds committed delta suffix")
+                .map(|batch| batch.commit_seq())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                engine.frontier().expect("rebuilds graph frontier"),
+                CommitSeq(2)
+            );
+            assert_eq!(engine_delta_frontier, CommitSeq(2));
+            assert_eq!(engine_delta_sequences, vec![CommitSeq(1), CommitSeq(2)]);
             drop(engine);
 
             // ORACLE SIDE: independently replay the Chronicle bytes and compare
