@@ -728,7 +728,7 @@ fn no_regret_numeric_fingerprint() -> NoRegretNumericFingerprint {
         ),
         fixture_identity(
             b"fgdb:fixture-only:asupersync-revision-oid:v1",
-            b"fffc0a4c3f1ef45da54af35b7aa720978db0dffc",
+            b"8522f9411c7652accf3996b215fca8df901c1489",
         ),
         fixture_identity(
             b"fgdb:fixture-only:math-abi-oid:v1",

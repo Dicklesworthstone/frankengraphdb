@@ -60,8 +60,8 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asupersync"
-version = "0.4.4"
-source = "git+https://github.com/Dicklesworthstone/asupersync?rev=fffc0a4c3f1ef45da54af35b7aa720978db0dffc#fffc0a4c3f1ef45da54af35b7aa720978db0dffc"
+version = "0.4.5"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=8522f9411c7652accf3996b215fca8df901c1489#8522f9411c7652accf3996b215fca8df901c1489"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -683,8 +683,8 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.4.4"
-source = "git+https://github.com/Dicklesworthstone/asupersync?rev=fffc0a4c3f1ef45da54af35b7aa720978db0dffc#fffc0a4c3f1ef45da54af35b7aa720978db0dffc"
+version = "0.4.5"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=8522f9411c7652accf3996b215fca8df901c1489#8522f9411c7652accf3996b215fca8df901c1489"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -693,8 +693,8 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.4"
-source = "git+https://github.com/Dicklesworthstone/asupersync?rev=fffc0a4c3f1ef45da54af35b7aa720978db0dffc#fffc0a4c3f1ef45da54af35b7aa720978db0dffc"
+version = "0.4.5"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=8522f9411c7652accf3996b215fca8df901c1489#8522f9411c7652accf3996b215fca8df901c1489"
 dependencies = [
  "serde",
  "serde_json",
@@ -702,8 +702,8 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.4"
-source = "git+https://github.com/Dicklesworthstone/asupersync?rev=fffc0a4c3f1ef45da54af35b7aa720978db0dffc#fffc0a4c3f1ef45da54af35b7aa720978db0dffc"
+version = "0.4.5"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=8522f9411c7652accf3996b215fca8df901c1489#8522f9411c7652accf3996b215fca8df901c1489"
 dependencies = [
  "serde",
 ]
