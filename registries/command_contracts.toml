@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 28
+registry_epoch = 29
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -416,6 +416,99 @@ publication_mode = "SinglePlane"                                           # [S]
 construction_dag_recipe_id = "dag:cc:meta:txn-ownership-expiry-abort-spec"  # [C][F]
 consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S-derived] L1008/L1782-L1784
 written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S-derived]
+checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F4 statement lifecycle — frozen Global ordinals 7-9. Registration
+# claims the exact statement identity before any shard observes it;
+# publication is the first Meta row whose one RootManifest generation updates
+# both the Semantic statement/outcome/resource roots and the sole Protocol
+# result-independent-retention index; abort closes only the open statement and
+# its owned resources. These are reserved contracts, not runtime handlers.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-statement-registration-spec"        # [C]
+role = "Meta"                                                              # [S] L1726 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1774
+outer_wire_tag = 0x0007                                                      # [S] frozen dense Meta ordinal 7
+input_schema_id = "GlobalStatementRegistrationSpec"                        # [S] L1726 full body
+input_wire_tag = 0x0007                                                      # [C]
+body_schema_id = "GlobalStatementRegistrationSpec"                         # [S]
+result_schema_id = "GlobalStatementRegistration"                           # [S] L1726 apply creates it
+applied_record_schema_id = "GlobalStatementIndex"                          # [S] L1726 inserts Open
+handler_symbol = "fgdb_apply::meta::global_statement_registration_spec"    # [C][F]
+transition_class = "Semantic"                                               # [S]
+sequence_effects = "requires the checked next sequence and current workspace; byte-matches the classification, bound query, parameters, transaction error policy, authority and statement audit admission; claims the distinct statement ticket when required, creates GlobalStatementRegistration and inserts Open before any shard observation; exact retry joins and every drift fails"  # [S] L1726
+expected_state_schema_id = "GlobalTxnWorkspaceGeneration"                  # [S] expected_workspace_generation_ref
+authority_arm = "AuthorityBoundHeader<Meta>"                               # [S-derived] complete binding inherited through registration_ref
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"                # [S] L1726
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-statement-registration-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_statement_index_root" ]  # [S] L1726
+written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_statement_index_root" ]  # [S]
+checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:global-statement-publication-spec"         # [C]
+role = "Meta"                                                              # [S] L1732
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S]
+outer_wire_tag = 0x0008                                                      # [S] frozen dense Meta ordinal 8
+input_schema_id = "GlobalStatementPublicationSpec"                         # [S] L1732 full body
+input_wire_tag = 0x0008                                                      # [C]
+body_schema_id = "GlobalStatementPublicationSpec"                          # [S]
+result_schema_id = "StatementPublishedOutput"                              # [S] L1732 published_output
+applied_record_schema_id = "GlobalStatementIndex"                          # [S] Open -> Published
+handler_symbol = "fgdb_apply::meta::global_statement_publication_spec"     # [C][F]
+transition_class = "Semantic"                                               # [S]
+sequence_effects = "byte-matches the exact statement, prior/successor workspace, routed shard set, read witnesses, serialization, output, authority and audit owner; atomically installs Published and the succeeding Registered outcome, advances semantic frontiers and resource/conflict state, and for Buffered output detaches one ResultIndependentRetentionRecord<Meta> into the Protocol index without a Semantic reference to it"  # [S] L1732
+expected_state_schema_id = "GlobalStatementIndex"                          # [S] expected_statement_index_value:Open
+authority_arm = "AuthorityBoundHeader<Meta>"                               # [S-derived] registration lineage
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                              # [S] L1732
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "AtomicProtocolDetach"                                  # [S] L1732 exact registered row mode
+construction_dag_recipe_id = "dag:cc:meta:global-statement-publication-spec"  # [C][F]
+consumed_state_slots = [ "Protocol|Meta|result_independent_retention_index", "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1732
+written_state_slots = [ "Protocol|Meta|result_independent_retention_index", "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S]
+checkpoint_floor_classes = [ "txn-attempt", "result-delivery" ]           # [S]
+backup_restore_gc_classes = [ "txn-lifecycle", "protocol-result-retention" ]  # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:global-statement-abort-spec"               # [C]
+role = "Meta"                                                              # [S] L1736
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S]
+outer_wire_tag = 0x0009                                                      # [S] frozen dense Meta ordinal 9
+input_schema_id = "GlobalStatementAbortSpec"                               # [S] L1736 full body
+input_wire_tag = 0x0009                                                      # [C]
+body_schema_id = "GlobalStatementAbortSpec"                                # [S]
+result_schema_id = "GlobalStatementIndex"                                  # [S] Failed|Abandoned entry
+applied_record_schema_id = "GlobalStatementIndex"                          # [S] Open -> Failed|Abandoned
+handler_symbol = "fgdb_apply::meta::global_statement_abort_spec"           # [C][F]
+transition_class = "Semantic"                                               # [S]
+sequence_effects = "requires the registration-pinned policy and stable failure class to select ContinueAttempt or AbortAttempt; resolves the statement ticket, proves no result or workspace effect, releases only named statement resources, marks Open as Failed or Abandoned, and leaves the operation ticket and attempt outcome unresolved"  # [S] L1736
+expected_state_schema_id = "GlobalStatementIndex"                          # [S] expected_statement_index_value:Open
+authority_arm = "AuthorizationDecisionRecord<Meta>"                        # [S] L1736 exact direct ref
+authority_evidence_target_schema_id = "AuthorizationDecisionRecord<Meta>"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                              # [S] L1736
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-statement-abort-spec"     # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1736
+written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S]
 checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
 backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
 posture_feature_predicate = "sharded"                                      # [S]

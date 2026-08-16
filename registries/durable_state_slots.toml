@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 14
+registry_epoch = 15
 
 
 [[slot]]
@@ -172,7 +172,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-statement-abort-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-statement-registration-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -212,7 +212,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-statement-publication-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -255,7 +255,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-statement-publication-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -280,7 +280,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-statement-abort-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-statement-registration-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -340,7 +340,30 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-statement-abort-spec", "cc:meta:global-statement-publication-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+# Meta F4 Buffered publication is an atomic cross-plane detach. This is the
+# sole Meta Protocol result owner; it is deliberately not a GlobalStatePayload
+# field and no Semantic row strongly references it after detachment.
+[[slot]]
+plane = "Protocol"
+role = "Meta"
+slot_tag = "result_independent_retention_index"
+backing_registry = "protocol_state_fields.toml"
+stable_name = "result_independent_retention_index"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-statement-publication-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

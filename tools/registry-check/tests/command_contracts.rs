@@ -111,6 +111,9 @@ fn phase_b_seed_rows_are_present() {
         "cc:meta:txn-ownership-transition-spec:reattach",
         "cc:meta:txn-ownership-transition-spec:renew",
         "cc:meta:txn-ownership-expiry-abort-spec",
+        "cc:meta:global-statement-registration-spec",
+        "cc:meta:global-statement-publication-spec",
+        "cc:meta:global-statement-abort-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
         // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
@@ -329,8 +332,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 154,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F3 rows"
+        registry.contracts.len() >= 157,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F4 rows"
     );
 }
 
@@ -726,6 +729,182 @@ fn meta_f3_ownership_contracts_are_exact_and_atomic() {
         .map(|row| row.inner_wire_tag)
         .collect();
     assert_eq!(tag_five, [Some(0x0001), Some(0x0002)]);
+}
+
+/// Registration, publication, and abort are three distinct Global semantic
+/// inputs. Publication alone crosses the Semantic/Protocol boundary, and its
+/// Protocol owner is independent rather than reachable from the statement
+/// value after detachment.
+#[test]
+fn meta_f4_statement_contracts_are_exact_and_cross_plane_safe() {
+    let registry = registry();
+
+    let registration = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:global-statement-registration-spec")
+        .expect("Meta statement registration row");
+    assert_eq!(
+        registration.outer_command_union,
+        "GlobalSequenceNeutralSpec<Tag>"
+    );
+    assert_eq!(registration.outer_wire_tag, 0x0007);
+    assert_eq!(registration.input_wire_tag, 0x0007);
+    assert_eq!(registration.inner_wire_tag, None);
+    assert_eq!(
+        registration.input_schema_id,
+        "GlobalStatementRegistrationSpec"
+    );
+    assert_eq!(registration.result_schema_id, "GlobalStatementRegistration");
+    assert_eq!(
+        registration.applied_record_schema_id,
+        "GlobalStatementIndex"
+    );
+    assert_eq!(
+        registration.expected_state_schema_id,
+        "GlobalTxnWorkspaceGeneration"
+    );
+    assert_eq!(registration.authority_arm, "AuthorityBoundHeader<Meta>");
+    assert_eq!(registration.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(
+        registration.terminal_audit_gate_arm,
+        "LifecycleScaffoldingNotRequired"
+    );
+    assert_eq!(registration.publication_mode, "SinglePlane");
+    assert_eq!(
+        registration.consumed_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_statement_index_root",
+        ]
+    );
+    assert_eq!(
+        registration.written_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_statement_index_root",
+        ]
+    );
+    for required in [
+        "before any shard observation",
+        "exact retry joins",
+        "every drift fails",
+    ] {
+        assert!(registration.sequence_effects.contains(required));
+    }
+
+    let publication = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:global-statement-publication-spec")
+        .expect("Meta statement publication row");
+    assert_eq!(publication.outer_wire_tag, 0x0008);
+    assert_eq!(publication.input_wire_tag, 0x0008);
+    assert_eq!(publication.inner_wire_tag, None);
+    assert_eq!(
+        publication.input_schema_id,
+        "GlobalStatementPublicationSpec"
+    );
+    assert_eq!(publication.result_schema_id, "StatementPublishedOutput");
+    assert_eq!(publication.applied_record_schema_id, "GlobalStatementIndex");
+    assert_eq!(publication.expected_state_schema_id, "GlobalStatementIndex");
+    assert_eq!(publication.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(publication.terminal_audit_gate_arm, "TerminalAuditGate");
+    assert_eq!(publication.publication_mode, "AtomicProtocolDetach");
+    assert_eq!(
+        publication.consumed_state_slots,
+        [
+            "Protocol|Meta|result_independent_retention_index",
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+            "SemanticPayload|Meta|global_statement_index_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    assert_eq!(
+        publication.written_state_slots,
+        [
+            "Protocol|Meta|result_independent_retention_index",
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+            "SemanticPayload|Meta|global_statement_index_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    for required in [
+        "ResultIndependentRetentionRecord<Meta>",
+        "without a Semantic reference",
+        "succeeding Registered outcome",
+    ] {
+        assert!(publication.sequence_effects.contains(required));
+    }
+
+    let abort = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:global-statement-abort-spec")
+        .expect("Meta statement abort row");
+    assert_eq!(abort.outer_wire_tag, 0x0009);
+    assert_eq!(abort.input_wire_tag, 0x0009);
+    assert_eq!(abort.inner_wire_tag, None);
+    assert_eq!(abort.input_schema_id, "GlobalStatementAbortSpec");
+    assert_eq!(abort.result_schema_id, "GlobalStatementIndex");
+    assert_eq!(abort.applied_record_schema_id, "GlobalStatementIndex");
+    assert_eq!(abort.authority_arm, "AuthorizationDecisionRecord<Meta>");
+    assert_eq!(
+        abort.authority_evidence_target_schema_id.as_deref(),
+        Some("AuthorizationDecisionRecord<Meta>")
+    );
+    assert_eq!(abort.publication_mode, "SinglePlane");
+    assert_eq!(
+        abort.consumed_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_statement_index_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    assert_eq!(
+        abort.written_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_statement_index_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    for required in [
+        "ContinueAttempt or AbortAttempt",
+        "no result or workspace effect",
+        "operation ticket and attempt outcome unresolved",
+    ] {
+        assert!(abort.sequence_effects.contains(required));
+    }
+
+    let exact_meta_tags: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| {
+            row.role == "Meta"
+                && row.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && (0x0007..=0x0009).contains(&row.outer_wire_tag)
+        })
+        .map(|row| (row.outer_wire_tag, row.command_contract_id.as_str()))
+        .collect();
+    assert_eq!(
+        exact_meta_tags,
+        [
+            (0x0007, "cc:meta:global-statement-registration-spec"),
+            (0x0008, "cc:meta:global-statement-publication-spec"),
+            (0x0009, "cc:meta:global-statement-abort-spec"),
+        ]
+    );
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These

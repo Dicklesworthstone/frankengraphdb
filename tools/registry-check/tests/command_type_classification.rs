@@ -150,6 +150,9 @@ fn source_forced_seed_population_is_present() {
         "GlobalBeginReservationSpec",
         "GlobalBeginTerminalSpec",
         "GlobalAttemptRegistrationSpec",
+        "GlobalStatementRegistrationSpec",
+        "GlobalStatementPublicationSpec",
+        "GlobalStatementAbortSpec",
     ] {
         assert!(
             registry
@@ -160,8 +163,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 115,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F3 rows"
+        registry.classifications.len() >= 118,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F4 rows"
     );
 }
 
@@ -786,6 +789,59 @@ fn meta_f3_attempt_registration_classification_is_exact() {
     );
     assert_eq!(contract.outer_wire_tag, 0x0004);
     assert_eq!(contract.inner_wire_tag, None);
+}
+
+#[test]
+fn meta_f4_statement_classifications_are_exact() {
+    let registry = registry();
+    let contracts = contracts();
+    for (type_name, contract_id, source_location, outer_tag) in [
+        (
+            "GlobalStatementRegistrationSpec",
+            "cc:meta:global-statement-registration-spec",
+            "a09:1726",
+            0x0007,
+        ),
+        (
+            "GlobalStatementPublicationSpec",
+            "cc:meta:global-statement-publication-spec",
+            "a09:1732",
+            0x0008,
+        ),
+        (
+            "GlobalStatementAbortSpec",
+            "cc:meta:global-statement-abort-spec",
+            "a09:1736",
+            0x0009,
+        ),
+    ] {
+        let rows: Vec<_> = registry
+            .classifications
+            .iter()
+            .filter(|row| row.type_name == type_name)
+            .collect();
+        assert_eq!(rows.len(), 1, "{type_name} must classify exactly once");
+        let row = rows[0];
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(row.command_contract_id.as_deref(), Some(contract_id));
+        assert_eq!(row.source_location, source_location);
+        assert_eq!(row.status, "registered");
+
+        let contract = contracts
+            .contracts
+            .iter()
+            .find(|contract| contract.command_contract_id == contract_id)
+            .expect("classified Meta F4 contract");
+        assert_eq!(contract.role, "Meta");
+        assert_eq!(contract.input_schema_id, type_name);
+        assert_eq!(
+            contract.outer_command_union,
+            "GlobalSequenceNeutralSpec<Tag>"
+        );
+        assert_eq!(contract.outer_wire_tag, outer_tag);
+        assert_eq!(contract.input_wire_tag, outer_tag);
+        assert_eq!(contract.inner_wire_tag, None);
+    }
 }
 
 /// Role specialization creates concrete Local and Meta contract families, not
