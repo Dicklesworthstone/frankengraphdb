@@ -919,7 +919,11 @@ fn meta_f5_active_attempt_cancel_contract_is_exact() {
         .iter()
         .filter(|row| row.command_contract_id == "cc:meta:global-attempt-cancel-spec")
         .collect();
-    assert_eq!(rows.len(), 1, "Meta attempt cancellation must classify once");
+    assert_eq!(
+        rows.len(),
+        1,
+        "Meta attempt cancellation must classify once"
+    );
     let row = rows[0];
     assert_eq!(row.role, "Meta");
     assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");

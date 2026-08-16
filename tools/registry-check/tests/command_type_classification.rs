@@ -867,9 +867,7 @@ fn meta_f5_attempt_cancel_classification_is_exact() {
     let contract = contracts
         .contracts
         .iter()
-        .find(|contract| {
-            contract.command_contract_id == "cc:meta:global-attempt-cancel-spec"
-        })
+        .find(|contract| contract.command_contract_id == "cc:meta:global-attempt-cancel-spec")
         .expect("classified Meta F5 contract");
     assert_eq!(contract.role, "Meta");
     assert_eq!(contract.input_schema_id, "GlobalAttemptCancelSpec");
