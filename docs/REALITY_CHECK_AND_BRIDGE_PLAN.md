@@ -1,13 +1,107 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-08-09.** This document is revised in place. The
-2026-07-31 through 2026-08-01 assessment is retained below as a superseded historical
-snapshot because it explains several decisions, but its counts and product verdict are
-not current.
+**Current measurement: 2026-08-16.** This document is revised in place. Older
+commit-bound assessments are retained below as superseded historical snapshots because
+they explain several decisions; their counts and statements about missing seams are not
+current unless the 2026-08-16 delta repeats them.
 
 ---
 
-## Current reality — 2026-08-09
+## Current delta — 2026-08-16
+
+### Product verdict
+
+**FrankenGraphDB still is not the database product described by the README, but three
+important parts of the embedded-spine verdict have materially improved since the
+2026-08-09 snapshot.**
+
+1. The pinned asupersync v0.4.4 revision exposes
+   `Runtime::request_cx_with_budget`, and the runnable example plus external-package
+   probes obtain a production runtime context through that API with default features
+   disabled. They narrow it to `CommitCx`; neither `Cx::for_testing` nor the LAB
+   scheduler participates. Production context acquisition is no longer a blocker.
+2. Normal open may select an authenticated durable Strata checkpoint from the root
+   slot, verify its Chronicle chain commitment, reopen those immutable objects, and
+   fold only the later suffix. A forced full rebuild remains the equivalence oracle.
+   Open still recovers and verifies the Chronicle marker chain, so this is not a claim
+   that total recovery cost is independent of retained history or checkpoint size.
+3. Every post-D2 failure in the integrated publication path now fences the live handle
+   in `NeedsAuthoritativeRecovery`. Reads, writes, and maintenance refuse stale state;
+   deterministic failure/cancellation/ENOSPC/fsync-lie and Strata publication-crash
+   tests prove ordinary reopen or same-handle recovery agrees with authoritative
+   Chronicle replay exactly once. P0 `fgdb-l96k` is closed.
+
+The product no-claim boundary is otherwise unchanged. `WriteBatch` is explicitly not a
+transaction; the integrated database still hard-codes one graph, branch, and partition;
+and there are no sessions, prepared statements, GQL/openCypher execution, production
+transaction manager, secure-view query path, streaming typed results, product CLI,
+server, Python package, or installable release. Tier R, archived anchors, product-scale
+admission/spill, and the complete server-side larger-than-memory path do not exist. The
+checkpoint path removes a full-fold bottleneck; it does not demonstrate the finished
+larger-than-memory promise or any G1-G4 product gate.
+
+### Current evidence boundary
+
+This delta was measured at tracked commit
+`4c0ee2a64da33d7e19eb68269f16af6c16a711b4`. The shared checkout contained three
+untracked foreign artifacts (`.beads/beads.db-wal-cert`,
+`.beads/beads.db-wal-cert-head`, and `tools/registry-check/src/claims.rs`); they were
+neither edited nor removed. The older line-number index below remains bound to its
+stated 2026-08-09 commits and must not be used as a current source-location map.
+
+Current executable anchors are:
+
+- `crates/fgdb/examples/open_a_database.rs`: a production-runtime create/write/read/
+  drop/reopen program using `Runtime::request_cx_with_budget`;
+- `crates/fgdb/src/lib.rs`: checkpoint-selected open, forced-rebuild equivalence,
+  `NeedsAuthoritativeRecovery`, and purpose-narrowed `CommitCx` entrypoints;
+- `crates/fgdb/tests/cx_probe.rs`: external-package production-context and recovery
+  probes;
+- `crates/fgdb-sim`: registered LAB-runtime, replay-completeness, forensics, and
+  submodular-premise selectors, without a whole-product simulation claim;
+- `registries/invariants.toml`: the still-deliberate zero-enforcement invariant ledger.
+
+The final exit code for a documentation landing belongs in that landing's evidence
+record; this document does not convert a focused test or an earlier full gate into proof
+for later bytes.
+
+### Current measured inventory
+
+| Measure | 2026-08-16 value | Interpretation |
+|---|---:|---|
+| Workspace topology | 70 crate slots: 19 active, 50 planned, 1 reserved | embedded posture is live; server and CLI remain deferred |
+| Cargo metadata | 20 packages, 20 library targets, 97 integration-test targets, 5 examples, 5 binaries | all five binaries are checker tools, not `fgdb` or `fgdbd` |
+| Implemented Cargo benchmark targets | 0 | no §17 benchmark target or product baseline exists |
+| Invariant registry | 20 IDs; 0 enforced clauses; 0 enforced invariants | no G1 invariant-coverage claim is active |
+| Checker registry | 57 live rows, 42 stub rows | the gate surface grew substantially; a live row is not an invariant promotion |
+| Formal lanes | 1 checked of 10; 9 declared | one Lean lane is checked; the other formal lanes remain future work |
+| Tracker | 745 records: 275 open, 14 in progress, 8 explicitly blocked, 448 closed | `br stats` reports 284 dependency-blocked records and zero `br ready` records |
+| Dependency graph | 1,568 edges; zero cycles | `bv --robot-insights` data hash `8ab0055c698b392d` |
+
+`bv --robot-triage` reports 19 actionable records under its broader scoring predicate,
+while `br ready --json` returns none. The highest-impact executable work remains the
+G0 command-contract closure (`fgdb-5uw2`): the registries and extensive reserved Local
+and Meta rows now exist, but the generated runtime union/body/result/handler bijection
+required by plan section 5.1 does not. The tempting `RemoteGrantTargetRef` quick win is
+correctly blocked: its plan-derived closed universe has 74 certified-remote target
+kinds, but only one currently resolves while satisfying the construction DAG. Landing
+a partial union would freeze a false contract.
+
+The current bridge priorities are therefore:
+
+1. finish source-grounded command families and then generate the executable closed
+   command unions and exhaustive handlers rather than accumulating metadata forever;
+2. land real transaction/session ownership and validation over the durable spine;
+3. connect the minimum GQL-to-GLA-to-Loom slice to streaming embedded results;
+4. add Tier R, bounded admission/spill, and product-scale recovery evidence;
+5. promote invariant clauses only alongside their exact live checkers and negative
+   controls;
+6. expose one correct vertical slice through CLI/server/package surfaces instead of
+   forking separate engines.
+
+---
+
+## Superseded reality snapshot — 2026-08-09
 
 ### The answer in one paragraph
 
