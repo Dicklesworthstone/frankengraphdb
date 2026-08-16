@@ -1,8 +1,11 @@
-# Canonical PreparedOwnership-plane field inventory.  The plane is currently
-# empty: no command-contract reservation names a PreparedOwnership slot yet.
-# registry-check requires this explicit empty projection and will reject a
-# future cross-plane row until its paired field row lands atomically.
+# Canonical PreparedOwnership-plane field inventory. Registry-check holds this
+# projection in exact bijection with durable_state_slots.toml; the first Meta
+# row is the current-root basis consumed by NeverRegisteredFloorSpec.
 schema_version = 1
-registry_epoch = 1
+registry_epoch = 2
 plane = "PreparedOwnership"
-field = []
+
+[[field]]
+role = "Meta"
+slot_tag = "meta_prepared_payload_root"
+status = "reserved"

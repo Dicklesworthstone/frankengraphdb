@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# GlobalTerminalCompletionSpec at ordinal 15; every Global row remains reserved
+# NeverRegisteredFloorSpec at ordinal 16; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 34
+registry_epoch = 35
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -730,6 +730,45 @@ consumed_state_slots = [ "Protocol|Meta|result_independent_retention_index", "Se
 written_state_slots = [ "Protocol|Meta|result_independent_retention_index", "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] TerminalReady, overlap/resource closure, audit resolution, optional detach
 checkpoint_floor_classes = [ "txn-attempt", "result-delivery" ]           # [S]
 backup_restore_gc_classes = [ "txn-lifecycle", "protocol-result-retention" ]  # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F11 never-registered floor — frozen Global ordinal 16. This is the
+# first cumulative attempt-history compaction phase. It revalidates the exact
+# detailed BEGIN/outcome values and the proof that no registration, prepared
+# owner, certificate, or exported shard binding exists; then it extends the
+# authenticated terminal summary, rewrites only the two detailed lookup
+# indexes, and advances the authoritative attempt-compaction floor. The row
+# remains reserved until its generated union/body/result triple and handler
+# exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:never-registered-floor-spec"               # [C]
+role = "Meta"                                                              # [S] L1796 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0010                                                      # [S] frozen dense Meta ordinal 16
+input_schema_id = "NeverRegisteredFloorSpec"                               # [S] L1796 full body
+input_wire_tag = 0x0010                                                      # [C] = outer (armless)
+body_schema_id = "NeverRegisteredFloorSpec"                                # [S]
+result_schema_id = "NeverRegisteredFloorRecord"                            # [S] L1796 exact compact record
+applied_record_schema_id = "GlobalAttemptCompactionFloor"                  # [S] L1802 NeverRegistered successor
+handler_symbol = "fgdb_apply::meta::never_registered_floor_spec"           # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "revalidates every selected NeverRegisteredDetailed begin and outcome value plus its nonbinding absence proof against the current Meta prepared and certificate roots; extends the authenticated TerminalAttemptSummaryRoot with exact never-registered leaves; atomically rewrites only those begin and outcome entries to their Compacted arms while preserving the same capability replay refs and public response bytes; installs the monotonic NeverRegistered successor of GlobalAttemptCompactionFloor; creates, burns, or rewrites no attempt, family, or conflict entry"  # [S] L1794-L1796/L1802
+expected_state_schema_id = "WeakStateIdentity"                             # [S] L1796 basis_global_state
+authority_arm = "NeverRegisteredEvidence"                                  # [S] L1796 exact sorted evidence refs
+authority_evidence_target_schema_id = "NeverRegisteredEvidence"            # [S]
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] no freeze member in the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1796 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:never-registered-floor-spec"     # [C][F]
+consumed_state_slots = [ "Consensus|Meta|meta_certificate_ledger", "PreparedOwnership|Meta|meta_prepared_payload_root", "SemanticPayload|Meta|global_attempt_compaction_floor_ref", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1796 current proof and rewrite bases; the inverse-reference digest is derived evidence, not a separately named payload slot
+written_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_ref", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1796/L1802 exact atomic successors
+checkpoint_floor_classes = [ "txn-attempt-compaction" ]                    # [S] L1802 MetaAttemptCompactionProtocolFloor
+backup_restore_gc_classes = [ "txn-attempt-compaction" ]                  # [S] L1802 retained through activated checkpoint/cut and independent floors
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]

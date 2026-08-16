@@ -2,10 +2,15 @@
 # authoritative in durable_state_slots.toml; this projection is exact-bijection
 # checked and cannot silently alias a Protocol or SemanticPayload field.
 schema_version = 1
-registry_epoch = 1
+registry_epoch = 2
 plane = "Consensus"
 
 [[field]]
 role = "Local"
 slot_tag = "joint_quorum_decode_proof"
+status = "reserved"
+
+[[field]]
+role = "Meta"
+slot_tag = "meta_certificate_ledger"
 status = "reserved"

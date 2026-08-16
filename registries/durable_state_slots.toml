@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 18
+registry_epoch = 19
 
 
 [[slot]]
@@ -156,6 +156,29 @@ gc_class = "ReservedPendingActivation"
 role_transition_class = "ReservedPendingActivation"
 status = "reserved"
 
+# Meta F11 cumulative attempt-history compaction. The authoritative floor owns
+# the current TerminalAttemptSummaryRoot; NeverRegisteredFloorSpec is its first
+# monotonic writer and atomically rewrites the two detailed lookup indexes.
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_attempt_compaction_floor_ref"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_attempt_compaction_floor_ref"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:never-registered-floor-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
 # Meta F2/F3 BEGIN-to-registration lineage. The plan names these as distinct
 # GlobalStatePayload roots: reservation and never-registered terminalization
 # update the same two-key lineage atomically, while F3 registration consumes
@@ -192,7 +215,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:never-registered-floor-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -212,7 +235,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:never-registered-floor-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -474,6 +497,49 @@ target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
 transition_writer_contract_ids = [ "cc:meta:global-final-certification-cancel-spec", "cc:meta:global-final-certification-reserve-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+# NeverRegisteredFloorSpec consumes, but never mutates, the current Meta
+# prepared-owner and certificate-ledger roots while revalidating its exact
+# no-registration/no-export evidence.
+[[slot]]
+plane = "PreparedOwnership"
+role = "Meta"
+slot_tag = "meta_prepared_payload_root"
+backing_registry = "prepared_state_fields.toml"
+stable_name = "meta_prepared_payload_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [  ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "Consensus"
+role = "Meta"
+slot_tag = "meta_certificate_ledger"
+backing_registry = "consensus_state_fields.toml"
+stable_name = "meta_certificate_ledger"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [  ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

@@ -48,21 +48,21 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 71, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 74, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&64));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&65));
     assert_eq!(plane_counts.get("Protocol"), Some(&2));
-    assert_eq!(plane_counts.get("PreparedOwnership"), None);
-    assert_eq!(plane_counts.get("Consensus"), Some(&1));
+    assert_eq!(plane_counts.get("PreparedOwnership"), Some(&1));
+    assert_eq!(plane_counts.get("Consensus"), Some(&2));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 64);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 65);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 2);
-    assert!(backings["prepared_state_fields.toml"].fields.is_empty());
-    assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
+    assert_eq!(backings["prepared_state_fields.toml"].fields.len(), 1);
+    assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 2);
 
     let key_state = slots
         .slots
@@ -291,6 +291,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:global-terminal-completion-spec",
+                "cc:meta:never-registered-floor-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
         } else {
@@ -298,6 +299,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
+                "cc:meta:never-registered-floor-spec",
             ]
         };
         assert_eq!(slot.transition_writer_contract_ids, expected_writers);
@@ -308,6 +310,46 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             .filter(|field| field.role == "Meta" && field.slot_tag == slot_tag)
             .count();
         assert_eq!(projected, 1, "{slot_tag} backing projection must be unique");
+    }
+
+    for (plane, slot_tag, backing_registry, writers) in [
+        (
+            "SemanticPayload",
+            "global_attempt_compaction_floor_ref",
+            "state_payload_fields.toml",
+            vec!["cc:meta:never-registered-floor-spec"],
+        ),
+        (
+            "PreparedOwnership",
+            "meta_prepared_payload_root",
+            "prepared_state_fields.toml",
+            vec![],
+        ),
+        (
+            "Consensus",
+            "meta_certificate_ledger",
+            "consensus_state_fields.toml",
+            vec![],
+        ),
+    ] {
+        let slot = slots
+            .slots
+            .iter()
+            .find(|slot| slot.plane == plane && slot.role == "Meta" && slot.slot_tag == slot_tag)
+            .expect("Meta F11 state authority");
+        assert_eq!(slot.stable_name, slot_tag);
+        assert_eq!(slot.backing_registry, backing_registry);
+        assert_eq!(slot.transition_writer_contract_ids, writers);
+        assert_eq!(slot.status, "reserved");
+        let projected = backings[backing_registry]
+            .fields
+            .iter()
+            .filter(|field| field.role == "Meta" && field.slot_tag == slot_tag)
+            .count();
+        assert_eq!(
+            projected, 1,
+            "{plane}|Meta|{slot_tag} backing must be unique"
+        );
     }
 
     let audit_ticket_index = slots

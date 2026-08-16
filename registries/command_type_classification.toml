@@ -32,7 +32,7 @@
 # The creation-time PreOrderArtifact population stands unchanged; the
 # population only grows.
 #
-# META F3-F10 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
+# META F3-F11 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
 # first registered-attempt member in the independent Global command namespace.
 # The three Global statement lifecycle inputs follow at ordinals 7-9. Each
 # classification lands atomically with its exact reserved command-contract row.
@@ -48,7 +48,8 @@
 # pre-signature transition that cancels that owner and releases its exact holds.
 # GlobalTerminalCompletionSpec follows at ordinal 15 and alone advances one
 # exact pending Sharded outcome to TerminalReady after validating every frozen
-# postcondition artifact.
+# postcondition artifact. NeverRegisteredFloorSpec follows at ordinal 16 and
+# performs only the first cumulative attempt-history compaction phase.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -87,7 +88,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 32
+registry_epoch = 33
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -343,6 +344,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-terminal-completion-spec"
 source_location = "a09:1790"
 statement = "GlobalTerminalCompletionSpec CASes one exact pending Sharded outcome, validates the complete canonical postcondition evidence and frozen public artifacts, and selects TerminalReady only when the required and satisfied bitmaps are exactly equal."
+status = "registered"
+
+[[classification]]
+type_name = "NeverRegisteredFloorSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:never-registered-floor-spec"
+source_location = "a08:1796"
+statement = "NeverRegisteredFloorSpec revalidates detailed never-registered lookup values and absence evidence, extends the authenticated terminal summary, atomically rewrites only the begin/outcome entries to Compacted, and installs the monotonic NeverRegistered attempt-compaction floor successor."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,

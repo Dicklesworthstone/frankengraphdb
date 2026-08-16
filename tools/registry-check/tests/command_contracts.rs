@@ -327,6 +327,8 @@ fn phase_b_seed_rows_are_present() {
         "cc:local:sharding-freeze-spec",
         "cc:local:sharding-unfreeze-spec",
         "cc:local:begin-role-transition-spec",
+        // Meta F11 is the first cumulative attempt-history compaction phase.
+        "cc:meta:never-registered-floor-spec",
     ] {
         assert!(
             registry
@@ -337,8 +339,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 162,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F10 rows"
+        registry.contracts.len() >= 163,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F11 rows"
     );
 }
 
@@ -1414,6 +1416,90 @@ fn meta_f10_terminal_completion_contract_is_exact() {
         .map(|candidate| candidate.command_contract_id.as_str())
         .collect();
     assert_eq!(exact_ordinal, ["cc:meta:global-terminal-completion-spec"]);
+}
+
+/// Never-registered compaction is a cumulative, proof-bound lookup rewrite,
+/// not an attempt terminalizer. Pin the exact cross-plane read basis and the
+/// much narrower three-root write set so an implementation cannot manufacture
+/// an attempt, weaken the absence proof, or cut the capability replay/public
+/// response while claiming to compact it.
+#[test]
+fn meta_f11_never_registered_floor_contract_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| row.command_contract_id == "cc:meta:never-registered-floor-spec")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "Meta never-registered floor must classify once"
+    );
+    let row = rows[0];
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x0010);
+    assert_eq!(row.input_wire_tag, 0x0010);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "NeverRegisteredFloorSpec");
+    assert_eq!(row.body_schema_id, "NeverRegisteredFloorSpec");
+    assert_eq!(row.result_schema_id, "NeverRegisteredFloorRecord");
+    assert_eq!(row.applied_record_schema_id, "GlobalAttemptCompactionFloor");
+    assert_eq!(row.expected_state_schema_id, "WeakStateIdentity");
+    assert_eq!(row.authority_arm, "NeverRegisteredEvidence");
+    assert_eq!(
+        row.authority_evidence_target_schema_id.as_deref(),
+        Some("NeverRegisteredEvidence")
+    );
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::never_registered_floor_spec"
+    );
+    assert_eq!(
+        row.consumed_state_slots,
+        [
+            "Consensus|Meta|meta_certificate_ledger",
+            "PreparedOwnership|Meta|meta_prepared_payload_root",
+            "SemanticPayload|Meta|global_attempt_compaction_floor_ref",
+            "SemanticPayload|Meta|global_begin_idempotency_index_root",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+        ]
+    );
+    assert_eq!(
+        row.written_state_slots,
+        [
+            "SemanticPayload|Meta|global_attempt_compaction_floor_ref",
+            "SemanticPayload|Meta|global_begin_idempotency_index_root",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+        ]
+    );
+    assert_eq!(row.checkpoint_floor_classes, ["txn-attempt-compaction"]);
+    assert_eq!(row.backup_restore_gc_classes, ["txn-attempt-compaction"]);
+    for required in [
+        "revalidates every selected NeverRegisteredDetailed begin and outcome value",
+        "extends the authenticated TerminalAttemptSummaryRoot",
+        "preserving the same capability replay refs and public response bytes",
+        "creates, burns, or rewrites no attempt, family, or conflict entry",
+    ] {
+        assert!(row.sequence_effects.contains(required));
+    }
+    assert_eq!(row.status, "reserved");
+
+    let exact_ordinal: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x0010
+        })
+        .map(|candidate| candidate.command_contract_id.as_str())
+        .collect();
+    assert_eq!(exact_ordinal, ["cc:meta:never-registered-floor-spec"]);
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These
