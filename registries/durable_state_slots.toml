@@ -158,7 +158,8 @@ status = "reserved"
 
 # Meta F11 cumulative attempt-history compaction. The authoritative floor owns
 # the current TerminalAttemptSummaryRoot; NeverRegisteredFloorSpec is its first
-# monotonic writer and atomically rewrites the two detailed lookup indexes.
+# monotonic writer, while the attested F14 publish phase installs Closed
+# successors after removing the matching pending build.
 [[slot]]
 plane = "SemanticPayload"
 role = "Meta"
@@ -170,7 +171,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:never-registered-floor-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-closed-attempt-floor-publish-spec", "cc:meta:never-registered-floor-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -193,7 +194,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:closed-attempt-compaction-spec" ]
+transition_writer_contract_ids = [ "cc:meta:closed-attempt-compaction-spec", "cc:meta:global-closed-attempt-floor-publish-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -238,7 +239,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-outcome-expiry-spec", "cc:meta:never-registered-floor-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-closed-attempt-floor-publish-spec", "cc:meta:global-outcome-expiry-spec", "cc:meta:never-registered-floor-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -258,7 +259,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-outcome-expiry-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:never-registered-floor-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:global-closed-attempt-floor-publish-spec", "cc:meta:global-outcome-expiry-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:never-registered-floor-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -281,7 +282,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-closed-attempt-floor-publish-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -301,7 +302,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-cancel-spec", "cc:meta:global-attempt-registration-spec", "cc:meta:global-closed-attempt-floor-publish-spec", "cc:meta:global-prepare-admission-spec", "cc:meta:global-read-close-spec", "cc:meta:global-statement-publication-spec", "cc:meta:global-terminal-completion-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

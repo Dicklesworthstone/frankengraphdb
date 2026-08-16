@@ -51,6 +51,8 @@
 # postcondition artifact. NeverRegisteredFloorSpec follows at ordinal 16 and
 # performs only the first cumulative attempt-history compaction phase;
 # GlobalOutcomeExpirySpec is the separate ordinal-17 replay-expiry control.
+# ClosedAttemptCompactionSpec and GlobalClosedAttemptFloorPublishSpec then
+# preserve the build/attest/publish split at ordinals 18-19.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -89,7 +91,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 35
+registry_epoch = 36
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -112,6 +114,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:closed-attempt-compaction-spec"
 source_location = "a08:1800"
 statement = "ClosedAttemptCompactionSpec is the separately ordered Meta build phase that verifies the complete heavy closure, creates an unsigned compact floor record, and inserts it into PendingAttemptCompactionRoot without advancing the authoritative floor or rewriting detailed indexes."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalClosedAttemptFloorPublishSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-closed-attempt-floor-publish-spec"
+source_location = "a08:1802"
+statement = "GlobalClosedAttemptFloorPublishSpec is the separately ordered attested Meta publication phase that removes the exact pending build, installs the monotonic authoritative compaction floor, rewrites only closure-proved detailed indexes, and preserves every independent retention owner."
 status = "registered"
 
 # --- F14 semantic GC authorization (frozen ordinals 66-69). GcProposal is

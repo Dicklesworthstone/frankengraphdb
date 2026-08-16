@@ -287,6 +287,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
+                "cc:meta:global-closed-attempt-floor-publish-spec",
                 "cc:meta:global-outcome-expiry-spec",
                 "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-read-close-spec",
@@ -300,6 +301,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
+                "cc:meta:global-closed-attempt-floor-publish-spec",
                 "cc:meta:global-outcome-expiry-spec",
                 "cc:meta:never-registered-floor-spec",
             ]
@@ -319,7 +321,10 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "SemanticPayload",
             "global_attempt_compaction_floor_ref",
             "state_payload_fields.toml",
-            vec!["cc:meta:never-registered-floor-spec"],
+            vec![
+                "cc:meta:global-closed-attempt-floor-publish-spec",
+                "cc:meta:never-registered-floor-spec",
+            ],
         ),
         (
             "PreparedOwnership",
@@ -365,7 +370,10 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         .expect("Meta F13 pending compaction root slot");
     assert_eq!(
         pending_compaction.transition_writer_contract_ids,
-        ["cc:meta:closed-attempt-compaction-spec"]
+        [
+            "cc:meta:closed-attempt-compaction-spec",
+            "cc:meta:global-closed-attempt-floor-publish-spec",
+        ]
     );
     assert_eq!(pending_compaction.stable_name, pending_compaction.slot_tag);
     assert_eq!(
@@ -428,6 +436,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             vec![
                 "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
+                "cc:meta:global-closed-attempt-floor-publish-spec",
                 "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-publication-spec",
@@ -438,6 +447,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             vec![
                 "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
+                "cc:meta:global-closed-attempt-floor-publish-spec",
                 "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-read-close-spec",
                 "cc:meta:global-terminal-completion-spec",

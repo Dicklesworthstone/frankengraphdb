@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# ClosedAttemptCompactionSpec at ordinal 18; every Global row remains reserved
+# GlobalClosedAttemptFloorPublishSpec at ordinal 19; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 37
+registry_epoch = 38
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -846,6 +846,44 @@ consumed_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_r
 written_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_pending_root" ]  # [S] L1800 build only; publication performs all detailed rewrites and floor advance
 checkpoint_floor_classes = [ "txn-attempt-compaction" ]                    # [S] L1800-L1802
 backup_restore_gc_classes = [ "txn-attempt-compaction" ]                  # [S] heavy evidence remains rooted through PublishClosed and a later cut
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F14 closed-attempt floor publication — frozen Global ordinal 19. This
+# is the attested publish phase: it removes the exact pending build, installs
+# the monotonic authoritative floor, and rewrites only the selected detailed
+# attempt/BEGIN/outcome/conflict entries proved by the closure commitment.
+# Independently retained objects remain rooted by their own typed leases or
+# floors. The row remains reserved until its generated union/body/result
+# triple and handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-closed-attempt-floor-publish-spec"  # [C]
+role = "Meta"                                                              # [S] L1802 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0013                                                      # [S] frozen dense Meta ordinal 19
+input_schema_id = "GlobalClosedAttemptFloorPublishSpec"                    # [S] L1802 full body
+input_wire_tag = 0x0013                                                      # [C] = outer (armless)
+body_schema_id = "GlobalClosedAttemptFloorPublishSpec"                     # [S]
+result_schema_id = "GlobalAttemptCompactionFloor"                          # [S] L1802 exact installed floor
+applied_record_schema_id = "GlobalAttemptCompactionFloor"                  # [S]
+handler_symbol = "fgdb_apply::meta::global_closed_attempt_floor_publish_spec"  # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "revalidates the attested compact record as a monotonic extension of the exact prior authoritative floor; removes exactly that PendingAttemptCompactionRoot entry; replaces only the selected detailed family, attempt, BEGIN, outcome, and proved overlap-closed conflict entries with their compact terminal forms while requiring byte-identical authenticated public outcomes; installs GlobalAttemptCompactionFloor with the exact AttemptCompactionAttestation; leaves every independently retained result, workspace grant, backup, replay, and capability object rooted by its own typed lease or floor; does not decide, abort, or time out prepared work; heavy evidence remains retained until PublishClosed is audit-visible and an activated checkpoint cut covers the build, publish, and certificate-ledger transfer"  # [S] L1802
+expected_state_schema_id = "GlobalAttemptCompactionFloor"                 # [S] expected_prior_authoritative_floor
+authority_arm = "AttemptCompactionAttestation"                             # [S] attestation_ref
+authority_evidence_target_schema_id = "AttemptCompactionAttestation"       # [S]
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] no freeze member in the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                              # [S] L1802 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-closed-attempt-floor-publish-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_ref", "SemanticPayload|Meta|global_attempt_compaction_pending_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1802 exact prior floor, pending entry, and selected rewrite bases
+written_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_ref", "SemanticPayload|Meta|global_attempt_compaction_pending_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1802 exact atomic publication successors
+checkpoint_floor_classes = [ "txn-attempt-compaction" ]                    # [S] L1802 activated cut boundary
+backup_restore_gc_classes = [ "txn-attempt-compaction" ]                   # [S] independent owners survive publication
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]
