@@ -1765,6 +1765,92 @@ fn meta_f14_closed_attempt_floor_publish_contract_is_exact() {
     );
 }
 
+/// The four configuration phases share one source-spelled body but remain
+/// separately ordered through its closed phase tag. Pin the exact two-write
+/// Semantic boundary and the prepared/certificate proof roots so this row
+/// cannot quietly become a Raft or remote-shard mutation.
+#[test]
+fn meta_f15_configuration_transition_contract_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| row.command_contract_id == "cc:meta:meta-configuration-transition-spec")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "Meta configuration transition must classify once"
+    );
+    let row = rows[0];
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x0014);
+    assert_eq!(row.input_wire_tag, 0x0014);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "MetaConfigurationTransitionSpec");
+    assert_eq!(row.body_schema_id, "MetaConfigurationTransitionSpec");
+    assert_eq!(row.result_schema_id, "TopologyState");
+    assert_eq!(row.applied_record_schema_id, "TopologyState");
+    assert_eq!(row.expected_state_schema_id, "WeakStateIdentity");
+    assert_eq!(row.authority_arm, "SourceUnspelled");
+    assert_eq!(row.authority_evidence_target_schema_id, None);
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::meta_configuration_transition_spec"
+    );
+    assert_eq!(
+        row.consumed_state_slots,
+        [
+            "Consensus|Meta|meta_certificate_ledger",
+            "PreparedOwnership|Meta|meta_prepared_payload_root",
+            "SemanticPayload|Meta|meta_config_payload_floor_ref",
+            "SemanticPayload|Meta|topology_state_ref",
+        ]
+    );
+    assert_eq!(
+        row.written_state_slots,
+        [
+            "SemanticPayload|Meta|meta_config_payload_floor_ref",
+            "SemanticPayload|Meta|topology_state_ref",
+        ]
+    );
+    assert_eq!(row.checkpoint_floor_classes, ["meta-configuration"]);
+    assert_eq!(row.backup_restore_gc_classes, ["meta-configuration"]);
+    for required in [
+        "separately ordered ProposeJoint, CommitJoint, CommitNew, or CommitRetirementFloor",
+        "identical topology epoch, form, shard assignments, routing",
+        "current configuration to equal the applied-tail configuration",
+        "new set owns every Meta prepared, certificate, and certified-remote obligation",
+        "prior-configuration prepared entry remains legal only in the exact transfer state",
+        "old ownership releases only after new ownership plus Raft, snapshot, apply, and GC acknowledgement",
+    ] {
+        assert!(
+            row.sequence_effects.contains(required),
+            "Meta configuration transition law lost {required:?}"
+        );
+    }
+    assert_eq!(row.status, "reserved");
+
+    let exact_ordinal: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x0014
+        })
+        .map(|candidate| candidate.command_contract_id.as_str())
+        .collect();
+    assert_eq!(
+        exact_ordinal,
+        ["cc:meta:meta-configuration-transition-spec"]
+    );
+}
+
 /// Freeze the complete F13 reservation, not merely its population. These
 /// literals are independent of the TOML rows: deleting a member, moving one
 /// to another tag/plane, weakening its authority/result, inventing an inner

@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# GlobalClosedAttemptFloorPublishSpec at ordinal 19; every Global row remains reserved
+# MetaConfigurationTransitionSpec at ordinal 20; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 38
+registry_epoch = 39
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -884,6 +884,42 @@ consumed_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_r
 written_state_slots = [ "SemanticPayload|Meta|global_attempt_compaction_floor_ref", "SemanticPayload|Meta|global_attempt_compaction_pending_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_begin_idempotency_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root" ]  # [S] L1802 exact atomic publication successors
 checkpoint_floor_classes = [ "txn-attempt-compaction" ]                    # [S] L1802 activated cut boundary
 backup_restore_gc_classes = [ "txn-attempt-compaction" ]                   # [S] independent owners survive publication
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F15 configuration transition — frozen Global ordinal 20. The four
+# source-spelled phases remain values inside this one armless input. Apply
+# changes only the Meta configuration carried by a same-routing TopologyState
+# and the paired configuration payload floor; current prepared ownership and
+# certificate roots are proof inputs, not mutation targets. The row remains
+# reserved until its generated union/body/result triple and handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:meta-configuration-transition-spec"       # [C]
+role = "Meta"                                                              # [S] L1804 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0014                                                      # [S] frozen dense Meta ordinal 20
+input_schema_id = "MetaConfigurationTransitionSpec"                        # [S] L1804 full body
+input_wire_tag = 0x0014                                                      # [C] = outer (armless)
+body_schema_id = "MetaConfigurationTransitionSpec"                         # [S]
+result_schema_id = "TopologyState"                                         # [S] L1804 exact constructed successor
+applied_record_schema_id = "TopologyState"                                 # [S]
+handler_symbol = "fgdb_apply::meta::meta_configuration_transition_spec"    # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "executes exactly one separately ordered ProposeJoint, CommitJoint, CommitNew, or CommitRetirementFloor phase; byte-matches the current and prospective ConfigurationState values, exact current TopologyState, global prefix, candidate closure proof, paired checkpoint and MetaConfigPayloadFloor, required MetaCertificateFloor and RemoteObligationFloor, and every PreparedOwnershipTransferRecord<Meta>; constructs a TopologyState successor with identical topology epoch, form, shard assignments, routing, and allocation/constraint ownership except for the phase-appropriate meta_configuration_ref and this applied control; requires the current configuration to equal the applied-tail configuration; CommitRetirementFloor proves the new set owns every Meta prepared, certificate, and certified-remote obligation; a prior-configuration prepared entry remains legal only in the exact transfer state, and old ownership releases only after new ownership plus Raft, snapshot, apply, and GC acknowledgement"  # [S] L1804
+expected_state_schema_id = "WeakStateIdentity"                             # [S] basis_global_state
+authority_arm = "SourceUnspelled"                                         # [S] no singular authority union member is named
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] no freeze member in the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1804 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S] Semantic topology/floor publication only
+construction_dag_recipe_id = "dag:cc:meta:meta-configuration-transition-spec"  # [C][F]
+consumed_state_slots = [ "Consensus|Meta|meta_certificate_ledger", "PreparedOwnership|Meta|meta_prepared_payload_root", "SemanticPayload|Meta|meta_config_payload_floor_ref", "SemanticPayload|Meta|topology_state_ref" ]  # [S] L1804 current proof and semantic CAS bases
+written_state_slots = [ "SemanticPayload|Meta|meta_config_payload_floor_ref", "SemanticPayload|Meta|topology_state_ref" ]  # [S] L1804 exact semantic successors
+checkpoint_floor_classes = [ "meta-configuration" ]                        # [S] paired checkpoint/floor and retirement cut
+backup_restore_gc_classes = [ "meta-configuration" ]                       # [S] old ownership survives through all acknowledgements
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]
