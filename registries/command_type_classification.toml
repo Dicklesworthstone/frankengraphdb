@@ -32,13 +32,15 @@
 # The creation-time PreOrderArtifact population stands unchanged; the
 # population only grows.
 #
-# META F3-F5 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
+# META F3-F6 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
 # first registered-attempt member in the independent Global command namespace.
 # The three Global statement lifecycle inputs follow at ordinals 7-9. Each
 # classification lands atomically with its exact reserved command-contract row.
 # GlobalAttemptCancelSpec follows at ordinal 10 as the sole active/unadmitted
-# cancellation input. This remains registry metadata, not a claim that a
-# generated Global union arm or runtime handler exists.
+# cancellation input. GlobalPrepareAdmissionSpec follows at ordinal 11 and
+# freezes one complete ReadWrite admission basis without assigning terminal
+# order. These remain registry metadata, not claims that generated Global
+# union arms or runtime handlers exist.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -77,7 +79,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 28
+registry_epoch = 29
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -293,6 +295,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-attempt-cancel-spec"
 source_location = "a09:1762"
 statement = "GlobalAttemptCancelSpec is the sole active-before-admission cancellation transition; after every Open statement is terminal and every published result is independently detached, apply installs Aborted, closes the conflict vertex, and releases only named attempt-owned closures without releasing independent result owners."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalPrepareAdmissionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-prepare-admission-spec"
+source_location = "a09:1740"
+statement = "GlobalPrepareAdmissionSpec validates one complete ReadWrite statement, delivery, workspace, read, effect, routing, participant, constraint, resource, outcome, audit, topology, policy, revocation, and conflict basis; apply installs PrepareAdmitted plus the immutable Armed Meta terminal fence without assigning future order."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,

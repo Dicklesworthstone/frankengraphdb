@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 66, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 68, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&59));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&61));
     assert_eq!(plane_counts.get("Protocol"), Some(&2));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 59);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 61);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 2);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -287,6 +287,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
+                "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
@@ -351,6 +352,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             vec![
                 "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
+                "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
@@ -358,6 +360,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             vec![
                 "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
+                "cc:meta:global-prepare-admission-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
         };
@@ -402,6 +405,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "resource_ledger_root",
             vec![
                 "cc:meta:global-attempt-cancel-spec",
+                "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-statement-abort-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
@@ -418,6 +422,33 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         assert_eq!(slot.stable_name, slot_tag);
         assert_eq!(slot.backing_registry, "state_payload_fields.toml");
         assert_eq!(slot.transition_writer_contract_ids, writers);
+        assert_eq!(slot.status, "reserved");
+
+        let projected = backings["state_payload_fields.toml"]
+            .fields
+            .iter()
+            .filter(|field| field.role == "Meta" && field.slot_tag == slot_tag)
+            .count();
+        assert_eq!(projected, 1, "{slot_tag} backing projection must be unique");
+    }
+
+    for slot_tag in [
+        "global_constraint_reservation_index_root",
+        "terminal_admission_fence",
+    ] {
+        let slot = slots
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.plane == "SemanticPayload" && slot.role == "Meta" && slot.slot_tag == slot_tag
+            })
+            .expect("Meta F6 prepare-admission state slot");
+        assert_eq!(slot.stable_name, slot_tag);
+        assert_eq!(slot.backing_registry, "state_payload_fields.toml");
+        assert_eq!(
+            slot.transition_writer_contract_ids,
+            ["cc:meta:global-prepare-admission-spec"]
+        );
         assert_eq!(slot.status, "reserved");
 
         let projected = backings["state_payload_fields.toml"]

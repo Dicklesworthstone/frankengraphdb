@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). This
 # The original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# GlobalAttemptCancelSpec at ordinal 10; every Global row remains reserved
+# GlobalPrepareAdmissionSpec at ordinal 11; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 30
+registry_epoch = 31
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -546,6 +546,43 @@ publication_mode = "SinglePlane"                                           # [S]
 construction_dag_recipe_id = "dag:cc:meta:global-attempt-cancel-spec"      # [C][F]
 consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1762 exact closure checks
 written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1762 terminal apply effects
+checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F6 prepare admission — frozen Global ordinal 11. Admission validates
+# one complete statement/delivery/workspace/read/effect/resource/constraint
+# basis, installs the first PrepareAdmitted outcome, and arms the immutable
+# Meta terminal fence without assigning any future sequence or HLC. The row
+# remains reserved until its generated union arm/body/result triple and apply
+# handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-prepare-admission-spec"             # [C]
+role = "Meta"                                                              # [S] L1740 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x000b                                                      # [S] frozen dense Meta ordinal 11
+input_schema_id = "GlobalPrepareAdmissionSpec"                             # [S] L1740 full body
+input_wire_tag = 0x000b                                                      # [C] = outer (armless)
+body_schema_id = "GlobalPrepareAdmissionSpec"                              # [S]
+result_schema_id = "MetaTerminalAdmissionFence"                            # [S] L1740 constructs immutable ::Armed
+applied_record_schema_id = "GlobalTxnOutcomeRecord"                        # [S] succeeding PrepareAdmitted is the canonical selector
+handler_symbol = "fgdb_apply::meta::global_prepare_admission_spec"         # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "requires ReadWrite, one contiguous terminal statement and delivery frontier, exact workspace/read/effect/routing/participant/constraint/resource/outcome/audit/topology/policy/revocation/conflict bases, and no prior admission or terminal; atomically installs PrepareAdmitted, Meta reservations, the Armed terminal fence, and matching attempt/conflict/outcome successors without assigning a future sequence or HLC"  # [S] L1740
+expected_state_schema_id = "GlobalAttemptIndex"                            # [S] expected_attempt_state:Active
+authority_arm = "GlobalAuthorizationDecisionRecord"                       # [S] L1740 exact direct ref
+authority_evidence_target_schema_id = "GlobalAuthorizationDecisionRecord"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"                # [S] L1740 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-prepare-admission-spec"   # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_constraint_reservation_index_root", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1740 exact admission basis
+written_state_slots = [ "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_constraint_reservation_index_root", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|resource_ledger_root", "SemanticPayload|Meta|terminal_admission_fence" ]  # [S] L1740 atomic successors
 checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
 backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
 posture_feature_predicate = "sharded"                                      # [S]

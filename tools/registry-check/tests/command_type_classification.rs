@@ -154,6 +154,7 @@ fn source_forced_seed_population_is_present() {
         "GlobalStatementPublicationSpec",
         "GlobalStatementAbortSpec",
         "GlobalAttemptCancelSpec",
+        "GlobalPrepareAdmissionSpec",
     ] {
         assert!(
             registry
@@ -164,8 +165,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 119,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F5 rows"
+        registry.classifications.len() >= 120,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F6 rows"
     );
 }
 
@@ -877,6 +878,45 @@ fn meta_f5_attempt_cancel_classification_is_exact() {
     );
     assert_eq!(contract.outer_wire_tag, 0x000a);
     assert_eq!(contract.input_wire_tag, 0x000a);
+    assert_eq!(contract.inner_wire_tag, None);
+}
+
+#[test]
+fn meta_f6_prepare_admission_classification_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .classifications
+        .iter()
+        .filter(|row| row.type_name == "GlobalPrepareAdmissionSpec")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "GlobalPrepareAdmissionSpec must classify once"
+    );
+    let row = rows[0];
+    assert_eq!(row.class, "RegisteredCommandInput");
+    assert_eq!(
+        row.command_contract_id.as_deref(),
+        Some("cc:meta:global-prepare-admission-spec")
+    );
+    assert_eq!(row.source_location, "a09:1740");
+    assert_eq!(row.status, "registered");
+
+    let contracts = contracts();
+    let contract = contracts
+        .contracts
+        .iter()
+        .find(|contract| contract.command_contract_id == "cc:meta:global-prepare-admission-spec")
+        .expect("classified Meta F6 contract");
+    assert_eq!(contract.role, "Meta");
+    assert_eq!(contract.input_schema_id, "GlobalPrepareAdmissionSpec");
+    assert_eq!(
+        contract.outer_command_union,
+        "GlobalSequenceNeutralSpec<Tag>"
+    );
+    assert_eq!(contract.outer_wire_tag, 0x000b);
+    assert_eq!(contract.input_wire_tag, 0x000b);
     assert_eq!(contract.inner_wire_tag, None);
 }
 
