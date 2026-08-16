@@ -46,10 +46,10 @@
 # 0x0001 + position in the frozen order. Rows now land family-by-family in that
 # order, every row status = "reserved" until its arm, canonical input,
 # body/result/applied-record triple, and handler exist (the live-row bijection
-# enumerators are still unbuilt and the validator refuses "live"). This
-# The original increment landed the F1/F2 seed at frozen ordinals 1-3. The
+# enumerators are still unbuilt and the validator refuses "live"). The
+# original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# GlobalReadCloseSpec at ordinal 12; every Global row remains reserved
+# GlobalFinalCertificationReserveSpec at ordinal 13; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 32
+registry_epoch = 33
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -621,6 +621,42 @@ consumed_state_slots = [ "Protocol|Meta|result_independent_retention_index", "Se
 written_state_slots = [ "Protocol|Meta|result_independent_retention_index", "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] terminal apply plus atomic detach
 checkpoint_floor_classes = [ "txn-attempt", "result-delivery" ]           # [S]
 backup_restore_gc_classes = [ "txn-lifecycle", "protocol-result-retention" ]  # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F8 final-certification reserve — frozen Global ordinal 13. This is the
+# sole Active owner of one validated terminal basis: apply reruns every named
+# predicate, CASes absence or a cancelled predecessor, and installs the exact
+# coordinate and obligation hold roots before any terminal audit lock,
+# signature, command, or candidate root exists. The row remains reserved until
+# its generated union/body/result triple and apply handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-final-certification-reserve-spec"   # [C]
+role = "Meta"                                                              # [S] L1748 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x000d                                                      # [S] frozen dense Meta ordinal 13
+input_schema_id = "GlobalFinalCertificationReserveSpec"                   # [S] L1748 full body
+input_wire_tag = 0x000d                                                      # [C] = outer (armless)
+body_schema_id = "GlobalFinalCertificationReserveSpec"                    # [S]
+result_schema_id = "GlobalFinalCertificationReservation"                  # [S] L1750 installed Active successor
+applied_record_schema_id = "GlobalFinalCertificationReservation"          # [S] reservation-root value
+handler_symbol = "fgdb_apply::meta::global_final_certification_reserve_spec"  # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "after every required prepare, constraint, serialization, authorization, resource, remote-grant, allocation, topology, configuration, branch-head, key-epoch, policy, revocation, and conflict predicate is exact, selects MetaCommit or MetaAbort and atomically installs one Active GlobalFinalCertificationReservation plus its exclusive Meta coordinate and obligation hold roots before any terminal audit lock, signature, command, or candidate root exists"  # [S] L1742/L1748-L1752
+expected_state_schema_id = "TerminalCertificationReservationRoot<Meta>"    # [S] L1752 absence/cancelled-predecessor CAS
+authority_arm = "AuthorityBoundHeader<Meta>"                               # [S] L1748 direct field
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] reserve precedes terminal audit construction
+terminal_audit_gate_arm = "LifecycleScaffoldingNotRequired"                # [S] L1748 verbatim
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-final-certification-reserve-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|terminal_certification_reservation_root" ]  # [S] L1752 reserve CAS
+written_state_slots = [ "SemanticPayload|Meta|terminal_certification_reservation_root", "SemanticPayload|Meta|terminal_coordinate_hold_root", "SemanticPayload|Meta|terminal_obligation_hold_root" ]  # [S] L1750/L1752 atomic Active owner and holds
+checkpoint_floor_classes = [ "final-certification" ]                       # [S] L1752 inventory closure
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [S] L1752 inventory closure
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]

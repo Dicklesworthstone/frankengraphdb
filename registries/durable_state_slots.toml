@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 17
+registry_epoch = 18
 
 
 [[slot]]
@@ -409,6 +409,71 @@ target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
 transition_writer_contract_ids = [ "cc:meta:global-prepare-admission-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+# Meta F8 final certification installs the role-specific Active reservation
+# and both exclusive hold roots atomically. The same three stable slot names
+# are role-specialized by the row key; no Local writer may address these Meta
+# projections. Cancellation and terminal consumption join the writer sets in
+# their later frozen tranches.
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "terminal_certification_reservation_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "terminal_certification_reservation_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-final-certification-reserve-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "terminal_coordinate_hold_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "terminal_coordinate_hold_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-final-certification-reserve-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "terminal_obligation_hold_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "terminal_obligation_hold_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:global-final-certification-reserve-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

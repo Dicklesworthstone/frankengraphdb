@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 68, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 71, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&61));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&64));
     assert_eq!(plane_counts.get("Protocol"), Some(&2));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 61);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 64);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 2);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -453,6 +453,34 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         assert_eq!(
             slot.transition_writer_contract_ids,
             ["cc:meta:global-prepare-admission-spec"]
+        );
+        assert_eq!(slot.status, "reserved");
+
+        let projected = backings["state_payload_fields.toml"]
+            .fields
+            .iter()
+            .filter(|field| field.role == "Meta" && field.slot_tag == slot_tag)
+            .count();
+        assert_eq!(projected, 1, "{slot_tag} backing projection must be unique");
+    }
+
+    for slot_tag in [
+        "terminal_certification_reservation_root",
+        "terminal_coordinate_hold_root",
+        "terminal_obligation_hold_root",
+    ] {
+        let slot = slots
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.plane == "SemanticPayload" && slot.role == "Meta" && slot.slot_tag == slot_tag
+            })
+            .expect("Meta F8 final-certification state slot");
+        assert_eq!(slot.stable_name, slot_tag);
+        assert_eq!(slot.backing_registry, "state_payload_fields.toml");
+        assert_eq!(
+            slot.transition_writer_contract_ids,
+            ["cc:meta:global-final-certification-reserve-spec"]
         );
         assert_eq!(slot.status, "reserved");
 

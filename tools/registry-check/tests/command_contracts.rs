@@ -117,6 +117,7 @@ fn phase_b_seed_rows_are_present() {
         "cc:meta:global-attempt-cancel-spec",
         "cc:meta:global-prepare-admission-spec",
         "cc:meta:global-read-close-spec",
+        "cc:meta:global-final-certification-reserve-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
         // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
@@ -335,8 +336,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 159,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F7 rows"
+        registry.contracts.len() >= 160,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F8 rows"
     );
 }
 
@@ -1163,6 +1164,92 @@ fn meta_f7_read_close_contract_is_exact() {
         .map(|candidate| candidate.command_contract_id.as_str())
         .collect();
     assert_eq!(exact_ordinal, ["cc:meta:global-read-close-spec"]);
+}
+
+/// Final certification is an ownership transition, not the terminal command
+/// itself. Pin the exact Active reservation and both hold roots so a partial
+/// predicate set, audit-time installation, or candidate-level co-owner cannot
+/// occupy the next frozen Global ordinal.
+#[test]
+fn meta_f8_final_certification_reserve_contract_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| row.command_contract_id == "cc:meta:global-final-certification-reserve-spec")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "Meta final-certification reserve must classify once"
+    );
+    let row = rows[0];
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x000d);
+    assert_eq!(row.input_wire_tag, 0x000d);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "GlobalFinalCertificationReserveSpec");
+    assert_eq!(row.body_schema_id, "GlobalFinalCertificationReserveSpec");
+    assert_eq!(row.result_schema_id, "GlobalFinalCertificationReservation");
+    assert_eq!(
+        row.applied_record_schema_id,
+        "GlobalFinalCertificationReservation"
+    );
+    assert_eq!(
+        row.expected_state_schema_id,
+        "TerminalCertificationReservationRoot<Meta>"
+    );
+    assert_eq!(row.authority_arm, "AuthorityBoundHeader<Meta>");
+    assert_eq!(row.authority_evidence_target_schema_id, None);
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(
+        row.terminal_audit_gate_arm,
+        "LifecycleScaffoldingNotRequired"
+    );
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::global_final_certification_reserve_spec"
+    );
+    assert_eq!(
+        row.consumed_state_slots,
+        ["SemanticPayload|Meta|terminal_certification_reservation_root"]
+    );
+    assert_eq!(
+        row.written_state_slots,
+        [
+            "SemanticPayload|Meta|terminal_certification_reservation_root",
+            "SemanticPayload|Meta|terminal_coordinate_hold_root",
+            "SemanticPayload|Meta|terminal_obligation_hold_root",
+        ]
+    );
+    assert_eq!(row.checkpoint_floor_classes, ["final-certification"]);
+    assert_eq!(row.backup_restore_gc_classes, ["txn-lifecycle"]);
+    for required in [
+        "selects MetaCommit or MetaAbort",
+        "one Active GlobalFinalCertificationReservation",
+        "exclusive Meta coordinate and obligation hold roots",
+        "before any terminal audit lock, signature, command, or candidate root exists",
+    ] {
+        assert!(row.sequence_effects.contains(required));
+    }
+    assert_eq!(row.status, "reserved");
+
+    let exact_ordinal: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x000d
+        })
+        .map(|candidate| candidate.command_contract_id.as_str())
+        .collect();
+    assert_eq!(
+        exact_ordinal,
+        ["cc:meta:global-final-certification-reserve-spec"]
+    );
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These
