@@ -32,7 +32,7 @@
 # The creation-time PreOrderArtifact population stands unchanged; the
 # population only grows.
 #
-# META F3-F8 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
+# META F3-F9 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
 # first registered-attempt member in the independent Global command namespace.
 # The three Global statement lifecycle inputs follow at ordinals 7-9. Each
 # classification lands atomically with its exact reserved command-contract row.
@@ -44,6 +44,8 @@
 # union arms or runtime handlers exist. GlobalFinalCertificationReserveSpec
 # follows at ordinal 13 and installs the sole Active owner of the exact held
 # terminal basis before any audit lock, signature, command, or candidate.
+# GlobalFinalCertificationCancelSpec follows at ordinal 14 and is the sole
+# pre-signature transition that cancels that owner and releases its exact holds.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -82,7 +84,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 31
+registry_epoch = 32
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -322,6 +324,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-final-certification-reserve-spec"
 source_location = "a09:1748"
 statement = "GlobalFinalCertificationReserveSpec revalidates the exact selected Meta terminal basis and atomically installs its sole Active GlobalFinalCertificationReservation plus exclusive coordinate and obligation hold roots before any terminal audit lock, signature, command, or candidate root exists."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalFinalCertificationCancelSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-final-certification-cancel-spec"
+source_location = "a09:1754"
+statement = "GlobalFinalCertificationCancelSpec names the exact Active reservation, current index value, complete hold-release recipe, and NoTerminalPlanLockShareOrOrderProof before moving the reservation to CancelledBeforeSignature and releasing exactly its holds."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,

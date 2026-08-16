@@ -480,7 +480,10 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         assert_eq!(slot.backing_registry, "state_payload_fields.toml");
         assert_eq!(
             slot.transition_writer_contract_ids,
-            ["cc:meta:global-final-certification-reserve-spec"]
+            [
+                "cc:meta:global-final-certification-cancel-spec",
+                "cc:meta:global-final-certification-reserve-spec",
+            ]
         );
         assert_eq!(slot.status, "reserved");
 
