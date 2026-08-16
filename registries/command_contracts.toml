@@ -49,7 +49,7 @@
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
 # current population continues that same frozen Global order through
-# GlobalFinalCertificationCancelSpec at ordinal 14; every Global row remains reserved
+# GlobalTerminalCompletionSpec at ordinal 15; every Global row remains reserved
 # metadata rather than a claim that its generated union arm or apply handler
 # exists.
 #
@@ -693,6 +693,43 @@ consumed_state_slots = [ "SemanticPayload|Meta|terminal_certification_reservatio
 written_state_slots = [ "SemanticPayload|Meta|terminal_certification_reservation_root", "SemanticPayload|Meta|terminal_coordinate_hold_root", "SemanticPayload|Meta|terminal_obligation_hold_root" ]  # [S] L1754 cancelled successor plus exact releases
 checkpoint_floor_classes = [ "final-certification" ]                       # [S] L1752/L1754
 backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [S] L1752/L1754
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F10 terminal completion — frozen Global ordinal 15. This is the sole
+# postcondition transition from one exact pending Sharded semantic outcome to
+# TerminalReady. It validates the complete decision, participant ACK, delta,
+# durability, result-retention, resource-release, visibility, conflict-floor,
+# and audit closure; it never manufactures any of those artifacts. The row
+# remains reserved until its generated union/body/result triple and handler
+# exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-terminal-completion-spec"          # [C]
+role = "Meta"                                                              # [S] L1790 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x000f                                                      # [S] frozen dense Meta ordinal 15
+input_schema_id = "GlobalTerminalCompletionSpec"                          # [S] L1790 full body
+input_wire_tag = 0x000f                                                      # [C] = outer (armless)
+body_schema_id = "GlobalTerminalCompletionSpec"                           # [S]
+result_schema_id = "GlobalTxnOutcomeRecord"                               # [S] L1790 succeeding outcome / TerminalReady
+applied_record_schema_id = "GlobalTxnOutcomeRecord"                       # [S] exact pending-predecessor CAS successor
+handler_symbol = "fgdb_apply::meta::global_terminal_completion_spec"      # [C][F]
+transition_class = "Semantic"                                               # [S] L1770/L1774
+sequence_effects = "CASes the exact pending GlobalTxnOutcomeRecord predecessor, monotonically adds only verified postcondition bits from the canonical decision, shard-ACK, delta, durability, result-retention, resource-release, portable-visibility, conflict-floor, and audit closure, validates rather than manufactures every frozen public and capability artifact, and selects TerminalReady only when the required and satisfied bitmaps are exactly equal; an AutocommitWriteReturning arm atomically detaches its result without waiting for activation or client ACK"  # [S] L1790-L1792
+expected_state_schema_id = "GlobalTxnOutcomeRecord"                       # [S] pending_outcome_ref exact predecessor
+authority_arm = "AuthorityBoundHeader<Meta>"                              # [S-derived] inherited through the pending outcome and public projection bundle
+terminal_audit_freeze_arm = "AuditFreezeField::Required<MetaControl>"     # [S] L1790 exact member
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1790 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "AtomicProtocolDetach{cpcr:cc:meta:global-terminal-completion-spec}"  # [S] L1792 AutocommitWriteReturning only
+construction_dag_recipe_id = "dag:cc:meta:global-terminal-completion-spec"  # [C][F]
+consumed_state_slots = [ "Protocol|Meta|result_independent_retention_index", "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1778/L1790-L1792 complete terminal closure
+written_state_slots = [ "Protocol|Meta|result_independent_retention_index", "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] TerminalReady, overlap/resource closure, audit resolution, optional detach
+checkpoint_floor_classes = [ "txn-attempt", "result-delivery" ]           # [S]
+backup_restore_gc_classes = [ "txn-lifecycle", "protocol-result-retention" ]  # [S]
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]

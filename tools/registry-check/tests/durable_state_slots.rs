@@ -290,6 +290,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-publication-spec",
+                "cc:meta:global-terminal-completion-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
         } else {
@@ -329,6 +330,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:meta:global-statement-abort-spec",
             "cc:meta:global-statement-publication-spec",
             "cc:meta:global-statement-registration-spec",
+            "cc:meta:global-terminal-completion-spec",
             "cc:meta:txn-ownership-expiry-abort-spec",
         ]
     );
@@ -357,6 +359,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-publication-spec",
+                "cc:meta:global-terminal-completion-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
         } else {
@@ -365,6 +368,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-prepare-admission-spec",
                 "cc:meta:global-read-close-spec",
+                "cc:meta:global-terminal-completion-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
         };
@@ -413,6 +417,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-abort-spec",
                 "cc:meta:global-statement-publication-spec",
+                "cc:meta:global-terminal-completion-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ],
         ),
@@ -509,6 +514,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         [
             "cc:meta:global-read-close-spec",
             "cc:meta:global-statement-publication-spec",
+            "cc:meta:global-terminal-completion-spec",
         ]
     );
     assert_eq!(

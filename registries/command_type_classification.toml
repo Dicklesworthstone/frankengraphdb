@@ -32,7 +32,7 @@
 # The creation-time PreOrderArtifact population stands unchanged; the
 # population only grows.
 #
-# META F3-F9 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
+# META F3-F10 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
 # first registered-attempt member in the independent Global command namespace.
 # The three Global statement lifecycle inputs follow at ordinals 7-9. Each
 # classification lands atomically with its exact reserved command-contract row.
@@ -46,6 +46,9 @@
 # terminal basis before any audit lock, signature, command, or candidate.
 # GlobalFinalCertificationCancelSpec follows at ordinal 14 and is the sole
 # pre-signature transition that cancels that owner and releases its exact holds.
+# GlobalTerminalCompletionSpec follows at ordinal 15 and alone advances one
+# exact pending Sharded outcome to TerminalReady after validating every frozen
+# postcondition artifact.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -332,6 +335,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-final-certification-cancel-spec"
 source_location = "a09:1754"
 statement = "GlobalFinalCertificationCancelSpec names the exact Active reservation, current index value, complete hold-release recipe, and NoTerminalPlanLockShareOrOrderProof before moving the reservation to CancelledBeforeSignature and releasing exactly its holds."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalTerminalCompletionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-terminal-completion-spec"
+source_location = "a09:1790"
+statement = "GlobalTerminalCompletionSpec CASes one exact pending Sharded outcome, validates the complete canonical postcondition evidence and frozen public artifacts, and selects TerminalReady only when the required and satisfied bitmaps are exactly equal."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,
