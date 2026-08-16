@@ -907,6 +907,86 @@ fn meta_f4_statement_contracts_are_exact_and_cross_plane_safe() {
     );
 }
 
+/// Freeze the next source-ordered Meta member without crossing the later
+/// ReadClose/Prepare boundary. Cancellation is one armless semantic row: the
+/// lifecycle-operation discriminator lives in its body and must not be minted
+/// as a second command tag.
+#[test]
+fn meta_f5_active_attempt_cancel_contract_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| row.command_contract_id == "cc:meta:global-attempt-cancel-spec")
+        .collect();
+    assert_eq!(rows.len(), 1, "Meta attempt cancellation must classify once");
+    let row = rows[0];
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x000a);
+    assert_eq!(row.input_wire_tag, 0x000a);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "GlobalAttemptCancelSpec");
+    assert_eq!(row.body_schema_id, "GlobalAttemptCancelSpec");
+    assert_eq!(row.result_schema_id, "GlobalTxnOutcomeRecord");
+    assert_eq!(row.applied_record_schema_id, "GlobalTxnOutcomeRecord");
+    assert_eq!(row.expected_state_schema_id, "GlobalAttemptIndex");
+    assert_eq!(row.authority_arm, "AuthorityBoundHeader<Meta>");
+    assert_eq!(
+        row.authority_evidence_target_schema_id.as_deref(),
+        Some("TerminalAbortAuthority<Meta>")
+    );
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+    assert_eq!(row.publication_mode, "SinglePlane");
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::global_attempt_cancel_spec"
+    );
+    assert_eq!(
+        row.consumed_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+            "SemanticPayload|Meta|global_statement_index_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    assert_eq!(
+        row.written_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    for required in [
+        "only before prepare admission",
+        "every Open statement is Failed or Abandoned",
+        "AppliedAbortRef::MetaControl",
+        "without releasing an independent result owner",
+    ] {
+        assert!(row.sequence_effects.contains(required));
+    }
+    assert_eq!(row.status, "reserved");
+
+    let exact_ordinal: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x000a
+        })
+        .map(|candidate| candidate.command_contract_id.as_str())
+        .collect();
+    assert_eq!(exact_ordinal, ["cc:meta:global-attempt-cancel-spec"]);
+}
+
 /// Freeze the complete F13 reservation, not merely its population. These
 /// literals are independent of the TOML rows: deleting a member, moving one
 /// to another tag/plane, weakening its authority/result, inventing an inner

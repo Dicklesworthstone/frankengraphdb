@@ -32,12 +32,13 @@
 # The creation-time PreOrderArtifact population stands unchanged; the
 # population only grows.
 #
-# META F3/F4 CONTINUATION (2026-08-15). GlobalAttemptRegistrationSpec is the
+# META F3-F5 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
 # first registered-attempt member in the independent Global command namespace.
 # The three Global statement lifecycle inputs follow at ordinals 7-9. Each
-# classification lands atomically with its exact reserved command-contract row;
-# this remains registry metadata, not a claim that a generated Global union arm
-# or runtime handler exists.
+# classification lands atomically with its exact reserved command-contract row.
+# GlobalAttemptCancelSpec follows at ordinal 10 as the sole active/unadmitted
+# cancellation input. This remains registry metadata, not a claim that a
+# generated Global union arm or runtime handler exists.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -76,7 +77,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 27
+registry_epoch = 28
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -284,6 +285,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-statement-abort-spec"
 source_location = "a09:1736"
 statement = "GlobalStatementAbortSpec resolves one open statement as Failed or Abandoned without a result or workspace effect and applies the registration-pinned continuation policy."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalAttemptCancelSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-attempt-cancel-spec"
+source_location = "a09:1762"
+statement = "GlobalAttemptCancelSpec is the sole active-before-admission cancellation transition; after every Open statement is terminal and every published result is independently detached, apply installs Aborted, closes the conflict vertex, and releases only named attempt-owned closures without releasing independent result owners."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,

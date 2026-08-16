@@ -153,6 +153,7 @@ fn source_forced_seed_population_is_present() {
         "GlobalStatementRegistrationSpec",
         "GlobalStatementPublicationSpec",
         "GlobalStatementAbortSpec",
+        "GlobalAttemptCancelSpec",
     ] {
         assert!(
             registry
@@ -163,8 +164,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 118,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F4 rows"
+        registry.classifications.len() >= 119,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F5 rows"
     );
 }
 
@@ -842,6 +843,43 @@ fn meta_f4_statement_classifications_are_exact() {
         assert_eq!(contract.input_wire_tag, outer_tag);
         assert_eq!(contract.inner_wire_tag, None);
     }
+}
+
+#[test]
+fn meta_f5_attempt_cancel_classification_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .classifications
+        .iter()
+        .filter(|row| row.type_name == "GlobalAttemptCancelSpec")
+        .collect();
+    assert_eq!(rows.len(), 1, "GlobalAttemptCancelSpec must classify once");
+    let row = rows[0];
+    assert_eq!(row.class, "RegisteredCommandInput");
+    assert_eq!(
+        row.command_contract_id.as_deref(),
+        Some("cc:meta:global-attempt-cancel-spec")
+    );
+    assert_eq!(row.source_location, "a09:1762");
+    assert_eq!(row.status, "registered");
+
+    let contracts = contracts();
+    let contract = contracts
+        .contracts
+        .iter()
+        .find(|contract| {
+            contract.command_contract_id == "cc:meta:global-attempt-cancel-spec"
+        })
+        .expect("classified Meta F5 contract");
+    assert_eq!(contract.role, "Meta");
+    assert_eq!(contract.input_schema_id, "GlobalAttemptCancelSpec");
+    assert_eq!(
+        contract.outer_command_union,
+        "GlobalSequenceNeutralSpec<Tag>"
+    );
+    assert_eq!(contract.outer_wire_tag, 0x000a);
+    assert_eq!(contract.input_wire_tag, 0x000a);
+    assert_eq!(contract.inner_wire_tag, None);
 }
 
 /// Role specialization creates concrete Local and Meta contract families, not

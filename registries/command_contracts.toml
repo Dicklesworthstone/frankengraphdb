@@ -48,10 +48,10 @@
 # body/result/applied-record triple, and handler exist (the live-row bijection
 # enumerators are still unbuilt and the validator refuses "live"). This
 # The original increment landed the F1/F2 seed at frozen ordinals 1-3. The
-# current population continues that same frozen Global order through the first
-# Meta F3 member, GlobalAttemptRegistrationSpec at ordinal 4; every Global row
-# remains reserved metadata rather than a claim that its generated union arm or
-# apply handler exists.
+# current population continues that same frozen Global order through
+# GlobalAttemptCancelSpec at ordinal 10; every Global row remains reserved
+# metadata rather than a claim that its generated union arm or apply handler
+# exists.
 #
 # Per-key derivation-authority marks used on the rows below:
 #   [S] source-forced (the plan spells it; the citation is beside the mark)
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 29
+registry_epoch = 30
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -509,6 +509,43 @@ publication_mode = "SinglePlane"                                           # [S]
 construction_dag_recipe_id = "dag:cc:meta:global-statement-abort-spec"     # [C][F]
 consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1736
 written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S]
+checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F5 active-attempt cancellation — frozen Global ordinal 10. This is the
+# only user/recovery transition that may terminalize an Active attempt before
+# prepare admission. It is armless: RequestTerminalAbort{stage:Active} is the
+# required lifecycle-operation value inside the body, not a command-union arm.
+# The row remains reserved until the generated Global union/body/result triple
+# and apply handler exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-attempt-cancel-spec"                # [C]
+role = "Meta"                                                              # [S] L1762 exact Meta input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x000a                                                      # [S] frozen dense Meta ordinal 10
+input_schema_id = "GlobalAttemptCancelSpec"                                # [S] L1762 full body
+input_wire_tag = 0x000a                                                      # [C] = outer (armless)
+body_schema_id = "GlobalAttemptCancelSpec"                                 # [S]
+result_schema_id = "GlobalTxnOutcomeRecord"                                # [S] L1762 installs terminal Aborted
+applied_record_schema_id = "GlobalTxnOutcomeRecord"                        # [S-derived] canonical terminal outcome selector
+handler_symbol = "fgdb_apply::meta::global_attempt_cancel_spec"            # [C][F]
+transition_class = "Semantic"                                               # [S] L1770 active-attempt cancellation family
+sequence_effects = "is valid only before prepare admission, after every Open statement is Failed or Abandoned and every published result is independently detached with one valid disposition proof; byte-matches the full authority, registration and audit admission, installs terminal Aborted with AppliedAbortRef::MetaControl, closes the conflict vertex, and releases only the named attempt-owned closures without releasing an independent result owner"  # [S] L1762
+expected_state_schema_id = "GlobalAttemptIndex"                            # [S] expected_attempt_state:Active
+authority_arm = "AuthorityBoundHeader<Meta>"                               # [S] L1762 exact member
+authority_evidence_target_schema_id = "TerminalAbortAuthority<Meta>"       # [S] L1762 exact terminal_abort_authority_ref
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                              # [S] L1762 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-attempt-cancel-spec"      # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1762 exact closure checks
+written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S] L1762 terminal apply effects
 checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
 backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
 posture_feature_predicate = "sharded"                                      # [S]

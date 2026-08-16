@@ -283,6 +283,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         assert_eq!(slot.status, "reserved");
         let expected_writers = if slot_tag == "global_outcome_directory_root" {
             vec![
+                "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
@@ -319,6 +320,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
     assert_eq!(
         audit_ticket_index.transition_writer_contract_ids,
         [
+            "cc:meta:global-attempt-cancel-spec",
             "cc:meta:global-attempt-registration-spec",
             "cc:meta:global-begin-terminal-spec",
             "cc:meta:global-statement-abort-spec",
@@ -347,12 +349,14 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         assert_eq!(slot.backing_registry, "state_payload_fields.toml");
         let expected_writers = if slot_tag == "global_conflict_index_ref" {
             vec![
+                "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
         } else {
             vec![
+                "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
@@ -397,6 +401,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         (
             "resource_ledger_root",
             vec![
+                "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-statement-abort-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
