@@ -1975,6 +1975,186 @@ fn meta_f16_shard_reconfiguration_contracts_are_exact() {
     );
 }
 
+/// Meta F17A is the exact Semantic entrance to distributed GC. It must keep
+/// bounded authorization, quarantine, and portable terminal-evidence import
+/// separate from Protocol dispatch/status work, and its armed import must
+/// preserve the Completed/Cancelled source order.
+#[test]
+fn meta_f17a_distributed_gc_semantic_contracts_are_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| {
+            row.role == "Meta"
+                && row.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && matches!(row.outer_wire_tag, 0x0017..=0x0019)
+        })
+        .collect();
+    let exact_ids: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.outer_wire_tag,
+                row.inner_wire_tag,
+                row.command_contract_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        exact_ids,
+        [
+            (0x0017, None, "cc:meta:global-gc-authorization-spec"),
+            (0x0018, None, "cc:meta:meta-gc-apply-quarantine-spec"),
+            (
+                0x0019,
+                Some(0x0001),
+                "cc:meta:gc-physical-disposition-import-spec:completed",
+            ),
+            (
+                0x0019,
+                Some(0x0002),
+                "cc:meta:gc-physical-disposition-import-spec:cancelled",
+            ),
+        ]
+    );
+
+    for row in &rows {
+        assert_eq!(row.input_wire_tag, row.outer_wire_tag);
+        assert_eq!(row.transition_class, "Semantic");
+        assert_eq!(
+            row.consumed_state_slots,
+            ["SemanticPayload|Meta|gc_semantic_state"]
+        );
+        assert_eq!(
+            row.written_state_slots,
+            ["SemanticPayload|Meta|gc_semantic_state"]
+        );
+        assert_eq!(row.checkpoint_floor_classes, ["semantic-gc"]);
+        assert_eq!(row.backup_restore_gc_classes, ["semantic-gc"]);
+        assert_eq!(row.posture_feature_predicate, "sharded");
+        assert_eq!(row.publication_mode, "SinglePlane");
+        assert_eq!(row.status, "reserved");
+    }
+
+    let authorization = rows
+        .iter()
+        .copied()
+        .find(|row| row.outer_wire_tag == 0x0017 && row.inner_wire_tag.is_none())
+        .expect("Meta F17A global authorization");
+    assert_eq!(authorization.input_schema_id, "GlobalGcAuthorizationSpec");
+    assert_eq!(authorization.body_schema_id, "GlobalGcAuthorizationSpec");
+    assert_eq!(
+        authorization.result_schema_id,
+        "GlobalGcAuthorizationRecord"
+    );
+    assert_eq!(
+        authorization.applied_record_schema_id,
+        "GlobalGcAuthorizationRecord"
+    );
+    assert_eq!(authorization.expected_state_schema_id, "WeakStateIdentity");
+    assert_eq!(authorization.authority_arm, "SourceUnspelled");
+    assert_eq!(authorization.authority_evidence_target_schema_id, None);
+    assert_eq!(authorization.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(authorization.terminal_audit_gate_arm, "TerminalAuditGate");
+    for required in [
+        "every certified ShardGcPreflightEvidence",
+        "stage-5-or-6 GcRemoteReleaseCompletionRef",
+        "authorizing only those bounded sets",
+        "never counts as completion or becomes reclaimable",
+    ] {
+        assert!(
+            authorization.sequence_effects.contains(required),
+            "authorization law lost {required:?}"
+        );
+    }
+
+    let quarantine = rows
+        .iter()
+        .copied()
+        .find(|row| row.command_contract_id == "cc:meta:meta-gc-apply-quarantine-spec")
+        .expect("Meta F17A quarantine");
+    assert_eq!(quarantine.input_schema_id, "MetaGcApplyQuarantineSpec");
+    assert_eq!(
+        quarantine.result_schema_id,
+        "MetaGcReclaimAuthorizationRecord"
+    );
+    assert_eq!(quarantine.applied_record_schema_id, "GcSemanticState<Meta>");
+    assert_eq!(quarantine.expected_state_schema_id, "WeakStateIdentity");
+    assert_eq!(quarantine.authority_arm, "GlobalGcAuthorizationRecord");
+    assert_eq!(
+        quarantine.authority_evidence_target_schema_id.as_deref(),
+        Some("GlobalGcAuthorizationRecord")
+    );
+    assert_eq!(quarantine.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(quarantine.terminal_audit_gate_arm, "TerminalAuditGate");
+    for required in [
+        "complete generation-zero operation-family plan bijection",
+        "GcSemanticState<Meta>::Quarantined only",
+        "creates no Protocol Requested record",
+    ] {
+        assert!(
+            quarantine.sequence_effects.contains(required),
+            "quarantine law lost {required:?}"
+        );
+    }
+
+    let completed = rows
+        .iter()
+        .copied()
+        .find(|row| row.inner_wire_tag == Some(0x0001))
+        .expect("Meta F17A completed disposition");
+    let cancelled = rows
+        .iter()
+        .copied()
+        .find(|row| row.inner_wire_tag == Some(0x0002))
+        .expect("Meta F17A cancelled disposition");
+    for row in [completed, cancelled] {
+        assert_eq!(row.input_schema_id, "GcPhysicalDispositionImportSpec<Meta>");
+        assert_eq!(row.body_schema_id, "GcPhysicalDispositionImportSpec<Meta>");
+        assert_eq!(row.result_schema_id, "GcSemanticState<Meta>");
+        assert_eq!(row.applied_record_schema_id, "GcSemanticState<Meta>");
+        assert_eq!(row.expected_state_schema_id, "GcSemanticState<Meta>");
+        assert_eq!(row.terminal_audit_freeze_arm, "SourceUnspelled");
+        assert_eq!(row.terminal_audit_gate_arm, "SourceUnspelled");
+        assert!(
+            row.sequence_effects
+                .contains("emits no acknowledgement/certificate")
+        );
+    }
+    assert_eq!(
+        completed.authority_arm,
+        "PortableGcPhysicalTerminalEvidence"
+    );
+    assert_eq!(
+        completed.authority_evidence_target_schema_id.as_deref(),
+        Some("PortableGcPhysicalTerminalEvidence")
+    );
+    assert!(
+        completed
+            .sequence_effects
+            .contains("PhysicalCompletedPendingCut")
+    );
+    assert_eq!(
+        cancelled.authority_arm,
+        "GcCancellationAuthorityFor<Meta>::GlobalMeta"
+    );
+    assert_eq!(
+        cancelled.authority_evidence_target_schema_id.as_deref(),
+        Some("GlobalGcCancellationAuthorizationRecord")
+    );
+    for required in [
+        "exact never-started target bijection",
+        "rejects SentUnknown, Requested, Started, CompletionRequired",
+        "CancelledBeforePhysicalStart",
+    ] {
+        assert!(
+            cancelled.sequence_effects.contains(required),
+            "cancelled disposition law lost {required:?}"
+        );
+    }
+}
+
 /// Freeze the complete F13 reservation, not merely its population. These
 /// literals are independent of the TOML rows: deleting a member, moving one
 /// to another tag/plane, weakening its authority/result, inventing an inner

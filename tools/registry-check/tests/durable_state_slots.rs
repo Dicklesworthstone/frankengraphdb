@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 78, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 79, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&69));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&70));
     assert_eq!(plane_counts.get("Protocol"), Some(&2));
     assert_eq!(plane_counts.get("PreparedOwnership"), Some(&1));
     assert_eq!(plane_counts.get("Consensus"), Some(&2));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 69);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 70);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 2);
     assert_eq!(backings["prepared_state_fields.toml"].fields.len(), 1);
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 2);
@@ -84,7 +84,11 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
     let gc_state = slots
         .slots
         .iter()
-        .find(|slot| slot.plane == "SemanticPayload" && slot.slot_tag == "gc_semantic_state")
+        .find(|slot| {
+            slot.plane == "SemanticPayload"
+                && slot.role == "Local"
+                && slot.slot_tag == "gc_semantic_state"
+        })
         .expect("F14 semantic GC slot");
     assert_eq!(gc_state.role, "Local");
     assert_eq!(gc_state.backing_registry, "state_payload_fields.toml");
@@ -98,6 +102,41 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:local:local-gc-authorize-spec",
             "cc:local:local-gc-cancellation-authorize-spec",
         ]
+    );
+
+    let meta_gc_state = slots
+        .slots
+        .iter()
+        .find(|slot| {
+            slot.plane == "SemanticPayload"
+                && slot.role == "Meta"
+                && slot.slot_tag == "gc_semantic_state"
+        })
+        .expect("Meta F17A distributed-GC semantic state slot");
+    assert_eq!(meta_gc_state.stable_name, "gc_semantic_state");
+    assert_eq!(meta_gc_state.backing_registry, "state_payload_fields.toml");
+    assert_eq!(meta_gc_state.status, "reserved");
+    assert_eq!(
+        meta_gc_state.transition_writer_contract_ids,
+        [
+            "cc:meta:gc-physical-disposition-import-spec:cancelled",
+            "cc:meta:gc-physical-disposition-import-spec:completed",
+            "cc:meta:global-gc-authorization-spec",
+            "cc:meta:meta-gc-apply-quarantine-spec",
+        ]
+    );
+    let projected_meta_gc_state = backings["state_payload_fields.toml"]
+        .fields
+        .iter()
+        .filter(|field| {
+            field.role == "Meta"
+                && field.slot_tag == "gc_semantic_state"
+                && field.status == "reserved"
+        })
+        .count();
+    assert_eq!(
+        projected_meta_gc_state, 1,
+        "Meta F17A GC backing projection must be unique"
     );
 
     let retention_map = slots
@@ -727,6 +766,21 @@ fn writer_set_is_derived_not_advisory() {
         .find(|slot| slot.slot_tag == "logical_state_root")
         .expect("logical root row");
     row.transition_writer_contract_ids.clear();
+    assert!(codes(&slots, &backings, &contracts).contains("slot_writer_set_mismatch"));
+
+    let (mut slots, backings, contracts) = fixture();
+    let meta_gc = slots
+        .slots
+        .iter_mut()
+        .find(|slot| {
+            slot.plane == "SemanticPayload"
+                && slot.role == "Meta"
+                && slot.slot_tag == "gc_semantic_state"
+        })
+        .expect("Meta F17A GC slot");
+    meta_gc
+        .transition_writer_contract_ids
+        .retain(|writer| !writer.ends_with("global-gc-authorization-spec"));
     assert!(codes(&slots, &backings, &contracts).contains("slot_writer_set_mismatch"));
 }
 

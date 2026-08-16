@@ -56,6 +56,9 @@
 # four-phase MetaConfigurationTransitionSpec input at ordinal 20. The Meta
 # shard-reconfiguration family follows in source order: authorization at
 # ordinal 21 and the inseparable topology/trust adoption CAS at ordinal 22.
+# Meta distributed GC begins at ordinals 23-25 with bounded global
+# authorization, Meta quarantine, and the role-specialized terminal-disposition
+# import; physical dispatch/status remains a Protocol concern.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
 # attempt-lifecycle command inputs landed with their contract rows. An ARMED
@@ -94,7 +97,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 37
+registry_epoch = 38
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -151,6 +154,27 @@ source_location = "a08:1808"
 statement = "ShardConfigurationAdoptionSpec is the ordered Meta adoption input that consumes certified old-and-new quorum evidence and atomically advances the topology shard entry together with the RemoteConfigurationTrustRoot selector and generation."
 status = "registered"
 
+# --- META F17A distributed-GC semantic entrance. The generic
+# --- GcPhysicalDispositionImportSpec classification remains singular below;
+# --- its Local and Meta role-specialized contract roots carry the concrete
+# --- armed rows without duplicating the input-looking type.
+
+[[classification]]
+type_name = "GlobalGcAuthorizationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-gc-authorization-spec"
+source_location = "a08:1810"
+statement = "GlobalGcAuthorizationSpec consumes the exact Meta preflight and certified Shard preflights plus current configuration/topology, excluded obligations, and completed stage-5-or-6 remote release proofs; only its bounded GlobalGcAuthorizationRecord may authorize later participant quarantine."
+status = "registered"
+
+[[classification]]
+type_name = "MetaGcApplyQuarantineSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:meta-gc-apply-quarantine-spec"
+source_location = "a08:1812"
+statement = "MetaGcApplyQuarantineSpec consumes the exact global authorization, current Meta preflight/root/reachability/disjointness evidence and complete generation-zero operation family; Semantic apply installs only the Meta reclaim authorization and Quarantined state, never Protocol work."
+status = "registered"
+
 # --- F14 semantic GC authorization (frozen ordinals 66-69). GcProposal is
 # --- pre-order evidence, while physical initialize/dispatch/status/receipt
 # --- work is Protocol maintenance. Only these four exact ordered Local
@@ -186,7 +210,7 @@ type_name = "GcPhysicalDispositionImportSpec"
 class = "RegisteredCommandInput"
 command_contract_id = "cc:local:gc-physical-disposition-import-spec"
 source_location = "a14:2055"
-statement = "GcPhysicalDispositionImportSpec<Local> is the source-ordered Completed|Cancelled Semantic union; only it imports portable terminal evidence into PhysicalCompletedPendingCut or CancelledBeforePhysicalStart, and the Cancelled arm requires exact LocalStandalone cancellation authority."
+statement = "GcPhysicalDispositionImportSpec<Role> is the source-ordered Completed|Cancelled Semantic union; only its role specialization imports portable terminal evidence into PhysicalCompletedPendingCut or CancelledBeforePhysicalStart, and the Cancelled arm requires that role's exact cancellation authority."
 status = "registered"
 
 # --- F5a checkpoint/floor/history-cut prefix. These are separately ordered

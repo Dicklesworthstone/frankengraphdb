@@ -6,7 +6,7 @@
 # role-local field exists in the SemanticPayload plane; registry-check holds
 # this inventory in exact bijection with the corresponding cross-plane rows.
 schema_version = 1
-registry_epoch = 14
+registry_epoch = 15
 plane = "SemanticPayload"
 
 [[field]]
@@ -272,6 +272,11 @@ status = "reserved"
 [[field]]
 role = "Meta"
 slot_tag = "meta_config_payload_floor_ref"
+status = "reserved"
+
+[[field]]
+role = "Meta"
+slot_tag = "gc_semantic_state"
 status = "reserved"
 
 [[field]]

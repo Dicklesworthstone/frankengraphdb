@@ -160,6 +160,8 @@ fn source_forced_seed_population_is_present() {
         "GlobalFinalCertificationCancelSpec",
         "GlobalTerminalCompletionSpec",
         "NeverRegisteredFloorSpec",
+        "GlobalGcAuthorizationSpec",
+        "MetaGcApplyQuarantineSpec",
     ] {
         assert!(
             registry
@@ -170,8 +172,8 @@ fn source_forced_seed_population_is_present() {
         );
     }
     assert!(
-        registry.classifications.len() >= 125,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F11 rows"
+        registry.classifications.len() >= 127,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F17A rows"
     );
 }
 
@@ -1327,6 +1329,104 @@ fn meta_f16_shard_reconfiguration_classifications_are_exact() {
         assert_eq!(contract.outer_wire_tag, ordinal);
         assert_eq!(contract.input_wire_tag, ordinal);
         assert_eq!(contract.inner_wire_tag, None);
+    }
+}
+
+/// Meta F17A adds two independently named command inputs and one Meta
+/// specialization of the already-classified role-generic disposition union.
+/// Pin both classification rows and all four concrete contract arms so neither
+/// duplicate type classification nor a Local-only generic binding can hide.
+#[test]
+fn meta_f17a_distributed_gc_classifications_are_exact() {
+    let registry = registry();
+    let contracts = contracts();
+    for (type_name, id, source, ordinal) in [
+        (
+            "GlobalGcAuthorizationSpec",
+            "cc:meta:global-gc-authorization-spec",
+            "a08:1810",
+            0x0017,
+        ),
+        (
+            "MetaGcApplyQuarantineSpec",
+            "cc:meta:meta-gc-apply-quarantine-spec",
+            "a08:1812",
+            0x0018,
+        ),
+    ] {
+        let rows: Vec<_> = registry
+            .classifications
+            .iter()
+            .filter(|row| row.type_name == type_name)
+            .collect();
+        assert_eq!(rows.len(), 1, "{type_name} must classify once");
+        let row = rows[0];
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(row.command_contract_id.as_deref(), Some(id));
+        assert_eq!(row.source_location, source);
+        assert_eq!(row.status, "registered");
+
+        let contract_rows: Vec<_> = contracts
+            .contracts
+            .iter()
+            .filter(|contract| contract.command_contract_id == id)
+            .collect();
+        assert_eq!(contract_rows.len(), 1, "{id} must resolve once");
+        let contract = contract_rows[0];
+        assert_eq!(contract.role, "Meta");
+        assert_eq!(contract.input_schema_id, type_name);
+        assert_eq!(
+            contract.outer_command_union,
+            "GlobalSequenceNeutralSpec<Tag>"
+        );
+        assert_eq!(contract.outer_wire_tag, ordinal);
+        assert_eq!(contract.input_wire_tag, ordinal);
+        assert_eq!(contract.inner_wire_tag, None);
+    }
+
+    let generic_rows: Vec<_> = registry
+        .classifications
+        .iter()
+        .filter(|row| row.type_name == "GcPhysicalDispositionImportSpec")
+        .collect();
+    assert_eq!(generic_rows.len(), 1, "role-generic input classifies once");
+    assert_eq!(generic_rows[0].class, "RegisteredCommandInput");
+    assert_eq!(
+        generic_rows[0].command_contract_id.as_deref(),
+        Some("cc:local:gc-physical-disposition-import-spec")
+    );
+    assert_eq!(generic_rows[0].source_location, "a14:2055");
+    assert!(generic_rows[0].statement.contains("<Role>"));
+    assert_eq!(generic_rows[0].status, "registered");
+
+    let meta_imports: Vec<_> = contracts
+        .contracts
+        .iter()
+        .filter(|contract| {
+            contract
+                .command_contract_id
+                .starts_with("cc:meta:gc-physical-disposition-import-spec:")
+        })
+        .collect();
+    assert_eq!(meta_imports.len(), 2, "Meta disposition union has two arms");
+    assert_eq!(
+        meta_imports
+            .iter()
+            .map(|row| (row.outer_wire_tag, row.inner_wire_tag))
+            .collect::<Vec<_>>(),
+        [(0x0019, Some(0x0001)), (0x0019, Some(0x0002))]
+    );
+    for contract in meta_imports {
+        assert_eq!(contract.role, "Meta");
+        assert_eq!(
+            contract.input_schema_id,
+            "GcPhysicalDispositionImportSpec<Meta>"
+        );
+        assert_eq!(
+            contract.outer_command_union,
+            "GlobalSequenceNeutralSpec<Tag>"
+        );
+        assert_eq!(contract.input_wire_tag, 0x0019);
     }
 }
 

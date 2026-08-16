@@ -48,10 +48,10 @@
 # body/result/applied-record triple, and handler exist (the live-row bijection
 # enumerators are still unbuilt and the validator refuses "live"). The
 # original increment landed the F1/F2 seed at frozen ordinals 1-3. The
-# current population continues that same frozen Global order through
-# ShardConfigurationAdoptionSpec at ordinal 22; every Global row remains reserved
-# metadata rather than a claim that its generated union arm or apply handler
-# exists.
+# current population continues that same frozen Global order through the Meta
+# distributed-GC semantic entrance at ordinal 25; every Global row remains
+# reserved metadata rather than a claim that its generated union arm or apply
+# handler exists.
 #
 # Per-key derivation-authority marks used on the rows below:
 #   [S] source-forced (the plan spells it; the citation is beside the mark)
@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 39
+registry_epoch = 40
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -985,6 +985,132 @@ consumed_state_slots = [ "SemanticPayload|Meta|remote_configuration_trust_root",
 written_state_slots = [ "SemanticPayload|Meta|remote_configuration_trust_root", "SemanticPayload|Meta|topology_state_ref" ]  # [S] L1808 inseparable successors
 checkpoint_floor_classes = [ "shard-configuration" ]                       # [S] topology/trust/configuration floors
 backup_restore_gc_classes = [ "shard-configuration" ]                      # [S] old grants remain until six-stage completion
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F17A distributed-GC semantic entrance — frozen Global ordinals 23-25.
+# Authorization bounds the exact Meta and Shard candidate sets. Meta quarantine
+# then installs only Semantic authorization/state; it creates no Protocol work.
+# The armed disposition import is the sole Semantic bridge from portable signed
+# Protocol terminal evidence to CompletedPendingCut or CancelledBeforeStart.
+# All rows remain reserved until generated union/body/result triples and apply
+# handlers exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-gc-authorization-spec"              # [C]
+role = "Meta"                                                              # [S] L1810 exact Meta authorization input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0017                                                      # [S] frozen dense Meta ordinal 23
+input_schema_id = "GlobalGcAuthorizationSpec"                              # [S] L1810 full body
+input_wire_tag = 0x0017                                                      # [C] = outer (armless)
+body_schema_id = "GlobalGcAuthorizationSpec"                               # [S]
+result_schema_id = "GlobalGcAuthorizationRecord"                           # [S] L1810 exact applied record
+applied_record_schema_id = "GlobalGcAuthorizationRecord"                   # [S]
+handler_symbol = "fgdb_apply::meta::global_gc_authorization_spec"          # [C][F]
+transition_class = "Semantic"                                               # [S] L1770 exact distributed-GC authorization
+sequence_effects = "recomputes and byte-matches the current Meta preflight record, exact Meta candidate set, every certified ShardGcPreflightEvidence and per-shard candidate commitment, complete excluded-obligation commitment, current Meta configuration and TopologyState, and every role-valid stage-5-or-6 GcRemoteReleaseCompletionRef; creates one GlobalGcAuthorizationRecord authorizing only those bounded sets; a planned release, stage-4 certificate, active grant, or ReleaseRequested grant target never counts as completion or becomes reclaimable"  # [S] L1810
+expected_state_schema_id = "WeakStateIdentity"                             # [S] basis_global_state
+authority_arm = "SourceUnspelled"                                         # [S] no singular authority union member is named
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1810 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S] Meta Semantic authorization only
+construction_dag_recipe_id = "dag:cc:meta:global-gc-authorization-spec"   # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]        # [S-derived] current preflight/authorization basis
+written_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]         # [S-derived] bounded global authorization state
+checkpoint_floor_classes = [ "semantic-gc" ]                              # [S] in-flight family survives checkpoint/floor movement
+backup_restore_gc_classes = [ "semantic-gc" ]                             # [S] complete bounded authorization closure
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:meta-gc-apply-quarantine-spec"             # [C]
+role = "Meta"                                                              # [S] L1812 exact Meta-local quarantine input
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x0018                                                      # [S] frozen dense Meta ordinal 24
+input_schema_id = "MetaGcApplyQuarantineSpec"                              # [S] L1812 full body
+input_wire_tag = 0x0018                                                      # [C] = outer (armless)
+body_schema_id = "MetaGcApplyQuarantineSpec"                               # [S]
+result_schema_id = "MetaGcReclaimAuthorizationRecord"                      # [S-derived] role-specific reclaim-authorization record
+applied_record_schema_id = "GcSemanticState<Meta>"                         # [S] selects Quarantined only
+handler_symbol = "fgdb_apply::meta::meta_gc_apply_quarantine_spec"         # [C][F]
+transition_class = "Semantic"                                               # [S]
+sequence_effects = "requires the exact GlobalGcAuthorizationRecord and its audit-visible authorization certificate, current Meta preflight record, global state/configuration/topology/root inventory, current reachability recomputation and newly-reachable disjointness proof, authorized Meta reclaim subset, completed remote-release acknowledgements, and complete generation-zero operation-family plan bijection; installs the MetaGcReclaimAuthorizationRecord and GcSemanticState<Meta>::Quarantined only; it creates no Protocol Requested record, dispatch attempt, or physical operation"  # [S] L1812-L1814
+expected_state_schema_id = "WeakStateIdentity"                             # [S] expected_current_global_state
+authority_arm = "GlobalGcAuthorizationRecord"                              # [S] authorization_record_ref
+authority_evidence_target_schema_id = "GlobalGcAuthorizationRecord"        # [S]
+terminal_audit_freeze_arm = "Forbidden"                                   # [S] absent from the fully spelled body
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] L1812 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S] later Protocol execution is separate
+construction_dag_recipe_id = "dag:cc:meta:meta-gc-apply-quarantine-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]        # [S-derived] authorization/current-state basis
+written_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]         # [S-derived] Quarantined state
+checkpoint_floor_classes = [ "semantic-gc" ]                              # [S]
+backup_restore_gc_classes = [ "semantic-gc" ]                             # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:gc-physical-disposition-import-spec:completed"  # [C]
+role = "Meta"                                                              # [S]
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S]
+outer_wire_tag = 0x0019                                                      # [S] frozen dense Meta ordinal 25
+input_schema_id = "GcPhysicalDispositionImportSpec<Meta>"                  # [S] L1814 role-specific closed union
+input_wire_tag = 0x0019                                                      # [C]
+inner_wire_tag = 0x0001                                                      # [S] source-order Completed arm
+body_schema_id = "GcPhysicalDispositionImportSpec<Meta>"                   # [S]
+result_schema_id = "GcSemanticState<Meta>"                                 # [S] PhysicalCompletedPendingCut
+applied_record_schema_id = "GcSemanticState<Meta>"                         # [S]
+handler_symbol = "fgdb_apply::meta::gc_physical_disposition_import_spec::completed"  # [C][F]
+transition_class = "Semantic"                                               # [S]
+sequence_effects = "validates the exact Meta quarantine publication, complete role-bound PortableGcPhysicalTerminalEvidence, current reachability recomputation, and no-resurrection proof; alone selects GcSemanticState<Meta>::PhysicalCompletedPendingCut, retains no raw Protocol reference, and emits no acknowledgement/certificate"  # [S] L1814
+expected_state_schema_id = "GcSemanticState<Meta>"                         # [S] Quarantined/AwaitingPhysicalDisposition
+authority_arm = "PortableGcPhysicalTerminalEvidence"                       # [S]
+authority_evidence_target_schema_id = "PortableGcPhysicalTerminalEvidence" # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                              # [S] arm body has no freeze member
+terminal_audit_gate_arm = "SourceUnspelled"                                # [S] arm body has no gate member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:gc-physical-disposition-import-spec:completed"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]        # [S-derived]
+written_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]         # [S-derived]
+checkpoint_floor_classes = [ "semantic-gc" ]                              # [S]
+backup_restore_gc_classes = [ "semantic-gc" ]                             # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:gc-physical-disposition-import-spec:cancelled"  # [C]
+role = "Meta"                                                              # [S]
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S]
+outer_wire_tag = 0x0019                                                      # [S] shared armed-member outer tag
+input_schema_id = "GcPhysicalDispositionImportSpec<Meta>"                  # [S]
+input_wire_tag = 0x0019                                                      # [C]
+inner_wire_tag = 0x0002                                                      # [S] source-order Cancelled arm
+body_schema_id = "GcPhysicalDispositionImportSpec<Meta>"                   # [S]
+result_schema_id = "GcSemanticState<Meta>"                                 # [S] CancelledBeforePhysicalStart
+applied_record_schema_id = "GcSemanticState<Meta>"                         # [S]
+handler_symbol = "fgdb_apply::meta::gc_physical_disposition_import_spec::cancelled"  # [C][F]
+transition_class = "Semantic"                                               # [S]
+sequence_effects = "requires the exact Meta quarantine publication, complete role-bound NoStartFenced terminal evidence, exact never-started target bijection, and GcCancellationAuthorityFor<Meta>::GlobalMeta authorization record plus certificate; rejects SentUnknown, Requested, Started, CompletionRequired, missing, mixed-mode, stale, or partial evidence; alone selects GcSemanticState<Meta>::CancelledBeforePhysicalStart and emits no acknowledgement/certificate"  # [S] L1814-L1818
+expected_state_schema_id = "GcSemanticState<Meta>"                         # [S] Quarantined/AwaitingPhysicalDisposition
+authority_arm = "GcCancellationAuthorityFor<Meta>::GlobalMeta"             # [S]
+authority_evidence_target_schema_id = "GlobalGcCancellationAuthorizationRecord"  # [S]
+terminal_audit_freeze_arm = "SourceUnspelled"                              # [S]
+terminal_audit_gate_arm = "SourceUnspelled"                                # [S]
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:gc-physical-disposition-import-spec:cancelled"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]        # [S-derived]
+written_state_slots = [ "SemanticPayload|Meta|gc_semantic_state" ]         # [S-derived]
+checkpoint_floor_classes = [ "semantic-gc" ]                              # [S]
+backup_restore_gc_classes = [ "semantic-gc" ]                             # [S]
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]
