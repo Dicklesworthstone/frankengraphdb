@@ -116,6 +116,7 @@ fn phase_b_seed_rows_are_present() {
         "cc:meta:global-statement-abort-spec",
         "cc:meta:global-attempt-cancel-spec",
         "cc:meta:global-prepare-admission-spec",
+        "cc:meta:global-read-close-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
         // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
@@ -334,8 +335,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 158,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F6 rows"
+        registry.contracts.len() >= 159,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F7 rows"
     );
 }
 
@@ -1075,6 +1076,93 @@ fn meta_f6_prepare_admission_contract_is_exact() {
         .map(|candidate| candidate.command_contract_id.as_str())
         .collect();
     assert_eq!(exact_ordinal, ["cc:meta:global-prepare-admission-spec"]);
+}
+
+/// The Global read-close member is armless even though its body has two modes.
+/// Pin both its terminal state effects and the autocommit cross-plane detach so
+/// a Local row, a write terminal, or an explicit-close-only implementation
+/// cannot occupy ordinal 12.
+#[test]
+fn meta_f7_read_close_contract_is_exact() {
+    let registry = registry();
+    let rows: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| row.command_contract_id == "cc:meta:global-read-close-spec")
+        .collect();
+    assert_eq!(rows.len(), 1, "Meta read close must classify once");
+    let row = rows[0];
+    assert_eq!(row.role, "Meta");
+    assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(row.outer_wire_tag, 0x000c);
+    assert_eq!(row.input_wire_tag, 0x000c);
+    assert_eq!(row.inner_wire_tag, None);
+    assert_eq!(row.input_schema_id, "GlobalReadCloseSpec");
+    assert_eq!(row.body_schema_id, "GlobalReadCloseSpec");
+    assert_eq!(row.result_schema_id, "GlobalTxnOutcomeRecord");
+    assert_eq!(row.applied_record_schema_id, "GlobalTxnOutcomeRecord");
+    assert_eq!(row.expected_state_schema_id, "WeakStateIdentity");
+    assert_eq!(row.authority_arm, "AuthorityBoundHeader<Meta>");
+    assert_eq!(row.authority_evidence_target_schema_id, None);
+    assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+    assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+    assert_eq!(row.publication_mode, "AtomicProtocolDetach");
+    assert_eq!(
+        row.handler_symbol,
+        "fgdb_apply::meta::global_read_close_spec"
+    );
+    assert_eq!(
+        row.consumed_state_slots,
+        [
+            "Protocol|Meta|result_independent_retention_index",
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+            "SemanticPayload|Meta|global_statement_index_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    assert_eq!(
+        row.written_state_slots,
+        [
+            "Protocol|Meta|result_independent_retention_index",
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    assert_eq!(
+        row.checkpoint_floor_classes,
+        ["txn-attempt", "result-delivery"]
+    );
+    assert_eq!(
+        row.backup_restore_gc_classes,
+        ["txn-lifecycle", "protocol-result-retention"]
+    );
+    for required in [
+        "operation_class ReadOnly",
+        "advances GlobalLogicalCommandSeq and HLC but never GlobalCommitSeq",
+        "installs ReadClosed",
+        "without waiting for activation or ACK",
+    ] {
+        assert!(row.sequence_effects.contains(required));
+    }
+    assert_eq!(row.status, "reserved");
+
+    let exact_ordinal: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "Meta"
+                && candidate.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && candidate.outer_wire_tag == 0x000c
+        })
+        .map(|candidate| candidate.command_contract_id.as_str())
+        .collect();
+    assert_eq!(exact_ordinal, ["cc:meta:global-read-close-spec"]);
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These

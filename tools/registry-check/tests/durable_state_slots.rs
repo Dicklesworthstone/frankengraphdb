@@ -288,6 +288,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
                 "cc:meta:global-prepare-admission-spec",
+                "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
@@ -324,6 +325,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             "cc:meta:global-attempt-cancel-spec",
             "cc:meta:global-attempt-registration-spec",
             "cc:meta:global-begin-terminal-spec",
+            "cc:meta:global-read-close-spec",
             "cc:meta:global-statement-abort-spec",
             "cc:meta:global-statement-publication-spec",
             "cc:meta:global-statement-registration-spec",
@@ -353,6 +355,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-prepare-admission-spec",
+                "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
@@ -361,6 +364,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
                 "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-prepare-admission-spec",
+                "cc:meta:global-read-close-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
             ]
         };
@@ -406,6 +410,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
             vec![
                 "cc:meta:global-attempt-cancel-spec",
                 "cc:meta:global-prepare-admission-spec",
+                "cc:meta:global-read-close-spec",
                 "cc:meta:global-statement-abort-spec",
                 "cc:meta:global-statement-publication-spec",
                 "cc:meta:txn-ownership-expiry-abort-spec",
@@ -470,7 +475,10 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         .expect("Meta F4 Protocol result-retention slot");
     assert_eq!(
         result_retention.transition_writer_contract_ids,
-        ["cc:meta:global-statement-publication-spec"]
+        [
+            "cc:meta:global-read-close-spec",
+            "cc:meta:global-statement-publication-spec",
+        ]
     );
     assert_eq!(
         result_retention.backing_registry,

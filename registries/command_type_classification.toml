@@ -32,14 +32,15 @@
 # The creation-time PreOrderArtifact population stands unchanged; the
 # population only grows.
 #
-# META F3-F6 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
+# META F3-F7 CONTINUATION (2026-08-15/16). GlobalAttemptRegistrationSpec is the
 # first registered-attempt member in the independent Global command namespace.
 # The three Global statement lifecycle inputs follow at ordinals 7-9. Each
 # classification lands atomically with its exact reserved command-contract row.
 # GlobalAttemptCancelSpec follows at ordinal 10 as the sole active/unadmitted
 # cancellation input. GlobalPrepareAdmissionSpec follows at ordinal 11 and
 # freezes one complete ReadWrite admission basis without assigning terminal
-# order. These remain registry metadata, not claims that generated Global
+# order. GlobalReadCloseSpec follows at ordinal 12 and freezes the read-only
+# terminal/detachment closure. These remain registry metadata, not claims that generated Global
 # union arms or runtime handlers exist.
 #
 # F3 TRANCHE (2026-08-03) + FAMILY BINDING (round-12 T4). The fourteen F3
@@ -79,7 +80,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 29
+registry_epoch = 30
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -303,6 +304,14 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:meta:global-prepare-admission-spec"
 source_location = "a09:1740"
 statement = "GlobalPrepareAdmissionSpec validates one complete ReadWrite statement, delivery, workspace, read, effect, routing, participant, constraint, resource, outcome, audit, topology, policy, revocation, and conflict basis; apply installs PrepareAdmitted plus the immutable Armed Meta terminal fence without assigning future order."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalReadCloseSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-read-close-spec"
+source_location = "a09:1766"
+statement = "GlobalReadCloseSpec requires a ReadOnly operation and exact mode-specific read/audit/serialization/conflict closure; apply advances GlobalLogicalCommandSeq/HLC but not GlobalCommitSeq, installs ReadClosed, and atomically detaches an autocommit result into independent Protocol retention."
 status = "registered"
 
 # --- F3 tranche (attempt-lifecycle): fourteen RegisteredCommandInput rows,
