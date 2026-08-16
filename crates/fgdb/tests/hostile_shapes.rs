@@ -31,7 +31,7 @@
 //! | cold partition reopen | COVERED — every witness reads after drop + reopen |
 //! | long version chains | COVERED — `a_long_edge_version_chain_survives_cold_reopen_and_compaction` drives 65 exact property versions through the public durable write path, reads every historical value after a cold reopen, and proves compaction preserves them. |
 //! | deep branch chains | NOT REACHABLE: the spine has no branch API. Chronicle's branch-parent walk is the cost this shape exists to expose, and it does not exist to call. |
-//! | compaction under load | PARTIAL: `Database::compact` is now a public, durable trigger and the long-chain witness proves it never moves historical answers or increases the referenced-block count. Concurrent foreground load remains unreachable: `compact` requires exclusive `&mut Database`, the spine owns an exclusive writer lease, and it exposes no read-only snapshot handle. The latency-under-load half remains owed by fgdb-p95p. |
+//! | compaction under load | PARTIAL: `Database::compact` is a public, durable trigger and the long-chain witness keeps a pinned read view actively traversing all 65 versions while compaction publishes a replacement root. It proves answer and root-generation isolation, not a wall-clock latency bound or cross-process object-retirement safety. |
 //!
 //! Three covered, one partial, and one absent. The remaining portions are
 //! absent because the engine cannot yet express the thing, not because the
@@ -44,6 +44,9 @@ use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{CanonicalScalar, EId, VId};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 
 const KNOWS: RelationId = RelationId(1);
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -523,7 +526,61 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
                 expected.len()
             );
 
-            db.compact(cx).await.expect("compacts the hostile chain");
+            let pinned = db.pinned_read_view().expect("pins the decoded generation");
+            let duplicate = db.pinned_read_view().expect("pins the same generation");
+            assert!(
+                pinned.shares_decoded_state_with(&duplicate),
+                "read-view acquisition copied rather than sharing the authenticated state"
+            );
+            assert_eq!(pinned.partition_root(), root_before_id);
+            assert_eq!(
+                pinned.frontier(),
+                db.frontier().expect("healthy frontier"),
+                "the read view did not pin the published frontier"
+            );
+            assert_eq!(
+                pinned.manifest(),
+                db.manifest().expect("healthy manifest"),
+                "the read view did not pin the authenticated manifest"
+            );
+
+            // Keep a real OS reader actively traversing the old generation
+            // until the exclusive writer has finished publishing the compacted
+            // root. This is intentionally stronger than merely retaining a
+            // view and reading it after compaction: a future implementation
+            // that mutates shared decoded blocks in place races this loop and
+            // fails one of the exact historical assertions.
+            let done = Arc::new(AtomicBool::new(false));
+            let reader_done = Arc::clone(&done);
+            let reader_expected = expected.clone();
+            let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+            let reader = std::thread::spawn(move || {
+                let assert_pinned_history = || {
+                    for (sequence, value) in &reader_expected {
+                        let edge = pinned
+                            .edge_at(EId(10), *sequence)
+                            .expect("pinned historical read succeeds")
+                            .expect("the pinned edge remains live");
+                        assert_eq!(
+                            edge.props,
+                            vec![(property, CanonicalScalar::Int(*value))],
+                            "pinned sequence {sequence:?} moved during compaction"
+                        );
+                    }
+                };
+                assert_pinned_history();
+                ready_tx.send(()).expect("announces active reader");
+                while !reader_done.load(Ordering::Acquire) {
+                    assert_pinned_history();
+                    std::hint::spin_loop();
+                }
+                assert_pinned_history();
+            });
+            ready_rx.recv().expect("reader reached the old generation");
+            let compact_result = db.compact(cx).await;
+            done.store(true, Ordering::Release);
+            reader.join().expect("pinned reader remains exact");
+            compact_result.expect("compacts the hostile chain");
             let compacted_root = db.partition_root().expect("healthy compacted root");
             assert_ne!(
                 compacted_root, root_before_id,
@@ -547,6 +604,80 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
                 .expect("reopens compacted generation");
             assert_eq!(db.partition_root().expect("healthy root"), compacted_root);
             assert_history(&db);
+        }
+    });
+}
+
+/// WITNESS: acquiring a read view is a shared-state operation, while a later
+/// write publishes a new generation without moving the view's frontier or any
+/// of its point, adjacency, or full-scan answers.
+#[test]
+fn a_pinned_read_snapshot_survives_a_successor_write() {
+    let dir = scratch("pinned-read-successor-write");
+    under_lab(46, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let cx = &cx;
+            let property = PropertyKeyId(11);
+            let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+
+            let mut first = WriteBatch::new(KNOWS);
+            first.create_vertex(VId(1), vec![], vec![]);
+            first.create_vertex(VId(2), vec![], vec![]);
+            first.add_edge(
+                EId(10),
+                VId(1),
+                VId(2),
+                vec![(property, CanonicalScalar::Int(7))],
+            );
+            let first_seq = db.write(cx, first).await.expect("commits first generation");
+
+            let pinned = db.pinned_read_view().expect("pins first generation");
+            let same_generation = pinned.clone();
+            assert!(pinned.shares_decoded_state_with(&same_generation));
+            let pinned_root = pinned.partition_root();
+            let pinned_manifest = pinned.manifest();
+            assert_eq!(pinned.frontier(), first_seq);
+            assert_eq!(pinned.neighbours(VId(1), KNOWS).unwrap(), vec![VId(2)]);
+            assert_eq!(pinned.in_neighbours(VId(2), KNOWS).unwrap(), vec![VId(1)]);
+            assert_eq!(pinned.vertices().unwrap().len(), 2);
+            assert_eq!(pinned.edges().unwrap().len(), 1);
+            assert_eq!(
+                pinned
+                    .edge(EId(10))
+                    .unwrap()
+                    .expect("edge is visible")
+                    .props,
+                vec![(property, CanonicalScalar::Int(7))]
+            );
+
+            let mut successor = WriteBatch::new(KNOWS);
+            successor.create_vertex(VId(3), vec![], vec![]);
+            successor.add_edge(EId(11), VId(2), VId(3), vec![]);
+            let successor_seq = db
+                .write(cx, successor)
+                .await
+                .expect("publishes successor generation");
+
+            assert!(successor_seq.0 > first_seq.0);
+            assert_ne!(db.partition_root().expect("new root"), pinned_root);
+            assert_ne!(db.manifest().expect("new manifest"), pinned_manifest);
+            assert_eq!(db.vertices().unwrap().len(), 3);
+            assert_eq!(db.edges().unwrap().len(), 2);
+            assert!(db.vertex(VId(3)).unwrap().is_some());
+
+            assert_eq!(pinned.frontier(), first_seq);
+            assert_eq!(pinned.partition_root(), pinned_root);
+            assert_eq!(pinned.manifest(), pinned_manifest);
+            assert_eq!(pinned.vertices().unwrap().len(), 2);
+            assert_eq!(pinned.edges().unwrap().len(), 1);
+            assert!(pinned.vertex(VId(3)).unwrap().is_none());
+            assert!(pinned.edge(EId(11)).unwrap().is_none());
+            assert_eq!(pinned.neighbours(VId(2), KNOWS).unwrap(), Vec::<VId>::new());
+            assert!(pinned.vertex_at(VId(1), first_seq).unwrap().is_some());
+            assert_eq!(pinned.edges_at(first_seq).unwrap().len(), 1);
+            assert_eq!(pinned.vertices_at(first_seq).unwrap().len(), 2);
+            assert!(pinned.vertex_at(VId(1), successor_seq).is_err());
         }
     });
 }

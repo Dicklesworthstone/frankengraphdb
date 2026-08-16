@@ -634,6 +634,12 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             first.create_vertex(VId(2), vec![], vec![]);
             first.add_edge(EId(10), VId(1), VId(2), vec![]);
             db.write(cx, first).await.expect("first commit publishes");
+            let published_view = db
+                .pinned_read_view()
+                .expect("healthy handle issues a view of the published generation");
+            let published_neighbours = published_view
+                .neighbours(VId(1), KNOWS)
+                .expect("issued view reads its pinned generation");
 
             let mut second = WriteBatch::new(KNOWS);
             second.create_vertex(
@@ -682,6 +688,7 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             assert_recovery_fence(stage, recovery, db.frontier());
             assert_recovery_fence(stage, recovery, db.manifest());
             assert_recovery_fence(stage, recovery, db.partition_root());
+            assert_recovery_fence(stage, recovery, db.pinned_read_view());
             assert_recovery_fence(stage, recovery, db.neighbours(VId(1), KNOWS));
             assert_recovery_fence(
                 stage,
@@ -713,6 +720,21 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             assert_recovery_fence(stage, recovery, db.vertices_at(recovery.published_frontier));
             assert_recovery_fence(stage, recovery, db.edges());
             assert_recovery_fence(stage, recovery, db.edges_at(recovery.published_frontier));
+            assert_eq!(published_view.frontier(), recovery.published_frontier);
+            assert_eq!(
+                published_view
+                    .neighbours(VId(1), KNOWS)
+                    .expect("pre-fence view remains readable"),
+                published_neighbours,
+                "{stage:?}: a view issued before the uncertain commit must retain its exact durable generation"
+            );
+            assert_eq!(
+                published_view
+                    .vertex(VId(3))
+                    .expect("pre-fence view remains readable"),
+                None,
+                "{stage:?}: the pre-fence generation must not absorb the uncertain commit"
+            );
             let compact_error = db
                 .compact(cx)
                 .await

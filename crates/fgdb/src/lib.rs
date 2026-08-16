@@ -143,6 +143,7 @@ use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, VId};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Re-exported because [`Database::write_with_crash`] takes one: a caller
 /// driving the crash-point matrix needs to name the instants, and importing them
@@ -1008,7 +1009,7 @@ pub struct EdgeRecord {
 }
 
 /// The published tier-D snapshot a reader is served from.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Snapshot {
     blocks: Vec<Vec<AdjacencyEntry>>,
     /// The root's block references, aligned with `blocks`. Retained so the
@@ -1042,6 +1043,181 @@ struct Snapshot {
     /// every emitted image against the oracle's own chains, so a drift in
     /// either implementation is a refusal, not a silent agreement.
     versions: std::collections::BTreeMap<ElementId, ObjectId>,
+}
+
+impl Snapshot {
+    fn check_frontier(&self, as_of: CommitSeq) -> Result<(), ReadError> {
+        if as_of.0 > self.frontier.0 {
+            return Err(ReadError::BeyondFrontier {
+                asked: as_of,
+                frontier: self.frontier,
+            });
+        }
+        Ok(())
+    }
+
+    fn neighbours_at(
+        &self,
+        src: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(merge_neighbours(&self.blocks, src, relation, as_of)?)
+    }
+
+    fn in_neighbours_at(
+        &self,
+        dst: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(merge_in_neighbours(&self.blocks, dst, relation, as_of)?)
+    }
+
+    fn edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(
+            merge_edge_with_props(&self.blocks, &self.block_props, eid, as_of)?
+                .map(|(entry, props)| EdgeRecord { entry, props }),
+        )
+    }
+
+    fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(merge_vertex(&self.patches, vid, as_of))
+    }
+
+    fn vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(merge_all_vertices(&self.patches, as_of))
+    }
+
+    fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
+        self.check_frontier(as_of)?;
+        Ok(
+            merge_all_edges_with_props(&self.blocks, &self.block_props, as_of)?
+                .into_iter()
+                .map(|(entry, props)| EdgeRecord { entry, props })
+                .collect(),
+        )
+    }
+}
+
+/// An immutable, in-process view of one already-authenticated published root.
+///
+/// Acquiring a view clones one [`Arc`], not the decoded blocks. A later write
+/// uses copy-on-write only when it must preserve an older live view, while
+/// compaction publishes a replacement generation without mutating the pinned
+/// one. This is deliberately not the plan's posture-closed
+/// `ReadSnapshot<Role>`: it has no authority binding, protocol cut, graph
+/// bindings, or retention lease. Those and the cross-process retirement
+/// protocol remain owned by `fgdb-w2-snapshots-leases-47e3`; this slice does
+/// not authorize deletion of immutable objects or promise that a view survives
+/// process death.
+#[derive(Clone)]
+#[must_use = "an embedded read view has no effect unless its pinned generation is read"]
+pub struct EmbeddedReadView {
+    snapshot: Arc<Snapshot>,
+}
+
+impl EmbeddedReadView {
+    /// The exact published frontier this view is pinned to.
+    #[must_use]
+    pub fn frontier(&self) -> CommitSeq {
+        self.snapshot.frontier
+    }
+
+    /// The manifest identity authenticated before this view was issued.
+    #[must_use]
+    pub fn manifest(&self) -> ManifestVersion {
+        self.snapshot.manifest
+    }
+
+    /// The immutable partition-root identity this view reads.
+    #[must_use]
+    pub fn partition_root(&self) -> PartitionRootVersion {
+        self.snapshot.root
+    }
+
+    /// The live destinations of `src` over `relation` at this view's frontier.
+    pub fn neighbours(&self, src: VId, relation: RelationId) -> Result<Vec<VId>, ReadError> {
+        self.neighbours_at(src, relation, self.snapshot.frontier)
+    }
+
+    /// The destinations of `src` over `relation` at a sequence within this view.
+    pub fn neighbours_at(
+        &self,
+        src: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, ReadError> {
+        self.snapshot.neighbours_at(src, relation, as_of)
+    }
+
+    /// The live sources of edges arriving at `dst` at this view's frontier.
+    pub fn in_neighbours(&self, dst: VId, relation: RelationId) -> Result<Vec<VId>, ReadError> {
+        self.in_neighbours_at(dst, relation, self.snapshot.frontier)
+    }
+
+    /// The sources of edges arriving at `dst` at a sequence within this view.
+    pub fn in_neighbours_at(
+        &self,
+        dst: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, ReadError> {
+        self.snapshot.in_neighbours_at(dst, relation, as_of)
+    }
+
+    /// The edge `eid` at this view's frontier.
+    pub fn edge(&self, eid: EId) -> Result<Option<EdgeRecord>, ReadError> {
+        self.edge_at(eid, self.snapshot.frontier)
+    }
+
+    /// The edge `eid` at a sequence within this view.
+    pub fn edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+        self.snapshot.edge_at(eid, as_of)
+    }
+
+    /// The vertex `vid` at this view's frontier.
+    pub fn vertex(&self, vid: VId) -> Result<Option<VertexRow>, ReadError> {
+        self.vertex_at(vid, self.snapshot.frontier)
+    }
+
+    /// The vertex `vid` at a sequence within this view.
+    pub fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
+        self.snapshot.vertex_at(vid, as_of)
+    }
+
+    /// Every vertex at this view's frontier, in ascending VId order.
+    pub fn vertices(&self) -> Result<Vec<VertexRow>, ReadError> {
+        self.vertices_at(self.snapshot.frontier)
+    }
+
+    /// Every vertex at a sequence within this view.
+    pub fn vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
+        self.snapshot.vertices_at(as_of)
+    }
+
+    /// Every edge at this view's frontier, in ascending EId order.
+    pub fn edges(&self) -> Result<Vec<EdgeRecord>, ReadError> {
+        self.edges_at(self.snapshot.frontier)
+    }
+
+    /// Every edge at a sequence within this view.
+    pub fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
+        self.snapshot.edges_at(as_of)
+    }
+
+    /// Verification seam for the zero-copy acquisition law. This compares
+    /// only the private in-process allocation and carries no durable identity.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_decoded_state_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.snapshot, &other.snapshot)
+    }
 }
 
 /// An open database.
@@ -1201,7 +1377,7 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// The generation the NEXT slot publication will carry; monotone.
     slot_generation: u64,
     keys: DatabaseKeys,
-    snapshot: Snapshot,
+    snapshot: Arc<Snapshot>,
     /// The persistent fold over every committed row, retained so a commit can
     /// fold only its own template instead of re-reading the whole history
     /// (`fgdb-fujt`: the per-commit rebuild's capsule re-read loop measured at
@@ -1566,16 +1742,15 @@ impl<V: Vfs + Clone> Database<V> {
         // insert would see a gap (plan:397, FG-INV-18).
         let delta_index =
             rebuild_delta_index(cx, &coordinator, &mut crypto_verification_events).await?;
+        let published_frontier = snapshot.frontier;
         Ok(Self {
             coordinator,
             store,
             slot_store,
             slot_generation,
             keys,
-            state: DatabaseState::Healthy {
-                published_frontier: snapshot.frontier,
-            },
-            snapshot,
+            state: DatabaseState::Healthy { published_frontier },
+            snapshot: Arc::new(snapshot),
             writer,
             // Deliberately empty rather than seeded from the rebuild: the first
             // publication's fallback re-earns every block's admission from disk
@@ -1601,6 +1776,20 @@ impl<V: Vfs + Clone> Database<V> {
     #[must_use]
     pub fn crypto_verification_events(&self) -> &[CryptoVerificationEvent] {
         &self.crypto_verification_events
+    }
+
+    /// Pin the current healthy published generation for in-process reads.
+    ///
+    /// The returned view shares the decoded immutable state and owns no writer
+    /// lease. It therefore remains readable while this handle commits or
+    /// compacts into a successor generation. Acquisition from a fenced handle
+    /// is refused: only a view known to match a published Chronicle frontier is
+    /// issued.
+    pub fn pinned_read_view(&self) -> Result<EmbeddedReadView, ReadError> {
+        self.ensure_readable()?;
+        Ok(EmbeddedReadView {
+            snapshot: Arc::clone(&self.snapshot),
+        })
     }
 
     /// Consume this handle and return one rebuilt from the authoritative
@@ -2506,18 +2695,21 @@ impl<V: Vfs + Clone> Database<V> {
             };
             fresh.insert(reference.block_id, (entries, props));
         }
+        // A pinned read view may still own the previous Arc. `make_mut`
+        // preserves it through copy-on-write; without a live view the Arc is
+        // unique and this remains the old zero-copy move-forward path.
+        let previous = Arc::make_mut(&mut self.snapshot);
         let mut carried: std::collections::BTreeMap<
             ObjectId,
             (Vec<AdjacencyEntry>, Option<BlockProps>),
-        > = self
-            .snapshot
+        > = previous
             .refs
             .iter()
             .map(|r| r.block_id)
             .zip(
-                std::mem::take(&mut self.snapshot.blocks)
+                std::mem::take(&mut previous.blocks)
                     .into_iter()
-                    .zip(std::mem::take(&mut self.snapshot.block_props)),
+                    .zip(std::mem::take(&mut previous.block_props)),
             )
             .collect();
         let (decoded, decoded_props): (Vec<Vec<AdjacencyEntry>>, Vec<Option<BlockProps>>) = root
@@ -2569,12 +2761,12 @@ impl<V: Vfs + Clone> Database<V> {
                 })?,
             );
         }
-        let mut carried_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> = self
-            .snapshot
+        let previous = Arc::make_mut(&mut self.snapshot);
+        let mut carried_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> = previous
             .patch_refs
             .iter()
             .map(|r| r.patch_id)
-            .zip(std::mem::take(&mut self.snapshot.patches))
+            .zip(std::mem::take(&mut previous.patches))
             .collect();
         let decoded_patches = root
             .vertex_patches
@@ -2590,7 +2782,7 @@ impl<V: Vfs + Clone> Database<V> {
             })
             .collect();
         self.writer = folded;
-        self.snapshot = Snapshot {
+        self.snapshot = Arc::new(Snapshot {
             blocks: decoded,
             block_props: decoded_props,
             refs: root.blocks,
@@ -2601,7 +2793,7 @@ impl<V: Vfs + Clone> Database<V> {
             manifest,
             next_birth_ordinal,
             versions: new_versions,
-        };
+        });
         self.state = DatabaseState::Healthy {
             published_frontier: self.snapshot.frontier,
         };
@@ -2630,13 +2822,8 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         as_of: CommitSeq,
     ) -> Result<Vec<VId>, ReadError> {
-        self.check_frontier(as_of)?;
-        Ok(merge_in_neighbours(
-            &self.snapshot.blocks,
-            dst,
-            relation,
-            as_of,
-        )?)
+        self.ensure_readable()?;
+        self.snapshot.in_neighbours_at(dst, relation, as_of)
     }
 
     /// [`Database::neighbours`] as of `as_of` — the system-time read B1 makes
@@ -2649,13 +2836,8 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         as_of: CommitSeq,
     ) -> Result<Vec<VId>, ReadError> {
-        self.check_frontier(as_of)?;
-        Ok(merge_neighbours(
-            &self.snapshot.blocks,
-            src,
-            relation,
-            as_of,
-        )?)
+        self.ensure_readable()?;
+        self.snapshot.neighbours_at(src, relation, as_of)
     }
 
     /// The edge `eid` — its endpoints, relation, lifetime, AND properties —
@@ -2675,14 +2857,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// the same visibility rule the frontier read applies, at an older
     /// sequence.
     pub fn edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
-        self.check_frontier(as_of)?;
-        Ok(merge_edge_with_props(
-            &self.snapshot.blocks,
-            &self.snapshot.block_props,
-            eid,
-            as_of,
-        )?
-        .map(|(entry, props)| EdgeRecord { entry, props }))
+        self.ensure_readable()?;
+        self.snapshot.edge_at(eid, as_of)
     }
 
     /// The vertex `vid` — its labels and properties — at the published
@@ -2700,8 +2876,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// statement visible at that sequence, or `None` when the vertex did not
     /// exist yet — or no longer did.
     pub fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
-        self.check_frontier(as_of)?;
-        Ok(merge_vertex(&self.snapshot.patches, vid, as_of))
+        self.ensure_readable()?;
+        self.snapshot.vertex_at(vid, as_of)
     }
 
     /// Every vertex visible at the published frontier, in ascending VId
@@ -2713,8 +2889,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// [`Database::vertices`] as of `as_of`, under the same frontier refusal
     /// as every `*_at` read.
     pub fn vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
-        self.check_frontier(as_of)?;
-        Ok(merge_all_vertices(&self.snapshot.patches, as_of))
+        self.ensure_readable()?;
+        self.snapshot.vertices_at(as_of)
     }
 
     /// Every edge visible at the published frontier — endpoints, relation,
@@ -2727,26 +2903,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// every `*_at` read and the identical whole-history validation and
     /// last-statement-wins precedence as the point lookups.
     pub fn edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
-        self.check_frontier(as_of)?;
-        Ok(
-            merge_all_edges_with_props(&self.snapshot.blocks, &self.snapshot.block_props, as_of)?
-                .into_iter()
-                .map(|(entry, props)| EdgeRecord { entry, props })
-                .collect(),
-        )
-    }
-
-    /// The shared refusal every `*_at` read applies before answering: the
-    /// published frontier bounds what this snapshot can truthfully say.
-    fn check_frontier(&self, as_of: CommitSeq) -> Result<(), ReadError> {
         self.ensure_readable()?;
-        if as_of.0 > self.snapshot.frontier.0 {
-            return Err(ReadError::BeyondFrontier {
-                asked: as_of,
-                frontier: self.snapshot.frontier,
-            });
-        }
-        Ok(())
+        self.snapshot.edges_at(as_of)
     }
 
     /// The sequence the healthy derived partition has caught up to.
@@ -2982,7 +3140,7 @@ impl<V: Vfs + Clone> Database<V> {
             .await
             .map_err(RebuildError::Slot)?;
         self.slot_generation = next_generation;
-        self.snapshot = snapshot;
+        self.snapshot = Arc::new(snapshot);
         self.writer = writer;
         // Receipts describe the superseded generation; the replacement earns
         // its own on the next publish.
