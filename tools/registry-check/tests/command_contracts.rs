@@ -108,6 +108,9 @@ fn phase_b_seed_rows_are_present() {
         "cc:meta:global-begin-terminal-spec",
         // Meta F3 starts the registered-attempt lineage at Global ordinal 4.
         "cc:meta:global-attempt-registration-spec",
+        "cc:meta:txn-ownership-transition-spec:reattach",
+        "cc:meta:txn-ownership-transition-spec:renew",
+        "cc:meta:txn-ownership-expiry-abort-spec",
         "cc:local:local-begin-reservation-spec",
         "cc:local:local-begin-terminal-spec",
         // F3 attempt-lifecycle (frozen ordinals 0x0004-0x0011)
@@ -326,8 +329,8 @@ fn phase_b_seed_rows_are_present() {
         );
     }
     assert!(
-        registry.contracts.len() >= 151,
-        "the population may only grow from the landed Local F1-F16 plus Meta F1-F2 rows"
+        registry.contracts.len() >= 154,
+        "the population may only grow from the landed Local F1-F16 plus Meta F1-F3 rows"
     );
 }
 
@@ -606,6 +609,123 @@ fn meta_f3_attempt_registration_contract_is_exact_and_atomic() {
         global_tag_four,
         ["cc:meta:global-attempt-registration-spec"]
     );
+}
+
+/// The shared ownership machine specializes into the independent Global
+/// command namespace without duplicating its input class. Reattach/Renew own
+/// one armed outer tag; expiry is the next armless member and closes every
+/// exact Meta attempt-lifecycle index named by the terminalization law.
+#[test]
+fn meta_f3_ownership_contracts_are_exact_and_atomic() {
+    let registry = registry();
+    let transition_slots = [
+        "SemanticPayload|Meta|global_txn_capability_lineage_root".to_owned(),
+        "SemanticPayload|Meta|global_txn_ownership_directory_root".to_owned(),
+    ];
+    for (id, inner, handler, effect) in [
+        (
+            "cc:meta:txn-ownership-transition-spec:reattach",
+            0x0001,
+            "fgdb_apply::meta::txn_ownership_transition_spec::reattach",
+            "changes session only through one exact open-statement disposition",
+        ),
+        (
+            "cc:meta:txn-ownership-transition-spec:renew",
+            0x0002,
+            "fgdb_apply::meta::txn_ownership_transition_spec::renew",
+            "cannot transfer session or control mode",
+        ),
+    ] {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|row| row.command_contract_id == id)
+            .expect("Meta ownership transition arm");
+        assert_eq!(row.role, "Meta");
+        assert_eq!(row.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+        assert_eq!(row.outer_wire_tag, 0x0005);
+        assert_eq!(row.input_wire_tag, 0x0005);
+        assert_eq!(row.inner_wire_tag, Some(inner));
+        assert_eq!(row.input_schema_id, "TxnOwnershipTransitionSpec<Meta>");
+        assert_eq!(row.body_schema_id, "TxnOwnershipTransitionSpec<Meta>");
+        assert_eq!(row.result_schema_id, "TxnOwnershipLease<Meta>");
+        assert_eq!(row.applied_record_schema_id, "TxnOwnershipLease<Meta>");
+        assert_eq!(row.expected_state_schema_id, "TxnOwnershipLease<Meta>");
+        assert_eq!(row.authority_arm, "AuthorityBoundHeader<Meta>");
+        assert_eq!(
+            row.authority_evidence_target_schema_id.as_deref(),
+            Some("DurableCapabilityValidationEvidence")
+        );
+        assert_eq!(row.terminal_audit_freeze_arm, "Forbidden");
+        assert_eq!(row.terminal_audit_gate_arm, "TerminalAuditGate");
+        assert_eq!(row.handler_symbol, handler);
+        assert_eq!(row.consumed_state_slots, transition_slots);
+        assert_eq!(row.written_state_slots, transition_slots);
+        assert!(row.sequence_effects.contains(effect));
+        assert!(row.sequence_effects.contains("capability lineage"));
+        assert_eq!(row.posture_feature_predicate, "sharded");
+        assert_eq!(row.status, "reserved");
+    }
+
+    let expiry = registry
+        .contracts
+        .iter()
+        .find(|row| row.command_contract_id == "cc:meta:txn-ownership-expiry-abort-spec")
+        .expect("Meta ownership expiry row");
+    assert_eq!(expiry.outer_command_union, "GlobalSequenceNeutralSpec<Tag>");
+    assert_eq!(expiry.outer_wire_tag, 0x0006);
+    assert_eq!(expiry.input_wire_tag, 0x0006);
+    assert_eq!(expiry.inner_wire_tag, None);
+    assert_eq!(expiry.input_schema_id, "TxnOwnershipExpiryAbortSpec<Meta>");
+    assert_eq!(expiry.body_schema_id, "TxnOwnershipExpiryAbortSpec<Meta>");
+    assert_eq!(expiry.result_schema_id, "GlobalTxnOutcomeRecord");
+    assert_eq!(expiry.applied_record_schema_id, "TxnOwnershipLease<Meta>");
+    assert_eq!(expiry.authority_arm, "TimeValidationEvidence");
+    assert_eq!(
+        expiry.authority_evidence_target_schema_id.as_deref(),
+        Some("TimeValidationEvidence")
+    );
+    assert_eq!(
+        expiry.consumed_state_slots,
+        [
+            "SemanticPayload|Meta|audit_ticket_index_root",
+            "SemanticPayload|Meta|global_attempt_index_root",
+            "SemanticPayload|Meta|global_conflict_index_ref",
+            "SemanticPayload|Meta|global_outcome_directory_root",
+            "SemanticPayload|Meta|global_statement_index_root",
+            "SemanticPayload|Meta|global_txn_capability_lineage_root",
+            "SemanticPayload|Meta|global_txn_ownership_directory_root",
+            "SemanticPayload|Meta|resource_ledger_root",
+        ]
+    );
+    assert_eq!(expiry.written_state_slots, expiry.consumed_state_slots);
+    for required in [
+        "Expired TimeValidationEvidence",
+        "structured cancellation",
+        "open-statement terminalization",
+        "result detachment",
+        "workspace-resource",
+        "conflict evidence",
+        "before PrepareFenced",
+    ] {
+        assert!(
+            expiry.sequence_effects.contains(required),
+            "expiry law lost {required:?}"
+        );
+    }
+    assert_eq!(expiry.status, "reserved");
+
+    let tag_five: Vec<_> = registry
+        .contracts
+        .iter()
+        .filter(|row| {
+            row.role == "Meta"
+                && row.outer_command_union == "GlobalSequenceNeutralSpec<Tag>"
+                && row.outer_wire_tag == 0x0005
+        })
+        .map(|row| row.inner_wire_tag)
+        .collect();
+    assert_eq!(tag_five, [Some(0x0001), Some(0x0002)]);
 }
 
 /// Freeze the complete F13 reservation, not merely its population. These
@@ -2062,6 +2182,7 @@ fn armed_member_rows_share_outer_tag_with_distinct_inner_tags() {
     for (root, arms) in [
         ("cc:local:local-attempt-registration-spec", 2usize),
         ("cc:local:txn-ownership-transition-spec", 2),
+        ("cc:meta:txn-ownership-transition-spec", 2),
         ("cc:local:local-outcome-compaction-spec", 2),
         ("cc:local:allocation-reservation-transition-spec", 2),
         ("cc:local:finalization-allocation-disposition-spec", 2),

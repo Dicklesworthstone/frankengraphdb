@@ -69,7 +69,7 @@
 # live-row-refusal precedent).
 #
 # registry_epoch changes only when rows are added or retired.
-registry_epoch = 13
+registry_epoch = 14
 
 
 [[slot]]
@@ -172,7 +172,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-terminal-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -212,7 +212,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:global-begin-reservation-spec", "cc:meta:global-begin-terminal-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -235,7 +235,7 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"
@@ -255,7 +255,92 @@ reference_semantics = "ReservedPendingActivation"
 target_schema_id = "ReservedPendingActivation"
 activation_predicate = "ReservedPendingActivation"
 initial_value_recipe = "ReservedPendingActivation"
-transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec" ]
+transition_writer_contract_ids = [ "cc:meta:global-attempt-registration-spec", "cc:meta:txn-ownership-expiry-abort-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+# Meta F3 ownership/expiry. The role-generic lease machine specializes into
+# two distinct GlobalStatePayload roots: directory membership and capability
+# lineage. Expiry also terminalizes the role-specific statement and resource
+# indexes; the already-landed audit/attempt/conflict/outcome rows list it in
+# their derived writer sets above.
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_statement_index_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_statement_index_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:txn-ownership-expiry-abort-spec" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_txn_capability_lineage_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_txn_capability_lineage_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:txn-ownership-expiry-abort-spec", "cc:meta:txn-ownership-transition-spec:reattach", "cc:meta:txn-ownership-transition-spec:renew" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "global_txn_ownership_directory_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "global_txn_ownership_directory_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:txn-ownership-expiry-abort-spec", "cc:meta:txn-ownership-transition-spec:reattach", "cc:meta:txn-ownership-transition-spec:renew" ]
+checkpoint_or_snapshot_class = "ReservedPendingActivation"
+floor_class = "ReservedPendingActivation"
+backup_class = "ReservedPendingActivation"
+restore_reconciliation_class = "ReservedPendingActivation"
+gc_class = "ReservedPendingActivation"
+role_transition_class = "ReservedPendingActivation"
+status = "reserved"
+
+[[slot]]
+plane = "SemanticPayload"
+role = "Meta"
+slot_tag = "resource_ledger_root"
+backing_registry = "state_payload_fields.toml"
+stable_name = "resource_ledger_root"
+exact_wire_type = "ReservedPendingActivation"
+reference_semantics = "ReservedPendingActivation"
+target_schema_id = "ReservedPendingActivation"
+activation_predicate = "ReservedPendingActivation"
+initial_value_recipe = "ReservedPendingActivation"
+transition_writer_contract_ids = [ "cc:meta:txn-ownership-expiry-abort-spec" ]
 checkpoint_or_snapshot_class = "ReservedPendingActivation"
 floor_class = "ReservedPendingActivation"
 backup_class = "ReservedPendingActivation"

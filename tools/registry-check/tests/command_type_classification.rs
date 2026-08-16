@@ -788,6 +788,75 @@ fn meta_f3_attempt_registration_classification_is_exact() {
     assert_eq!(contract.inner_wire_tag, None);
 }
 
+/// Role specialization creates concrete Local and Meta contract families, not
+/// duplicate input-looking types. Pin the singular generic classifications
+/// and require both role-valid command roots to exist with their exact unions.
+#[test]
+fn meta_f3_ownership_uses_singular_generic_classifications() {
+    let registry = registry();
+    let contracts = contracts();
+    for (type_name, classification_root, local_root, meta_root, armed) in [
+        (
+            "TxnOwnershipTransitionSpec",
+            "cc:local:txn-ownership-transition-spec",
+            "cc:local:txn-ownership-transition-spec",
+            "cc:meta:txn-ownership-transition-spec",
+            true,
+        ),
+        (
+            "TxnOwnershipExpiryAbortSpec",
+            "cc:local:txn-ownership-expiry-abort-spec",
+            "cc:local:txn-ownership-expiry-abort-spec",
+            "cc:meta:txn-ownership-expiry-abort-spec",
+            false,
+        ),
+    ] {
+        let rows: Vec<_> = registry
+            .classifications
+            .iter()
+            .filter(|row| row.type_name == type_name)
+            .collect();
+        assert_eq!(rows.len(), 1, "{type_name} must classify exactly once");
+        assert_eq!(rows[0].class, "RegisteredCommandInput");
+        assert_eq!(
+            rows[0].command_contract_id.as_deref(),
+            Some(classification_root)
+        );
+
+        for (role, root, union, input) in [
+            (
+                "Local",
+                local_root,
+                "SequenceNeutralSpec<Tag>",
+                format!("{type_name}<Local>"),
+            ),
+            (
+                "Meta",
+                meta_root,
+                "GlobalSequenceNeutralSpec<Tag>",
+                format!("{type_name}<Meta>"),
+            ),
+        ] {
+            let concrete: Vec<_> = contracts
+                .contracts
+                .iter()
+                .filter(|contract| {
+                    contract.command_contract_id == root
+                        || contract
+                            .command_contract_id
+                            .starts_with(&format!("{root}:"))
+                })
+                .collect();
+            assert_eq!(concrete.len(), if armed { 2 } else { 1 });
+            assert!(concrete.iter().all(|contract| {
+                contract.role == role
+                    && contract.outer_command_union == union
+                    && contract.input_schema_id == input
+            }));
+        }
+    }
+}
+
 /// The load-bearing test: open every cited plan line and require the
 /// classified type to be named there. A class whose anchor does not name the
 /// type is a choice, not a derivation.

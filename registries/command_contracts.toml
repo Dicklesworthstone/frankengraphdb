@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 27
+registry_epoch = 28
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -322,6 +322,103 @@ written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "Semanti
 checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
 backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
 posture_feature_predicate = "sharded"                                      # [S] Meta exists in W12 sharded posture
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# META F3 ownership — frozen Global ordinals 5-6. The transition member is
+# armed exactly Reattach/Renew in the source order shared by both roles. Meta
+# stores ownership and capability lineage in two distinct GlobalStatePayload
+# roots; expiry additionally terminalizes the registered attempt's exact
+# audit/attempt/statement/conflict/outcome/resource entries. These rows remain
+# reserved until the generated Global union and apply handlers exist.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:txn-ownership-transition-spec:reattach"     # [C]
+role = "Meta"                                                              # [S] L1774 exact role specialization
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1774
+outer_wire_tag = 0x0005                                                      # [S] frozen dense Meta ordinal 5
+input_schema_id = "TxnOwnershipTransitionSpec<Meta>"                       # [S] L1006/L1774
+input_wire_tag = 0x0005                                                      # [C]
+inner_wire_tag = 0x0001                                                      # [S] Reattach first in source order (L1006)
+body_schema_id = "TxnOwnershipTransitionSpec<Meta>"                        # [S]
+result_schema_id = "TxnOwnershipLease<Meta>"                               # [S] L1004/L1006
+applied_record_schema_id = "TxnOwnershipLease<Meta>"                       # [S-derived] successor selected by the directory CAS
+handler_symbol = "fgdb_apply::meta::txn_ownership_transition_spec::reattach"  # [C][F]
+transition_class = "Semantic"                                               # [S] L1774
+sequence_effects = "changes session only through one exact open-statement disposition; validates the Meta domain, principal, generation, presented capability and lineage, then CASes one successor lease and capability lineage; PrepareFenced permits status only"  # [S] L1006
+expected_state_schema_id = "TxnOwnershipLease<Meta>"                       # [S] expected_owned_lease_ref
+authority_arm = "AuthorityBoundHeader<Meta>"                               # [S] L1006
+authority_evidence_target_schema_id = "DurableCapabilityValidationEvidence"  # [S] L1006
+terminal_audit_freeze_arm = "Forbidden"                                    # [S] absent from the arm
+terminal_audit_gate_arm = "TerminalAuditGate"                              # [S] L1006
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:txn-ownership-transition-spec:reattach"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root" ]  # [S] L1002/L1004/L1652
+written_state_slots = [ "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root" ]   # [S]
+checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:txn-ownership-transition-spec:renew"        # [C]
+role = "Meta"                                                              # [S]
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S]
+outer_wire_tag = 0x0005                                                      # [S] shared armed member
+input_schema_id = "TxnOwnershipTransitionSpec<Meta>"                       # [S]
+input_wire_tag = 0x0005                                                      # [C]
+inner_wire_tag = 0x0002                                                      # [S] Renew second in source order (L1006)
+body_schema_id = "TxnOwnershipTransitionSpec<Meta>"                        # [S]
+result_schema_id = "TxnOwnershipLease<Meta>"                               # [S]
+applied_record_schema_id = "TxnOwnershipLease<Meta>"                       # [S-derived]
+handler_symbol = "fgdb_apply::meta::txn_ownership_transition_spec::renew"   # [C][F]
+transition_class = "Semantic"                                               # [S]
+sequence_effects = "cannot transfer session or control mode; requires Usable evidence for the exact successor window/action; validates the Meta domain, principal, generation, capability and lineage, then CASes one successor lease and capability lineage"  # [S] L1006
+expected_state_schema_id = "TxnOwnershipLease<Meta>"                       # [S]
+authority_arm = "AuthorityBoundHeader<Meta>"                               # [S]
+authority_evidence_target_schema_id = "DurableCapabilityValidationEvidence"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                    # [S]
+terminal_audit_gate_arm = "TerminalAuditGate"                              # [S]
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:txn-ownership-transition-spec:renew"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root" ]  # [S]
+written_state_slots = [ "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root" ]   # [S]
+checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:txn-ownership-expiry-abort-spec"           # [C]
+role = "Meta"                                                              # [S]
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1774
+outer_wire_tag = 0x0006                                                      # [S] frozen dense Meta ordinal 6
+input_schema_id = "TxnOwnershipExpiryAbortSpec<Meta>"                      # [S] L1008/L1774
+input_wire_tag = 0x0006                                                      # [C]
+body_schema_id = "TxnOwnershipExpiryAbortSpec<Meta>"                       # [S]
+result_schema_id = "GlobalTxnOutcomeRecord"                                # [S-derived] W12 abort terminalizes the registered attempt (L1782)
+applied_record_schema_id = "TxnOwnershipLease<Meta>"                       # [S-derived] retires the expired owned lease
+handler_symbol = "fgdb_apply::meta::txn_ownership_expiry_abort_spec"       # [C][F]
+transition_class = "Semantic"                                               # [S] L1774
+sequence_effects = "requires Expired TimeValidationEvidence for the exact Meta lease/action; complete structured cancellation, open-statement terminalization, result detachment, workspace-resource and conflict evidence; atomically terminalizes the claimed attempt before PrepareFenced so expiry cannot strand it"  # [S] L1008/L1782-L1784
+expected_state_schema_id = "TxnOwnershipLease<Meta>"                       # [S-derived]
+authority_arm = "TimeValidationEvidence"                                   # [S] L1008
+authority_evidence_target_schema_id = "TimeValidationEvidence"            # [S] L1008
+terminal_audit_freeze_arm = "SourceUnspelled"                              # T6
+terminal_audit_gate_arm = "SourceUnspelled"                                # T6
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:txn-ownership-expiry-abort-spec"  # [C][F]
+consumed_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S-derived] L1008/L1782-L1784
+written_state_slots = [ "SemanticPayload|Meta|audit_ticket_index_root", "SemanticPayload|Meta|global_attempt_index_root", "SemanticPayload|Meta|global_conflict_index_ref", "SemanticPayload|Meta|global_outcome_directory_root", "SemanticPayload|Meta|global_statement_index_root", "SemanticPayload|Meta|global_txn_capability_lineage_root", "SemanticPayload|Meta|global_txn_ownership_directory_root", "SemanticPayload|Meta|resource_ledger_root" ]  # [S-derived]
+checkpoint_floor_classes = [ "txn-attempt" ]                               # [C][F]
+backup_restore_gc_classes = [ "txn-lifecycle" ]                            # [C][F]
+posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]
 

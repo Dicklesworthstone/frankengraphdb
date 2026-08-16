@@ -48,18 +48,18 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         "unexpected violations: {violations:#?}"
     );
 
-    assert_eq!(slots.slots.len(), 61, "the frozen reservation inventory");
+    assert_eq!(slots.slots.len(), 65, "the frozen reservation inventory");
     let mut plane_counts = BTreeMap::new();
     for slot in &slots.slots {
         *plane_counts.entry(slot.plane.as_str()).or_insert(0usize) += 1;
     }
-    assert_eq!(plane_counts.get("SemanticPayload"), Some(&55));
+    assert_eq!(plane_counts.get("SemanticPayload"), Some(&59));
     assert_eq!(plane_counts.get("Protocol"), Some(&1));
     assert_eq!(plane_counts.get("PreparedOwnership"), None);
     assert_eq!(plane_counts.get("Consensus"), Some(&1));
     assert_eq!(plane_counts.get("Bootstrap"), Some(&4));
 
-    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 55);
+    assert_eq!(backings["state_payload_fields.toml"].fields.len(), 59);
     assert_eq!(backings["protocol_state_fields.toml"].fields.len(), 1);
     assert!(backings["prepared_state_fields.toml"].fields.is_empty());
     assert_eq!(backings["consensus_state_fields.toml"].fields.len(), 1);
@@ -281,14 +281,21 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         assert_eq!(slot.stable_name, slot_tag);
         assert_eq!(slot.backing_registry, "state_payload_fields.toml");
         assert_eq!(slot.status, "reserved");
-        assert_eq!(
-            slot.transition_writer_contract_ids,
-            [
+        let expected_writers = if slot_tag == "global_outcome_directory_root" {
+            vec![
+                "cc:meta:global-attempt-registration-spec",
+                "cc:meta:global-begin-reservation-spec",
+                "cc:meta:global-begin-terminal-spec",
+                "cc:meta:txn-ownership-expiry-abort-spec",
+            ]
+        } else {
+            vec![
                 "cc:meta:global-attempt-registration-spec",
                 "cc:meta:global-begin-reservation-spec",
                 "cc:meta:global-begin-terminal-spec",
             ]
-        );
+        };
+        assert_eq!(slot.transition_writer_contract_ids, expected_writers);
 
         let projected = backings["state_payload_fields.toml"]
             .fields
@@ -313,6 +320,7 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         [
             "cc:meta:global-attempt-registration-spec",
             "cc:meta:global-begin-terminal-spec",
+            "cc:meta:txn-ownership-expiry-abort-spec",
         ]
     );
     assert_eq!(audit_ticket_index.status, "reserved");
@@ -335,8 +343,57 @@ fn shipped_slot_and_backing_registries_are_exact_and_clean() {
         assert_eq!(slot.backing_registry, "state_payload_fields.toml");
         assert_eq!(
             slot.transition_writer_contract_ids,
-            ["cc:meta:global-attempt-registration-spec"]
+            [
+                "cc:meta:global-attempt-registration-spec",
+                "cc:meta:txn-ownership-expiry-abort-spec",
+            ]
         );
+        assert_eq!(slot.status, "reserved");
+
+        let projected = backings["state_payload_fields.toml"]
+            .fields
+            .iter()
+            .filter(|field| field.role == "Meta" && field.slot_tag == slot_tag)
+            .count();
+        assert_eq!(projected, 1, "{slot_tag} backing projection must be unique");
+    }
+
+    for (slot_tag, writers) in [
+        (
+            "global_statement_index_root",
+            vec!["cc:meta:txn-ownership-expiry-abort-spec"],
+        ),
+        (
+            "global_txn_capability_lineage_root",
+            vec![
+                "cc:meta:txn-ownership-expiry-abort-spec",
+                "cc:meta:txn-ownership-transition-spec:reattach",
+                "cc:meta:txn-ownership-transition-spec:renew",
+            ],
+        ),
+        (
+            "global_txn_ownership_directory_root",
+            vec![
+                "cc:meta:txn-ownership-expiry-abort-spec",
+                "cc:meta:txn-ownership-transition-spec:reattach",
+                "cc:meta:txn-ownership-transition-spec:renew",
+            ],
+        ),
+        (
+            "resource_ledger_root",
+            vec!["cc:meta:txn-ownership-expiry-abort-spec"],
+        ),
+    ] {
+        let slot = slots
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.plane == "SemanticPayload" && slot.role == "Meta" && slot.slot_tag == slot_tag
+            })
+            .expect("Meta F3 ownership state slot");
+        assert_eq!(slot.stable_name, slot_tag);
+        assert_eq!(slot.backing_registry, "state_payload_fields.toml");
+        assert_eq!(slot.transition_writer_contract_ids, writers);
         assert_eq!(slot.status, "reserved");
 
         let projected = backings["state_payload_fields.toml"]
