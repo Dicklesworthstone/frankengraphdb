@@ -27,7 +27,10 @@ use fgdb_sim::fixture::{
     FixtureWorkloadError, MAX_FIXTURE_PAYLOAD_BYTES,
 };
 use fgdb_sim::shrink::{
-    FIXTURE_SCHEDULE_WORKLOAD_SHRINK_LIMITS, shrink_fixture_schedule_and_workload_under_lab,
+    FIXTURE_SCHEDULE_WORKLOAD_ARTIFACT_ENV, FIXTURE_SCHEDULE_WORKLOAD_MINIMAL_DIGEST_ENV,
+    FIXTURE_SCHEDULE_WORKLOAD_SHRINK_LIMITS, FIXTURE_SCHEDULE_WORKLOAD_SOURCE_DIGEST_ENV,
+    FixtureScheduleWorkloadArtifact, FixtureScheduleWorkloadArtifactError,
+    FixtureScheduleWorkloadArtifactLimits, shrink_fixture_schedule_and_workload_under_lab,
     shrink_fixture_workload_under_lab,
 };
 use fgdb_sim::vfs::Trigger;
@@ -72,6 +75,15 @@ fn execute_fixture_replay_consumer(command: &str, expected_digest: &str) -> Outp
         .env(FIXTURE_REPLAY_EXPECTED_DIGEST_ENV, expected_digest)
         .output()
         .expect("fresh-process fixture replay consumer launches")
+}
+
+fn resign_schedule_workload_artifact(bytes: &mut [u8]) {
+    assert!(bytes.len() > 32);
+    let checksum_at = bytes.len() - 32;
+    let mut hasher = Hasher::new();
+    hasher.update(b"fgdb.sim.fixture.schedule-workload-artifact.v1");
+    hasher.update(&bytes[..checksum_at]);
+    bytes[checksum_at..].copy_from_slice(&hasher.finalize().0);
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +809,338 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
     assert!(two_axis.attempts() > 2);
     assert!(two_axis.accepted() >= 2);
     assert_eq!(two_axis.rejected_different_failure(), 0);
+
+    // Freeze the complete source authorities plus both one-minimal deletion
+    // sets. Decode must reconstruct the private candidate types; replay must
+    // force the complete source first and then reproduce the exact minimized
+    // execution. Neither a checksum-valid substitution nor a same-kind run is
+    // sufficient.
+    let artifact = FixtureScheduleWorkloadArtifact::from_shrunk(&two_axis)
+        .expect("two-axis shrink freezes into a strict artifact");
+    let artifact_limits = FixtureScheduleWorkloadArtifactLimits::default();
+    let artifact_bytes = artifact
+        .to_canonical_bytes()
+        .expect("two-axis artifact encodes canonically");
+    let decoded_artifact =
+        FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(&artifact_bytes, artifact_limits)
+            .expect("two-axis artifact decodes under bounded admission");
+    assert_eq!(decoded_artifact, artifact);
+    assert_eq!(
+        decoded_artifact.source_execution_digest(),
+        two_axis.original_execution_digest()
+    );
+    assert_eq!(
+        decoded_artifact.minimal_execution_digest(),
+        two_axis.minimal_execution_digest()
+    );
+    assert_eq!(decoded_artifact.failure(), two_axis.failure());
+    assert_eq!(
+        decoded_artifact.schedule_indices(),
+        minimal_schedule_indices
+    );
+    assert_eq!(
+        decoded_artifact.workload_indices(),
+        &[retained_action_index]
+    );
+    let artifact_run = decoded_artifact
+        .replay(
+            &faulting_root.join("two-axis-artifact-replay"),
+            artifact_limits,
+        )
+        .expect("artifact forces its source and minimized executions");
+    assert_eq!(
+        artifact_run.execution_digest(),
+        two_axis.minimal_execution_digest()
+    );
+
+    for length in 0..artifact_bytes.len() {
+        assert!(
+            FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(
+                &artifact_bytes[..length],
+                artifact_limits,
+            )
+            .is_err(),
+            "artifact truncation at {length} bytes was accepted"
+        );
+    }
+    let mut trailing = artifact_bytes.clone();
+    trailing.push(0);
+    assert_eq!(
+        FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(&trailing, artifact_limits),
+        Err(FixtureScheduleWorkloadArtifactError::TrailingBytes)
+    );
+    for index in 0..artifact_bytes.len() {
+        let mut mutated = artifact_bytes.clone();
+        mutated[index] ^= 1;
+        assert!(
+            FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(&mutated, artifact_limits)
+                .is_err(),
+            "artifact byte mutation at {index} was accepted"
+        );
+    }
+    let limited_bytes = FixtureScheduleWorkloadArtifactLimits {
+        max_encoded_bytes: artifact_bytes.len() - 1,
+        ..artifact_limits
+    };
+    assert!(matches!(
+        FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(&artifact_bytes, limited_bytes,),
+        Err(FixtureScheduleWorkloadArtifactError::EncodedBytesExceeded { .. })
+    ));
+    let limited_schedule = FixtureScheduleWorkloadArtifactLimits {
+        schedule: asupersync::lab::runtime::ForcedScheduleDecodeLimits::new(
+            artifact
+                .source_schedule()
+                .to_canonical_bytes()
+                .unwrap()
+                .len()
+                - 1,
+            artifact_limits.schedule.max_dispatches,
+            artifact_limits.schedule.max_decoded_dispatch_bytes,
+        ),
+        ..artifact_limits
+    };
+    assert!(matches!(
+        FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(
+            &artifact_bytes,
+            limited_schedule,
+        ),
+        Err(FixtureScheduleWorkloadArtifactError::Schedule(
+            ForcedScheduleError::ArtifactByteLimitExceeded { .. }
+        ))
+    ));
+    let limited_indices = FixtureScheduleWorkloadArtifactLimits {
+        max_schedule_indices: artifact.schedule_indices().len() - 1,
+        ..artifact_limits
+    };
+    assert!(
+        FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(
+            &artifact_bytes,
+            limited_indices,
+        )
+        .is_err()
+    );
+    let limited_work = FixtureScheduleWorkloadArtifactLimits {
+        candidate: ForcedScheduleCandidateLimits::new(
+            artifact_limits.candidate.max_source_dispatches,
+            artifact_limits.candidate.max_candidate_dispatches,
+            1,
+        ),
+        ..artifact_limits
+    };
+    let limited_work_output = faulting_root.join("two-axis-limited-work-publication");
+    assert!(matches!(
+        artifact.replay_and_publish(
+            &limited_work_output,
+            &faulting_root.join("two-axis-limited-work-replay"),
+            limited_work,
+        ),
+        Err(FixtureScheduleWorkloadArtifactError::Harness(
+            FixtureRunError::ForcedSchedule(ForcedScheduleError::CandidateWorkLimitExceeded { .. })
+        ))
+    ));
+    assert!(
+        !limited_work_output.exists(),
+        "candidate work exhaustion reached publication side effects"
+    );
+
+    // Re-sign semantic substitutions so these controls exercise root and
+    // replay validation rather than stopping at the outer checksum.
+    const DIGESTS_OFFSET: usize = 8 + 4;
+    const DIGEST_BYTES: usize = 64;
+    const FAULT_PLAN_LEN_OFFSET: usize = DIGESTS_OFFSET + 7 * DIGEST_BYTES;
+    const HEADER_BYTES: usize = FAULT_PLAN_LEN_OFFSET + 4 + 4 + 4 * 8;
+    let read_u32 = |offset: usize| {
+        u32::from_le_bytes(artifact_bytes[offset..offset + 4].try_into().unwrap()) as usize
+    };
+    let read_u64 = |offset: usize| {
+        usize::try_from(u64::from_le_bytes(
+            artifact_bytes[offset..offset + 8].try_into().unwrap(),
+        ))
+        .unwrap()
+    };
+    let fault_plan_len = read_u32(FAULT_PLAN_LEN_OFFSET);
+    let source_schedule_len = read_u64(FAULT_PLAN_LEN_OFFSET + 8);
+    let source_workload_len = read_u64(FAULT_PLAN_LEN_OFFSET + 16);
+    let source_schedule_offset = HEADER_BYTES + fault_plan_len;
+    let mut unsupported_schedule_schema = artifact_bytes.clone();
+    unsupported_schedule_schema[source_schedule_offset + 8..source_schedule_offset + 12]
+        .copy_from_slice(&2u32.to_le_bytes());
+    resign_schedule_workload_artifact(&mut unsupported_schedule_schema);
+    assert!(matches!(
+        FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(
+            &unsupported_schedule_schema,
+            artifact_limits,
+        ),
+        Err(FixtureScheduleWorkloadArtifactError::Schedule(
+            ForcedScheduleError::ArtifactVersionMismatch {
+                expected: 1,
+                found: 2,
+            }
+        ))
+    ));
+    let first_schedule_index =
+        HEADER_BYTES + fault_plan_len + source_schedule_len + source_workload_len;
+    let mut substituted_index = artifact_bytes.clone();
+    substituted_index[first_schedule_index..first_schedule_index + 8]
+        .copy_from_slice(&u64::MAX.to_le_bytes());
+    resign_schedule_workload_artifact(&mut substituted_index);
+    assert!(
+        FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(
+            &substituted_index,
+            artifact_limits,
+        )
+        .is_err(),
+        "a checksum-valid synthesized schedule index was accepted"
+    );
+
+    let mut substituted_source_digest = artifact_bytes.clone();
+    substituted_source_digest[DIGESTS_OFFSET] = if substituted_source_digest[DIGESTS_OFFSET] == b'0'
+    {
+        b'1'
+    } else {
+        b'0'
+    };
+    resign_schedule_workload_artifact(&mut substituted_source_digest);
+    let substituted_source = FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(
+        &substituted_source_digest,
+        artifact_limits,
+    )
+    .expect("source-root mutation remains structurally canonical");
+    let substituted_output = faulting_root.join("two-axis-substituted-source-publication");
+    assert!(matches!(
+        substituted_source.replay_and_publish(
+            &substituted_output,
+            &faulting_root.join("two-axis-substituted-source-replay"),
+            artifact_limits,
+        ),
+        Err(FixtureScheduleWorkloadArtifactError::ReplayDiverged(
+            "source-execution-digest"
+        ))
+    ));
+    assert!(
+        !substituted_output.exists(),
+        "a source-root substitution reached publication side effects"
+    );
+
+    let mut substituted_minimal_digest = artifact_bytes.clone();
+    let minimal_offset = DIGESTS_OFFSET + DIGEST_BYTES;
+    substituted_minimal_digest[minimal_offset] =
+        if substituted_minimal_digest[minimal_offset] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+    resign_schedule_workload_artifact(&mut substituted_minimal_digest);
+    let substituted_minimal = FixtureScheduleWorkloadArtifact::try_from_canonical_bytes(
+        &substituted_minimal_digest,
+        artifact_limits,
+    )
+    .expect("minimal-root mutation remains structurally canonical");
+    assert!(matches!(
+        substituted_minimal.replay(
+            &faulting_root.join("two-axis-substituted-minimal-replay"),
+            artifact_limits,
+        ),
+        Err(FixtureScheduleWorkloadArtifactError::ReplayDiverged(
+            "minimal-execution-digest"
+        ))
+    ));
+
+    let artifact_output = faulting_root.join("two-axis-artifacts");
+    let artifact_replay = faulting_root.join("two-axis-artifact-publication-replay");
+    let expected_artifact_path = artifact_output.join(format!(
+        "{}.fixture-schedule-workload.fgsw",
+        artifact.source_execution_digest()
+    ));
+    let publication =
+        artifact.replay_and_publish(&artifact_output, &artifact_replay, artifact_limits);
+    assert!(
+        matches!(
+            &publication,
+            Ok(_) | Err(FixtureScheduleWorkloadArtifactError::AlreadyPublished)
+        ),
+        "two-axis artifact publication failed: {publication:?}"
+    );
+    let published_path = match publication {
+        Ok(path) => path,
+        Err(FixtureScheduleWorkloadArtifactError::AlreadyPublished) => {
+            assert!(expected_artifact_path.exists());
+            expected_artifact_path.clone()
+        }
+        Err(_) => expected_artifact_path.clone(),
+    };
+    assert_eq!(published_path, expected_artifact_path);
+    assert_eq!(
+        std::fs::read(&expected_artifact_path).expect("published artifact is readable"),
+        artifact_bytes
+    );
+    assert_eq!(
+        FixtureScheduleWorkloadArtifact::read_from_path(&expected_artifact_path, artifact_limits)
+            .expect("published artifact decodes"),
+        artifact
+    );
+    assert_eq!(
+        artifact.replay_and_publish(
+            &artifact_output,
+            &faulting_root.join("two-axis-artifact-retry-replay"),
+            artifact_limits,
+        ),
+        Err(FixtureScheduleWorkloadArtifactError::AlreadyPublished),
+        "exact retry must never overwrite immutable evidence"
+    );
+
+    let mut fresh_command = artifact
+        .command_for(&expected_artifact_path)
+        .expect("fresh-process command is constructible");
+    let fresh = fresh_command
+        .output()
+        .expect("fresh-process two-axis consumer launches");
+    assert!(
+        fresh.status.success(),
+        "fresh-process two-axis replay failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&fresh.stdout)
+            .contains("test fixture_schedule_workload_artifact_from_env ... ok")
+    );
+    let mut wrong_fresh_command = artifact
+        .command_for(&expected_artifact_path)
+        .expect("fresh-process negative command is constructible");
+    wrong_fresh_command.env(
+        FIXTURE_SCHEDULE_WORKLOAD_MINIMAL_DIGEST_ENV,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    assert!(
+        !wrong_fresh_command
+            .output()
+            .expect("fresh-process negative launches")
+            .status
+            .success(),
+        "fresh-process consumer accepted a substituted minimal root"
+    );
+
+    let occupied_output = faulting_root.join("two-axis-occupied-artifacts");
+    std::fs::create_dir_all(&occupied_output).expect("occupied output root");
+    let occupied_path = occupied_output.join(format!(
+        "{}.fixture-schedule-workload.fgsw",
+        artifact.source_execution_digest()
+    ));
+    std::fs::write(&occupied_path, b"foreign-artifact").expect("plant foreign artifact");
+    assert_eq!(
+        artifact.replay_and_publish(
+            &occupied_output,
+            &faulting_root.join("two-axis-occupied-replay"),
+            artifact_limits,
+        ),
+        Err(FixtureScheduleWorkloadArtifactError::PublicationConflict)
+    );
+    assert_eq!(
+        std::fs::read(&occupied_path).expect("foreign bytes remain readable"),
+        b"foreign-artifact",
+        "a conflicting immutable namespace must remain byte-identical"
+    );
 
     let zero_limit_root = faulting_root.join("two-axis-zero-campaign-limit");
     assert!(matches!(
@@ -1889,4 +2233,30 @@ fn fixture_replay_from_env() {
         expected,
         "fresh-process fixture replay reached different execution-root evidence"
     );
+}
+
+/// Fresh-process consumer for the strict schedule+workload artifact.
+#[test]
+#[ignore = "driven by FixtureScheduleWorkloadArtifact::command_for"]
+fn fixture_schedule_workload_artifact_from_env() {
+    let path = std::env::var_os(FIXTURE_SCHEDULE_WORKLOAD_ARTIFACT_ENV)
+        .map(PathBuf::from)
+        .expect("two-axis artifact path is set");
+    let expected_source = std::env::var(FIXTURE_SCHEDULE_WORKLOAD_SOURCE_DIGEST_ENV)
+        .expect("two-axis source digest is set");
+    let expected_minimal = std::env::var(FIXTURE_SCHEDULE_WORKLOAD_MINIMAL_DIGEST_ENV)
+        .expect("two-axis minimal digest is set");
+    let limits = FixtureScheduleWorkloadArtifactLimits::default();
+    let artifact = FixtureScheduleWorkloadArtifact::read_from_path(&path, limits)
+        .expect("fresh process decodes the strict artifact under bounded admission");
+    assert_eq!(artifact.source_execution_digest(), expected_source);
+    assert_eq!(artifact.minimal_execution_digest(), expected_minimal);
+    let run = artifact
+        .replay(
+            &scratch_root("fixture-schedule-workload-artifact-from-env"),
+            limits,
+        )
+        .expect("fresh process reproduces source and minimal executions");
+    assert_eq!(run.failure_kind(), Some(artifact.failure()));
+    assert_eq!(run.execution_digest(), expected_minimal);
 }

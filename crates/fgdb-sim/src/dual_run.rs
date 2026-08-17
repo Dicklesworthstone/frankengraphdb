@@ -1228,7 +1228,7 @@ impl LabFixtureRun {
     }
 }
 
-fn derive_fixture_schedule_candidate(
+pub(crate) fn derive_fixture_schedule_candidate(
     source_workload: &FixtureWorkload,
     source_schedule: &ForcedSchedule,
     source_trace_digest: &str,
