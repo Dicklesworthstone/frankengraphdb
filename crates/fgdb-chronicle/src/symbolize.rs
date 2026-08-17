@@ -265,7 +265,11 @@ mod tests {
 /// merely some bytes. Bundling them is not cosmetic — it makes it impossible to
 /// pass a recovery target that is missing a transcript input, which is how an
 /// identity check silently degrades into a length check.
-#[derive(Debug, Clone, Copy)]
+///
+/// `Debug` is deliberately redacted because `k_oid` is raw key material. The
+/// remaining public fields do not justify exposing that key through an ordinary
+/// recovery diagnostic.
+#[derive(Clone, Copy)]
 pub struct RecoveryTarget<'a> {
     /// The database identity key the ObjectId is keyed under.
     pub k_oid: &'a [u8; 32],
@@ -278,6 +282,12 @@ pub struct RecoveryTarget<'a> {
     /// Length of the protected (sealed) bytes, from the authenticated
     /// encoding descriptor — it fixes K and trims the final symbol's padding.
     pub protected_len: usize,
+}
+
+impl core::fmt::Debug for RecoveryTarget<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("RecoveryTarget([REDACTED])")
+    }
 }
 
 /// Recover a protected object from whatever authenticated symbols survive, and

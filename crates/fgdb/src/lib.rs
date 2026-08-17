@@ -176,13 +176,23 @@ const PARTITION: u64 = 0;
 /// Key MANAGEMENT is `fgdb-warden`'s, and it does not exist yet. Until it does
 /// the caller supplies these, which is honest about where they come from: this
 /// slice derives no key material and stores none.
-#[derive(Clone, Copy, Debug)]
+///
+/// `Debug` is deliberately redacted. This public value is also retained inside
+/// [`Database`], so a derived formatter here would leak both raw keys through
+/// direct formatting and transitively through the database handle.
+#[derive(Clone, Copy)]
 pub struct DatabaseKeys {
     /// The immutable object-identity key (§5.1).
     pub k_oid: [u8; 32],
     pub namespace: DatabaseSecurityNamespaceId,
     /// The data-encryption key for capsules.
     pub dek: [u8; 32],
+}
+
+impl core::fmt::Debug for DatabaseKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("DatabaseKeys([REDACTED])")
+    }
 }
 
 impl DatabaseKeys {

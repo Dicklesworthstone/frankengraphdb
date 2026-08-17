@@ -26,9 +26,11 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{
     CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError, WriteMismatchPolicy,
 };
+use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
+use fgdb_chronicle::symbolize::RecoveryTarget;
 use fgdb_delta_types::{CanonicalError, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
-use fgdb_types::ids::DatabaseSecurityNamespaceId;
+use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::path::{Path, PathBuf};
 
@@ -70,6 +72,82 @@ where
         "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
     );
     output
+}
+
+/// Secret holders participate in several derived diagnostic surfaces. The
+/// exact direct strings kill a return to derived `Debug`; the real `Database`
+/// rendering proves its nested `CommitCoordinator` cannot bypass the same
+/// boundary. Array-shaped needles are derived independently from the planted
+/// bytes, so changing their values cannot make the negative vacuous.
+#[test]
+fn key_material_is_redacted_from_direct_and_containing_debug_surfaces() {
+    const PLANTED_K_OID: [u8; 32] = [0xa5; 32];
+    const PLANTED_DEK: [u8; 32] = [0x3d; 32];
+
+    let database_keys = DatabaseKeys {
+        k_oid: PLANTED_K_OID,
+        namespace: NAMESPACE,
+        dek: PLANTED_DEK,
+    };
+    let capsule_keys = CapsuleKeys {
+        k_oid: PLANTED_K_OID,
+        namespace: NAMESPACE,
+        dek: PLANTED_DEK,
+        object_kind: fgdb::CAPSULE_OBJECT_KIND,
+        profile: CapsuleProfile::balanced(),
+    };
+    let recovery_target = RecoveryTarget {
+        k_oid: &PLANTED_K_OID,
+        namespace: NAMESPACE,
+        object_id: ObjectId([0x41; 32]),
+        canonical_header: b"public fixture header",
+        protected_len: 64,
+    };
+    assert_eq!(format!("{database_keys:?}"), "DatabaseKeys([REDACTED])");
+    assert_eq!(format!("{capsule_keys:?}"), "CapsuleKeys([REDACTED])");
+    assert_eq!(format!("{recovery_target:?}"), "RecoveryTarget([REDACTED])");
+
+    let k_oid_needle = format!("{PLANTED_K_OID:?}");
+    let dek_needle = format!("{PLANTED_DEK:?}");
+    for rendered in [
+        format!("{database_keys:?}"),
+        format!("{capsule_keys:?}"),
+        format!("{recovery_target:?}"),
+    ] {
+        assert!(
+            !rendered.contains(&k_oid_needle),
+            "K_oid leaked: {rendered}"
+        );
+        assert!(!rendered.contains(&dek_needle), "DEK leaked: {rendered}");
+    }
+
+    let dir = scratch("redacted-key-debug");
+    under_lab(8_209, move |cx| async move {
+        let database = Database::create(&cx, &dir, database_keys)
+            .await
+            .expect("creates with planted keys");
+        let store = fgdb_strata::store::BlockStore::open(&cx, &dir, PLANTED_K_OID, NAMESPACE)
+            .expect("reopens the planted keyed store");
+        assert_eq!(format!("{store:?}"), "BlockStore([REDACTED])");
+        let rendered = format!("{database:?}");
+        assert!(
+            rendered.contains("DatabaseKeys([REDACTED])"),
+            "database formatter bypassed the embedded-key redaction: {rendered}"
+        );
+        assert!(
+            rendered.contains("CapsuleKeys([REDACTED])"),
+            "coordinator formatter bypassed the capsule-key redaction: {rendered}"
+        );
+        assert!(
+            rendered.contains("BlockStore([REDACTED])"),
+            "database formatter bypassed the block-store key redaction: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&k_oid_needle),
+            "K_oid leaked: {rendered}"
+        );
+        assert!(!rendered.contains(&dek_needle), "DEK leaked: {rendered}");
+    });
 }
 
 /// Commit the fixture history: three vertices, two `KNOWS` edges across two

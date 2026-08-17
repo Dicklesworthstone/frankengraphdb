@@ -253,13 +253,23 @@ pub fn identify(
 }
 
 /// The key material and coding policy a coordinator seals capsules under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` is deliberately redacted. This value is nested inside
+/// [`crate::commit::CommitCoordinator`], whose derived formatter must remain
+/// useful without turning an ordinary diagnostic into a raw `K_oid`/DEK leak.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CapsuleKeys {
     pub k_oid: [u8; 32],
     pub namespace: DatabaseSecurityNamespaceId,
     pub dek: [u8; 32],
     pub object_kind: u16,
     pub profile: CapsuleProfile,
+}
+
+impl core::fmt::Debug for CapsuleKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CapsuleKeys([REDACTED])")
+    }
 }
 
 impl CapsuleKeys {

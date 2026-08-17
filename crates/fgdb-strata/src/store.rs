@@ -392,12 +392,23 @@ fn read_bounded(
 }
 
 /// A directory of content-addressed Strata blocks.
-#[derive(Debug, Clone)]
+///
+/// The keyed object-identity material is deliberately absent from `Debug`.
+/// `BlockStore` is nested inside the embedded database handle, so deriving the
+/// formatter here would bypass the redaction on that handle's explicit key
+/// holder and disclose `K_oid` through an ordinary diagnostic.
+#[derive(Clone)]
 pub struct BlockStore {
     dir: PathBuf,
     publication_lock_path: PathBuf,
     k_oid: [u8; 32],
     namespace: DatabaseSecurityNamespaceId,
+}
+
+impl core::fmt::Debug for BlockStore {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BlockStore([REDACTED])")
+    }
 }
 
 /// Proof that one authenticated root was checked against every block it names.
