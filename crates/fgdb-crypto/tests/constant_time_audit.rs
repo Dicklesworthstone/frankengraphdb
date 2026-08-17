@@ -1293,13 +1293,38 @@ where
         std::hint::black_box(last());
     }
 
+    let mut paired_rounds = Vec::with_capacity(rounds);
+    for _ in 0..rounds {
+        let first_before = elapsed_batch(batch_size, &mut first);
+        let last_before = elapsed_batch(batch_size, &mut last);
+        let last_after = elapsed_batch(batch_size, &mut last);
+        let first_after = elapsed_batch(batch_size, &mut first);
+        paired_rounds.push(([first_before, first_after], [last_before, last_after]));
+    }
+
+    // A workspace-wide test run can preempt one batch for milliseconds. Such
+    // host-load outliers made the deliberately vulnerable control disappear
+    // into the variance even though its last-byte class was over 100x slower.
+    // Rank complete ABBA rounds by the class-blind sum and discard only the
+    // highest-load one-eighth. A systematic class separation remains in every
+    // retained round; the filter cannot select on which public class was faster.
+    paired_rounds.sort_by(|left, right| {
+        left.0
+            .iter()
+            .chain(left.1.iter())
+            .sum::<f64>()
+            .total_cmp(&right.0.iter().chain(right.1.iter()).sum::<f64>())
+    });
+    let retained_rounds = rounds - rounds / 8;
     let mut first_moments = RunningMoments::new();
     let mut last_moments = RunningMoments::new();
-    for _ in 0..rounds {
-        first_moments.observe(elapsed_batch(batch_size, &mut first));
-        last_moments.observe(elapsed_batch(batch_size, &mut last));
-        last_moments.observe(elapsed_batch(batch_size, &mut last));
-        first_moments.observe(elapsed_batch(batch_size, &mut first));
+    for (first_samples, last_samples) in paired_rounds.into_iter().take(retained_rounds) {
+        for nanos in first_samples {
+            first_moments.observe(nanos);
+        }
+        for nanos in last_samples {
+            last_moments.observe(nanos);
+        }
     }
 
     let denominator = (first_moments.sample_variance() / first_moments.count as f64
@@ -1379,7 +1404,7 @@ fn aead_forgery_timing_probe_is_bounded_and_detector_is_live() {
         },
     );
 
-    let equal = [0xa5_u8; 512];
+    let equal = [0xa5_u8; 4096];
     let mut control_first = equal;
     control_first[0] ^= 1;
     let mut control_last = equal;
@@ -1402,7 +1427,7 @@ fn aead_forgery_timing_probe_is_bounded_and_detector_is_live() {
     );
 
     eprintln!(
-        "fgdb_crypto_timing_evidence method=welch_t_abba_v1 kernel=chacha20poly1305_open \
+        "fgdb_crypto_timing_evidence method=welch_t_abba_load_trim_v2 kernel=chacha20poly1305_open \
          classes=tag_mismatch_first,tag_mismatch_last samples_per_class={} batch_size={} \
          first_mean_ns={:.3} last_mean_ns={:.3} t_statistic={:.6} threshold_abs_t={MAX_PRODUCTION_ABS_T}",
         production.first.count,
@@ -1412,7 +1437,7 @@ fn aead_forgery_timing_probe_is_bounded_and_detector_is_live() {
         production.t_statistic,
     );
     eprintln!(
-        "fgdb_crypto_timing_evidence method=welch_t_abba_v1 kernel=planted_early_exit_compare \
+        "fgdb_crypto_timing_evidence method=welch_t_abba_load_trim_v2 kernel=planted_early_exit_compare \
          classes=mismatch_first,mismatch_last samples_per_class={} batch_size={} \
          first_mean_ns={:.3} last_mean_ns={:.3} t_statistic={:.6} required_abs_t={MIN_PLANTED_ABS_T}",
         planted.first.count,
@@ -1422,8 +1447,12 @@ fn aead_forgery_timing_probe_is_bounded_and_detector_is_live() {
         planted.t_statistic,
     );
 
-    assert_eq!(production.first.count, (AEAD_ROUNDS * 2) as u64);
-    assert_eq!(production.last.count, (AEAD_ROUNDS * 2) as u64);
+    let retained_aead_rounds = AEAD_ROUNDS - AEAD_ROUNDS / 8;
+    assert_eq!(production.first.count, (retained_aead_rounds * 2) as u64);
+    assert_eq!(production.last.count, (retained_aead_rounds * 2) as u64);
+    let retained_control_rounds = CONTROL_ROUNDS - CONTROL_ROUNDS / 8;
+    assert_eq!(planted.first.count, (retained_control_rounds * 2) as u64);
+    assert_eq!(planted.last.count, (retained_control_rounds * 2) as u64);
     assert!(
         production.t_statistic.abs() <= MAX_PRODUCTION_ABS_T,
         "bounded timing screen detected first-vs-last forged-tag separation: {production:?}"
