@@ -39,7 +39,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use asupersync::Budget;
-use asupersync::lab::runtime::{ForcedSchedule, ForcedScheduleError, ForcedScheduleLimits};
+use asupersync::lab::runtime::{
+    ForcedSchedule, ForcedScheduleCandidate, ForcedScheduleCandidateLimits,
+    ForcedScheduleCandidateReport, ForcedScheduleCandidateTermination, ForcedScheduleError,
+    ForcedScheduleLimits,
+};
 use asupersync::lab::{
     CancellationRecord, DualRunHarness, DualRunResult, LabConfig, LabRuntime, LoserDrainRecord,
     NormalizedSemantics, ObligationBalanceRecord, RegionCloseRecord, ResourceSurfaceRecord,
@@ -80,6 +84,14 @@ const MAX_FIXTURE_REPLAY_PLAN_BYTES: usize = 1_024;
 /// producer/consumer fixture unexpectedly expands its scheduler work.
 pub const FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS: ForcedScheduleLimits =
     ForcedScheduleLimits::new(4_096, 32_768);
+
+/// Default admission for one deletion-only fixture schedule candidate.
+///
+/// Source, retained-dispatch, and execution work remain separately bounded.
+/// This is evidence capture for the exported fixture, not a general scheduler
+/// minimizer or a claim that arbitrary workloads have a forced-replay codec.
+pub const FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS: ForcedScheduleCandidateLimits =
+    ForcedScheduleCandidateLimits::new(4_096, 4_096, 32_768);
 
 /// Runtime posture that produced a fixture receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -601,6 +613,11 @@ pub enum FixtureRunError {
     LabInvariantViolation,
     /// Exact scheduler capture or forced execution refused this run.
     ForcedSchedule(ForcedScheduleError),
+    /// A reduced schedule candidate was paired with a different fixture root.
+    ScheduleCandidateSourceMismatch {
+        /// Stable name of the source root that did not match.
+        field: &'static str,
+    },
     /// The complete runtime replay trace was not available.
     MissingReplayTrace,
     /// The replay trace did not prove successful completion of both tasks.
@@ -665,6 +682,10 @@ impl core::fmt::Display for FixtureRunError {
             Self::ForcedSchedule(error) => {
                 write!(f, "fixture LAB forced schedule refused: {error}")
             }
+            Self::ScheduleCandidateSourceMismatch { field } => write!(
+                f,
+                "fixture LAB schedule candidate source mismatch in {field}"
+            ),
             Self::MissingReplayTrace => f.write_str("fixture LAB replay trace is missing"),
             Self::IncompleteReplayTrace => {
                 f.write_str("fixture LAB replay trace lacks completed task dispatches")
@@ -782,6 +803,45 @@ fn forced_schedule_digest(schedule: &ForcedSchedule) -> String {
     hasher.update(&schedule.terminal_steps().to_le_bytes());
     hasher.update(&schedule.terminal_nanos().to_le_bytes());
     hasher.update(&schedule.terminal_schedule_hash().to_le_bytes());
+    hasher.finalize().to_hex()
+}
+
+fn forced_schedule_candidate_digest(candidate: &ForcedScheduleCandidate) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(b"fgdb.sim.fixture.forced-schedule-candidate.v1");
+    hasher.update(&candidate.version().to_le_bytes());
+    hasher.update(&candidate.source_version().to_le_bytes());
+    hasher.update(&candidate.seed().to_le_bytes());
+    hasher.update(&candidate.config_hash().to_le_bytes());
+    hasher.update(
+        &u64::try_from(candidate.source_dispatch_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(&candidate.source_terminal_schedule_hash().to_le_bytes());
+    hasher.update(
+        &u64::try_from(candidate.dispatches().len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for dispatch in candidate.dispatches() {
+        hasher.update(
+            &u64::try_from(dispatch.source_index())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(&dispatch.task().0.to_le_bytes());
+        hasher.update(&dispatch.worker().to_le_bytes());
+        let lane = match dispatch.lane() {
+            DispatchLane::Cancel => 0,
+            DispatchLane::Timed => 1,
+            DispatchLane::Ready => 2,
+            DispatchLane::Stolen => 3,
+        };
+        hasher.update(&[lane]);
+        hasher.update(&dispatch.source_step().to_le_bytes());
+        hasher.update(&dispatch.source_nanos().to_le_bytes());
+    }
     hasher.finalize().to_hex()
 }
 
@@ -1101,6 +1161,206 @@ impl LabFixtureRun {
     pub const fn workload(&self) -> &FixtureWorkload {
         &self.workload
     }
+
+    /// Derives a deletion-only scheduler candidate from this exact completed
+    /// fixture execution.
+    ///
+    /// Retained indices are copied from the foundation-owned source schedule;
+    /// callers cannot synthesize a task, worker, lane, step, or timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureRunError::ForcedSchedule`] when the source schedule,
+    /// retained indices, or caller-owned limits fail foundation validation.
+    pub fn derive_schedule_candidate(
+        &self,
+        retained_source_indices: &[usize],
+        limits: ForcedScheduleCandidateLimits,
+    ) -> Result<FixtureScheduleCandidate, FixtureRunError> {
+        let candidate = self
+            .forced_schedule
+            .derive_candidate(retained_source_indices, limits)
+            .map_err(FixtureRunError::ForcedSchedule)?;
+        Ok(FixtureScheduleCandidate {
+            source_seed: self.workload.seed(),
+            source_workload_bytes: self.workload.to_canonical_bytes(),
+            source_workload_digest: self.workload.canonical_digest_hex(),
+            source_schedule_digest: forced_schedule_digest(&self.forced_schedule),
+            source_trace_digest: self.receipt.trace_digest().to_string(),
+            candidate_digest: forced_schedule_candidate_digest(&candidate),
+            candidate,
+        })
+    }
+}
+
+/// One fixture-bound deletion-only scheduler candidate.
+///
+/// The foundation candidate is private and can only be created from a
+/// completed [`LabFixtureRun`]. The additional roots prevent a candidate from
+/// being paired with a different workload that happens to share a seed. This
+/// is scheduler authority for a bounded LAB experiment, not a replay trace or
+/// a general persisted schedule format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureScheduleCandidate {
+    source_seed: u64,
+    source_workload_bytes: Vec<u8>,
+    source_workload_digest: String,
+    source_schedule_digest: String,
+    source_trace_digest: String,
+    candidate_digest: String,
+    candidate: ForcedScheduleCandidate,
+}
+
+impl FixtureScheduleCandidate {
+    /// Ordered source indices retained by this candidate.
+    #[must_use]
+    pub fn retained_source_indices(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+        self.candidate
+            .dispatches()
+            .iter()
+            .map(|dispatch| dispatch.source_index())
+    }
+
+    /// Number of dispatches in the complete source schedule.
+    #[must_use]
+    pub const fn source_dispatch_count(&self) -> usize {
+        self.candidate.source_dispatch_count()
+    }
+
+    /// Domain-separated identity of the complete source schedule.
+    #[must_use]
+    pub fn source_schedule_digest(&self) -> &str {
+        &self.source_schedule_digest
+    }
+
+    /// Domain-separated trace identity of the source fixture execution.
+    #[must_use]
+    pub fn source_trace_digest(&self) -> &str {
+        &self.source_trace_digest
+    }
+
+    /// Domain-separated identity of the retained candidate itself.
+    #[must_use]
+    pub fn candidate_digest(&self) -> &str {
+        &self.candidate_digest
+    }
+}
+
+/// Terminal state of one fixture task at a reduced-candidate boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixtureScheduleCandidateTaskOutcome {
+    /// The candidate exhausted its retained choices before this task finished.
+    Incomplete,
+    /// The task returned successfully.
+    Succeeded,
+    /// The task returned one typed component error.
+    Failed(FixtureTaskError),
+    /// The task terminated without returning its typed output.
+    Terminated,
+}
+
+/// Exact observed boundary from executing one reduced fixture schedule.
+///
+/// An exhausted candidate is intentionally not converted into
+/// [`LabFixtureRun`]: it has not established quiescence, complete task output,
+/// or a complete-run receipt.
+#[derive(Debug)]
+pub struct FixtureScheduleCandidateRun {
+    report: ForcedScheduleCandidateReport,
+    producer: FixtureScheduleCandidateTaskOutcome,
+    consumer: FixtureScheduleCandidateTaskOutcome,
+    trace_bytes: Vec<u8>,
+    replay_trace: ReplayTrace,
+    workload: FixtureWorkload,
+    injected_faults: Vec<FaultEvent>,
+    source_schedule_digest: String,
+    source_trace_digest: String,
+    candidate_digest: String,
+}
+
+impl FixtureScheduleCandidateRun {
+    /// Foundation-owned execution report, including quiescent/exhausted state
+    /// and the exact retained source indices actually consumed.
+    #[must_use]
+    pub const fn report(&self) -> &ForcedScheduleCandidateReport {
+        &self.report
+    }
+
+    /// Producer state observed exactly at the candidate boundary.
+    #[must_use]
+    pub const fn producer(&self) -> FixtureScheduleCandidateTaskOutcome {
+        self.producer
+    }
+
+    /// Consumer state observed exactly at the candidate boundary.
+    #[must_use]
+    pub const fn consumer(&self) -> FixtureScheduleCandidateTaskOutcome {
+        self.consumer
+    }
+
+    /// Canonical bytes emitted by the fixture actions that actually ran.
+    #[must_use]
+    pub fn trace_bytes(&self) -> &[u8] {
+        &self.trace_bytes
+    }
+
+    /// Runtime event trace observed at the candidate boundary. This is
+    /// evidence only and is never consumed as scheduler authority.
+    #[must_use]
+    pub const fn replay_trace(&self) -> &ReplayTrace {
+        &self.replay_trace
+    }
+
+    /// Exact immutable workload supplied to this candidate execution.
+    #[must_use]
+    pub const fn workload(&self) -> &FixtureWorkload {
+        &self.workload
+    }
+
+    /// Faults actually injected before this candidate boundary.
+    #[must_use]
+    pub fn injected_faults(&self) -> &[FaultEvent] {
+        &self.injected_faults
+    }
+
+    /// Complete source-schedule identity copied from the candidate authority.
+    #[must_use]
+    pub fn source_schedule_digest(&self) -> &str {
+        &self.source_schedule_digest
+    }
+
+    /// Source fixture-trace identity copied from the candidate authority.
+    #[must_use]
+    pub fn source_trace_digest(&self) -> &str {
+        &self.source_trace_digest
+    }
+
+    /// Identity of the exact retained deletion-only candidate executed here.
+    #[must_use]
+    pub fn candidate_digest(&self) -> &str {
+        &self.candidate_digest
+    }
+
+    /// True only when this exact candidate consumed every retained source
+    /// index and the foundation reported quiescence.
+    #[must_use]
+    pub fn completed_candidate(&self, candidate: &FixtureScheduleCandidate) -> bool {
+        self.report.termination == ForcedScheduleCandidateTermination::Quiescent
+            && self.report.lab.quiescent
+            && self.report.lab.invariant_violations.is_empty()
+            && self.producer == FixtureScheduleCandidateTaskOutcome::Succeeded
+            && self.consumer == FixtureScheduleCandidateTaskOutcome::Succeeded
+            && self.report.consumed_source_indices.len() == candidate.candidate.dispatches().len()
+            && self
+                .report
+                .consumed_source_indices
+                .iter()
+                .copied()
+                .eq(candidate.retained_source_indices())
+            && self.candidate_digest == candidate.candidate_digest
+            && self.source_schedule_digest == candidate.source_schedule_digest
+            && self.source_trace_digest == candidate.source_trace_digest
+    }
 }
 
 /// One completed live execution of the fixture.
@@ -1184,6 +1444,107 @@ pub fn run_fixture_workload_under_forced_schedule(
         lab_config,
         FixtureLabScheduleMode::Force { schedule, limits },
     )
+}
+
+/// Executes one fixture-bound deletion-only scheduler candidate.
+///
+/// The foundation consumes only the retained task/worker/lane choices. It does
+/// not consult scheduler RNG after the candidate is exhausted and it does not
+/// consume [`ReplayTrace`] as authority. A reduced execution returns its typed
+/// boundary even when tasks remain incomplete; only a genuinely quiescent
+/// complete candidate can satisfy
+/// [`FixtureScheduleCandidateRun::completed_candidate`].
+///
+/// # Errors
+///
+/// Returns [`FixtureRunError`] when source roots do not match, the workload or
+/// scratch directory is invalid, task admission fails, the foundation refuses
+/// the candidate, or the runtime evidence recorder is unavailable.
+pub fn run_fixture_workload_under_forced_schedule_candidate(
+    cfg: &FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_dir: &Path,
+    mut lab_config: LabConfig,
+    candidate: &FixtureScheduleCandidate,
+    limits: ForcedScheduleCandidateLimits,
+) -> Result<FixtureScheduleCandidateRun, FixtureRunError> {
+    if cfg.seed != candidate.source_seed || workload.seed() != candidate.source_seed {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch { field: "seed" });
+    }
+    let workload_bytes = workload.to_canonical_bytes();
+    if workload_bytes != candidate.source_workload_bytes
+        || workload.canonical_digest_hex() != candidate.source_workload_digest
+    {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch { field: "workload" });
+    }
+    if lab_config.seed != candidate.candidate.seed() {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "scheduler-seed",
+        });
+    }
+    if forced_schedule_candidate_digest(&candidate.candidate) != candidate.candidate_digest {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "candidate-digest",
+        });
+    }
+
+    lab_config.auto_advance_time = true;
+    lab_config = lab_config.with_default_replay_recording();
+    let mut lab = LabRuntime::new(lab_config);
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (producer_fut, consumer_fut, trace, workload) =
+        fixture_futures_for_workload(cfg, workload.clone(), scratch_dir)
+            .map_err(FixtureRunError::Workload)?;
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|error| FixtureRunError::ScratchIo(error.kind()))?;
+    let (producer_task, mut producer_handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, producer_fut)
+        .map_err(|_| FixtureRunError::LabTaskCreate {
+            component: "producer",
+        })?;
+    let (consumer_task, mut consumer_handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, consumer_fut)
+        .map_err(|_| FixtureRunError::LabTaskCreate {
+            component: "consumer",
+        })?;
+    lab.scheduler.lock().schedule(producer_task, 0);
+    lab.scheduler.lock().schedule(consumer_task, 0);
+
+    let report = lab
+        .run_forced_schedule_candidate(&candidate.candidate, limits)
+        .map_err(FixtureRunError::ForcedSchedule)?;
+    let producer = match producer_handle.try_join() {
+        Err(_) => FixtureScheduleCandidateTaskOutcome::Terminated,
+        Ok(None) => FixtureScheduleCandidateTaskOutcome::Incomplete,
+        Ok(Some(Ok(()))) => FixtureScheduleCandidateTaskOutcome::Succeeded,
+        Ok(Some(Err(error))) => FixtureScheduleCandidateTaskOutcome::Failed(error),
+    };
+    let consumer = match consumer_handle.try_join() {
+        Err(_) => FixtureScheduleCandidateTaskOutcome::Terminated,
+        Ok(None) => FixtureScheduleCandidateTaskOutcome::Incomplete,
+        Ok(Some(Ok(()))) => FixtureScheduleCandidateTaskOutcome::Succeeded,
+        Ok(Some(Err(error))) => FixtureScheduleCandidateTaskOutcome::Failed(error),
+    };
+    let replay_trace = lab
+        .finish_replay_trace()
+        .ok_or(FixtureRunError::MissingReplayTrace)?;
+    let trace_bytes = trace.to_bytes();
+    let injected_faults = trace.fault_events();
+
+    Ok(FixtureScheduleCandidateRun {
+        report,
+        producer,
+        consumer,
+        trace_bytes,
+        replay_trace,
+        workload,
+        injected_faults,
+        source_schedule_digest: candidate.source_schedule_digest.clone(),
+        source_trace_digest: candidate.source_trace_digest.clone(),
+        candidate_digest: candidate.candidate_digest.clone(),
+    })
 }
 
 #[derive(Clone, Copy)]

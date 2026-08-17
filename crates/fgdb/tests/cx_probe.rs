@@ -2,7 +2,7 @@
 //! permits us to measure.**
 //!
 //! Beads fgdb-r8fa / fgdb-uz0o / fgdb-p95p. Pinned asupersync v0.4.6 source
-//! revision `90685fbe` makes `Runtime::request_cx_with_budget` public. Every test here now
+//! revision `9f7c3769` makes `Runtime::request_cx_with_budget` public. Every test here now
 //! obtains its root context from that runtime boundary with default features
 //! disabled; `Cx::for_testing` and `test-internals` are absent from this package.
 //!

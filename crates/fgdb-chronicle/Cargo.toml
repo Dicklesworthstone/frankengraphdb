@@ -9,6 +9,6 @@ publish = false
 workspace = true
 
 [dependencies]
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "90685fbe13aa88f679d8e212d814a995b520a5a1", default-features = false }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "9f7c37697dd92022b5cf9dbc574f9a5a44fce417", default-features = false }
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-types = { path = "../fgdb-types" }

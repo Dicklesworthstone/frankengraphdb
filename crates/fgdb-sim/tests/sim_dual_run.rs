@@ -14,11 +14,13 @@ use std::process::{Command, Output};
 
 use fgdb_crypto::Hasher;
 use fgdb_sim::dual_run::{
-    DualRunOutcome, FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS, FIXTURE_REPLAY_ENV,
-    FIXTURE_REPLAY_EXPECTED_DIGEST_ENV, FixtureFailureKind, FixtureReplay, FixtureReplayError,
-    FixtureRunError, FixtureRunReceipt, FixtureRuntime, determinism_gate, dual_run_fixture,
+    DualRunOutcome, FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS, FIXTURE_REPLAY_ENV, FIXTURE_REPLAY_EXPECTED_DIGEST_ENV,
+    FixtureFailureKind, FixtureReplay, FixtureReplayError, FixtureRunError, FixtureRunReceipt,
+    FixtureRuntime, FixtureScheduleCandidateTaskOutcome, determinism_gate, dual_run_fixture,
     dual_run_verdict_log_lines, run_fixture_under_lab, run_fixture_workload_live,
-    run_fixture_workload_under_forced_schedule, run_fixture_workload_under_lab,
+    run_fixture_workload_under_forced_schedule,
+    run_fixture_workload_under_forced_schedule_candidate, run_fixture_workload_under_lab,
 };
 use fgdb_sim::fixture::{
     FixtureConfig, FixtureTaskStage, FixtureWorkload, FixtureWorkloadDecodeLimits,
@@ -28,6 +30,9 @@ use fgdb_sim::shrink::shrink_fixture_workload_under_lab;
 use fgdb_sim::vfs::Trigger;
 
 use asupersync::lab::LabConfig;
+use asupersync::lab::runtime::{
+    ForcedScheduleCandidateLimits, ForcedScheduleCandidateTermination, ForcedScheduleError,
+};
 use asupersync::trace::RecorderConfig;
 use asupersync::trace::replay::ReplayEvent;
 
@@ -869,6 +874,193 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
             .matches_forced_schedule(raw.forced_schedule())
     );
 
+    let all_source_indices = (0..raw.forced_schedule().dispatches().len()).collect::<Vec<_>>();
+    assert!(
+        all_source_indices.len() > 1,
+        "the fixture must expose a nontrivial schedule to reduce"
+    );
+    let full_candidate = raw
+        .derive_schedule_candidate(
+            &all_source_indices,
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        )
+        .expect("the complete source schedule derives a deletion-only candidate");
+    assert_eq!(
+        full_candidate.retained_source_indices().collect::<Vec<_>>(),
+        all_source_indices
+    );
+    assert_eq!(
+        full_candidate.source_dispatch_count(),
+        raw.forced_schedule().dispatches().len()
+    );
+    assert_eq!(
+        Some(full_candidate.source_schedule_digest()),
+        raw.receipt.forced_schedule_digest()
+    );
+    assert_eq!(
+        full_candidate.source_trace_digest(),
+        raw.receipt.trace_digest()
+    );
+    assert!(!full_candidate.candidate_digest().is_empty());
+
+    let full_candidate_run = run_fixture_workload_under_forced_schedule_candidate(
+        &cfg,
+        &decoded,
+        &lab_root.join("full-schedule-candidate"),
+        LabConfig::new(cfg.seed),
+        &full_candidate,
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    )
+    .expect("the full deletion-only candidate executes through scheduler authority");
+    assert_eq!(
+        full_candidate_run.report().termination,
+        ForcedScheduleCandidateTermination::Quiescent
+    );
+    assert_eq!(
+        full_candidate_run.report().consumed_source_indices,
+        all_source_indices
+    );
+    assert_eq!(
+        full_candidate_run.producer(),
+        FixtureScheduleCandidateTaskOutcome::Succeeded
+    );
+    assert_eq!(
+        full_candidate_run.consumer(),
+        FixtureScheduleCandidateTaskOutcome::Succeeded
+    );
+    assert!(full_candidate_run.completed_candidate(&full_candidate));
+    assert_eq!(full_candidate_run.trace_bytes(), raw.trace_bytes);
+    assert_eq!(full_candidate_run.workload(), &decoded);
+    assert_eq!(
+        full_candidate_run.injected_faults(),
+        raw.receipt.injected_faults()
+    );
+    assert_eq!(
+        full_candidate_run.source_schedule_digest(),
+        full_candidate.source_schedule_digest()
+    );
+    assert_eq!(
+        full_candidate_run.source_trace_digest(),
+        full_candidate.source_trace_digest()
+    );
+    assert_eq!(
+        full_candidate_run.candidate_digest(),
+        full_candidate.candidate_digest()
+    );
+
+    let empty_candidate = raw
+        .derive_schedule_candidate(&[], FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS)
+        .expect("the empty deletion-only candidate is a valid bounded experiment");
+    let empty_candidate_run = run_fixture_workload_under_forced_schedule_candidate(
+        &cfg,
+        &decoded,
+        &lab_root.join("empty-schedule-candidate"),
+        LabConfig::new(cfg.seed),
+        &empty_candidate,
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    )
+    .expect("the empty candidate reports exhaustion without RNG fallback");
+    assert_eq!(
+        empty_candidate_run.report().termination,
+        ForcedScheduleCandidateTermination::Exhausted
+    );
+    assert!(
+        empty_candidate_run
+            .report()
+            .consumed_source_indices
+            .is_empty()
+    );
+    assert_eq!(
+        empty_candidate_run.producer(),
+        FixtureScheduleCandidateTaskOutcome::Incomplete
+    );
+    assert_eq!(
+        empty_candidate_run.consumer(),
+        FixtureScheduleCandidateTaskOutcome::Incomplete
+    );
+    assert!(!empty_candidate_run.completed_candidate(&empty_candidate));
+    assert!(empty_candidate_run.injected_faults().is_empty());
+    assert!(
+        empty_candidate_run
+            .replay_trace()
+            .events
+            .iter()
+            .all(|event| { !matches!(event, ReplayEvent::TaskScheduled { .. }) })
+    );
+
+    let one_choice_candidate = raw
+        .derive_schedule_candidate(&[0], FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS)
+        .expect("one retained source choice derives");
+    let one_choice_run = run_fixture_workload_under_forced_schedule_candidate(
+        &cfg,
+        &decoded,
+        &lab_root.join("one-choice-schedule-candidate"),
+        LabConfig::new(cfg.seed),
+        &one_choice_candidate,
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    )
+    .expect("one retained source choice executes without scheduler fallback");
+    assert_eq!(
+        one_choice_run.report().termination,
+        ForcedScheduleCandidateTermination::Exhausted
+    );
+    assert_eq!(one_choice_run.report().consumed_source_indices, [0]);
+    assert_eq!(
+        one_choice_run
+            .replay_trace()
+            .events
+            .iter()
+            .filter(|event| matches!(event, ReplayEvent::TaskScheduled { .. }))
+            .count(),
+        1,
+        "candidate exhaustion must not fall back to an unrecorded scheduler choice"
+    );
+
+    let work_limited_root = lab_root.join("work-limited-schedule-candidate");
+    let work_limited = ForcedScheduleCandidateLimits::new(
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS.max_source_dispatches,
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS.max_candidate_dispatches,
+        1,
+    );
+    assert!(matches!(
+        run_fixture_workload_under_forced_schedule_candidate(
+            &cfg,
+            &decoded,
+            &work_limited_root,
+            LabConfig::new(cfg.seed),
+            &full_candidate,
+            work_limited,
+        ),
+        Err(FixtureRunError::ForcedSchedule(
+            ForcedScheduleError::CandidateWorkLimitExceeded { .. }
+        ))
+    ));
+    assert!(
+        !work_limited_root.join("record-0000.bin").exists(),
+        "work-limit admission must refuse before polling a fixture task"
+    );
+
+    let config_mismatch_root = lab_root.join("config-mismatch-schedule-candidate");
+    let mut incompatible_lab = LabConfig::new(cfg.seed);
+    incompatible_lab.worker_count = 2;
+    assert!(matches!(
+        run_fixture_workload_under_forced_schedule_candidate(
+            &cfg,
+            &decoded,
+            &config_mismatch_root,
+            incompatible_lab,
+            &full_candidate,
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        ),
+        Err(FixtureRunError::ForcedSchedule(
+            ForcedScheduleError::ConfigMismatch { .. }
+        ))
+    ));
+    assert!(
+        !config_mismatch_root.join("record-0000.bin").exists(),
+        "configuration mismatch must refuse before polling a fixture task"
+    );
+
     // Version-1 layout: magic(8), seed(8), count(4), then the first action's
     // ordinal(4), delay(8), payload length(4), and payload. Mutating the
     // payload remains a valid workload but must change the actual execution.
@@ -883,6 +1075,49 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
     )
     .expect("payload substitution remains structurally valid");
     assert!(!raw.receipt.matches_workload(&substituted));
+    let substituted_candidate_root = lab_root.join("substituted-candidate-workload");
+    assert!(matches!(
+        run_fixture_workload_under_forced_schedule_candidate(
+            &cfg,
+            &substituted,
+            &substituted_candidate_root,
+            LabConfig::new(cfg.seed),
+            &full_candidate,
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        ),
+        Err(FixtureRunError::ScheduleCandidateSourceMismatch { field: "workload" })
+    ));
+    assert!(
+        !substituted_candidate_root.exists(),
+        "workload substitution must refuse before scratch or task side effects"
+    );
+    let substituted_scheduler_root = lab_root.join("substituted-candidate-scheduler-seed");
+    assert!(matches!(
+        run_fixture_workload_under_forced_schedule_candidate(
+            &cfg,
+            &decoded,
+            &substituted_scheduler_root,
+            LabConfig::new(cfg.seed ^ 1),
+            &full_candidate,
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        ),
+        Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "scheduler-seed"
+        })
+    ));
+    assert!(
+        !substituted_scheduler_root.exists(),
+        "scheduler-seed substitution must refuse before scratch or task side effects"
+    );
+    assert!(matches!(
+        raw.derive_schedule_candidate(
+            &[raw.forced_schedule().dispatches().len()],
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        ),
+        Err(FixtureRunError::ForcedSchedule(
+            ForcedScheduleError::CandidateIndexOutOfRange { .. }
+        ))
+    ));
     let substituted_run = run_fixture_workload_under_lab(
         &cfg,
         &substituted,
