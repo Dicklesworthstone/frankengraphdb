@@ -40,5 +40,5 @@ path = "../fgdb-delta-types"
 # inject fsync lies and torn writes at that boundary.
 [dev-dependencies.asupersync]
 git = "https://github.com/Dicklesworthstone/asupersync"
-rev = "8522f9411c7652accf3996b215fca8df901c1489"
+rev = "90685fbe13aa88f679d8e212d814a995b520a5a1"
 default-features = false
