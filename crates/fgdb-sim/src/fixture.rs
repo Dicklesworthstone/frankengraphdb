@@ -77,6 +77,7 @@ pub const MAX_FIXTURE_WORKLOAD_DELAY_NANOS: u64 = 60 * MAX_FIXTURE_ACTION_DELAY_
 
 const FIXTURE_WORKLOAD_MAGIC: &[u8; 8] = b"FGDBFWL1";
 const FIXTURE_WORKLOAD_DIGEST_DOMAIN: &[u8] = b"fgdb.sim.fixture.workload.v1";
+const FIXTURE_WORKLOAD_CANDIDATE_DIGEST_DOMAIN: &[u8] = b"fgdb.sim.fixture.workload-candidate.v1";
 const FIXTURE_WORKLOAD_HEADER_BYTES: usize = 8 + 8 + 4;
 const FIXTURE_ACTION_HEADER_BYTES: usize = 4 + 8 + 4;
 
@@ -194,6 +195,10 @@ pub enum FixtureWorkloadError {
     AllocationRefused,
     /// An explicit workload was paired with a different fixture seed.
     SeedMismatch { config: u64, workload: u64 },
+    /// A deletion-only candidate named an action outside its source workload.
+    CandidateIndexOutOfRange { index: usize, source_actions: usize },
+    /// Candidate indices must retain source order without duplicates.
+    CandidateIndicesNotStrictlyIncreasing { previous: usize, current: usize },
 }
 
 impl core::fmt::Display for FixtureWorkloadError {
@@ -237,6 +242,17 @@ impl core::fmt::Display for FixtureWorkloadError {
             Self::SeedMismatch { config, workload } => write!(
                 f,
                 "fixture config seed {config:#x} does not match workload seed {workload:#x}"
+            ),
+            Self::CandidateIndexOutOfRange {
+                index,
+                source_actions,
+            } => write!(
+                f,
+                "fixture workload candidate index {index} is outside {source_actions} source actions"
+            ),
+            Self::CandidateIndicesNotStrictlyIncreasing { previous, current } => write!(
+                f,
+                "fixture workload candidate indices are not strictly increasing: {previous} then {current}"
             ),
         }
     }
@@ -367,6 +383,23 @@ impl FixtureWorkloadAction {
 pub struct FixtureWorkload {
     seed: u64,
     actions: Arc<[FixtureWorkloadAction]>,
+}
+
+/// One source-bound, deletion-only fixture workload candidate.
+///
+/// The candidate retains complete actions from one canonical source workload
+/// and re-numbers only their local ordinals. Private roots prevent callers
+/// from pairing a reduced action stream with a different source schedule that
+/// merely shares the same seed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureWorkloadCandidate {
+    source_seed: u64,
+    source_workload_bytes: Vec<u8>,
+    source_workload_digest: String,
+    source_action_count: usize,
+    retained_source_indices: Vec<usize>,
+    workload: FixtureWorkload,
+    candidate_digest: String,
 }
 
 impl FixtureWorkload {
@@ -602,6 +635,70 @@ impl FixtureWorkload {
         hasher.finalize().to_hex()
     }
 
+    /// Derives a source-bound deletion-only action candidate.
+    ///
+    /// Retained indices must be strictly increasing. This preserves source
+    /// order and makes duplicate or synthesized actions unrepresentable.
+    pub fn derive_candidate(
+        &self,
+        retained_source_indices: &[usize],
+    ) -> Result<FixtureWorkloadCandidate, FixtureWorkloadError> {
+        if retained_source_indices.len() > self.actions.len() {
+            return Err(FixtureWorkloadError::ActionCountExceeded {
+                actual: retained_source_indices.len(),
+                limit: self.actions.len(),
+            });
+        }
+        let mut previous = None;
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(retained_source_indices.len())
+            .map_err(|_| FixtureWorkloadError::AllocationRefused)?;
+        let mut retained_indices = Vec::new();
+        retained_indices
+            .try_reserve_exact(retained_source_indices.len())
+            .map_err(|_| FixtureWorkloadError::AllocationRefused)?;
+        for &index in retained_source_indices {
+            if index >= self.actions.len() {
+                return Err(FixtureWorkloadError::CandidateIndexOutOfRange {
+                    index,
+                    source_actions: self.actions.len(),
+                });
+            }
+            if let Some(previous) = previous
+                && previous >= index
+            {
+                return Err(
+                    FixtureWorkloadError::CandidateIndicesNotStrictlyIncreasing {
+                        previous,
+                        current: index,
+                    },
+                );
+            }
+            retained.push(self.actions[index].clone());
+            retained_indices.push(index);
+            previous = Some(index);
+        }
+        let workload = Self::try_from_retained_actions(self.seed, &retained)?;
+        let source_workload_bytes = self.to_canonical_bytes();
+        let source_workload_digest = self.canonical_digest_hex();
+        let candidate_digest = fixture_workload_candidate_digest(
+            &source_workload_bytes,
+            self.actions.len(),
+            retained_source_indices,
+            &workload,
+        );
+        Ok(FixtureWorkloadCandidate {
+            source_seed: self.seed,
+            source_workload_bytes,
+            source_workload_digest,
+            source_action_count: self.actions.len(),
+            retained_source_indices: retained_indices,
+            workload,
+            candidate_digest,
+        })
+    }
+
     /// Rebuilds a canonical workload from a retained action subsequence.
     ///
     /// Action ordinals are identities within one encoded workload, so a
@@ -664,6 +761,85 @@ impl FixtureWorkload {
         }
         Ok(())
     }
+}
+
+impl FixtureWorkloadCandidate {
+    /// Seed of the complete source workload.
+    #[must_use]
+    pub const fn source_seed(&self) -> u64 {
+        self.source_seed
+    }
+
+    /// Number of actions in the complete source workload.
+    #[must_use]
+    pub const fn source_action_count(&self) -> usize {
+        self.source_action_count
+    }
+
+    /// Ordered source action indices retained by this candidate.
+    #[must_use]
+    pub fn retained_source_indices(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+        self.retained_source_indices.iter().copied()
+    }
+
+    /// Domain-separated identity of the complete source workload.
+    #[must_use]
+    pub fn source_workload_digest(&self) -> &str {
+        &self.source_workload_digest
+    }
+
+    /// Exact canonical reduced workload.
+    #[must_use]
+    pub const fn workload(&self) -> &FixtureWorkload {
+        &self.workload
+    }
+
+    /// Domain-separated identity of this exact retained candidate.
+    #[must_use]
+    pub fn candidate_digest(&self) -> &str {
+        &self.candidate_digest
+    }
+
+    pub(crate) fn source_workload_bytes(&self) -> &[u8] {
+        &self.source_workload_bytes
+    }
+
+    pub(crate) fn integrity_is_valid(&self) -> bool {
+        self.source_seed == self.workload.seed()
+            && self.candidate_digest
+                == fixture_workload_candidate_digest(
+                    &self.source_workload_bytes,
+                    self.source_action_count,
+                    &self.retained_source_indices,
+                    &self.workload,
+                )
+    }
+}
+
+fn fixture_workload_candidate_digest(
+    source_workload_bytes: &[u8],
+    source_action_count: usize,
+    retained_source_indices: &[usize],
+    workload: &FixtureWorkload,
+) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(FIXTURE_WORKLOAD_CANDIDATE_DIGEST_DOMAIN);
+    hasher.update(source_workload_bytes);
+    hasher.update(
+        &u64::try_from(source_action_count)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(
+        &u64::try_from(retained_source_indices.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for &index in retained_source_indices {
+        hasher.update(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+    }
+    hasher.update(&workload.to_canonical_bytes());
+    hasher.finalize().to_hex()
 }
 
 fn take_workload_bytes<'a>(

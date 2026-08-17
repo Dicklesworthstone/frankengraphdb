@@ -56,7 +56,7 @@ use fgdb_crypto::Hasher;
 
 use crate::fixture::{
     FixtureConfig, FixtureSemantics, FixtureTaskError, FixtureTaskStage, FixtureWorkload,
-    FixtureWorkloadDecodeLimits, FixtureWorkloadError, first_divergence,
+    FixtureWorkloadCandidate, FixtureWorkloadDecodeLimits, FixtureWorkloadError, first_divergence,
     fixture_futures_for_workload,
 };
 use crate::vfs::{FaultEvent, FaultPlan};
@@ -587,6 +587,44 @@ impl FixtureFailureEvidence {
     #[must_use]
     pub fn execution_digest(&self) -> &str {
         &self.execution_digest
+    }
+
+    /// Derives a deletion-only scheduler candidate from this exact failed LAB
+    /// execution and its source workload.
+    ///
+    /// Live failures and substituted workloads have no scheduler authority and
+    /// are refused before a candidate can be constructed.
+    pub fn derive_schedule_candidate(
+        &self,
+        source_workload: &FixtureWorkload,
+        retained_source_indices: &[usize],
+        limits: ForcedScheduleCandidateLimits,
+    ) -> Result<FixtureScheduleCandidate, FixtureRunError> {
+        if self.runtime != FixtureRuntime::Lab || !self.matches_workload(source_workload) {
+            return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+                field: "failure-workload",
+            });
+        }
+        let schedule = self.forced_schedule.as_ref().ok_or(
+            FixtureRunError::ScheduleCandidateSourceMismatch {
+                field: "failure-schedule",
+            },
+        )?;
+        if self.scheduler_seed != Some(schedule.seed())
+            || self.forced_schedule_digest.as_deref() != Some(&forced_schedule_digest(schedule))
+        {
+            return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+                field: "failure-schedule-root",
+            });
+        }
+        derive_fixture_schedule_candidate(
+            source_workload,
+            schedule,
+            &self.trace_digest,
+            self.fault_plan,
+            retained_source_indices,
+            limits,
+        )
     }
 }
 
@@ -1129,6 +1167,8 @@ pub struct LabFixtureRun {
     forced_schedule: ForcedSchedule,
     /// Exact versioned workload consumed by the producer.
     workload: FixtureWorkload,
+    /// Exact fault policy active during this source execution.
+    fault_plan: FaultPlan,
     /// Virtual nanoseconds the run consumed — proof the clock was virtual.
     pub virtual_elapsed_nanos: u64,
     /// Terminal virtual-clock epoch reported by the lab runtime.
@@ -1177,20 +1217,38 @@ impl LabFixtureRun {
         retained_source_indices: &[usize],
         limits: ForcedScheduleCandidateLimits,
     ) -> Result<FixtureScheduleCandidate, FixtureRunError> {
-        let candidate = self
-            .forced_schedule
-            .derive_candidate(retained_source_indices, limits)
-            .map_err(FixtureRunError::ForcedSchedule)?;
-        Ok(FixtureScheduleCandidate {
-            source_seed: self.workload.seed(),
-            source_workload_bytes: self.workload.to_canonical_bytes(),
-            source_workload_digest: self.workload.canonical_digest_hex(),
-            source_schedule_digest: forced_schedule_digest(&self.forced_schedule),
-            source_trace_digest: self.receipt.trace_digest().to_string(),
-            candidate_digest: forced_schedule_candidate_digest(&candidate),
-            candidate,
-        })
+        derive_fixture_schedule_candidate(
+            &self.workload,
+            &self.forced_schedule,
+            self.receipt.trace_digest(),
+            self.fault_plan,
+            retained_source_indices,
+            limits,
+        )
     }
+}
+
+fn derive_fixture_schedule_candidate(
+    source_workload: &FixtureWorkload,
+    source_schedule: &ForcedSchedule,
+    source_trace_digest: &str,
+    source_fault_plan: FaultPlan,
+    retained_source_indices: &[usize],
+    limits: ForcedScheduleCandidateLimits,
+) -> Result<FixtureScheduleCandidate, FixtureRunError> {
+    let candidate = source_schedule
+        .derive_candidate(retained_source_indices, limits)
+        .map_err(FixtureRunError::ForcedSchedule)?;
+    Ok(FixtureScheduleCandidate {
+        source_seed: source_workload.seed(),
+        source_workload_bytes: source_workload.to_canonical_bytes(),
+        source_workload_digest: source_workload.canonical_digest_hex(),
+        source_schedule_digest: forced_schedule_digest(source_schedule),
+        source_trace_digest: source_trace_digest.to_string(),
+        source_fault_plan,
+        candidate_digest: forced_schedule_candidate_digest(&candidate),
+        candidate,
+    })
 }
 
 /// One fixture-bound deletion-only scheduler candidate.
@@ -1207,6 +1265,7 @@ pub struct FixtureScheduleCandidate {
     source_workload_digest: String,
     source_schedule_digest: String,
     source_trace_digest: String,
+    source_fault_plan: FaultPlan,
     candidate_digest: String,
     candidate: ForcedScheduleCandidate,
 }
@@ -1244,6 +1303,12 @@ impl FixtureScheduleCandidate {
     pub fn candidate_digest(&self) -> &str {
         &self.candidate_digest
     }
+
+    /// Exact fault policy installed by the complete source execution.
+    #[must_use]
+    pub const fn source_fault_plan(&self) -> FaultPlan {
+        self.source_fault_plan
+    }
 }
 
 /// Terminal state of one fixture task at a reduced-candidate boundary.
@@ -1276,6 +1341,10 @@ pub struct FixtureScheduleCandidateRun {
     source_schedule_digest: String,
     source_trace_digest: String,
     candidate_digest: String,
+    source_workload_digest: String,
+    workload_candidate_digest: Option<String>,
+    workload_retained_source_indices: Option<Vec<usize>>,
+    execution_digest: String,
 }
 
 impl FixtureScheduleCandidateRun {
@@ -1341,16 +1410,61 @@ impl FixtureScheduleCandidateRun {
         &self.candidate_digest
     }
 
-    /// True only when this exact candidate consumed every retained source
-    /// index and the foundation reported quiescence.
+    /// Complete source-workload identity shared by both candidate axes.
     #[must_use]
-    pub fn completed_candidate(&self, candidate: &FixtureScheduleCandidate) -> bool {
-        self.report.termination == ForcedScheduleCandidateTermination::Quiescent
-            && self.report.lab.quiescent
-            && self.report.lab.invariant_violations.is_empty()
-            && self.producer == FixtureScheduleCandidateTaskOutcome::Succeeded
-            && self.consumer == FixtureScheduleCandidateTaskOutcome::Succeeded
-            && self.report.consumed_source_indices.len() == candidate.candidate.dispatches().len()
+    pub fn source_workload_digest(&self) -> &str {
+        &self.source_workload_digest
+    }
+
+    /// Workload-candidate identity when the workload axis was reduced.
+    #[must_use]
+    pub fn workload_candidate_digest(&self) -> Option<&str> {
+        self.workload_candidate_digest.as_deref()
+    }
+
+    /// Ordered source action indices actually selected for this execution.
+    #[must_use]
+    pub fn workload_retained_source_indices(&self) -> Option<&[usize]> {
+        self.workload_retained_source_indices.as_deref()
+    }
+
+    /// Seal over the exact candidate authorities and observed boundary.
+    #[must_use]
+    pub fn execution_digest(&self) -> &str {
+        &self.execution_digest
+    }
+
+    /// Stable component failure observed at this candidate boundary.
+    #[must_use]
+    pub const fn failure_kind(&self) -> Option<FixtureFailureKind> {
+        match self.producer {
+            FixtureScheduleCandidateTaskOutcome::Failed(error) => {
+                return Some(FixtureFailureKind::Producer {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                });
+            }
+            FixtureScheduleCandidateTaskOutcome::Incomplete
+            | FixtureScheduleCandidateTaskOutcome::Succeeded
+            | FixtureScheduleCandidateTaskOutcome::Terminated => {}
+        }
+        match self.consumer {
+            FixtureScheduleCandidateTaskOutcome::Failed(error) => {
+                Some(FixtureFailureKind::Consumer {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                })
+            }
+            FixtureScheduleCandidateTaskOutcome::Incomplete
+            | FixtureScheduleCandidateTaskOutcome::Succeeded
+            | FixtureScheduleCandidateTaskOutcome::Terminated => None,
+        }
+    }
+
+    /// Whether this run consumed every retained scheduler choice in order.
+    #[must_use]
+    pub fn consumed_schedule_candidate(&self, candidate: &FixtureScheduleCandidate) -> bool {
+        self.report.consumed_source_indices.len() == candidate.candidate.dispatches().len()
             && self
                 .report
                 .consumed_source_indices
@@ -1360,6 +1474,36 @@ impl FixtureScheduleCandidateRun {
             && self.candidate_digest == candidate.candidate_digest
             && self.source_schedule_digest == candidate.source_schedule_digest
             && self.source_trace_digest == candidate.source_trace_digest
+    }
+
+    /// Whether this run consumed the exact reduced workload authority.
+    #[must_use]
+    pub fn matches_workload_candidate(&self, candidate: &FixtureWorkloadCandidate) -> bool {
+        candidate.integrity_is_valid()
+            && self.workload == *candidate.workload()
+            && self.source_workload_digest == candidate.source_workload_digest()
+            && self.workload_candidate_digest.as_deref() == Some(candidate.candidate_digest())
+            && self
+                .workload_retained_source_indices
+                .as_deref()
+                .is_some_and(|indices| {
+                    indices
+                        .iter()
+                        .copied()
+                        .eq(candidate.retained_source_indices())
+                })
+    }
+
+    /// True only when this exact candidate consumed every retained source
+    /// index and the foundation reported quiescence.
+    #[must_use]
+    pub fn completed_candidate(&self, candidate: &FixtureScheduleCandidate) -> bool {
+        self.report.termination == ForcedScheduleCandidateTermination::Quiescent
+            && self.report.lab.quiescent
+            && self.report.lab.invariant_violations.is_empty()
+            && self.producer == FixtureScheduleCandidateTaskOutcome::Succeeded
+            && self.consumer == FixtureScheduleCandidateTaskOutcome::Succeeded
+            && self.consumed_schedule_candidate(candidate)
     }
 }
 
@@ -1464,12 +1608,17 @@ pub fn run_fixture_workload_under_forced_schedule_candidate(
     cfg: &FixtureConfig,
     workload: &FixtureWorkload,
     scratch_dir: &Path,
-    mut lab_config: LabConfig,
+    lab_config: LabConfig,
     candidate: &FixtureScheduleCandidate,
     limits: ForcedScheduleCandidateLimits,
 ) -> Result<FixtureScheduleCandidateRun, FixtureRunError> {
     if cfg.seed != candidate.source_seed || workload.seed() != candidate.source_seed {
         return Err(FixtureRunError::ScheduleCandidateSourceMismatch { field: "seed" });
+    }
+    if cfg.fault_plan != candidate.source_fault_plan {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "fault-plan",
+        });
     }
     let workload_bytes = workload.to_canonical_bytes();
     if workload_bytes != candidate.source_workload_bytes
@@ -1488,6 +1637,87 @@ pub fn run_fixture_workload_under_forced_schedule_candidate(
         });
     }
 
+    run_fixture_schedule_candidate_inner(
+        cfg,
+        workload,
+        scratch_dir,
+        lab_config,
+        candidate,
+        None,
+        limits,
+    )
+}
+
+/// Executes a deletion-only scheduler candidate against a deletion-only
+/// workload candidate derived from the same completed source run.
+///
+/// Both source roots are checked before the scratch directory is created or a
+/// fixture future is polled. This is the executable two-axis seam consumed by
+/// the real fixture shrinker.
+pub fn run_fixture_schedule_workload_candidate(
+    cfg: &FixtureConfig,
+    workload_candidate: &FixtureWorkloadCandidate,
+    scratch_dir: &Path,
+    lab_config: LabConfig,
+    schedule_candidate: &FixtureScheduleCandidate,
+    limits: ForcedScheduleCandidateLimits,
+) -> Result<FixtureScheduleCandidateRun, FixtureRunError> {
+    if !workload_candidate.integrity_is_valid() {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "workload-candidate-digest",
+        });
+    }
+    if cfg.seed != schedule_candidate.source_seed
+        || cfg.seed != workload_candidate.source_seed()
+        || workload_candidate.workload().seed() != workload_candidate.source_seed()
+    {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch { field: "seed" });
+    }
+    if cfg.fault_plan != schedule_candidate.source_fault_plan {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "fault-plan",
+        });
+    }
+    if schedule_candidate.source_workload_bytes != workload_candidate.source_workload_bytes()
+        || schedule_candidate.source_workload_digest != workload_candidate.source_workload_digest()
+    {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "workload-source-root",
+        });
+    }
+    if lab_config.seed != schedule_candidate.candidate.seed() {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "scheduler-seed",
+        });
+    }
+    if forced_schedule_candidate_digest(&schedule_candidate.candidate)
+        != schedule_candidate.candidate_digest
+    {
+        return Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "candidate-digest",
+        });
+    }
+
+    run_fixture_schedule_candidate_inner(
+        cfg,
+        workload_candidate.workload(),
+        scratch_dir,
+        lab_config,
+        schedule_candidate,
+        Some(workload_candidate),
+        limits,
+    )
+}
+
+fn run_fixture_schedule_candidate_inner(
+    cfg: &FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_dir: &Path,
+    mut lab_config: LabConfig,
+    candidate: &FixtureScheduleCandidate,
+    workload_candidate: Option<&FixtureWorkloadCandidate>,
+    limits: ForcedScheduleCandidateLimits,
+) -> Result<FixtureScheduleCandidateRun, FixtureRunError> {
     lab_config.auto_advance_time = true;
     lab_config = lab_config.with_default_replay_recording();
     let mut lab = LabRuntime::new(lab_config);
@@ -1533,6 +1763,23 @@ pub fn run_fixture_workload_under_forced_schedule_candidate(
     let trace_bytes = trace.to_bytes();
     let injected_faults = trace.fault_events();
 
+    let workload_candidate_digest =
+        workload_candidate.map(|candidate| candidate.candidate_digest().to_string());
+    let workload_retained_source_indices = workload_candidate
+        .map(|candidate| candidate.retained_source_indices().collect::<Vec<usize>>());
+    let execution_digest = fixture_schedule_candidate_execution_digest(
+        candidate,
+        &workload,
+        workload_candidate_digest.as_deref(),
+        workload_retained_source_indices.as_deref(),
+        &report,
+        producer,
+        consumer,
+        &trace_bytes,
+        &replay_trace,
+        &injected_faults,
+    );
+
     Ok(FixtureScheduleCandidateRun {
         report,
         producer,
@@ -1544,7 +1791,65 @@ pub fn run_fixture_workload_under_forced_schedule_candidate(
         source_schedule_digest: candidate.source_schedule_digest.clone(),
         source_trace_digest: candidate.source_trace_digest.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
+        source_workload_digest: candidate.source_workload_digest.clone(),
+        workload_candidate_digest,
+        workload_retained_source_indices,
+        execution_digest,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fixture_schedule_candidate_execution_digest(
+    schedule_candidate: &FixtureScheduleCandidate,
+    workload: &FixtureWorkload,
+    workload_candidate_digest: Option<&str>,
+    workload_retained_source_indices: Option<&[usize]>,
+    report: &ForcedScheduleCandidateReport,
+    producer: FixtureScheduleCandidateTaskOutcome,
+    consumer: FixtureScheduleCandidateTaskOutcome,
+    trace_bytes: &[u8],
+    replay_trace: &ReplayTrace,
+    injected_faults: &[FaultEvent],
+) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(b"fgdb.sim.fixture.schedule-workload-candidate-execution.v1");
+    hasher.update(schedule_candidate.source_schedule_digest.as_bytes());
+    hasher.update(schedule_candidate.source_trace_digest.as_bytes());
+    hasher.update(schedule_candidate.candidate_digest.as_bytes());
+    hasher.update(schedule_candidate.source_workload_digest.as_bytes());
+    hasher.update(
+        schedule_candidate
+            .source_fault_plan
+            .encode_replay_fields()
+            .as_bytes(),
+    );
+    hasher.update(
+        workload_candidate_digest
+            .unwrap_or("source-workload")
+            .as_bytes(),
+    );
+    if let Some(indices) = workload_retained_source_indices {
+        for &index in indices {
+            hasher.update(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+        }
+    }
+    hasher.update(&workload.to_canonical_bytes());
+    hasher.update(format!("{report:?}").as_bytes());
+    hasher.update(&[match report.termination {
+        ForcedScheduleCandidateTermination::Quiescent => 1,
+        ForcedScheduleCandidateTermination::Exhausted => 2,
+    }]);
+    for &index in &report.consumed_source_indices {
+        hasher.update(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+    }
+    hasher.update(format!("{producer:?}").as_bytes());
+    hasher.update(format!("{consumer:?}").as_bytes());
+    hasher.update(trace_bytes);
+    hasher.update(replay_trace_digest(replay_trace).as_bytes());
+    for fault in injected_faults {
+        hasher.update(format!("{fault:?}").as_bytes());
+    }
+    hasher.finalize().to_hex()
 }
 
 #[derive(Clone, Copy)]
@@ -1709,6 +2014,7 @@ fn run_fixture_workload_under_lab_mode(
         replay_trace,
         forced_schedule,
         workload,
+        fault_plan: cfg.fault_plan,
         virtual_elapsed_nanos,
         virtual_clock_epoch_nanos: report.now_nanos,
         semantics,

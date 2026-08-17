@@ -9,11 +9,13 @@
 //! That quotation is the target-state contract. The current reusable filing
 //! pipeline minimizes a typed [`FaultPlan`] through [`shrink`]. The separate
 //! [`shrink_schedule_and_workload`] primitive proves typed two-axis reduction.
-//! [`shrink_fixture_workload_under_lab`] now consumes the fixture's real typed
-//! LAB execution verdict and minimizes its canonical workload actions, but the
-//! recorded asupersync task-dispatch schedule still cannot be forced through
-//! the pinned runtime. Callers must not describe this module as universal or
-//! schedule-aware pre-shrinking until that foundation integration exists.
+//! [`shrink_fixture_workload_under_lab`] consumes the fixture's real typed LAB
+//! verdict and minimizes canonical workload actions. The stricter
+//! [`shrink_fixture_schedule_and_workload_under_lab`] derives deletion-only
+//! authorities from the exact failed execution and executes both reduced axes
+//! through asupersync's bounded forced-schedule candidate path. This is real
+//! two-axis minimization for the exported fixture, not a universal scheduler
+//! shrinker or a standalone persisted forced-schedule artifact.
 //!
 //! # The one law, and why it is a type and not a string comparison
 //!
@@ -52,11 +54,16 @@
 
 use crate::artifact::{Failure, FailureKind, Replay, RunOutcome};
 use crate::dual_run::{
-    FixtureFailureEvidence, FixtureFailureKind, FixtureReplay, FixtureReplayError, FixtureRunError,
+    FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS, FixtureFailureEvidence, FixtureFailureKind,
+    FixtureReplay, FixtureReplayError, FixtureRunError, FixtureScheduleCandidate,
+    FixtureScheduleCandidateRun, run_fixture_schedule_workload_candidate,
     run_fixture_workload_under_lab,
 };
-use crate::fixture::{FixtureWorkload, FixtureWorkloadAction, FixtureWorkloadError};
+use crate::fixture::{
+    FixtureWorkload, FixtureWorkloadAction, FixtureWorkloadCandidate, FixtureWorkloadError,
+};
 use crate::vfs::{FaultEvent, FaultPlan, Trigger};
+use asupersync::lab::runtime::ForcedScheduleCandidateLimits;
 use fgdb_crypto::Hasher;
 use std::io;
 use std::path::Path;
@@ -866,6 +873,350 @@ pub fn shrink_fixture_workload_under_lab(
         minimal_evidence,
         failure,
         attempts: shrunk.attempts,
+        accepted: shrunk.accepted,
+        rejected_different_failure: shrunk.rejected_different_failure,
+    }))
+}
+
+/// One real exported-fixture failure minimized across both its recorded LAB
+/// dispatch schedule and canonical workload actions.
+#[derive(Debug)]
+pub struct FixtureScheduleWorkloadShrunk {
+    original_evidence: FixtureFailureEvidence,
+    schedule_candidate: FixtureScheduleCandidate,
+    workload_candidate: FixtureWorkloadCandidate,
+    minimal_run: FixtureScheduleCandidateRun,
+    failure: FixtureFailureKind,
+    attempts: usize,
+    accepted: usize,
+    rejected_different_failure: usize,
+}
+
+impl FixtureScheduleWorkloadShrunk {
+    /// Execution-root seal of the complete source failure.
+    #[must_use]
+    pub fn original_execution_digest(&self) -> &str {
+        self.original_evidence.execution_digest()
+    }
+
+    /// Immutable evidence captured from the complete failing source run.
+    #[must_use]
+    pub const fn original_evidence(&self) -> &FixtureFailureEvidence {
+        &self.original_evidence
+    }
+
+    /// One-minimal deletion-only scheduler authority.
+    #[must_use]
+    pub const fn schedule_candidate(&self) -> &FixtureScheduleCandidate {
+        &self.schedule_candidate
+    }
+
+    /// One-minimal deletion-only workload authority.
+    #[must_use]
+    pub const fn workload_candidate(&self) -> &FixtureWorkloadCandidate {
+        &self.workload_candidate
+    }
+
+    /// Exact observed boundary of the minimized candidate execution.
+    #[must_use]
+    pub const fn minimal_run(&self) -> &FixtureScheduleCandidateRun {
+        &self.minimal_run
+    }
+
+    /// Seal over the minimized authorities and observed execution boundary.
+    #[must_use]
+    pub fn minimal_execution_digest(&self) -> &str {
+        self.minimal_run.execution_digest()
+    }
+
+    /// Exact component/operation/I/O category retained by every reduction.
+    #[must_use]
+    pub const fn failure(&self) -> FixtureFailureKind {
+        self.failure
+    }
+
+    /// Runtime executions, including source capture and the premise candidate.
+    #[must_use]
+    pub const fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    /// Reductions accepted across both axes.
+    #[must_use]
+    pub const fn accepted(&self) -> usize {
+        self.accepted
+    }
+
+    /// Smaller candidates rejected because they failed differently.
+    #[must_use]
+    pub const fn rejected_different_failure(&self) -> usize {
+        self.rejected_different_failure
+    }
+}
+
+/// Infrastructure error that prevents an honest two-axis fixture shrink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixtureScheduleWorkloadShrinkError {
+    /// The source run or a candidate failed outside the typed fixture model.
+    Harness(FixtureRunError),
+    /// Deriving a deletion-only workload candidate failed.
+    Workload(FixtureWorkloadError),
+    /// A source failure did not carry LAB forced-schedule authority.
+    MissingScheduleEvidence,
+    /// The source failed, but its complete candidate did not reproduce.
+    CandidatePremiseDidNotReproduce,
+    /// The reducer returned axes that did not match its last accepted run.
+    MinimalCandidateMismatch,
+    /// Caller configured no candidate execution budget.
+    ZeroCandidateExecutionLimit,
+    /// Candidate execution budget was exhausted before a verdict was known.
+    CandidateExecutionLimitExceeded { limit: usize },
+}
+
+impl core::fmt::Display for FixtureScheduleWorkloadShrinkError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Harness(error) => write!(f, "two-axis fixture shrink harness failed: {error}"),
+            Self::Workload(error) => {
+                write!(f, "two-axis fixture workload candidate refused: {error}")
+            }
+            Self::MissingScheduleEvidence => {
+                f.write_str("two-axis fixture shrink source lacks forced-schedule evidence")
+            }
+            Self::CandidatePremiseDidNotReproduce => f.write_str(
+                "complete schedule/workload candidate did not reproduce its source failure",
+            ),
+            Self::MinimalCandidateMismatch => {
+                f.write_str("two-axis fixture shrink returned mismatched minimal authorities")
+            }
+            Self::ZeroCandidateExecutionLimit => {
+                f.write_str("two-axis fixture shrink candidate limit must be nonzero")
+            }
+            Self::CandidateExecutionLimitExceeded { limit } => write!(
+                f,
+                "two-axis fixture shrink exhausted its {limit} candidate executions"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FixtureScheduleWorkloadShrinkError {}
+
+/// Caller-owned work admission for one two-axis fixture shrink campaign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixtureScheduleWorkloadShrinkLimits {
+    /// Per-candidate foundation admission.
+    pub candidate: ForcedScheduleCandidateLimits,
+    /// Maximum prefix probes plus delta-debug candidate executions.
+    pub max_candidate_executions: usize,
+}
+
+impl FixtureScheduleWorkloadShrinkLimits {
+    #[must_use]
+    pub const fn new(
+        candidate: ForcedScheduleCandidateLimits,
+        max_candidate_executions: usize,
+    ) -> Self {
+        Self {
+            candidate,
+            max_candidate_executions,
+        }
+    }
+}
+
+/// Default bounded admission for the exported fixture's two-axis shrinker.
+pub const FIXTURE_SCHEDULE_WORKLOAD_SHRINK_LIMITS: FixtureScheduleWorkloadShrinkLimits =
+    FixtureScheduleWorkloadShrinkLimits::new(FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS, 32_768);
+
+/// Minimize one real failing LAB fixture across schedule and workload axes.
+///
+/// The source execution is captured once. Every scheduler candidate derives
+/// from that failure's exact [`asupersync::lab::runtime::ForcedSchedule`], and
+/// every workload candidate derives from the exact canonical source actions.
+/// A reduction is accepted only when the candidate executor observes the same
+/// [`FixtureFailureKind`] and consumes both immutable authorities.
+pub fn shrink_fixture_schedule_and_workload_under_lab(
+    cfg: &crate::fixture::FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_root: &Path,
+    scheduler_seed: u64,
+    limits: FixtureScheduleWorkloadShrinkLimits,
+) -> Result<Option<FixtureScheduleWorkloadShrunk>, FixtureScheduleWorkloadShrinkError> {
+    if limits.max_candidate_executions == 0 {
+        return Err(FixtureScheduleWorkloadShrinkError::ZeroCandidateExecutionLimit);
+    }
+    let source_result = run_fixture_workload_under_lab(
+        cfg,
+        workload,
+        &scratch_root.join("fixture-two-axis-source"),
+        asupersync::lab::LabConfig::new(scheduler_seed),
+    );
+    let source_error = match source_result {
+        Ok(_) => return Ok(None),
+        Err(error) => error,
+    };
+    let target = source_error
+        .failure_kind()
+        .ok_or_else(|| FixtureScheduleWorkloadShrinkError::Harness(source_error.clone()))?;
+    let original_evidence = source_error
+        .failure_evidence()
+        .cloned()
+        .ok_or_else(|| FixtureScheduleWorkloadShrinkError::Harness(source_error.clone()))?;
+    let source_schedule = original_evidence
+        .forced_schedule()
+        .ok_or(FixtureScheduleWorkloadShrinkError::MissingScheduleEvidence)?;
+    let mut schedule_axis = (0..source_schedule.dispatches().len()).collect::<Vec<_>>();
+    let workload_axis = (0..workload.actions().len()).collect::<Vec<_>>();
+
+    // A failed source run may record cleanup dispatches after the component
+    // returned its error. Exact candidate execution correctly refuses those
+    // now-unavailable tasks. Trim only that observed suffix, then require the
+    // remaining complete prefix to reproduce before delta debugging begins.
+    let full_workload_candidate = workload
+        .derive_candidate(&workload_axis)
+        .map_err(FixtureScheduleWorkloadShrinkError::Workload)?;
+    let mut prefix_probes = 0usize;
+    loop {
+        let prefix_candidate = original_evidence
+            .derive_schedule_candidate(workload, &schedule_axis, limits.candidate)
+            .map_err(FixtureScheduleWorkloadShrinkError::Harness)?;
+        let prefix_root =
+            scratch_root.join(format!("fixture-two-axis-prefix-probe-{prefix_probes:04}"));
+        if prefix_probes >= limits.max_candidate_executions {
+            return Err(
+                FixtureScheduleWorkloadShrinkError::CandidateExecutionLimitExceeded {
+                    limit: limits.max_candidate_executions,
+                },
+            );
+        }
+        prefix_probes += 1;
+        match run_fixture_schedule_workload_candidate(
+            cfg,
+            &full_workload_candidate,
+            &prefix_root,
+            asupersync::lab::LabConfig::new(scheduler_seed),
+            &prefix_candidate,
+            limits.candidate,
+        ) {
+            Ok(run) if run.failure_kind() == Some(target) => break,
+            Err(FixtureRunError::ForcedSchedule(
+                asupersync::lab::runtime::ForcedScheduleError::TaskUnavailable { index, .. },
+            )) if index > 0 && index < schedule_axis.len() => {
+                schedule_axis.truncate(index);
+            }
+            Ok(_) | Err(FixtureRunError::ForcedSchedule(_)) => {
+                return Err(FixtureScheduleWorkloadShrinkError::CandidatePremiseDidNotReproduce);
+            }
+            Err(error) => return Err(FixtureScheduleWorkloadShrinkError::Harness(error)),
+        }
+    }
+
+    let mut fatal = None;
+    let mut ordinal = 0usize;
+    let mut last_reproduced = None;
+    let shrunk = {
+        let mut reproduces = |schedule_indices: &[usize], workload_indices: &[usize]| {
+            if fatal.is_some() {
+                return ShrinkTrial::DidNotReproduce;
+            }
+            let workload_candidate = match workload.derive_candidate(workload_indices) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    fatal = Some(FixtureScheduleWorkloadShrinkError::Workload(error));
+                    return ShrinkTrial::DidNotReproduce;
+                }
+            };
+            let schedule_candidate = match original_evidence.derive_schedule_candidate(
+                workload,
+                schedule_indices,
+                limits.candidate,
+            ) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    fatal = Some(FixtureScheduleWorkloadShrinkError::Harness(error));
+                    return ShrinkTrial::DidNotReproduce;
+                }
+            };
+            let attempt = scratch_root.join(format!("fixture-two-axis-attempt-{ordinal:04}"));
+            if prefix_probes.saturating_add(ordinal) >= limits.max_candidate_executions {
+                fatal = Some(
+                    FixtureScheduleWorkloadShrinkError::CandidateExecutionLimitExceeded {
+                        limit: limits.max_candidate_executions,
+                    },
+                );
+                return ShrinkTrial::DidNotReproduce;
+            }
+            ordinal += 1;
+            match run_fixture_schedule_workload_candidate(
+                cfg,
+                &workload_candidate,
+                &attempt,
+                asupersync::lab::LabConfig::new(scheduler_seed),
+                &schedule_candidate,
+                limits.candidate,
+            ) {
+                Ok(run) if run.failure_kind() == Some(target) => {
+                    if !run.consumed_schedule_candidate(&schedule_candidate)
+                        || !run.matches_workload_candidate(&workload_candidate)
+                    {
+                        fatal = Some(FixtureScheduleWorkloadShrinkError::MinimalCandidateMismatch);
+                        return ShrinkTrial::DidNotReproduce;
+                    }
+                    last_reproduced = Some((
+                        schedule_indices.to_vec(),
+                        workload_indices.to_vec(),
+                        schedule_candidate,
+                        workload_candidate,
+                        run,
+                    ));
+                    ShrinkTrial::Reproduced
+                }
+                Ok(run) => run
+                    .failure_kind()
+                    .map_or(ShrinkTrial::DidNotReproduce, ShrinkTrial::DifferentFailure),
+                Err(FixtureRunError::ForcedSchedule(
+                    asupersync::lab::runtime::ForcedScheduleError::TaskUnavailable { .. },
+                )) => ShrinkTrial::DidNotReproduce,
+                Err(error) => {
+                    fatal = Some(FixtureScheduleWorkloadShrinkError::Harness(error));
+                    ShrinkTrial::DidNotReproduce
+                }
+            }
+        };
+        shrink_schedule_and_workload(schedule_axis, workload_axis, &mut reproduces)
+    };
+    if let Some(error) = fatal {
+        return Err(error);
+    }
+    let Some(shrunk) = shrunk else {
+        return Err(FixtureScheduleWorkloadShrinkError::CandidatePremiseDidNotReproduce);
+    };
+    let Some((
+        minimal_schedule_indices,
+        minimal_workload_indices,
+        schedule_candidate,
+        workload_candidate,
+        minimal_run,
+    )) = last_reproduced
+    else {
+        return Err(FixtureScheduleWorkloadShrinkError::CandidatePremiseDidNotReproduce);
+    };
+    if minimal_schedule_indices != shrunk.schedule
+        || minimal_workload_indices != shrunk.workload
+        || minimal_run.failure_kind() != Some(target)
+    {
+        return Err(FixtureScheduleWorkloadShrinkError::MinimalCandidateMismatch);
+    }
+    Ok(Some(FixtureScheduleWorkloadShrunk {
+        original_evidence,
+        schedule_candidate,
+        workload_candidate,
+        minimal_run,
+        failure: target,
+        attempts: shrunk
+            .attempts
+            .saturating_add(prefix_probes)
+            .saturating_add(1),
         accepted: shrunk.accepted,
         rejected_different_failure: shrunk.rejected_different_failure,
     }))

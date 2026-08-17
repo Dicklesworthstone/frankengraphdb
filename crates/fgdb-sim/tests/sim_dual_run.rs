@@ -18,15 +18,18 @@ use fgdb_sim::dual_run::{
     FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS, FIXTURE_REPLAY_ENV, FIXTURE_REPLAY_EXPECTED_DIGEST_ENV,
     FixtureFailureKind, FixtureReplay, FixtureReplayError, FixtureRunError, FixtureRunReceipt,
     FixtureRuntime, FixtureScheduleCandidateTaskOutcome, determinism_gate, dual_run_fixture,
-    dual_run_verdict_log_lines, run_fixture_under_lab, run_fixture_workload_live,
-    run_fixture_workload_under_forced_schedule,
+    dual_run_verdict_log_lines, run_fixture_schedule_workload_candidate, run_fixture_under_lab,
+    run_fixture_workload_live, run_fixture_workload_under_forced_schedule,
     run_fixture_workload_under_forced_schedule_candidate, run_fixture_workload_under_lab,
 };
 use fgdb_sim::fixture::{
     FixtureConfig, FixtureTaskStage, FixtureWorkload, FixtureWorkloadDecodeLimits,
     FixtureWorkloadError, MAX_FIXTURE_PAYLOAD_BYTES,
 };
-use fgdb_sim::shrink::shrink_fixture_workload_under_lab;
+use fgdb_sim::shrink::{
+    FIXTURE_SCHEDULE_WORKLOAD_SHRINK_LIMITS, shrink_fixture_schedule_and_workload_under_lab,
+    shrink_fixture_workload_under_lab,
+};
 use fgdb_sim::vfs::Trigger;
 
 use asupersync::lab::LabConfig;
@@ -690,6 +693,338 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         LabConfig::new(faulting.seed),
     )
     .expect("removing the sole causal action must clear the failure");
+
+    // The real two-axis path starts from the failed LAB execution, derives
+    // both authorities from that source, and executes every candidate through
+    // asupersync rather than a synthetic shrink oracle.
+    let two_axis = shrink_fixture_schedule_and_workload_under_lab(
+        &faulting,
+        &faulting_workload,
+        &faulting_root.join("schedule-workload-shrink"),
+        faulting.seed,
+        FIXTURE_SCHEDULE_WORKLOAD_SHRINK_LIMITS,
+    )
+    .expect("two-axis fixture shrink infrastructure succeeds")
+    .expect("the source failure reproduces through candidate execution");
+    assert_eq!(
+        two_axis.original_execution_digest(),
+        lab_evidence.execution_digest(),
+        "source capture must retain the exact failure execution root"
+    );
+    assert_eq!(two_axis.failure(), lab_failure.failure_kind().unwrap());
+    assert!(
+        two_axis.schedule_candidate().source_dispatch_count() > 1,
+        "the source schedule must be nontrivial before minimization"
+    );
+    let minimal_schedule_indices = two_axis
+        .schedule_candidate()
+        .retained_source_indices()
+        .collect::<Vec<_>>();
+    assert!(!minimal_schedule_indices.is_empty());
+    assert!(
+        minimal_schedule_indices.len() < two_axis.schedule_candidate().source_dispatch_count(),
+        "post-failure cleanup choices must not survive in the causal schedule"
+    );
+    assert_eq!(
+        two_axis.workload_candidate().source_action_count(),
+        faulting_workload.actions().len()
+    );
+    assert_eq!(
+        two_axis
+            .workload_candidate()
+            .retained_source_indices()
+            .count(),
+        1,
+        "the planted write refusal needs exactly one retained action"
+    );
+    assert_eq!(two_axis.workload_candidate().workload().actions().len(), 1);
+    assert_eq!(
+        two_axis.workload_candidate().workload().actions()[0].ordinal(),
+        0,
+        "retained actions are re-numbered into a canonical workload"
+    );
+    let retained_action_index = two_axis
+        .workload_candidate()
+        .retained_source_indices()
+        .next()
+        .expect("one retained source action");
+    let retained_source_action = &faulting_workload.actions()[retained_action_index];
+    let minimal_action = &two_axis.workload_candidate().workload().actions()[0];
+    assert_eq!(
+        minimal_action.delay_nanos(),
+        retained_source_action.delay_nanos()
+    );
+    assert_eq!(minimal_action.payload(), retained_source_action.payload());
+    assert_eq!(
+        two_axis.minimal_run().failure_kind(),
+        Some(two_axis.failure())
+    );
+    assert!(
+        two_axis
+            .minimal_run()
+            .consumed_schedule_candidate(two_axis.schedule_candidate())
+    );
+    assert!(
+        two_axis
+            .minimal_run()
+            .matches_workload_candidate(two_axis.workload_candidate())
+    );
+    assert_eq!(
+        two_axis
+            .minimal_run()
+            .report()
+            .consumed_source_indices
+            .len(),
+        minimal_schedule_indices.len()
+    );
+    assert_eq!(
+        two_axis
+            .minimal_run()
+            .replay_trace()
+            .events
+            .iter()
+            .filter(|event| matches!(event, ReplayEvent::TaskScheduled { .. }))
+            .count(),
+        minimal_schedule_indices.len(),
+        "the minimized candidate must not fall back to scheduler RNG"
+    );
+    assert!(!two_axis.minimal_execution_digest().is_empty());
+    assert_ne!(
+        two_axis.original_execution_digest(),
+        two_axis.minimal_execution_digest(),
+        "deleting schedule and workload entries must change the execution seal"
+    );
+    assert!(two_axis.attempts() > 2);
+    assert!(two_axis.accepted() >= 2);
+    assert_eq!(two_axis.rejected_different_failure(), 0);
+
+    let zero_limit_root = faulting_root.join("two-axis-zero-campaign-limit");
+    assert!(matches!(
+        shrink_fixture_schedule_and_workload_under_lab(
+            &faulting,
+            &faulting_workload,
+            &zero_limit_root,
+            faulting.seed,
+            fgdb_sim::shrink::FixtureScheduleWorkloadShrinkLimits::new(
+                FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+                0,
+            ),
+        ),
+        Err(fgdb_sim::shrink::FixtureScheduleWorkloadShrinkError::ZeroCandidateExecutionLimit)
+    ));
+    assert!(
+        !zero_limit_root.exists(),
+        "zero campaign admission must refuse before source execution"
+    );
+    assert!(matches!(
+        shrink_fixture_schedule_and_workload_under_lab(
+            &faulting,
+            &faulting_workload,
+            &faulting_root.join("two-axis-one-candidate-limit"),
+            faulting.seed,
+            fgdb_sim::shrink::FixtureScheduleWorkloadShrinkLimits::new(
+                FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+                1,
+            ),
+        ),
+        Err(
+            fgdb_sim::shrink::FixtureScheduleWorkloadShrinkError::CandidateExecutionLimitExceeded {
+                limit: 1
+            }
+        )
+    ));
+
+    let repeated_minimal = run_fixture_schedule_workload_candidate(
+        &faulting,
+        two_axis.workload_candidate(),
+        &faulting_root.join("two-axis-minimal-repeat"),
+        LabConfig::new(faulting.seed),
+        two_axis.schedule_candidate(),
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    )
+    .expect("the minimized candidate deterministically re-executes");
+    assert_eq!(repeated_minimal.failure_kind(), Some(two_axis.failure()));
+    assert_eq!(
+        repeated_minimal.execution_digest(),
+        two_axis.minimal_execution_digest(),
+        "scratch paths are not execution identity"
+    );
+    let alternate_action_index = if retained_action_index == 0 { 1 } else { 0 };
+    let alternate_workload_candidate = faulting_workload
+        .derive_candidate(&[alternate_action_index])
+        .expect("a different retained source action derives");
+    assert_eq!(
+        alternate_workload_candidate.source_workload_digest(),
+        two_axis.workload_candidate().source_workload_digest()
+    );
+    assert_ne!(
+        alternate_workload_candidate.candidate_digest(),
+        two_axis.workload_candidate().candidate_digest(),
+        "retained source identity is part of workload-candidate identity"
+    );
+    let alternate_workload_run = run_fixture_schedule_workload_candidate(
+        &faulting,
+        &alternate_workload_candidate,
+        &faulting_root.join("two-axis-alternate-source-action"),
+        LabConfig::new(faulting.seed),
+        two_axis.schedule_candidate(),
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    )
+    .expect("the alternate one-action candidate executes");
+    assert_eq!(
+        alternate_workload_run.failure_kind(),
+        Some(two_axis.failure())
+    );
+    assert_ne!(
+        alternate_workload_run.execution_digest(),
+        two_axis.minimal_execution_digest(),
+        "same coarse failure must not collapse distinct retained executions"
+    );
+
+    for removed_position in 0..minimal_schedule_indices.len() {
+        let mut retained = minimal_schedule_indices.clone();
+        retained.remove(removed_position);
+        let reduced_schedule = two_axis
+            .original_evidence()
+            .derive_schedule_candidate(
+                &faulting_workload,
+                &retained,
+                FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+            )
+            .expect("one-further-deletion schedule candidate derives");
+        let reduced_run = run_fixture_schedule_workload_candidate(
+            &faulting,
+            two_axis.workload_candidate(),
+            &faulting_root.join(format!(
+                "two-axis-minus-schedule-position-{removed_position:04}"
+            )),
+            LabConfig::new(faulting.seed),
+            &reduced_schedule,
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        );
+        assert!(
+            !matches!(&reduced_run, Ok(run) if run.failure_kind() == Some(two_axis.failure())),
+            "removing retained schedule position {removed_position} still reproduced the target"
+        );
+    }
+
+    let empty_schedule = two_axis
+        .original_evidence()
+        .derive_schedule_candidate(
+            &faulting_workload,
+            &[],
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        )
+        .expect("empty schedule candidate derives from the exact source");
+    let empty_schedule_root = faulting_root.join("two-axis-minus-schedule");
+    let empty_schedule_run = run_fixture_schedule_workload_candidate(
+        &faulting,
+        two_axis.workload_candidate(),
+        &empty_schedule_root,
+        LabConfig::new(faulting.seed),
+        &empty_schedule,
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    )
+    .expect("empty candidate reports a typed exhausted boundary");
+    assert_eq!(empty_schedule_run.failure_kind(), None);
+    assert_eq!(
+        empty_schedule_run.report().termination,
+        ForcedScheduleCandidateTermination::Exhausted
+    );
+    assert!(
+        empty_schedule_run
+            .replay_trace()
+            .events
+            .iter()
+            .all(|event| !matches!(event, ReplayEvent::TaskScheduled { .. })),
+        "zero retained dispatches must not consult scheduler RNG"
+    );
+
+    let empty_workload_candidate = faulting_workload
+        .derive_candidate(&[])
+        .expect("empty workload candidate is canonical");
+    let empty_workload_run = run_fixture_schedule_workload_candidate(
+        &faulting,
+        &empty_workload_candidate,
+        &faulting_root.join("two-axis-minus-workload"),
+        LabConfig::new(faulting.seed),
+        two_axis.schedule_candidate(),
+        FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+    );
+    assert!(
+        !matches!(&empty_workload_run, Ok(run) if run.failure_kind() == Some(two_axis.failure())),
+        "removing the sole retained action must clear the target failure"
+    );
+
+    let mut other_source_cfg = faulting.clone();
+    other_source_cfg.rounds -= 1;
+    let other_source = FixtureWorkload::try_from_config(&other_source_cfg)
+        .expect("same-seed substituted source workload materializes");
+    let other_indices = (0..other_source.actions().len()).collect::<Vec<_>>();
+    let other_candidate = other_source
+        .derive_candidate(&other_indices)
+        .expect("substituted source candidate derives");
+    let substituted_root = faulting_root.join("two-axis-substituted-workload-source");
+    assert!(matches!(
+        run_fixture_schedule_workload_candidate(
+            &faulting,
+            &other_candidate,
+            &substituted_root,
+            LabConfig::new(faulting.seed),
+            two_axis.schedule_candidate(),
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        ),
+        Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "workload-source-root"
+        })
+    ));
+    assert!(
+        !substituted_root.exists(),
+        "source substitution must refuse before scratch or task effects"
+    );
+    let mut fault_plan_substitution = faulting.clone();
+    fault_plan_substitution.fault_plan = fgdb_sim::vfs::FaultPlan::faultless();
+    let fault_plan_substitution_root = faulting_root.join("two-axis-substituted-fault-plan");
+    assert!(matches!(
+        run_fixture_schedule_workload_candidate(
+            &fault_plan_substitution,
+            two_axis.workload_candidate(),
+            &fault_plan_substitution_root,
+            LabConfig::new(faulting.seed),
+            two_axis.schedule_candidate(),
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        ),
+        Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "fault-plan"
+        })
+    ));
+    assert!(
+        !fault_plan_substitution_root.exists(),
+        "fault-plan substitution must refuse before scratch or task effects"
+    );
+    assert!(matches!(
+        faulting_workload.derive_candidate(&[faulting_workload.actions().len()]),
+        Err(FixtureWorkloadError::CandidateIndexOutOfRange { .. })
+    ));
+    assert!(matches!(
+        faulting_workload.derive_candidate(&[1, 1]),
+        Err(FixtureWorkloadError::CandidateIndicesNotStrictlyIncreasing { .. })
+    ));
+    let excessive_candidate_indices = vec![0; faulting_workload.actions().len().saturating_add(1)];
+    assert!(matches!(
+        faulting_workload.derive_candidate(&excessive_candidate_indices),
+        Err(FixtureWorkloadError::ActionCountExceeded { .. })
+    ));
+    assert!(matches!(
+        live_evidence.derive_schedule_candidate(
+            &faulting_workload,
+            &[0],
+            FIXTURE_FORCED_SCHEDULE_CANDIDATE_LIMITS,
+        ),
+        Err(FixtureRunError::ScheduleCandidateSourceMismatch {
+            field: "failure-workload"
+        })
+    ));
 
     let failed = std::panic::catch_unwind(|| {
         run_fixture_under_lab(&faulting, &faulting_root, LabConfig::new(faulting.seed))
