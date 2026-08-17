@@ -14,10 +14,11 @@ use std::process::{Command, Output};
 
 use fgdb_crypto::Hasher;
 use fgdb_sim::dual_run::{
-    DualRunOutcome, FIXTURE_REPLAY_ENV, FIXTURE_REPLAY_EXPECTED_DIGEST_ENV, FixtureFailureKind,
-    FixtureReplay, FixtureReplayError, FixtureRunError, FixtureRunReceipt, FixtureRuntime,
-    determinism_gate, dual_run_fixture, dual_run_verdict_log_lines, run_fixture_under_lab,
-    run_fixture_workload_live, run_fixture_workload_under_lab,
+    DualRunOutcome, FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS, FIXTURE_REPLAY_ENV,
+    FIXTURE_REPLAY_EXPECTED_DIGEST_ENV, FixtureFailureKind, FixtureReplay, FixtureReplayError,
+    FixtureRunError, FixtureRunReceipt, FixtureRuntime, determinism_gate, dual_run_fixture,
+    dual_run_verdict_log_lines, run_fixture_under_lab, run_fixture_workload_live,
+    run_fixture_workload_under_forced_schedule, run_fixture_workload_under_lab,
 };
 use fgdb_sim::fixture::{
     FixtureConfig, FixtureTaskStage, FixtureWorkload, FixtureWorkloadDecodeLimits,
@@ -426,6 +427,44 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
         "record-0000.bin"
     );
     assert!(!lab_evidence.execution_digest().is_empty());
+    let source_forced_schedule = lab_evidence
+        .forced_schedule()
+        .expect("LAB failure retains executable dispatch authority");
+    assert!(lab_evidence.forced_schedule_digest().is_some());
+    let forced_lab_result = run_fixture_workload_under_forced_schedule(
+        &faulting,
+        &faulting_workload,
+        &faulting_root.join("typed-lab-forced-replay"),
+        LabConfig::new(faulting.seed),
+        source_forced_schedule,
+        FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS,
+    );
+    assert_eq!(
+        forced_lab_result
+            .as_ref()
+            .err()
+            .and_then(|error| error.failure_kind()),
+        lab_failure.failure_kind()
+    );
+    let forced_lab_failure = forced_lab_result.err().expect(
+        "the exact source schedule must reproduce the typed component failure, not return success",
+    );
+    assert_eq!(
+        forced_lab_failure.failure_kind(),
+        lab_failure.failure_kind()
+    );
+    let forced_lab_evidence = forced_lab_failure
+        .failure_evidence()
+        .expect("forced component failure carries execution evidence");
+    assert_eq!(
+        forced_lab_evidence.execution_digest(),
+        lab_evidence.execution_digest(),
+        "forced replay must reproduce every execution-root field"
+    );
+    assert_eq!(
+        forced_lab_evidence.forced_schedule_digest(),
+        lab_evidence.forced_schedule_digest()
+    );
     let live_result = run_fixture_workload_live(
         &faulting,
         &faulting_workload,
@@ -453,6 +492,8 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
     assert_eq!(live_evidence.runtime(), FixtureRuntime::Live);
     assert_eq!(live_evidence.virtual_clock_epoch_nanos(), None);
     assert!(live_evidence.lab_replay_trace_digest().is_none());
+    assert!(live_evidence.forced_schedule().is_none());
+    assert!(live_evidence.forced_schedule_digest().is_none());
     assert!(live_evidence.task_dispatches().is_none());
     assert!(live_evidence.matches_workload(&faulting_workload));
     assert_eq!(live_evidence.injected_faults().len(), 1);
@@ -794,6 +835,39 @@ fn raw_fixture_and_dual_run_receipts_are_execution_bound_and_reconstructable() {
     .expect("decoded workload executes");
     assert_eq!(decoded_run.trace_bytes, raw.trace_bytes);
     assert!(decoded_run.receipt.matches_workload(&decoded));
+
+    let forced = run_fixture_workload_under_forced_schedule(
+        &cfg,
+        &decoded,
+        &lab_root.join("forced-source-schedule"),
+        LabConfig::new(cfg.seed),
+        raw.forced_schedule(),
+        FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS,
+    )
+    .expect("the exact source dispatch projection force-replays before every poll");
+    assert_eq!(forced.trace_bytes, raw.trace_bytes);
+    assert_eq!(forced.trace_fingerprint, raw.trace_fingerprint);
+    assert_eq!(forced.schedule_hash, raw.schedule_hash);
+    assert_eq!(forced.virtual_elapsed_nanos, raw.virtual_elapsed_nanos);
+    assert_eq!(
+        forced.virtual_clock_epoch_nanos,
+        raw.virtual_clock_epoch_nanos
+    );
+    assert_eq!(forced.semantics, raw.semantics);
+    assert_eq!(
+        forced.receipt.lab_replay_trace_digest(),
+        raw.receipt.lab_replay_trace_digest()
+    );
+    assert_eq!(
+        forced.receipt.forced_schedule_digest(),
+        raw.receipt.forced_schedule_digest()
+    );
+    assert!(raw.receipt.matches_forced_schedule(raw.forced_schedule()));
+    assert!(
+        forced
+            .receipt
+            .matches_forced_schedule(raw.forced_schedule())
+    );
 
     // Version-1 layout: magic(8), seed(8), count(4), then the first action's
     // ordinal(4), delay(8), payload length(4), and payload. Mutating the

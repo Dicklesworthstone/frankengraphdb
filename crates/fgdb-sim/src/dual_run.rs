@@ -39,12 +39,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use asupersync::Budget;
+use asupersync::lab::runtime::{ForcedSchedule, ForcedScheduleError, ForcedScheduleLimits};
 use asupersync::lab::{
     CancellationRecord, DualRunHarness, DualRunResult, LabConfig, LabRuntime, LoserDrainRecord,
     NormalizedSemantics, ObligationBalanceRecord, RegionCloseRecord, ResourceSurfaceRecord,
     TerminalOutcome, capture_obligation_balance, capture_region_close, normalize_lab_report,
 };
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::runtime::scheduler::DispatchLane;
 use asupersync::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace};
 use fgdb_crypto::Hasher;
 
@@ -70,6 +72,14 @@ pub const FIXTURE_REPLAY_EXPECTED_DIGEST_ENV: &str = "FGDB_SIM_EXPECTED_FIXTURE_
 
 const FIXTURE_REPLAY_MAGIC: &str = "FGDBFIX1";
 const MAX_FIXTURE_REPLAY_PLAN_BYTES: usize = 1_024;
+
+/// Default admission for the exported fixture's exact scheduler evidence.
+///
+/// Callers that force a retained schedule must still supply their own limits.
+/// This bound applies only to source capture and fails closed if the small
+/// producer/consumer fixture unexpectedly expands its scheduler work.
+pub const FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS: ForcedScheduleLimits =
+    ForcedScheduleLimits::new(4_096, 32_768);
 
 /// Runtime posture that produced a fixture receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +131,8 @@ pub struct FixtureFailureEvidence {
     workload_digest: String,
     workload_bytes: Vec<u8>,
     lab_replay_trace_digest: Option<String>,
+    forced_schedule: Option<ForcedSchedule>,
+    forced_schedule_digest: Option<String>,
     task_dispatches: Option<Vec<TaskDispatchStep>>,
     injected_faults: Vec<FaultEvent>,
     task_error: FixtureTaskError,
@@ -130,9 +142,10 @@ pub struct FixtureFailureEvidence {
 /// A complete replay value for the exported producer/consumer fixture.
 ///
 /// This replays the exact canonical workload under the exact fault plan and a
-/// fresh [`LabConfig::new`] built from the recorded scheduler seed. It does
-/// not claim to force the recorded task-dispatch schedule: the pinned
-/// foundation exposes schedule recording but no public schedule-driving API.
+/// fresh [`LabConfig::new`] built from the recorded scheduler seed. This older
+/// descriptor intentionally carries no [`ForcedSchedule`] authority; callers
+/// needing exact dispatch replay must use
+/// [`run_fixture_workload_under_forced_schedule`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixtureReplay {
     workload: FixtureWorkload,
@@ -399,6 +412,7 @@ struct FixtureFailureCapture<'a> {
     trace_bytes: &'a [u8],
     workload: &'a FixtureWorkload,
     lab_replay_trace: Option<&'a ReplayTrace>,
+    forced_schedule: Option<&'a ForcedSchedule>,
     injected_faults: Vec<FaultEvent>,
 }
 
@@ -413,6 +427,7 @@ impl FixtureFailureEvidence {
             trace_bytes,
             workload,
             lab_replay_trace,
+            forced_schedule,
             injected_faults,
         } = capture;
         let mut trace_hasher = Hasher::new();
@@ -422,6 +437,8 @@ impl FixtureFailureEvidence {
         let workload_bytes = workload.to_canonical_bytes();
         let workload_digest = workload.canonical_digest_hex();
         let lab_replay_trace_digest = lab_replay_trace.map(replay_trace_digest);
+        let forced_schedule_digest = forced_schedule.map(forced_schedule_digest);
+        let forced_schedule = forced_schedule.cloned();
         let task_dispatches = lab_replay_trace.map(task_dispatch_steps);
         let mut execution_hasher = Hasher::new();
         execution_hasher.update(b"fgdb.sim.fixture.failure-execution.v1");
@@ -433,6 +450,9 @@ impl FixtureFailureEvidence {
         execution_hasher.update(trace_digest.as_bytes());
         execution_hasher.update(&workload_bytes);
         if let Some(digest) = &lab_replay_trace_digest {
+            execution_hasher.update(digest.as_bytes());
+        }
+        if let Some(digest) = &forced_schedule_digest {
             execution_hasher.update(digest.as_bytes());
         }
         if let Some(dispatches) = &task_dispatches {
@@ -456,6 +476,8 @@ impl FixtureFailureEvidence {
             workload_digest,
             workload_bytes,
             lab_replay_trace_digest,
+            forced_schedule,
+            forced_schedule_digest,
             task_dispatches,
             injected_faults,
             task_error,
@@ -519,6 +541,18 @@ impl FixtureFailureEvidence {
         self.lab_replay_trace_digest.as_deref()
     }
 
+    /// Exact forced-dispatch projection digest, absent under the live runtime.
+    #[must_use]
+    pub fn forced_schedule_digest(&self) -> Option<&str> {
+        self.forced_schedule_digest.as_deref()
+    }
+
+    /// Exact LAB dispatch authority retained for executable failure replay.
+    #[must_use]
+    pub const fn forced_schedule(&self) -> Option<&ForcedSchedule> {
+        self.forced_schedule.as_ref()
+    }
+
     /// Exact ordered LAB task dispatches, absent under the live runtime.
     #[must_use]
     pub fn task_dispatches(&self) -> Option<&[TaskDispatchStep]> {
@@ -565,6 +599,8 @@ pub enum FixtureRunError {
     LabNotQuiescent,
     /// The LAB runtime reported at least one invariant violation.
     LabInvariantViolation,
+    /// Exact scheduler capture or forced execution refused this run.
+    ForcedSchedule(ForcedScheduleError),
     /// The complete runtime replay trace was not available.
     MissingReplayTrace,
     /// The replay trace did not prove successful completion of both tasks.
@@ -626,6 +662,9 @@ impl core::fmt::Display for FixtureRunError {
             Self::LabInvariantViolation => {
                 f.write_str("fixture LAB run reported an invariant violation")
             }
+            Self::ForcedSchedule(error) => {
+                write!(f, "fixture LAB forced schedule refused: {error}")
+            }
             Self::MissingReplayTrace => f.write_str("fixture LAB replay trace is missing"),
             Self::IncompleteReplayTrace => {
                 f.write_str("fixture LAB replay trace lacks completed task dispatches")
@@ -642,9 +681,9 @@ impl std::error::Error for FixtureRunError {}
 
 /// One task-dispatch decision retained from the lab runtime's replay trace.
 ///
-/// This is evidence capture, not a schedule-control API. The pinned asupersync
-/// runtime can record these decisions, but does not yet expose a public driver
-/// that forces an edited decision stream back through [`LabRuntime`].
+/// This is a human-readable projection of [`ReplayTrace`], not scheduler
+/// authority. Exact execution consumes [`ForcedSchedule`] through
+/// [`run_fixture_workload_under_forced_schedule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskDispatchStep {
     task_id: u64,
@@ -720,6 +759,32 @@ fn replay_trace_digest(trace: &ReplayTrace) -> String {
     hasher.finalize().to_hex()
 }
 
+fn forced_schedule_digest(schedule: &ForcedSchedule) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(b"fgdb.sim.fixture.forced-schedule.v1");
+    hasher.update(&schedule.version().to_le_bytes());
+    hasher.update(&schedule.seed().to_le_bytes());
+    hasher.update(&schedule.config_hash().to_le_bytes());
+    hasher.update(&(schedule.dispatches().len() as u64).to_le_bytes());
+    for dispatch in schedule.dispatches() {
+        hasher.update(&dispatch.task().0.to_le_bytes());
+        hasher.update(&dispatch.worker().to_le_bytes());
+        let lane = match dispatch.lane() {
+            DispatchLane::Cancel => 0,
+            DispatchLane::Timed => 1,
+            DispatchLane::Ready => 2,
+            DispatchLane::Stolen => 3,
+        };
+        hasher.update(&[lane]);
+        hasher.update(&dispatch.at_step().to_le_bytes());
+        hasher.update(&dispatch.at_nanos().to_le_bytes());
+    }
+    hasher.update(&schedule.terminal_steps().to_le_bytes());
+    hasher.update(&schedule.terminal_nanos().to_le_bytes());
+    hasher.update(&schedule.terminal_schedule_hash().to_le_bytes());
+    hasher.finalize().to_hex()
+}
+
 impl FixtureRuntime {
     const fn as_str(self) -> &'static str {
         match self {
@@ -748,6 +813,7 @@ pub struct FixtureRunReceipt {
     workload_bytes: Vec<u8>,
     workload_action_count: usize,
     lab_replay_trace_digest: Option<String>,
+    forced_schedule_digest: Option<String>,
     task_dispatches: Option<Vec<TaskDispatchStep>>,
     injected_faults: Vec<FaultEvent>,
     artifact_fields_asserted: Vec<&'static str>,
@@ -765,6 +831,7 @@ impl FixtureRunReceipt {
         trace_bytes: &[u8],
         workload: &FixtureWorkload,
         lab_replay_trace: Option<&ReplayTrace>,
+        forced_schedule: Option<&ForcedSchedule>,
         injected_faults: Vec<FaultEvent>,
     ) -> Self {
         let mut hasher = Hasher::new();
@@ -782,6 +849,7 @@ impl FixtureRunReceipt {
             workload_action_count: workload.actions().len(),
             workload_bytes,
             lab_replay_trace_digest: lab_replay_trace.map(replay_trace_digest),
+            forced_schedule_digest: forced_schedule.map(forced_schedule_digest),
             task_dispatches: lab_replay_trace.map(task_dispatch_steps),
             injected_faults,
             // The exported fixture is a passing substrate run. It neither
@@ -860,6 +928,21 @@ impl FixtureRunReceipt {
         self.lab_replay_trace_digest.as_deref()
     }
 
+    /// Domain-separated digest of the exact forced-dispatch projection.
+    #[must_use]
+    pub fn forced_schedule_digest(&self) -> Option<&str> {
+        self.forced_schedule_digest.as_deref()
+    }
+
+    /// Verifies that this receipt binds the supplied scheduler authority.
+    #[must_use]
+    pub fn matches_forced_schedule(&self, schedule: &ForcedSchedule) -> bool {
+        self.runtime == FixtureRuntime::Lab
+            && self.scheduler_seed == Some(schedule.seed())
+            && self.forced_schedule_digest.as_deref()
+                == Some(forced_schedule_digest(schedule).as_str())
+    }
+
     /// Exact ordered task-dispatch projection captured by the lab runtime.
     #[must_use]
     pub fn task_dispatches(&self) -> Option<&[TaskDispatchStep]> {
@@ -869,8 +952,8 @@ impl FixtureRunReceipt {
     /// Verifies that this receipt was derived from exactly `trace`.
     ///
     /// This binds both the complete replay bytes and the human-readable
-    /// dispatch projection. It deliberately does not claim the runtime can
-    /// force-replay an edited trace.
+    /// dispatch projection. It does not treat those bytes as scheduler
+    /// authority; exact execution is separately bound by `forced_schedule`.
     #[must_use]
     pub fn matches_lab_replay_trace(&self, trace: &ReplayTrace) -> bool {
         let digest = replay_trace_digest(trace);
@@ -915,7 +998,7 @@ impl FixtureRunReceipt {
             |epoch| epoch.to_string(),
         );
         let mut lines = vec![format!(
-            "fixture-run scenario_id={} runtime={} seed={:#x} virtual_clock_epoch_nanos={} trace_digest={} workload_digest={} workload_bytes={} workload_action_count={} lab_replay_trace_digest={} task_dispatch_count={}",
+            "fixture-run scenario_id={} runtime={} seed={:#x} virtual_clock_epoch_nanos={} trace_digest={} workload_digest={} workload_bytes={} workload_action_count={} lab_replay_trace_digest={} forced_schedule_digest={} task_dispatch_count={}",
             self.scenario_id,
             self.runtime.as_str(),
             self.seed,
@@ -925,6 +1008,9 @@ impl FixtureRunReceipt {
             self.workload_bytes.len(),
             self.workload_action_count,
             self.lab_replay_trace_digest
+                .as_deref()
+                .unwrap_or("not-applicable-live"),
+            self.forced_schedule_digest
                 .as_deref()
                 .unwrap_or("not-applicable-live"),
             self.task_dispatches
@@ -978,10 +1064,9 @@ pub struct LabFixtureRun {
     /// Schedule-certificate hash: the dispatch decisions themselves.
     pub schedule_hash: u64,
     /// Complete canonical asupersync record of runtime decisions and events.
-    ///
-    /// Capturing this is a prerequisite for future schedule minimization; the
-    /// current adapter does not claim it can force an edited trace to replay.
     replay_trace: ReplayTrace,
+    /// Exact scheduler authority captured before each task poll.
+    forced_schedule: ForcedSchedule,
     /// Exact versioned workload consumed by the producer.
     workload: FixtureWorkload,
     /// Virtual nanoseconds the run consumed — proof the clock was virtual.
@@ -1003,6 +1088,12 @@ impl LabFixtureRun {
     #[must_use]
     pub const fn replay_trace(&self) -> &ReplayTrace {
         &self.replay_trace
+    }
+
+    /// Exact dispatch projection that a fresh LAB runtime can force before poll.
+    #[must_use]
+    pub const fn forced_schedule(&self) -> &ForcedSchedule {
+        &self.forced_schedule
     }
 
     /// Exact immutable workload consumed by this execution.
@@ -1055,14 +1146,61 @@ pub fn run_fixture_under_lab(
 
 /// Runs one already-materialized workload under the lab runtime.
 ///
-/// This is the execution seam future workload minimization can call. It does
-/// not force an edited scheduler trace; schedule control remains a separate
-/// foundation capability.
+/// This is the seed-driven execution seam used for source capture and workload
+/// minimization. Exact schedule replay uses
+/// [`run_fixture_workload_under_forced_schedule`] and never falls back here.
 pub fn run_fixture_workload_under_lab(
     cfg: &FixtureConfig,
     workload: &FixtureWorkload,
     scratch_dir: &Path,
+    lab_config: LabConfig,
+) -> Result<LabFixtureRun, FixtureRunError> {
+    run_fixture_workload_under_lab_mode(
+        cfg,
+        workload,
+        scratch_dir,
+        lab_config,
+        FixtureLabScheduleMode::Capture(FIXTURE_FORCED_SCHEDULE_CAPTURE_LIMITS),
+    )
+}
+
+/// Force-replays the exact scheduler projection against a fresh fixture run.
+///
+/// This consumes the recorded task choices before every poll. It never edits
+/// or treats [`ReplayTrace`] as scheduler authority and never falls back to the
+/// seed-driven scheduler when the supplied projection diverges.
+pub fn run_fixture_workload_under_forced_schedule(
+    cfg: &FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_dir: &Path,
+    lab_config: LabConfig,
+    schedule: &ForcedSchedule,
+    limits: ForcedScheduleLimits,
+) -> Result<LabFixtureRun, FixtureRunError> {
+    run_fixture_workload_under_lab_mode(
+        cfg,
+        workload,
+        scratch_dir,
+        lab_config,
+        FixtureLabScheduleMode::Force { schedule, limits },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum FixtureLabScheduleMode<'a> {
+    Capture(ForcedScheduleLimits),
+    Force {
+        schedule: &'a ForcedSchedule,
+        limits: ForcedScheduleLimits,
+    },
+}
+
+fn run_fixture_workload_under_lab_mode(
+    cfg: &FixtureConfig,
+    workload: &FixtureWorkload,
+    scratch_dir: &Path,
     mut lab_config: LabConfig,
+    schedule_mode: FixtureLabScheduleMode<'_>,
 ) -> Result<LabFixtureRun, FixtureRunError> {
     let scheduler_seed = lab_config.seed;
     lab_config.auto_advance_time = true;
@@ -1091,7 +1229,23 @@ pub fn run_fixture_workload_under_lab(
         })?;
     lab.scheduler.lock().schedule(producer_task, 0);
     lab.scheduler.lock().schedule(consumer_task, 0);
-    let virtual_report = lab.run_with_auto_advance();
+    let (virtual_elapsed_nanos, forced_schedule) = match schedule_mode {
+        FixtureLabScheduleMode::Capture(limits) => {
+            lab.start_forced_schedule_recording(limits.max_dispatches)
+                .map_err(FixtureRunError::ForcedSchedule)?;
+            let virtual_report = lab.run_with_auto_advance();
+            let forced_schedule = lab
+                .finish_forced_schedule_recording()
+                .map_err(FixtureRunError::ForcedSchedule)?;
+            (virtual_report.virtual_elapsed_nanos, forced_schedule)
+        }
+        FixtureLabScheduleMode::Force { schedule, limits } => {
+            let forced_report = lab
+                .run_forced_schedule(schedule, limits)
+                .map_err(FixtureRunError::ForcedSchedule)?;
+            (forced_report.terminal_nanos, schedule.clone())
+        }
+    };
     let report = lab.report();
     let producer_result = producer_handle
         .try_join()
@@ -1149,6 +1303,7 @@ pub fn run_fixture_workload_under_lab(
                     trace_bytes: &trace_bytes,
                     workload: &workload,
                     lab_replay_trace: Some(&replay_trace),
+                    forced_schedule: Some(&forced_schedule),
                     injected_faults,
                 },
                 error,
@@ -1167,6 +1322,7 @@ pub fn run_fixture_workload_under_lab(
                     trace_bytes: &trace_bytes,
                     workload: &workload,
                     lab_replay_trace: Some(&replay_trace),
+                    forced_schedule: Some(&forced_schedule),
                     injected_faults,
                 },
                 error,
@@ -1182,6 +1338,7 @@ pub fn run_fixture_workload_under_lab(
         &trace_bytes,
         &workload,
         Some(&replay_trace),
+        Some(&forced_schedule),
         injected_faults,
     );
     Ok(LabFixtureRun {
@@ -1189,8 +1346,9 @@ pub fn run_fixture_workload_under_lab(
         trace_fingerprint: report.trace_fingerprint,
         schedule_hash: report.trace_certificate.schedule_hash,
         replay_trace,
+        forced_schedule,
         workload,
-        virtual_elapsed_nanos: virtual_report.virtual_elapsed_nanos,
+        virtual_elapsed_nanos,
         virtual_clock_epoch_nanos: report.now_nanos,
         semantics,
         region_close: runtime_semantics.region_close,
@@ -1241,6 +1399,7 @@ pub fn run_fixture_workload_live(
                     trace_bytes: &trace_bytes,
                     workload: &workload,
                     lab_replay_trace: None,
+                    forced_schedule: None,
                     injected_faults,
                 },
                 error,
@@ -1259,6 +1418,7 @@ pub fn run_fixture_workload_live(
                     trace_bytes: &trace_bytes,
                     workload: &workload,
                     lab_replay_trace: None,
+                    forced_schedule: None,
                     injected_faults,
                 },
                 error,
@@ -1273,6 +1433,7 @@ pub fn run_fixture_workload_live(
         None,
         &trace_bytes,
         &workload,
+        None,
         None,
         injected_faults,
     );
