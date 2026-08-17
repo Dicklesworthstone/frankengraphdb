@@ -15,7 +15,7 @@ current unless the 2026-08-16 delta repeats them.
 important parts of the embedded-spine verdict have materially improved since the
 2026-08-09 snapshot.**
 
-1. The pinned asupersync v0.4.6 source revision exposes
+1. The pinned asupersync v0.4.7 source revision exposes
    `Runtime::request_cx_with_budget`, and the runnable example plus external-package
    probes obtain a production runtime context through that API with default features
    disabled. They narrow it to `CommitCx`; neither `Cx::for_testing` nor the LAB
