@@ -34,7 +34,7 @@ use crate::root::{
     ROOT_FILE_LEN, RootSelection, RootSlot, SLOT_A_OFFSET, SLOT_B_OFFSET, SLOT_LEN, select_root,
 };
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
-use asupersync::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+use asupersync::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
 use std::future::Future;
@@ -93,6 +93,29 @@ where
     sync_file().await?;
     after_file_sync()?;
     sync_parent_directory().await
+}
+
+/// Read exactly one root file without trusting an earlier metadata snapshot as
+/// an allocation bound.
+///
+/// Metadata remains a useful early refusal in [`RootStore::read_file`], but an
+/// inode can grow after that observation. Reading one byte past the fixed
+/// format ceiling makes both the accepted allocation and the overlong witness
+/// finite. This is deliberately a reader helper rather than a filesystem-size
+/// helper so the bound remains load-bearing under that race.
+async fn read_bounded_root<R: AsyncRead + Unpin>(reader: R) -> Result<Vec<u8>, StoreError> {
+    let limit = u64::try_from(ROOT_FILE_LEN)
+        .expect("the two fixed root slots fit in u64")
+        .saturating_add(1);
+    let mut reader = reader.take(limit);
+    let mut bytes = Vec::with_capacity(ROOT_FILE_LEN);
+    reader.read_to_end(&mut bytes).await?;
+    if bytes.len() != ROOT_FILE_LEN {
+        return Err(StoreError::MalformedFile {
+            len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        });
+    }
+    Ok(bytes)
 }
 
 /// The published root file's name inside a database directory.
@@ -524,19 +547,12 @@ impl<V: Vfs> RootStore<V> {
 
     async fn read_file(&self, cx: &impl StorageReadCx) -> Result<Vec<u8>, StoreError> {
         cx.with_restriction_async(async {
-            let mut file = self.vfs.open_read(&self.path).await?;
+            let file = self.vfs.open_read(&self.path).await?;
             let len = file.metadata().await?.len();
             if len != ROOT_FILE_LEN as u64 {
                 return Err(StoreError::MalformedFile { len });
             }
-            let mut bytes = Vec::with_capacity(ROOT_FILE_LEN);
-            file.read_to_end(&mut bytes).await?;
-            if bytes.len() != ROOT_FILE_LEN {
-                return Err(StoreError::MalformedFile {
-                    len: bytes.len() as u64,
-                });
-            }
-            Ok(bytes)
+            read_bounded_root(file).await
         })
         .await
     }
@@ -590,7 +606,7 @@ impl<V: Vfs> RootStore<V> {
 
 #[cfg(test)]
 mod tests {
-    use super::run_created_entry_barrier;
+    use super::{ROOT_FILE_LEN, StoreError, read_bounded_root, run_created_entry_barrier};
     use std::cell::RefCell;
     use std::future::Future;
     use std::pin::pin;
@@ -653,5 +669,42 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(events.into_inner(), ["file", "crash-hook"]);
+    }
+
+    #[test]
+    fn root_reader_accepts_exact_bytes_and_bounds_a_growing_stream() {
+        let exact = vec![0x5a; ROOT_FILE_LEN];
+        assert_eq!(
+            poll_ready(read_bounded_root(std::io::Cursor::new(exact.clone())))
+                .expect("the exact fixed root length is admitted"),
+            exact
+        );
+
+        let short = poll_ready(read_bounded_root(std::io::Cursor::new(vec![
+            0x5a;
+            ROOT_FILE_LEN
+                - 1
+        ])))
+        .expect_err("a short stream is not a root file");
+        assert!(matches!(
+            short,
+            StoreError::MalformedFile { len } if len == (ROOT_FILE_LEN - 1) as u64
+        ));
+
+        // Model the bytes observed after a truthful fixed-size metadata check:
+        // the stream has since grown far beyond that observation. The reader
+        // consumes only the one-byte witness needed to distinguish it from the
+        // exact format. Removing `take(ROOT_FILE_LEN + 1)` changes this error to
+        // the full attacker-controlled length and makes this control red.
+        let overlong = poll_ready(read_bounded_root(std::io::Cursor::new(vec![
+            0x5a;
+            ROOT_FILE_LEN
+                * 4
+        ])))
+        .expect_err("post-metadata growth is bounded and refused");
+        assert!(matches!(
+            overlong,
+            StoreError::MalformedFile { len } if len == (ROOT_FILE_LEN + 1) as u64
+        ));
     }
 }
