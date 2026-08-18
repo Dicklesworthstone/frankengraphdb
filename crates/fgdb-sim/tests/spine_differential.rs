@@ -27,7 +27,7 @@
 //! them — only the durable stream, which is the only thing they are supposed to
 //! agree about.
 
-use asupersync::fs::Vfs;
+use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     BlockStoreCrashPoint, CAPSULE_OBJECT_KIND, Database, DatabaseCreateCrashPoint, DatabaseKeys,
@@ -35,7 +35,7 @@ use fgdb::{
     WriteError, WriteMismatchPolicy,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
-use fgdb_chronicle::commit::CommitCoordinator;
+use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator};
 use fgdb_chronicle::identity::{VerificationOperation, VerificationOutcome};
 use fgdb_chronicle::store::{ROOT_FILE_NAME, StoreError as SlotStoreError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -48,6 +48,7 @@ use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 use std::future::{Future, poll_fn};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::task::Poll;
 
@@ -78,6 +79,109 @@ fn oracle_keys() -> CapsuleKeys {
 
 fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("fgdb-spine-diff-{}-{name}", std::process::id()))
+}
+
+/// A test authority that can hide exactly one namespace entry while every
+/// other operation reaches the real faulting VFS. `Database::open_with_vfs`
+/// must observe this refusal before Chronicle or Strata can escape to the
+/// backing Unix namespace.
+#[derive(Clone)]
+struct GatedNamespaceVfs<V> {
+    inner: V,
+    gated_path: PathBuf,
+    error_kind: io::ErrorKind,
+}
+
+impl<V> GatedNamespaceVfs<V> {
+    fn new(inner: V, gated_path: PathBuf, error_kind: io::ErrorKind) -> Self {
+        Self {
+            inner,
+            gated_path,
+            error_kind,
+        }
+    }
+}
+
+impl<V: Vfs> Vfs for GatedNamespaceVfs<V> {
+    type File = V::File;
+
+    async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+        self.inner.open(path, options).await
+    }
+
+    async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
+        if path == self.gated_path {
+            return Err(io::Error::new(
+                self.error_kind,
+                "planted namespace-authority refusal",
+            ));
+        }
+        self.inner.symlink_metadata(path).await
+    }
+
+    async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(path, permissions).await
+    }
+
+    async fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir(path).await
+    }
+
+    async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir_all(path).await
+    }
+
+    async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+        self.inner.read_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.inner.rename(from, to).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+        self.inner.hard_link(original, link).await
+    }
+
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.canonicalize(path).await
+    }
+
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.read_link(path).await
+    }
+
+    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.inner.read(path).await
+    }
+
+    async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.inner.read_to_string(path).await
+    }
+
+    async fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        self.inner.write(path, contents).await
+    }
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
@@ -212,6 +316,77 @@ fn database_create_waits_for_the_root_names_parent_barrier() {
             DatabaseState::Healthy {
                 published_frontier: CommitSeq(0),
             }
+        );
+    });
+}
+
+#[test]
+fn database_open_obeys_the_supplied_vfs_namespace_authority() {
+    let dir = scratch("open-vfs-namespace-authority");
+
+    under_lab(0x3_2200_0001, move |cx| async move {
+        let vfs = FaultVfs::unix(FaultPlan::faultless());
+        let mut database = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("create through the same VFS");
+        database
+            .write(&cx, vfs_fault_batch())
+            .await
+            .expect("publish one observable row");
+        drop(database);
+
+        assert!(
+            std::fs::symlink_metadata(&dir)
+                .expect("backing root exists")
+                .is_dir(),
+            "the planted refusal must come from the supplied VFS, not the backing namespace"
+        );
+        assert!(
+            dir.join(CAPSULE_DIR).is_dir(),
+            "the backing capsule directory must exist before the VFS hides it"
+        );
+
+        let deny_root =
+            GatedNamespaceVfs::new(vfs.clone(), dir.clone(), io::ErrorKind::PermissionDenied);
+        let refusal = Database::open_with_vfs(&cx, deny_root, &dir, engine_keys())
+            .await
+            .expect_err("the explicit VFS owns root admission");
+        assert!(
+            matches!(refusal, OpenError::Io(ref error) if error.kind() == io::ErrorKind::PermissionDenied),
+            "root authority refusal must retain its typed I/O cause: {refusal}"
+        );
+
+        let hide_capsules =
+            GatedNamespaceVfs::new(vfs.clone(), dir.join(CAPSULE_DIR), io::ErrorKind::NotFound);
+        let refusal = Database::open_with_vfs(&cx, hide_capsules, &dir, engine_keys())
+            .await
+            .expect_err("the explicit VFS owns database-shape admission");
+        assert!(
+            matches!(
+                refusal,
+                OpenError::NotADatabase {
+                    ref path,
+                    missing: CAPSULE_DIR,
+                } if path == &dir
+            ),
+            "a VFS-hidden capsule directory must make the root non-database: {refusal}"
+        );
+
+        let reopened = Database::open_with_vfs(&cx, vfs, &dir, engine_keys())
+            .await
+            .expect("the unmodified VFS still opens the database");
+        assert_eq!(
+            reopened.state(),
+            DatabaseState::Healthy {
+                published_frontier: CommitSeq(1),
+            }
+        );
+        assert!(
+            reopened
+                .vertex(VId(1))
+                .expect("read through reopened spine")
+                .is_some(),
+            "the positive path must serve the row written before reopen"
         );
     });
 }

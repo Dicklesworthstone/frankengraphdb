@@ -1595,29 +1595,7 @@ impl Database<UnixVfs> {
         path: impl AsRef<Path>,
         keys: DatabaseKeys,
     ) -> Result<Self, OpenError> {
-        let path = path.as_ref();
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(OpenError::NotADirectory {
-                    path: path.to_path_buf(),
-                });
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(OpenError::NotADatabase {
-                    path: path.to_path_buf(),
-                    missing: "the directory itself",
-                });
-            }
-            Err(error) => return Err(OpenError::Io(error)),
-        }
-        if !path.join(CAPSULE_DIR).is_dir() {
-            return Err(OpenError::NotADatabase {
-                path: path.to_path_buf(),
-                missing: CAPSULE_DIR,
-            });
-        }
-        Self::bind_with_vfs(cx, UnixVfs::new(), path, keys, false).await
+        Self::open_with_vfs(cx, UnixVfs::new(), path, keys).await
     }
 
     /// Open the commit stream and the block store, then rebuild the fold.
@@ -1754,8 +1732,8 @@ impl<V: Vfs + Clone> Database<V> {
         keys: DatabaseKeys,
     ) -> Result<Self, OpenError> {
         let path = path.as_ref();
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.is_dir() => {
+        match cx.with_restriction_async(vfs.symlink_metadata(path)).await {
+            Ok(metadata) if !metadata.file_type().is_dir() => {
                 return Err(OpenError::NotADirectory {
                     path: path.to_path_buf(),
                 });
@@ -1769,11 +1747,24 @@ impl<V: Vfs + Clone> Database<V> {
             }
             Err(error) => return Err(OpenError::Io(error)),
         }
-        if !path.join(CAPSULE_DIR).is_dir() {
-            return Err(OpenError::NotADatabase {
-                path: path.to_path_buf(),
-                missing: CAPSULE_DIR,
-            });
+        match cx
+            .with_restriction_async(vfs.symlink_metadata(&path.join(CAPSULE_DIR)))
+            .await
+        {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(OpenError::NotADatabase {
+                    path: path.to_path_buf(),
+                    missing: CAPSULE_DIR,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(OpenError::NotADatabase {
+                    path: path.to_path_buf(),
+                    missing: CAPSULE_DIR,
+                });
+            }
+            Err(error) => return Err(OpenError::Io(error)),
         }
         Self::bind_with_vfs(cx, vfs, path, keys, false).await
     }
