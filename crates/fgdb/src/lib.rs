@@ -112,7 +112,7 @@
 
 #![forbid(unsafe_code)]
 
-use asupersync::fs::{UnixVfs, Vfs};
+use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
 use fgdb_chronicle::identity::{CryptoVerificationEvent, IdentifiedObject};
@@ -287,11 +287,29 @@ pub enum OpenError {
     NotEmpty {
         path: PathBuf,
     },
+    /// A verification probe stopped creation after the database directory
+    /// inode was durable but before its name was durable in the parent.
+    ///
+    /// This is emitted only by [`Database::create_with_vfs_at_crash`]. The
+    /// ordinary constructor executes the same path with no stopping point.
+    InjectedCreateCrash(DatabaseCreateCrashPoint),
     Io(std::io::Error),
     Commit(CommitError),
     Store(StoreError),
     /// The durable stream could not be rebuilt into a partition.
     Rebuild(RebuildError),
+}
+
+/// The creation-only instant that separates a durable database directory inode
+/// from a durable name for that directory in its parent.
+///
+/// A test-facing stop exists because a crash-image test must exercise the same
+/// ordering as [`Database::create`], not a copied approximation of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseCreateCrashPoint {
+    /// The database directory itself has been synced, but its parent directory
+    /// has not yet made the new name durable.
+    AfterDatabaseDirectorySyncBeforeParentSync,
 }
 
 /// Why rebuilding the tier-D fold from the durable stream failed.
@@ -559,6 +577,9 @@ impl core::fmt::Display for OpenError {
                 "{} is not empty and does not hold a database",
                 path.display()
             ),
+            Self::InjectedCreateCrash(point) => {
+                write!(f, "injected database-creation crash at {point:?}")
+            }
             Self::Io(error) => write!(f, "io: {error}"),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
             Self::Store(error) => write!(f, "block store: {error}"),
@@ -1549,36 +1570,19 @@ impl<V: Vfs> core::fmt::Debug for Database<V> {
 
 impl Database<UnixVfs> {
     /// Create a database in `path`, which must be absent or an empty directory.
+    ///
+    /// When `path` is absent, its immediate parent must already exist. Creation
+    /// is deliberately one component at a time: after creating the database
+    /// directory, this method syncs that directory and then its parent before
+    /// opening Chronicle or Strata beneath it. Recursively creating missing
+    /// ancestors without an inode-to-parent barrier for every component would
+    /// let a successful create disappear after a crash.
     pub async fn create(
         cx: &CommitCx,
         path: impl AsRef<Path>,
         keys: DatabaseKeys,
     ) -> Result<Self, OpenError> {
-        let path = path.as_ref();
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(OpenError::NotADirectory {
-                    path: path.to_path_buf(),
-                });
-            }
-            Ok(_) => {
-                if path.join(CAPSULE_DIR).exists() {
-                    return Err(OpenError::AlreadyADatabase {
-                        path: path.to_path_buf(),
-                    });
-                }
-                if std::fs::read_dir(path)?.next().is_some() {
-                    return Err(OpenError::NotEmpty {
-                        path: path.to_path_buf(),
-                    });
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir_all(path)?;
-            }
-            Err(error) => return Err(OpenError::Io(error)),
-        }
-        Self::bind_with_vfs(cx, UnixVfs::new(), path, keys, false).await
+        Self::create_with_vfs(cx, UnixVfs::new(), path, keys).await
     }
 
     /// Open the database in `path`.
@@ -1643,6 +1647,97 @@ impl Database<UnixVfs> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Create through an explicit filesystem and cross the database root's own
+    /// namespace durability barrier before creating any children.
+    ///
+    /// Production uses [`Database::create`]. The explicit form is the lab seam
+    /// that proves the root directory obeys the same inode-then-parent ordering
+    /// as Chronicle and Strata entries below it. The current Strata block store
+    /// remains Unix-filesystem-backed; this method does not claim otherwise.
+    #[doc(hidden)]
+    pub async fn create_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<Self, OpenError> {
+        Self::create_with_vfs_inner(cx, vfs, path.as_ref(), keys, None).await
+    }
+
+    /// Stop creation at the named root-directory durability instant.
+    ///
+    /// The ordinary constructor delegates to the same implementation with no
+    /// crash point, so a crash matrix cannot accidentally exercise a weaker
+    /// copy. The point is reached only when `path` was absent and this call
+    /// created it; an already-existing empty directory has no new root name to
+    /// lose. This stops before Chronicle or Strata can create child entries.
+    #[doc(hidden)]
+    pub async fn create_with_vfs_at_crash(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        crash_at: DatabaseCreateCrashPoint,
+    ) -> Result<Self, OpenError> {
+        Self::create_with_vfs_inner(cx, vfs, path.as_ref(), keys, Some(crash_at)).await
+    }
+
+    async fn create_with_vfs_inner(
+        cx: &CommitCx,
+        vfs: V,
+        path: &Path,
+        keys: DatabaseKeys,
+        crash_at: Option<DatabaseCreateCrashPoint>,
+    ) -> Result<Self, OpenError> {
+        let path_buf = path.to_path_buf();
+        let created_root = match cx.with_restriction_async(vfs.symlink_metadata(path)).await {
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                return Err(OpenError::NotADirectory { path: path_buf });
+            }
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                cx.with_restriction_async(vfs.create_dir(path)).await?;
+                true
+            }
+            Err(error) => return Err(OpenError::Io(error)),
+        };
+
+        match cx
+            .with_restriction_async(vfs.symlink_metadata(&path.join(CAPSULE_DIR)))
+            .await
+        {
+            Ok(_) => return Err(OpenError::AlreadyADatabase { path: path_buf }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(OpenError::Io(error)),
+        }
+
+        let mut entries = cx.with_restriction_async(vfs.read_dir(path)).await?;
+        if cx
+            .with_restriction_async(entries.next_entry())
+            .await?
+            .is_some()
+        {
+            return Err(OpenError::NotEmpty { path: path_buf });
+        }
+
+        sync_vfs_directory(cx, &vfs, path).await?;
+        if created_root
+            && crash_at
+                == Some(DatabaseCreateCrashPoint::AfterDatabaseDirectorySyncBeforeParentSync)
+        {
+            return Err(OpenError::InjectedCreateCrash(
+                DatabaseCreateCrashPoint::AfterDatabaseDirectorySyncBeforeParentSync,
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|candidate| !candidate.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync_vfs_directory(cx, &vfs, parent).await?;
+
+        Self::bind_with_vfs(cx, vfs, path, keys, false).await
+    }
+
     /// Open the integrated database while interposing `vfs` on Chronicle and
     /// `manifest.root` I/O.
     ///
@@ -3295,6 +3390,20 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn path(&self) -> &Path {
         self.coordinator.database_dir()
     }
+}
+
+/// Make every namespace entry currently visible in `directory` durable through
+/// the caller's commit authority.
+async fn sync_vfs_directory<V: Vfs>(
+    cx: &CommitCx,
+    vfs: &V,
+    directory: &Path,
+) -> std::io::Result<()> {
+    cx.with_restriction_async(async {
+        let directory = vfs.open(directory, &OpenOptions::new().read(true)).await?;
+        directory.sync_all().await
+    })
+    .await
 }
 
 /// The element-version chain domain.

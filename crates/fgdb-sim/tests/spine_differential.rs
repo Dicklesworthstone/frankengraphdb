@@ -27,10 +27,12 @@
 //! them — only the durable stream, which is the only thing they are supposed to
 //! agree about.
 
+use asupersync::fs::Vfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    BlockStoreCrashPoint, CAPSULE_OBJECT_KIND, Database, DatabaseKeys, DatabaseState,
-    DerivedPublicationStage, ReadError, RebuildError, WriteBatch, WriteError, WriteMismatchPolicy,
+    BlockStoreCrashPoint, CAPSULE_OBJECT_KIND, Database, DatabaseCreateCrashPoint, DatabaseKeys,
+    DatabaseState, DerivedPublicationStage, OpenError, ReadError, RebuildError, WriteBatch,
+    WriteError, WriteMismatchPolicy,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
@@ -128,6 +130,90 @@ fn assert_recovery_fence<T>(
             "{stage:?}: every state-bearing read must carry recovery evidence"
         ),
     }
+}
+
+#[test]
+fn database_create_waits_for_the_root_names_parent_barrier() {
+    let parent = scratch("database-root-dirent");
+    std::fs::create_dir_all(&parent).expect("existing parent");
+    let interrupted = parent.join("interrupted");
+    let durable = parent.join("durable");
+
+    under_lab(0x599_0001, move |cx| async move {
+        let interrupted_vfs = FaultVfs::unix(FaultPlan {
+            dirent_loss: Trigger::Always,
+            ..FaultPlan::faultless()
+        });
+        let error = Database::create_with_vfs_at_crash(
+            &cx,
+            interrupted_vfs.clone(),
+            &interrupted,
+            engine_keys(),
+            DatabaseCreateCrashPoint::AfterDatabaseDirectorySyncBeforeParentSync,
+        )
+        .await
+        .expect_err("the planted crash point must stop creation");
+        assert!(
+            matches!(
+                error,
+                OpenError::InjectedCreateCrash(
+                    DatabaseCreateCrashPoint::AfterDatabaseDirectorySyncBeforeParentSync
+                )
+            ),
+            "wrong planted crash result: {error}"
+        );
+        assert_eq!(
+            interrupted_vfs.pending_dirent_ops(),
+            1,
+            "syncing the new directory inode cannot settle its name in the parent"
+        );
+        interrupted_vfs
+            .crash()
+            .await
+            .expect("roll back the volatile database root name");
+        let error = interrupted_vfs
+            .symlink_metadata(&interrupted)
+            .await
+            .expect_err("the root name was legally losable before parent sync");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+        let durable_vfs = FaultVfs::unix(FaultPlan {
+            dirent_loss: Trigger::Always,
+            ..FaultPlan::faultless()
+        });
+        let database = Database::create_with_vfs(&cx, durable_vfs.clone(), &durable, engine_keys())
+            .await
+            .expect("ordinary creation crosses the root barrier");
+        assert_eq!(
+            durable_vfs.pending_dirent_ops(),
+            0,
+            "a successful create cannot leave any namespace operation volatile"
+        );
+        drop(database);
+
+        durable_vfs
+            .crash()
+            .await
+            .expect("faultless namespace after successful create");
+        assert!(
+            durable_vfs
+                .symlink_metadata(&durable)
+                .await
+                .expect("durable database root")
+                .file_type()
+                .is_dir(),
+            "the database root must survive after create returns"
+        );
+        let reopened = Database::open_with_vfs(&cx, durable_vfs, &durable, engine_keys())
+            .await
+            .expect("the surviving root contains a reopenable database");
+        assert_eq!(
+            reopened.state(),
+            DatabaseState::Healthy {
+                published_frontier: CommitSeq(0),
+            }
+        );
+    });
 }
 
 fn vfs_fault_batch() -> WriteBatch {

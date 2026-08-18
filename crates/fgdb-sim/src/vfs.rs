@@ -96,12 +96,12 @@
 //!   below): a crash loses an unsynced dirent operation entirely or not at
 //!   all. A half-applied rename (both names present, or neither) is a
 //!   journal-implementation artifact this model does not represent.
-//! * **`create_dir`/`remove_dir`/`hard_link` durability.** Directory-tree
-//!   shape and extra links are applied straight to the backing store and
-//!   survive every crash; only *file* dirents (create, rename, remove) are
-//!   modelled. Chronicle creates its database directory once at open and
-//!   never links; modelling those would add surface no landed campaign can
-//!   drive.
+//! * **`remove_dir`/`hard_link` durability.** Directory removal and extra links
+//!   are applied straight to the backing store and survive every crash. File
+//!   dirents (create, rename, remove) and directory creation are modelled. A
+//!   database root is itself a directory dirent, so excluding directory
+//!   creation would make the outermost durability barrier impossible to
+//!   falsify.
 //!
 //! # Dirent durability (fgdb-3a3u)
 //!
@@ -628,8 +628,11 @@ struct NamespaceOp {
 
 enum NamespaceKind {
     /// `path` came into existence. Loss-undo removes it: the name was never
-    /// durable, even if the file's contents were honestly synced.
-    Created { path: PathBuf },
+    /// durable, even if the entry's inode or contents were honestly synced.
+    Created {
+        path: PathBuf,
+        entry_kind: CreatedEntryKind,
+    },
     /// `from` became `to`. Loss-undo renames back and, when the rename
     /// clobbered an existing `to`, restores that file's durable bytes.
     Renamed {
@@ -639,6 +642,12 @@ enum NamespaceKind {
     },
     /// `path` was unlinked. Loss-undo restores its durable bytes.
     Removed { path: PathBuf, durable: Vec<u8> },
+}
+
+#[derive(Clone, Copy)]
+enum CreatedEntryKind {
+    File,
+    Directory,
 }
 
 impl NamespaceKind {
@@ -654,7 +663,7 @@ impl NamespaceKind {
     /// The name the loss makes vanish (or reappear, for a removal).
     fn vanished_path(&self) -> &Path {
         match self {
-            Self::Created { path } | Self::Removed { path, .. } => path,
+            Self::Created { path, .. } | Self::Removed { path, .. } => path,
             Self::Renamed { to, .. } => to,
         }
     }
@@ -995,8 +1004,16 @@ impl<V: Vfs> FaultVfs<V> {
         }
         for op in lost.into_iter().rev() {
             match op.kind {
-                NamespaceKind::Created { path } => {
-                    match self.backing.remove_file(&path).await {
+                NamespaceKind::Created { path, entry_kind } => {
+                    let rollback = match entry_kind {
+                        CreatedEntryKind::File => self.backing.remove_file(&path).await,
+                        // If a child dirent happened to survive while its
+                        // ancestor name did not, the whole subtree is still
+                        // unreachable after recovery. Removing recursively is
+                        // the faithful rollback of the ancestor link.
+                        CreatedEntryKind::Directory => self.backing.remove_dir_all(&path).await,
+                    };
+                    match rollback {
                         Ok(()) => {}
                         // Already absent (e.g. a later, also-lost removal was
                         // rolled back first): the name is gone either way.
@@ -1612,6 +1629,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
                 path.parent().map(Path::to_path_buf).into_iter().collect(),
                 NamespaceKind::Created {
                     path: path.to_path_buf(),
+                    entry_kind: CreatedEntryKind::File,
                 },
             );
         }
@@ -1652,11 +1670,68 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
     }
 
     async fn create_dir(&self, path: &Path) -> io::Result<()> {
-        self.backing.create_dir(path).await
+        self.backing.create_dir(path).await?;
+        self.record_namespace(
+            path.parent().map(Path::to_path_buf).into_iter().collect(),
+            NamespaceKind::Created {
+                path: path.to_path_buf(),
+                entry_kind: CreatedEntryKind::Directory,
+            },
+        );
+        Ok(())
     }
 
     async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        self.backing.create_dir_all(path).await
+        // Create one component at a time so each newly introduced name is
+        // attributed to the parent directory whose sync makes it durable.
+        // Recording only after our create succeeds avoids claiming a racing
+        // creator's namespace operation as ours.
+        let mut components: Vec<&Path> = path
+            .ancestors()
+            .filter(|candidate| !candidate.as_os_str().is_empty())
+            .collect();
+        components.reverse();
+        for component in components {
+            match self.backing.metadata(component).await {
+                Ok(metadata) if metadata.file_type().is_dir() => continue,
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("{} exists and is not a directory", component.display()),
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+
+            match self.backing.create_dir(component).await {
+                Ok(()) => self.record_namespace(
+                    component
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .into_iter()
+                        .collect(),
+                    NamespaceKind::Created {
+                        path: component.to_path_buf(),
+                        entry_kind: CreatedEntryKind::Directory,
+                    },
+                ),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    match self.backing.metadata(component).await {
+                        Ok(metadata) if metadata.file_type().is_dir() => {}
+                        Ok(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::AlreadyExists,
+                                format!("{} exists and is not a directory", component.display()),
+                            ));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn remove_dir(&self, path: &Path) -> io::Result<()> {

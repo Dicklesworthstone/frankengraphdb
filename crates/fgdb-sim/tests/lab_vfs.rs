@@ -721,6 +721,47 @@ fn an_honest_directory_sync_makes_the_name_immune_to_loss() {
 }
 
 #[test]
+fn a_created_directory_owes_its_parent_even_when_its_child_is_durable() {
+    let parent = scratch_dir("directory-dirent");
+    let first = parent.join("first");
+    let leaf = first.join("leaf");
+    let vfs = FaultVfs::unix(FaultPlan {
+        dirent_loss: Trigger::Always,
+        ..FaultPlan::faultless()
+    });
+
+    runtime().block_on(async {
+        vfs.create_dir_all(&leaf).await.expect("nested create");
+        assert_eq!(
+            vfs.pending_dirent_ops(),
+            2,
+            "each newly created directory name owes its own parent"
+        );
+
+        sync_dir(&vfs, &first)
+            .await
+            .expect("make the leaf name durable");
+        assert_eq!(
+            vfs.pending_dirent_ops(),
+            1,
+            "syncing first settles leaf, not first's name in parent"
+        );
+
+        vfs.crash().await.expect("crash rollback");
+        let error = vfs
+            .symlink_metadata(&first)
+            .await
+            .expect_err("the unsynced ancestor name must disappear");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    });
+
+    let events = vfs.events();
+    assert_eq!(events.len(), 1, "only the unsettled ancestor is lost");
+    assert_eq!(events[0].path, first);
+    assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+}
+
+#[test]
 fn a_lying_directory_sync_settles_nothing() {
     let dir = scratch_dir("dirent-lie");
     let path = dir.join("log");
