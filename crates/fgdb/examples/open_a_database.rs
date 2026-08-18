@@ -53,11 +53,11 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     // A per-pid directory: concurrent panes run this against one /tmp, and
     // nothing is ever removed — rule 1 has no carve-out for example code.
     let path = std::env::temp_dir().join(format!("fgdb-example-{}", std::process::id()));
-    let keys = DatabaseKeys {
-        k_oid: [0x5a; 32],
-        namespace: DatabaseSecurityNamespaceId([0x77; 32]),
-        dek: [0x3c; 32],
-    };
+    let keys = DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    );
 
     println!("fgdb spine witness");
     println!("  database directory: {}", path.display());
@@ -68,7 +68,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
     runtime.block_on(async move {
         // ---- create, write, read -------------------------------------------
-        let mut db = Database::create(cx, &path, keys).await?;
+        let mut db = Database::create(cx, &path, keys.clone()).await?;
         let mut batch = WriteBatch::new(KNOWS);
         batch.create_vertex(VId(1), vec![], vec![]);
         batch.create_vertex(VId(2), vec![], vec![]);

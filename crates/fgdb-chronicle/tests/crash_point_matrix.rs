@@ -58,13 +58,13 @@ fn digest(seed: u8) -> Digest {
 /// The keys every coordinator in this file opens under. Fixed so a capsule's
 /// identity is a function of its bytes alone across the whole suite.
 fn keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: [0x5a; 32],
-        namespace: fgdb_types::ids::DatabaseSecurityNamespaceId([0x77; 32]),
-        dek: [0x3c; 32],
-        object_kind: 0x0274,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        [0x5a; 32],
+        fgdb_types::ids::DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+        0x0274,
+        CapsuleProfile::balanced(),
+    )
 }
 
 /// The identity capsule `seq`'s bytes will have. Derived, not invented: the

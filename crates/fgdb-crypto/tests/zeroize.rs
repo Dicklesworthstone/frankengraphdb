@@ -20,7 +20,7 @@
 //! memset-targeted byte and word boundaries. That remains measured artifact
 //! evidence, not a portable Rust-language zeroization theorem.
 
-use fgdb_crypto::zeroize::{Secret, scrub_slice, scrub_words, scrub_words32};
+use fgdb_crypto::zeroize::{Secret, SharedSecret, scrub_slice, scrub_words, scrub_words32};
 
 /// Scrubbing zeroes the bytes. The directly observable half of the contract.
 #[test]
@@ -150,4 +150,25 @@ fn scrubbing_twice_is_idempotent() {
     secret.scrub();
     assert_eq!(secret.expose(), &[0u8; 32]);
     // And the implicit drop that follows scrubs a third time without incident.
+}
+
+/// Cloning a long-lived authority must clone ownership, not key bytes.
+#[test]
+fn shared_secret_clones_share_one_scrub_on_last_drop_allocation() {
+    let first = SharedSecret::new([0x96_u8; 32]);
+    let second = first.clone();
+
+    assert!(
+        core::ptr::eq(first.expose(), second.expose()),
+        "SharedSecret::clone copied the bytes into a second allocation"
+    );
+    assert!(
+        core::mem::needs_drop::<SharedSecret<32>>(),
+        "the shared owner cannot reach Secret's scrub-on-drop boundary"
+    );
+    assert_eq!(
+        format!("{first:?}"),
+        "SharedSecret<32>(redacted)",
+        "the shared owner exposed key material through Debug"
+    );
 }

@@ -58,24 +58,20 @@ const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77
 const DEK: [u8; 32] = [0x3c; 32];
 
 fn engine_keys() -> DatabaseKeys {
-    DatabaseKeys {
-        k_oid: K_OID,
-        namespace: NAMESPACE,
-        dek: DEK,
-    }
+    DatabaseKeys::new(K_OID, NAMESPACE, DEK)
 }
 
 /// The oracle side opens the stream itself. These must be the keys the engine
 /// wrote under or the capsules will not open — which is a property worth having
 /// exercised rather than hidden behind a shared constructor.
 fn oracle_keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: K_OID,
-        namespace: NAMESPACE,
-        dek: DEK,
-        object_kind: CAPSULE_OBJECT_KIND,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        DEK,
+        CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn scratch(name: &str) -> PathBuf {

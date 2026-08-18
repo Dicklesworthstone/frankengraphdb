@@ -55,11 +55,11 @@ fn production_runtime() -> (Runtime, Cx) {
 }
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys {
-        k_oid: [0x5a; 32],
-        namespace: DatabaseSecurityNamespaceId([0x77; 32]),
-        dek: [0x3c; 32],
-    }
+    DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    )
 }
 
 fn scratch(name: &str) -> PathBuf {

@@ -23,17 +23,17 @@
 //! # use fgdb_types::ids::DatabaseSecurityNamespaceId;
 //! # use fgdb_types::{EId, VId};
 //! # let path = std::env::temp_dir().join(format!("fgdb-doctest-{}", std::process::id()));
-//! # let keys = DatabaseKeys {
-//! #     k_oid: [0x5a; 32],
-//! #     namespace: DatabaseSecurityNamespaceId([0x77; 32]),
-//! #     dek: [0x3c; 32],
-//! # };
+//! # let keys = DatabaseKeys::new(
+//! #     [0x5a; 32],
+//! #     DatabaseSecurityNamespaceId([0x77; 32]),
+//! #     [0x3c; 32],
+//! # );
 //! # let runtime = RuntimeBuilder::new().build().expect("production runtime");
 //! # let root = runtime.request_cx_with_budget(Budget::INFINITE);
 //! # let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
 //! # let path = &path;
 //! # runtime.block_on(async move {
-//!     let mut db = Database::create(cx, path, keys).await?;
+//!     let mut db = Database::create(cx, path, keys.clone()).await?;
 //!     let mut batch = WriteBatch::new(RelationId(1));
 //!     batch.create_vertex(VId(1), vec![], vec![]);
 //!     batch.create_vertex(VId(2), vec![], vec![]);
@@ -120,7 +120,7 @@ use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate};
 use fgdb_chronicle::{
     RootBootstrap, RootSelection, RootSlot, RootStore, store::StoreError as SlotStoreError,
 };
-use fgdb_crypto::Digest;
+use fgdb_crypto::{Digest, zeroize::SharedSecret};
 use fgdb_delta_types::{
     CanonicalError, CommittedMarker, CoordinateEntry, DeltaRow, ElementId, IndexError, LabelId,
     LocalDeltaBatchIndex, LogicalDeltaBatch, LogicalDeltaTemplate, PropertyKeyId, RelationId,
@@ -180,13 +180,13 @@ const PARTITION: u64 = 0;
 /// `Debug` is deliberately redacted. This public value is also retained inside
 /// [`Database`], so a derived formatter here would leak both raw keys through
 /// direct formatting and transitively through the database handle.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct DatabaseKeys {
     /// The immutable object-identity key (§5.1).
-    pub k_oid: [u8; 32],
+    k_oid: SharedSecret<32>,
     pub namespace: DatabaseSecurityNamespaceId,
     /// The data-encryption key for capsules.
-    pub dek: [u8; 32],
+    dek: SharedSecret<32>,
 }
 
 impl core::fmt::Debug for DatabaseKeys {
@@ -196,18 +196,44 @@ impl core::fmt::Debug for DatabaseKeys {
 }
 
 impl DatabaseKeys {
-    fn capsule_keys(&self) -> CapsuleKeys {
-        CapsuleKeys {
-            k_oid: self.k_oid,
-            namespace: self.namespace,
-            dek: self.dek,
-            object_kind: CAPSULE_OBJECT_KIND,
-            profile: CapsuleProfile::balanced(),
+    /// Move raw key bytes into shared scrub-on-last-drop ownership.
+    pub fn new(k_oid: [u8; 32], namespace: DatabaseSecurityNamespaceId, dek: [u8; 32]) -> Self {
+        Self {
+            k_oid: SharedSecret::new(k_oid),
+            namespace,
+            dek: SharedSecret::new(dek),
         }
     }
 
+    /// Borrow the logical-identity key without creating an owned copy.
+    pub fn k_oid(&self) -> &[u8; 32] {
+        self.k_oid.expose()
+    }
+
+    /// Clone ownership of the logical-identity authority without copying it.
+    #[doc(hidden)]
+    pub fn shared_k_oid(&self) -> SharedSecret<32> {
+        self.k_oid.clone()
+    }
+
+    /// Borrow the capsule encryption key without creating an owned copy.
+    pub fn dek(&self) -> &[u8; 32] {
+        self.dek.expose()
+    }
+
+    #[doc(hidden)]
+    pub fn capsule_keys(&self) -> CapsuleKeys {
+        CapsuleKeys::new(
+            self.k_oid.clone(),
+            self.namespace,
+            self.dek.clone(),
+            CAPSULE_OBJECT_KIND,
+            CapsuleProfile::balanced(),
+        )
+    }
+
     fn block_keys(&self) -> (&[u8; 32], DatabaseSecurityNamespaceId) {
-        (&self.k_oid, self.namespace)
+        (self.k_oid.expose(), self.namespace)
     }
 }
 
@@ -1681,7 +1707,7 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Self, OpenError> {
         let coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
-        let store = BlockStore::open(cx, path, keys.k_oid, keys.namespace)?;
+        let store = BlockStore::open(cx, path, keys.k_oid.clone(), keys.namespace)?;
         let mut crypto_verification_events = Vec::new();
         // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
         // resolvable manifest. Before accepting it, bind verifies the selected
@@ -1918,7 +1944,7 @@ impl<V: Vfs + Clone> Database<V> {
             DatabaseState::CommitOutcomeUnknown { .. }
             | DatabaseState::NeedsAuthoritativeRecovery(_) => {
                 let path = self.path().to_path_buf();
-                let keys = self.keys;
+                let keys = self.keys.clone();
                 let vfs = self.vfs.clone();
                 drop(self);
                 Self::open_with_vfs(cx, vfs, path, keys).await
@@ -2529,7 +2555,7 @@ impl<V: Vfs + Clone> Database<V> {
             }],
         )?;
 
-        let capsule = prepare_capsule(&self.keys.k_oid, self.keys.namespace, &template)?;
+        let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
         let marker_ref = match self
             .coordinator
             .commit_with_crash(
@@ -3122,7 +3148,7 @@ impl<V: Vfs + Clone> Database<V> {
                         RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
                     })?;
                     let patch_id = fgdb_strata::edge_props::property_patch_id(
-                        &self.keys.k_oid,
+                        self.keys.k_oid(),
                         self.keys.namespace,
                         &patch_bytes,
                     );
@@ -3151,7 +3177,7 @@ impl<V: Vfs + Clone> Database<V> {
             };
             let (first_seq, last_seq) =
                 fgdb_strata::root::span_of(entries).expect("the packer emits no empty blocks");
-            let block_id = fgdb_strata::block_id(&self.keys.k_oid, self.keys.namespace, &bytes);
+            let block_id = fgdb_strata::block_id(self.keys.k_oid(), self.keys.namespace, &bytes);
             chain_heads.insert(family, fgdb_strata::DeltaBlockVersion(block_id));
             sealed.push(fgdb_strata::writer::SealedBlock {
                 block_id,
@@ -3174,7 +3200,7 @@ impl<V: Vfs + Clone> Database<V> {
                 fgdb_strata::vertex::span_of_rows(rows).expect("the packer emits no empty patches");
             sealed_patches.push(fgdb_strata::writer::SealedPatch {
                 patch_id: fgdb_strata::vertex::vertex_patch_id(
-                    &self.keys.k_oid,
+                    self.keys.k_oid(),
                     self.keys.namespace,
                     &bytes,
                 ),
@@ -3799,7 +3825,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     let manifest_bytes =
         encode_manifest(&manifest_records).expect("records_of proved these records canonical");
     let manifest = ManifestVersion(fgdb_strata::manifest::manifest_id(
-        &keys.k_oid,
+        keys.k_oid(),
         keys.namespace,
         &manifest_bytes,
     ));

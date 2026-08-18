@@ -47,13 +47,13 @@ const PROP_NAME: PropertyKeyId = PropertyKeyId(100);
 /// the caller computed would differ — which is exactly what
 /// `a_prepared_capsule_agrees_with_the_stores_derived_identity` checks.
 fn keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: K_OID,
-        namespace: NAMESPACE,
-        dek: [0x3c; 32],
-        object_kind: fgdb_sim::CAPSULE_OBJECT_KIND,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        [0x3c; 32],
+        fgdb_sim::CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn scratch_dir(name: &str) -> PathBuf {

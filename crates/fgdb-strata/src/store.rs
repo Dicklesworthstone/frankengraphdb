@@ -54,6 +54,7 @@ use crate::edge_props::{
 };
 use crate::vertex::{VertexPatchVersion, VertexRow, decode_patch, vertex_patch_id};
 use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
+use fgdb_crypto::zeroize::SharedSecret;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, StorageReadCx};
@@ -401,7 +402,7 @@ fn read_bounded(
 pub struct BlockStore {
     dir: PathBuf,
     publication_lock_path: PathBuf,
-    k_oid: [u8; 32],
+    k_oid: SharedSecret<32>,
     namespace: DatabaseSecurityNamespaceId,
 }
 
@@ -458,10 +459,18 @@ impl AdmittedPartitionRoot<'_> {
 }
 
 impl BlockStore {
+    /// Borrow the retained identity authority for ownership-law tests.
+    ///
+    /// This never returns an owned key and is not a general data API.
+    #[doc(hidden)]
+    pub fn k_oid(&self) -> &[u8; 32] {
+        self.k_oid.expose()
+    }
+
     pub fn open(
         cx: &CommitCx,
         database_dir: impl AsRef<Path>,
-        k_oid: [u8; 32],
+        k_oid: impl Into<SharedSecret<32>>,
         namespace: DatabaseSecurityNamespaceId,
     ) -> Result<Self, StoreError> {
         Self::open_with_crash(cx, database_dir, k_oid, namespace, None)
@@ -475,10 +484,11 @@ impl BlockStore {
     pub fn open_with_crash(
         cx: &CommitCx,
         database_dir: impl AsRef<Path>,
-        k_oid: [u8; 32],
+        k_oid: impl Into<SharedSecret<32>>,
         namespace: DatabaseSecurityNamespaceId,
         crash_at: Option<BlockStoreCrashPoint>,
     ) -> Result<Self, StoreError> {
+        let k_oid = k_oid.into();
         let database_dir = database_dir.as_ref().to_path_buf();
         let dir = database_dir.join(BLOCK_DIR);
         match std::fs::create_dir(&dir) {
@@ -655,7 +665,7 @@ impl BlockStore {
         let offered_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         ensure_size_within_limit(offered_len, MAX_STORED_OBJECT_BYTES)?;
 
-        let id = kind.identity(&self.k_oid, self.namespace, bytes);
+        let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
         let path = self.path(id);
 
         before_lock();
@@ -677,7 +687,7 @@ impl BlockStore {
                 let mut file =
                     cx.with_restriction(|| OpenOptions::new().read(true).write(true).open(&path))?;
                 let existing = read_bounded(cx, &mut file, MAX_STORED_OBJECT_BYTES)?;
-                let actual = kind.identity(&self.k_oid, self.namespace, &existing);
+                let actual = kind.identity(self.k_oid.expose(), self.namespace, &existing);
                 if actual != id {
                     return Err(StoreError::DamagedExisting {
                         expected: id,
@@ -799,7 +809,7 @@ impl BlockStore {
         id: DeltaBlockVersion,
     ) -> Result<Vec<u8>, StoreError> {
         let bytes = self.read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)?;
-        let actual = block_id(&self.k_oid, self.namespace, &bytes);
+        let actual = block_id(self.k_oid.expose(), self.namespace, &bytes);
         if actual != id.0 {
             return Err(StoreError::IdentityMismatch {
                 expected: id.0,
@@ -862,8 +872,9 @@ impl BlockStore {
     {
         let limit = MANIFEST_HEADER_AND_RECORDS_CEILING;
         let bytes = self.read_object_bytes(cx, id.0, limit)?;
-        let records = crate::manifest::read_manifest(&self.k_oid, self.namespace, &bytes, id)
-            .map_err(StoreError::MalformedManifest)?;
+        let records =
+            crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
+                .map_err(StoreError::MalformedManifest)?;
         let mut resolved = Vec::with_capacity(records.len());
         for (at, record) in records.into_iter().enumerate() {
             let root =
@@ -888,7 +899,8 @@ impl BlockStore {
         id: ObjectId,
     ) -> Result<Vec<u8>, StoreError> {
         let bytes = self.read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)?;
-        let actual = crate::edge_props::property_patch_id(&self.k_oid, self.namespace, &bytes);
+        let actual =
+            crate::edge_props::property_patch_id(self.k_oid.expose(), self.namespace, &bytes);
         if actual != id {
             return Err(StoreError::IdentityMismatch {
                 expected: id,
@@ -906,7 +918,7 @@ impl BlockStore {
         id: VertexPatchVersion,
     ) -> Result<Vec<u8>, StoreError> {
         let bytes = self.read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)?;
-        let actual = vertex_patch_id(&self.k_oid, self.namespace, &bytes);
+        let actual = vertex_patch_id(self.k_oid.expose(), self.namespace, &bytes);
         if actual != id.0 {
             return Err(StoreError::IdentityMismatch {
                 expected: id.0,
@@ -940,9 +952,14 @@ impl BlockStore {
                 at,
                 error: Box::new(error),
             })?;
-        let entries =
-            crate::root::resolve_block_ref(&self.k_oid, self.namespace, at, reference, &bytes)
-                .map_err(StoreError::MalformedRoot)?;
+        let entries = crate::root::resolve_block_ref(
+            self.k_oid.expose(),
+            self.namespace,
+            at,
+            reference,
+            &bytes,
+        )
+        .map_err(StoreError::MalformedRoot)?;
         // The block's hosted property patch is part of the block's truth
         // (fgdb-yqor): reachability is root -> block -> patch, so admitting
         // the block admits its patch — identity, format, and the joint
@@ -972,7 +989,7 @@ impl BlockStore {
                     error: Box::new(error),
                 })?;
             let rows = read_property_patch(
-                &self.k_oid,
+                self.k_oid.expose(),
                 self.namespace,
                 &patch_bytes,
                 EdgePropertyPatchVersion(patch_id),
@@ -1078,7 +1095,7 @@ impl BlockStore {
                 at,
                 error: Box::new(error),
             })?;
-        crate::root::resolve_patch_ref(&self.k_oid, self.namespace, at, reference, &bytes)
+        crate::root::resolve_patch_ref(self.k_oid.expose(), self.namespace, at, reference, &bytes)
             .map_err(StoreError::MalformedRoot)
     }
 
@@ -1196,7 +1213,7 @@ impl BlockStore {
         bytes: &[u8],
         receipts: &mut PublishReceipts,
     ) -> Result<VertexPatchVersion, StoreError> {
-        let id = vertex_patch_id(&self.k_oid, self.namespace, bytes);
+        let id = vertex_patch_id(self.k_oid.expose(), self.namespace, bytes);
         if receipts.patch_spans.contains_key(&id) {
             return Ok(VertexPatchVersion(id));
         }
@@ -1254,7 +1271,7 @@ impl BlockStore {
         receipts: &mut PublishReceipts,
         crash_at: Option<BlockStoreCrashPoint>,
     ) -> Result<DeltaBlockVersion, StoreError> {
-        let id = block_id(&self.k_oid, self.namespace, bytes);
+        let id = block_id(self.k_oid.expose(), self.namespace, bytes);
         if receipts.spans.contains_key(&id) {
             return Ok(DeltaBlockVersion(id));
         }
@@ -1285,7 +1302,7 @@ impl BlockStore {
                 }
             };
             let rows = read_property_patch(
-                &self.k_oid,
+                self.k_oid.expose(),
                 self.namespace,
                 proof_bytes,
                 EdgePropertyPatchVersion(patch_id),
@@ -1431,7 +1448,7 @@ impl BlockStore {
         id: PartitionRootVersion,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
         let bytes = self.read_object_bytes(cx, id.0, crate::root::MAX_ENCODED_ROOT_BYTES as u64)?;
-        crate::root::read_root(&self.k_oid, self.namespace, &bytes, id.0)
+        crate::root::read_root(self.k_oid.expose(), self.namespace, &bytes, id.0)
             .map_err(StoreError::MalformedRoot)
     }
 

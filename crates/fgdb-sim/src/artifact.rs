@@ -1116,21 +1116,17 @@ const RECOVERY_NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespac
 const RECOVERY_DEK: [u8; 32] = [0x3c; 32];
 
 fn recovery_keys() -> DatabaseKeys {
-    DatabaseKeys {
-        k_oid: RECOVERY_K_OID,
-        namespace: RECOVERY_NAMESPACE,
-        dek: RECOVERY_DEK,
-    }
+    DatabaseKeys::new(RECOVERY_K_OID, RECOVERY_NAMESPACE, RECOVERY_DEK)
 }
 
 fn recovery_capsule_keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: RECOVERY_K_OID,
-        namespace: RECOVERY_NAMESPACE,
-        dek: RECOVERY_DEK,
-        object_kind: CAPSULE_OBJECT_KIND,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        RECOVERY_K_OID,
+        RECOVERY_NAMESPACE,
+        RECOVERY_DEK,
+        CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn recovery_batch(vid: VId) -> WriteBatch {

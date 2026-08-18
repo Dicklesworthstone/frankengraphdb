@@ -42,6 +42,7 @@
 //! test below proves the scrub RUNS, not that no copy survives anywhere.
 
 use core::sync::atomic::{Ordering, compiler_fence};
+use std::sync::Arc;
 
 /// A fixed-size secret that scrubs itself on drop.
 ///
@@ -108,6 +109,68 @@ impl<const N: usize> core::fmt::Debug for Secret<N> {
 impl<const N: usize> From<[u8; N]> for Secret<N> {
     fn from(bytes: [u8; N]) -> Self {
         Secret::new(bytes)
+    }
+}
+
+/// Shared ownership of one scrub-on-last-drop secret allocation.
+///
+/// Long-lived database components often need the same `K_oid` authority: the
+/// embedded handle, Chronicle, and Strata all derive identities from it. A
+/// plain `[u8; N]` field makes every handoff another untracked secret copy;
+/// cloning [`Secret`] would have the same defect, so `Secret` deliberately
+/// cannot be cloned. `SharedSecret` instead clones only an [`Arc`] pointer.
+/// Every owner borrows the same fixed-size [`Secret`] allocation, and the
+/// existing `Secret` destructor scrubs that allocation when the last owner is
+/// dropped.
+///
+/// This does not strengthen the safe-code zeroization claim documented at the
+/// module root. In particular, it cannot scrub compiler-created temporaries or
+/// the caller's pre-construction copies. It does remove deliberate retained
+/// copies from the database ownership graph.
+///
+/// `SharedSecret` is intentionally not `Copy`:
+///
+/// ```compile_fail
+/// use fgdb_crypto::zeroize::SharedSecret;
+/// fn requires_copy<T: Copy>() {}
+/// requires_copy::<SharedSecret<32>>();
+/// ```
+///
+/// There is intentionally no value-returning extraction API:
+///
+/// ```compile_fail
+/// use fgdb_crypto::zeroize::SharedSecret;
+/// let secret = SharedSecret::new([0x5a; 32]);
+/// let _raw: [u8; 32] = secret.into_inner();
+/// ```
+#[derive(Clone)]
+pub struct SharedSecret<const N: usize> {
+    secret: Arc<Secret<N>>,
+}
+
+impl<const N: usize> SharedSecret<N> {
+    /// Move raw material into a single shared scrub-on-last-drop owner.
+    pub fn new(bytes: [u8; N]) -> Self {
+        Self {
+            secret: Arc::new(Secret::new(bytes)),
+        }
+    }
+
+    /// Borrow the shared bytes without manufacturing another owned copy.
+    pub fn expose(&self) -> &[u8; N] {
+        self.secret.expose()
+    }
+}
+
+impl<const N: usize> core::fmt::Debug for SharedSecret<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "SharedSecret<{N}>(redacted)")
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for SharedSecret<N> {
+    fn from(bytes: [u8; N]) -> Self {
+        Self::new(bytes)
     }
 }
 

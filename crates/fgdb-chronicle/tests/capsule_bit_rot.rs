@@ -54,13 +54,13 @@ fn digest(seed: u8) -> Digest {
 }
 
 fn keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: [0x5a; 32],
-        namespace: fgdb_types::ids::DatabaseSecurityNamespaceId([0x77; 32]),
-        dek: [0x3c; 32],
-        object_kind: 0x0274,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        [0x5a; 32],
+        fgdb_types::ids::DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+        0x0274,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn marker_for(seq: u64, capsule: ObjectId, chain: &MarkerChain) -> CommitMarker {
@@ -252,7 +252,7 @@ fn an_undamaged_capsule_reads_back_exactly() {
 
         let (_, symbols) = decode_container(&std::fs::read(&path).expect("read")).expect("decodes");
         assert!(
-            symbols.len() > keys().profile.erasure_budget(),
+            symbols.len() > keys().profile().erasure_budget(),
             "the fixture must hold more symbols than the repair budget, or \
              'within budget' and 'the whole object' are the same test"
         );
@@ -294,7 +294,7 @@ fn rot_within_the_repair_budget_heals() {
     under_lab(3, move |cx| async move {
         let cx = &cx;
         let (path, oid) = committed(&dir, cx).await;
-        let budget = keys().profile.erasure_budget();
+        let budget = keys().profile().erasure_budget();
         let total = rot_symbols(&path, budget);
         assert!(budget > 0 && budget < total);
 
@@ -323,7 +323,7 @@ fn rot_beyond_the_repair_budget_fails_closed() {
     under_lab(4, move |cx| async move {
         let cx = &cx;
         let (path, oid) = committed(&dir, cx).await;
-        let over = keys().profile.erasure_budget() + 1;
+        let over = keys().profile().erasure_budget() + 1;
         rot_symbols(&path, over);
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys())
@@ -345,7 +345,7 @@ fn rot_beyond_the_repair_budget_fails_closed() {
 /// entirely — each would only be checking one side of a boundary it never names.
 #[test]
 fn the_repair_budget_is_the_exact_boundary() {
-    let budget = keys().profile.erasure_budget();
+    let budget = keys().profile().erasure_budget();
     let heals = {
         let dir = scratch_dir("edge-at");
         under_lab(5, move |cx| async move {
@@ -447,7 +447,7 @@ fn healed_bytes_still_recompute_their_identity() {
     under_lab(9, move |cx| async move {
         let cx = &cx;
         let (path, oid) = committed(&dir, cx).await;
-        rot_symbols(&path, keys().profile.erasure_budget());
+        rot_symbols(&path, keys().profile().erasure_budget());
 
         let coordinator = CommitCoordinator::open(cx, &dir, keys())
             .await

@@ -61,13 +61,13 @@ const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 
 fn keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: K_OID,
-        namespace: NAMESPACE,
-        dek: [0x3c; 32],
-        object_kind: fgdb_sim::CAPSULE_OBJECT_KIND,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        [0x3c; 32],
+        fgdb_sim::CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn scratch_dir(name: &str) -> PathBuf {

@@ -1014,11 +1014,11 @@ const DURABLE_APPEND_OUTCOME: &str = "fgdb.sim.outcome/v1:durable-append-survive
 const SPINE_OUTCOME: &str = "fgdb.sim.outcome/v1:embedded-spine-acknowledged-write-survives-crash";
 
 fn ldfi_keys() -> DatabaseKeys {
-    DatabaseKeys {
-        k_oid: [0x31; 32],
-        namespace: DatabaseSecurityNamespaceId([0x32; 32]),
-        dek: [0x33; 32],
-    }
+    DatabaseKeys::new(
+        [0x31; 32],
+        DatabaseSecurityNamespaceId([0x32; 32]),
+        [0x33; 32],
+    )
 }
 
 fn successful_durable_append_trace(dir: PathBuf) -> Vec<TraceEvent> {

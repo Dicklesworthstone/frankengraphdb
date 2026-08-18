@@ -1260,18 +1260,18 @@ mod tests {
             if created.is_err() {
                 return;
             }
-            let keys = CapsuleKeys {
-                k_oid: [0x5a; 32],
-                namespace: DatabaseSecurityNamespaceId([0x77; 32]),
-                dek: [0x3c; 32],
-                object_kind: 0x0274,
-                profile: CapsuleProfile::balanced(),
-            };
+            let keys = CapsuleKeys::new(
+                [0x5a; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x3c; 32],
+                0x0274,
+                CapsuleProfile::balanced(),
+            );
 
             // Sixty-four immediate handoffs keep this a lock-lifecycle stress,
             // not a one-shot example that happens to pass once on the host.
             for iteration in 0..64 {
-                let owner = CommitCoordinator::open(&cx, &dir, keys).await;
+                let owner = CommitCoordinator::open(&cx, &dir, keys.clone()).await;
                 assert!(
                     owner.is_ok(),
                     "owner opens at iteration {iteration}: {owner:?}"
@@ -1292,7 +1292,7 @@ mod tests {
                 };
                 drop(owner);
 
-                let successor = CommitCoordinator::open(&cx, &dir, keys).await;
+                let successor = CommitCoordinator::open(&cx, &dir, keys.clone()).await;
                 assert!(
                     successor.is_ok(),
                     "owner drop unlocks inherited descriptor at iteration {iteration}: \

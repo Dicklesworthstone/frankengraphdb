@@ -85,11 +85,11 @@ const BRANCH: BranchId = BranchId(1);
 const PARTITION: u64 = 0;
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys {
-        k_oid: [0x5a; 32],
-        namespace: DatabaseSecurityNamespaceId([0x77; 32]),
-        dek: [0x3c; 32],
-    }
+    DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    )
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -273,8 +273,8 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
         .expect("replica coordinator opens");
     stages.open_recover_chain = start.elapsed();
 
-    let store =
-        BlockStore::open(&commit, dir, keys.k_oid, keys.namespace).expect("replica store opens");
+    let store = BlockStore::open(&commit, dir, keys.shared_k_oid(), keys.namespace)
+        .expect("replica store opens");
 
     let entries: Vec<_> = coordinator.chain().entries().to_vec();
 
@@ -323,7 +323,7 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
             for row in &coordinate.rows {
                 writer
                     .apply(
-                        (&keys.k_oid, keys.namespace),
+                        (keys.k_oid(), keys.namespace),
                         fgdb_types::CommitSeq(*seq),
                         row,
                     )
@@ -335,7 +335,7 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
 
     let start = Instant::now();
     let (root, blocks, patches) = writer
-        .publish((&keys.k_oid, keys.namespace), frontier)
+        .publish((keys.k_oid(), keys.namespace), frontier)
         .expect("replica publish");
     for block in &blocks {
         store.put(&commit, &block.bytes).expect("replica block put");
@@ -376,7 +376,8 @@ fn control_capsule_bytes(round: u64) -> (Vec<u8>, fgdb::PreparedCapsule) {
     )
     .expect("control template");
     let keys = keys();
-    let capsule = prepare_capsule(&keys.k_oid, keys.namespace, &template).expect("control capsule");
+    let capsule =
+        prepare_capsule(keys.k_oid(), keys.namespace, &template).expect("control capsule");
     (capsule.bytes.clone(), capsule)
 }
 
@@ -550,11 +551,5 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
 /// `DatabaseKeys::capsule_keys` is private to the spine; the replica rebuilds
 /// the same value from the same public fields and the public capsule vocabulary.
 fn capsule_keys(keys: &DatabaseKeys) -> fgdb_chronicle::capsule::CapsuleKeys {
-    fgdb_chronicle::capsule::CapsuleKeys {
-        k_oid: keys.k_oid,
-        namespace: keys.namespace,
-        dek: keys.dek,
-        object_kind: fgdb::CAPSULE_OBJECT_KIND,
-        profile: fgdb_chronicle::capsule::CapsuleProfile::balanced(),
-    }
+    keys.capsule_keys()
 }

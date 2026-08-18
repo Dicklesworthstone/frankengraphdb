@@ -37,7 +37,7 @@ use crate::identity::{
     IdentityMismatch,
 };
 use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
-use fgdb_crypto::Digest;
+use fgdb_crypto::{Digest, zeroize::SharedSecret};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
 /// Container magic, so a truncated or foreign file is refused by its first four
@@ -257,13 +257,13 @@ pub fn identify(
 /// `Debug` is deliberately redacted. This value is nested inside
 /// [`crate::commit::CommitCoordinator`], whose derived formatter must remain
 /// useful without turning an ordinary diagnostic into a raw `K_oid`/DEK leak.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct CapsuleKeys {
-    pub k_oid: [u8; 32],
-    pub namespace: DatabaseSecurityNamespaceId,
-    pub dek: [u8; 32],
-    pub object_kind: u16,
-    pub profile: CapsuleProfile,
+    k_oid: SharedSecret<32>,
+    namespace: DatabaseSecurityNamespaceId,
+    dek: SharedSecret<32>,
+    object_kind: u16,
+    profile: CapsuleProfile,
 }
 
 impl core::fmt::Debug for CapsuleKeys {
@@ -273,17 +273,68 @@ impl core::fmt::Debug for CapsuleKeys {
 }
 
 impl CapsuleKeys {
+    /// Construct one coordinator authority from owned secret material.
+    ///
+    /// Arrays move into a scrub-on-last-drop owner. Passing an existing
+    /// [`SharedSecret`] clones only its ownership pointer, so the embedded
+    /// database and Chronicle do not retain independent key-byte copies.
+    pub fn new(
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+        dek: impl Into<SharedSecret<32>>,
+        object_kind: u16,
+        profile: CapsuleProfile,
+    ) -> Self {
+        Self {
+            k_oid: k_oid.into(),
+            namespace,
+            dek: dek.into(),
+            object_kind,
+            profile,
+        }
+    }
+
+    /// Borrow the logical-identity key without creating an owned copy.
+    pub fn k_oid(&self) -> &[u8; 32] {
+        self.k_oid.expose()
+    }
+
+    /// The public namespace paired with this key authority.
+    pub const fn namespace(&self) -> DatabaseSecurityNamespaceId {
+        self.namespace
+    }
+
+    /// The registered logical object kind sealed by this authority.
+    pub const fn object_kind(&self) -> u16 {
+        self.object_kind
+    }
+
+    /// Borrow the object-encryption key without creating an owned copy.
+    pub fn dek(&self) -> &[u8; 32] {
+        self.dek.expose()
+    }
+
+    /// The registered erasure policy paired with this authority.
+    pub const fn profile(&self) -> CapsuleProfile {
+        self.profile
+    }
+
     /// The identity these keys give `plaintext`.
     pub fn identify(&self, plaintext: &[u8]) -> ObjectId {
-        identify(&self.k_oid, self.namespace, self.object_kind, plaintext)
+        identify(
+            self.k_oid.expose(),
+            self.namespace,
+            self.object_kind,
+            plaintext,
+        )
     }
 
     /// Seal `plaintext` under these keys.
     pub fn seal(&self, plaintext: &[u8]) -> Result<SealedCapsule, CapsuleError> {
         seal(
-            &self.k_oid,
+            self.k_oid.expose(),
             self.namespace,
-            &self.dek,
+            self.dek.expose(),
             self.object_kind,
             plaintext,
             self.profile,
@@ -303,9 +354,9 @@ impl CapsuleKeys {
             descriptor,
             symbols,
             expected_object_id,
-            &self.k_oid,
+            self.k_oid.expose(),
             self.namespace,
-            &self.dek,
+            self.dek.expose(),
             verification,
         )
     }

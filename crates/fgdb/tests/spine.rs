@@ -27,7 +27,7 @@ use fgdb::{
     CompareAndSetMismatch, CrashPoint, Database, DatabaseKeys, OpenError, PreparedCapsule,
     WriteBatch, WriteError, WriteMismatchPolicy,
 };
-use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
+use fgdb_chronicle::capsule::CapsuleKeys;
 use fgdb_chronicle::symbolize::RecoveryTarget;
 use fgdb_delta_types::{CanonicalError, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
@@ -41,11 +41,7 @@ const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys {
-        k_oid: K_OID,
-        namespace: NAMESPACE,
-        dek: [0x3c; 32],
-    }
+    DatabaseKeys::new(K_OID, NAMESPACE, [0x3c; 32])
 }
 
 /// A scratch directory that does not yet exist, so `create` owns making it.
@@ -85,18 +81,25 @@ fn key_material_is_redacted_from_direct_and_containing_debug_surfaces() {
     const PLANTED_K_OID: [u8; 32] = [0xa5; 32];
     const PLANTED_DEK: [u8; 32] = [0x3d; 32];
 
-    let database_keys = DatabaseKeys {
-        k_oid: PLANTED_K_OID,
-        namespace: NAMESPACE,
-        dek: PLANTED_DEK,
-    };
-    let capsule_keys = CapsuleKeys {
-        k_oid: PLANTED_K_OID,
-        namespace: NAMESPACE,
-        dek: PLANTED_DEK,
-        object_kind: fgdb::CAPSULE_OBJECT_KIND,
-        profile: CapsuleProfile::balanced(),
-    };
+    let database_keys = DatabaseKeys::new(PLANTED_K_OID, NAMESPACE, PLANTED_DEK);
+    let database_keys_clone = database_keys.clone();
+    let capsule_keys = database_keys.capsule_keys();
+    assert!(
+        core::ptr::eq(database_keys.k_oid(), database_keys_clone.k_oid()),
+        "DatabaseKeys::clone copied K_oid instead of sharing its owner"
+    );
+    assert!(
+        core::ptr::eq(database_keys.dek(), database_keys_clone.dek()),
+        "DatabaseKeys::clone copied the DEK instead of sharing its owner"
+    );
+    assert!(
+        core::ptr::eq(database_keys.k_oid(), capsule_keys.k_oid()),
+        "Chronicle retained a second K_oid allocation"
+    );
+    assert!(
+        core::ptr::eq(database_keys.dek(), capsule_keys.dek()),
+        "Chronicle retained a second DEK allocation"
+    );
     let recovery_target = RecoveryTarget {
         k_oid: &PLANTED_K_OID,
         namespace: NAMESPACE,
@@ -127,8 +130,22 @@ fn key_material_is_redacted_from_direct_and_containing_debug_surfaces() {
         let database = Database::create(&cx, &dir, database_keys)
             .await
             .expect("creates with planted keys");
-        let store = fgdb_strata::store::BlockStore::open(&cx, &dir, PLANTED_K_OID, NAMESPACE)
-            .expect("reopens the planted keyed store");
+        let store = fgdb_strata::store::BlockStore::open(
+            &cx,
+            &dir,
+            database_keys_clone.shared_k_oid(),
+            NAMESPACE,
+        )
+        .expect("reopens the planted keyed store");
+        assert!(
+            core::ptr::eq(database_keys_clone.k_oid(), store.k_oid()),
+            "Strata retained a second K_oid allocation"
+        );
+        let store_clone = store.clone();
+        assert!(
+            core::ptr::eq(store.k_oid(), store_clone.k_oid()),
+            "BlockStore::clone copied K_oid instead of sharing its owner"
+        );
         assert_eq!(format!("{store:?}"), "BlockStore([REDACTED])");
         let rendered = format!("{database:?}");
         assert!(
@@ -149,6 +166,28 @@ fn key_material_is_redacted_from_direct_and_containing_debug_surfaces() {
         );
         assert!(!rendered.contains(&dek_needle), "DEK leaked: {rendered}");
     });
+}
+
+/// Long-lived key owners must participate in the governed secret-drop path.
+///
+/// This is deliberately a type-level control rather than an attempt to read
+/// freed storage. Before fgdb-w1-crypto-y5o.6 both types were plain `Copy`
+/// arrays, so they required no drop at all and could not possibly scrub their
+/// retained key material when the database/coordinator went away.
+#[test]
+fn long_lived_key_owners_require_secret_drop() {
+    assert!(
+        core::mem::needs_drop::<DatabaseKeys>(),
+        "DatabaseKeys retains K_oid and the capsule DEK but has no drop path"
+    );
+    assert!(
+        core::mem::needs_drop::<CapsuleKeys>(),
+        "CapsuleKeys retains K_oid and the capsule DEK but has no drop path"
+    );
+    assert!(
+        !core::mem::needs_drop::<[u8; 32]>(),
+        "the bare-array control must remain drop-free"
+    );
 }
 
 #[test]

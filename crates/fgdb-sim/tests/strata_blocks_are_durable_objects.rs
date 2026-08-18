@@ -50,13 +50,13 @@ const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77
 const STRATA_BLOCK_KIND: u16 = DELTA_BLOCK_OBJECT_KIND;
 
 fn keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: K_OID,
-        namespace: NAMESPACE,
-        dek: [0x3c; 32],
-        object_kind: STRATA_BLOCK_KIND,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        [0x3c; 32],
+        STRATA_BLOCK_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
@@ -268,10 +268,13 @@ fn a_block_rotted_beyond_the_budget_fails_closed() {
 fn identity_binds_object_kind_and_the_substitution_guard_agrees() {
     let (bytes, _) = block_bytes();
     let as_block = keys().seal(&bytes).expect("seals").object_id;
-    let as_other = CapsuleKeys {
-        object_kind: fgdb_sim::CAPSULE_OBJECT_KIND,
-        ..keys()
-    }
+    let as_other = CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        [0x3c; 32],
+        fgdb_sim::CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
     .seal(&bytes)
     .expect("seals")
     .object_id;

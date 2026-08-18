@@ -60,13 +60,13 @@ const SOURCE_INTENT_ROOT_DIGEST: [u8; 32] = [0x22; 32];
 const SCHEMA_EPOCH: SchemaEpoch = SchemaEpoch(0);
 
 fn keys() -> CapsuleKeys {
-    CapsuleKeys {
-        k_oid: K_OID,
-        namespace: NAMESPACE,
-        dek: [0x3c; 32],
-        object_kind: fgdb_sim::CAPSULE_OBJECT_KIND,
-        profile: CapsuleProfile::balanced(),
-    }
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        [0x3c; 32],
+        fgdb_sim::CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn scratch_dir(name: &str) -> PathBuf {
@@ -199,8 +199,8 @@ async fn append_fixture(
     )
     .expect("reference effects are canonical");
     let capsule = prepare_capsule(
-        &coordinator.keys().k_oid,
-        coordinator.keys().namespace,
+        coordinator.keys().k_oid(),
+        coordinator.keys().namespace(),
         &template,
     )
     .expect("canonical template seals");

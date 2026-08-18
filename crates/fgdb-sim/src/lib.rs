@@ -329,9 +329,9 @@ fn reference_database_id<V: asupersync::fs::Vfs>(
     let keys = coordinator.keys();
     let mut hasher = fgdb_crypto::Hasher::new();
     hasher.update(REFERENCE_DATABASE_ID_DOMAIN);
-    hasher.update(&keys.k_oid);
-    hasher.update(&keys.namespace.0);
-    hasher.update(&keys.object_kind.to_le_bytes());
+    hasher.update(keys.k_oid());
+    hasher.update(&keys.namespace().0);
+    hasher.update(&keys.object_kind().to_le_bytes());
     hasher.update(canonical_dir.as_os_str().as_encoded_bytes());
     let digest = hasher.finalize();
     let mut database_id = [0u8; 16];
