@@ -209,12 +209,24 @@ impl CipherDescriptor {
 /// canonical bytes it was computed over, so a collision bucket can perform the
 /// full verification the plan requires (digest, kind, length, plaintext)
 /// rather than trusting a 128-bit prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct IdentifiedObject {
     object_id: ObjectId,
     namespace: DatabaseSecurityNamespaceId,
     object_kind: u16,
     canonical_plaintext: Vec<u8>,
+}
+
+impl core::fmt::Debug for IdentifiedObject {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IdentifiedObject")
+            .field("object_id", &self.object_id)
+            .field("namespace", &self.namespace)
+            .field("object_kind", &self.object_kind)
+            .field("canonical_plaintext_len", &self.canonical_plaintext.len())
+            .field("canonical_plaintext", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl IdentifiedObject {

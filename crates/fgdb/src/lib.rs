@@ -3449,11 +3449,22 @@ fn intent_semantics_oid() -> ObjectId {
 /// Built in one place so the three can never disagree. A caller that computed
 /// the oid from one byte string and the digest from another would produce a
 /// commit that passes every check at write time and fails to recover.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PreparedCapsule {
     pub bytes: Vec<u8>,
     pub object_id: ObjectId,
     pub template_digest: Digest,
+}
+
+impl core::fmt::Debug for PreparedCapsule {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedCapsule")
+            .field("bytes_len", &self.bytes.len())
+            .field("bytes", &"[REDACTED]")
+            .field("object_id", &self.object_id)
+            .field("template_digest", &self.template_digest)
+            .finish()
+    }
 }
 
 /// The digest a marker declares for its template — a plain hash of the exact

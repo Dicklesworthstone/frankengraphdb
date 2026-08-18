@@ -36,7 +36,6 @@ use fgdb_types::ids::ObjectId;
 /// that could retain pieces of one draft to approve a later one would be a
 /// mechanism for blessing an old capsule, which §5.2 step 2 forbids: a rebase
 /// produces new effects, it never blesses an old capsule.
-#[derive(Debug)]
 pub struct CommitDraft<'a> {
     /// The sequence this commit will occupy if it survives validation. Not
     /// consumed by a rejection: the chain only moves on a durable marker.
@@ -49,6 +48,18 @@ pub struct CommitDraft<'a> {
     pub capsule_plaintext: &'a [u8],
     /// The chained marker that would name the capsule.
     pub marker: &'a CommitMarker,
+}
+
+impl core::fmt::Debug for CommitDraft<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CommitDraft")
+            .field("commit_seq", &self.commit_seq)
+            .field("capsule_oid", &self.capsule_oid)
+            .field("capsule_plaintext_len", &self.capsule_plaintext.len())
+            .field("capsule_plaintext", &"[REDACTED]")
+            .field("marker", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Why validation refused a draft.

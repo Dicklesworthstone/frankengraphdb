@@ -8,13 +8,15 @@
 
 use fgdb_chronicle::root::{OPENER_PAYLOAD_LEN, recover_root_object};
 use fgdb_chronicle::{
-    CipherDescriptor, CryptoVerificationEvent, EncodedObject, EncodingDescriptor, IdentifiedObject,
-    IdentityMismatch, LocationForm, PackBuilder, PackDomain, PackError, PackProtectionProfile,
-    PlacementDescriptor, RecoveredObjectError, RootBootstrap, RootRecoveryError, RootSlot,
-    SymbolError, SymbolRecord, VerificationFailureClass, VerificationOperation,
-    VerificationOutcome, WriteKeyDomain,
+    CipherDescriptor, CommitDraft, CommitMarker, CryptoVerificationEvent, EffectSource,
+    EncodedObject, EncodingDescriptor, IdentifiedObject, IdentityMismatch, LocationForm,
+    PackBuilder, PackDomain, PackError, PackProtectionProfile, PlacementDescriptor,
+    RecoveredObjectError, RootBootstrap, RootRecoveryError, RootSlot, SymbolError, SymbolRecord,
+    VerificationFailureClass, VerificationOperation, VerificationOutcome, WriteKeyDomain,
 };
-use fgdb_types::ids::DatabaseSecurityNamespaceId;
+use fgdb_crypto::Digest;
+use fgdb_types::CommitSeq;
+use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
 fn k_oid() -> [u8; 32] {
     core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(7))
@@ -148,6 +150,82 @@ fn root_bootstrap(cipher: &CipherDescriptor) -> RootBootstrap {
         opener_payload: [0; OPENER_PAYLOAD_LEN],
         opener_digest: [0; 32],
     }
+}
+
+fn debug_marker(capsule_oid: ObjectId) -> CommitMarker {
+    CommitMarker {
+        logical_command_seq: 1,
+        commit_seq: 1,
+        effect_source: EffectSource::Local {
+            capsule_ref: capsule_oid,
+            logical_delta_template_digest: Digest([0x31; 32]),
+        },
+        prev_global: None,
+        head_updates: Vec::new(),
+        merge_record_oid: None,
+        coordinate_schema_transition_digest: Digest([0x32; 32]),
+        topology_epoch: 1,
+        policy_epoch: 1,
+        revocation_index: 1,
+        txn_token: [0x33; 16],
+        commit_hlc: 1,
+        final_effect_digest: Digest([0x34; 32]),
+        authorization_decision_digest: Digest([0x35; 32]),
+        resource_effect_digest: Digest([0x36; 32]),
+        payload_availability_certificate_oid: None,
+        flags: 0,
+    }
+}
+
+fn assert_debug_omits_bytes(rendered: &str, bytes: &[u8]) {
+    let numeric_needle = bytes
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        !rendered.contains(&numeric_needle),
+        "Debug output exposed the planted canonical plaintext: {rendered}"
+    );
+}
+
+#[test]
+fn canonical_plaintext_is_redacted_from_direct_and_containing_debug_surfaces() {
+    let plaintext = [
+        0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec,
+    ];
+    let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &plaintext);
+    let object_debug = format!("{object:?}");
+    assert_debug_omits_bytes(&object_debug, &plaintext);
+    assert!(object_debug.contains("canonical_plaintext: \"[REDACTED]\""));
+    assert!(object_debug.contains("canonical_plaintext_len:"));
+
+    let domain = PackDomain {
+        namespace: namespace(),
+        tenant: 7,
+        write_key: WriteKeyDomain::CommitStream,
+        retention_class: 3,
+    };
+    let mut pack = PackBuilder::new(domain);
+    pack.add(object.clone(), domain)
+        .expect("the member belongs to the pack domain");
+    let pack_debug = format!("{pack:?}");
+    assert_debug_omits_bytes(&pack_debug, &plaintext);
+    assert!(pack_debug.contains("member_count: 1"));
+    assert!(pack_debug.contains("members: \"[REDACTED]\""));
+
+    let marker = debug_marker(object.object_id());
+    let draft = CommitDraft {
+        commit_seq: CommitSeq(1),
+        capsule_oid: object.object_id(),
+        capsule_plaintext: &plaintext,
+        marker: &marker,
+    };
+    let draft_debug = format!("{draft:?}");
+    assert_debug_omits_bytes(&draft_debug, &plaintext);
+    assert!(draft_debug.contains("capsule_plaintext_len: 12"));
+    assert!(draft_debug.contains("capsule_plaintext: \"[REDACTED]\""));
+    assert!(draft_debug.contains("marker: \"[REDACTED]\""));
 }
 
 /// The pipeline runs end to end and the protected bytes decrypt back to what

@@ -143,10 +143,20 @@ pub struct SubobjectLocator {
 /// A pack under construction. Members are admitted one at a time and the
 /// domain law is checked on admission, so an illegal pack cannot reach a
 /// sealed state at all.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PackBuilder {
     domain: PackDomain,
     members: Vec<IdentifiedObject>,
+}
+
+impl core::fmt::Debug for PackBuilder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PackBuilder")
+            .field("domain", &self.domain)
+            .field("member_count", &self.members.len())
+            .field("members", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl PackBuilder {

@@ -24,7 +24,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    CrashPoint, Database, DatabaseKeys, OpenError, WriteBatch, WriteError, WriteMismatchPolicy,
+    CrashPoint, Database, DatabaseKeys, OpenError, PreparedCapsule, WriteBatch, WriteError,
+    WriteMismatchPolicy,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::symbolize::RecoveryTarget;
@@ -148,6 +149,30 @@ fn key_material_is_redacted_from_direct_and_containing_debug_surfaces() {
         );
         assert!(!rendered.contains(&dek_needle), "DEK leaked: {rendered}");
     });
+}
+
+#[test]
+fn prepared_capsule_debug_redacts_canonical_plaintext() {
+    let plaintext = vec![
+        0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc,
+    ];
+    let capsule = PreparedCapsule {
+        bytes: plaintext.clone(),
+        object_id: ObjectId([0x42; 32]),
+        template_digest: fgdb_crypto::Digest([0x43; 32]),
+    };
+    let rendered = format!("{capsule:?}");
+    let numeric_needle = plaintext
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        !rendered.contains(&numeric_needle),
+        "prepared capsule Debug exposed canonical plaintext: {rendered}"
+    );
+    assert!(rendered.contains("bytes_len: 12"));
+    assert!(rendered.contains("bytes: \"[REDACTED]\""));
 }
 
 /// Commit the fixture history: three vertices, two `KNOWS` edges across two
