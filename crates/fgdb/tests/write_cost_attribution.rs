@@ -43,16 +43,16 @@
 //!    itself were the O(history) term, THIS would grow; if it is flat, the
 //!    attribution excludes the commit protocol.
 //!
-//! **VERDICT SHAPE.** Attribution holds when: the marginal write, normalized
-//! against adjacent constant-work fsync sentinels, reproduces the growth
-//! (mechanism present at this scale); the rebuild replica accounts for the
-//! majority of the marginal write at large N (the suspect is the cost); and
-//! the chronicle-only control stays flat (the alternative is excluded). Each
-//! is asserted with deliberately coarse ratios — this box runs many panes, so
-//! raw wall time is reported but never decides a verdict without its adjacent
-//! load control. Per `cx_probe.rs`'s own doctrine these numbers are REPORTED,
-//! never promoted to a §17 speed gate, and the assertions are on shape, not
-//! speed.
+//! **VERDICT SHAPE.** Attribution holds when: the marginal write grows in both
+//! raw time and sentinel-normalized time (mechanism present at this scale);
+//! the rebuild replica accounts for the majority of the marginal write at
+//! large N (the suspect is the cost); and the chronicle-only control stays
+//! flat (the alternative is excluded). Requiring both growth witnesses is
+//! deliberate: neighboring load can inflate raw time while a transiently slow
+//! early sentinel can inflate only the normalized ratio. Neither alone proves
+//! history-proportional work. Per `cx_probe.rs`'s own doctrine these numbers
+//! are REPORTED, never promoted to a §17 speed gate, and the assertions are on
+//! shape, not speed.
 //!
 //! **UBS DISPOSITION:** as in `cx_probe.rs`, `Instant::now()` here is a
 //! measurement interval start, never key material; `keys()` is the same fixed
@@ -145,6 +145,30 @@ fn normalized_growth_within(
     observed <= allowed
 }
 
+/// A history-growth conviction needs both witnesses: raw work exceeds the
+/// bound, and dividing by the adjacent load control still exceeds it. If
+/// either witness stays bounded, the run did not attribute growth to history.
+fn history_growth_within(
+    small_work: Duration,
+    small_sentinel: Duration,
+    large_work: Duration,
+    large_sentinel: Duration,
+    max_factor: u128,
+) -> bool {
+    let raw_allowed = small_work
+        .as_nanos()
+        .checked_mul(max_factor)
+        .expect("measured raw duration budget fits u128");
+    large_work.as_nanos() <= raw_allowed
+        || normalized_growth_within(
+            small_work,
+            small_sentinel,
+            large_work,
+            large_sentinel,
+            max_factor,
+        )
+}
+
 /// Require the normalized reference cost to be at least `factor` times the
 /// normalized subject cost. This is Verdict 2's load-independent form.
 fn normalized_reference_dominates(
@@ -170,7 +194,7 @@ fn normalized_reference_dominates(
 fn sentinel_normalization_rejects_history_growth_without_false_redding_load() {
     // Fivefold raw inflation caused entirely by fivefold neighboring I/O load
     // is the same amount of attributed work and must remain green.
-    assert!(normalized_growth_within(
+    assert!(history_growth_within(
         Duration::from_millis(80),
         Duration::from_millis(10),
         Duration::from_millis(400),
@@ -180,11 +204,32 @@ fn sentinel_normalization_rejects_history_growth_without_false_redding_load() {
 
     // The same raw inflation with an unchanged sentinel is real subject growth
     // and must still red. This prevents normalization from becoming a waiver.
-    assert!(!normalized_growth_within(
+    assert!(!history_growth_within(
         Duration::from_millis(80),
         Duration::from_millis(10),
         Duration::from_millis(400),
         Duration::from_millis(10),
+        2,
+    ));
+
+    // A transiently slow early sentinel can make the normalized ratio alone
+    // exceed 2x even while the subject remains flat. Raw boundedness prevents
+    // that control noise from being mislabeled as an O(history) regression.
+    assert!(history_growth_within(
+        Duration::from_millis(80),
+        Duration::from_millis(10),
+        Duration::from_millis(100),
+        Duration::from_millis(5),
+        2,
+    ));
+
+    // Both witnesses exceeding the bound remains red; the raw companion is
+    // an attribution requirement, not a waiver for real growth.
+    assert!(!history_growth_within(
+        Duration::from_millis(80),
+        Duration::from_millis(10),
+        Duration::from_millis(200),
+        Duration::from_millis(8),
         2,
     ));
 
@@ -498,15 +543,17 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     // Attribution-era numbers, kept for the record: 81→183→445 ms over
     // 8→32→96 (a 5.5x climb, 95% of it rebuild's capsule re-read loop).
     // Post-fix: 47.7→46.9→49.4 ms, flat. The adjacent same-directory sentinel
-    // removes machine-wide I/O inflation from the verdict; 2x headroom remains
-    // unchanged, while a real regression to per-commit rebuild is >5x.
+    // removes machine-wide I/O inflation, while the raw companion refuses to
+    // convict a flat subject merely because the early sentinel was slower.
+    // The 2x headroom is unchanged; a real per-commit rebuild exceeds both
+    // witnesses by >5x on this sweep.
     let (small_n, small_t, small_sentinel) = marginal[0];
     let (large_n, large_t, large_sentinel) = marginal[marginal.len() - 1];
     assert!(
-        normalized_growth_within(small_t, small_sentinel, large_t, large_sentinel, 2,),
+        history_growth_within(small_t, small_sentinel, large_t, large_sentinel, 2,),
         "THE O(HISTORY) WRITE COST IS BACK: marginal write at {large_n} \
          commits ({large_t:?} / {large_sentinel:?} sentinel) is more than 2x \
-         the sentinel-normalized marginal write at {small_n} commits \
+         the raw AND sentinel-normalized marginal write at {small_n} commits \
          ({small_t:?} / {small_sentinel:?} sentinel). The incremental snapshot path \
          (fgdb-fujt) bounded this; something reintroduced per-commit work \
          proportional to history. Report above."
