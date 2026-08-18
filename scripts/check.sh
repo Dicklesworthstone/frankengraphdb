@@ -1100,6 +1100,12 @@ run_ubs() {
 # v5.3.8 invocation: regime.rs reports 19 at f292858^, 38 at f292858, 38 at
 # 3d0098c, and 38 at 23a1ac7. A stable whole-tree scan at 23a1ac7 over 241
 # tracked Rust sources closed at 133+183+122+2 = 440.
+# MOVED 2026-08-18 (fgdb-6bxl): panic 133 -> 132. The Chronicle store test's
+# ready-only future driver now returns `Option<F::Output>` instead of panicking
+# on `Poll::Pending`; each caller asserts readiness at its own typed boundary.
+# Re-measured with the gate's own UBS invocation over 245 tracked Rust sources:
+# the partition closes at 132+183+122+2 = 439. This is the sole finding removed
+# by the same landing; the production root-reader bound is otherwise unchanged.
 #
 # The added matches compare canonical encoding domains, public detector/profile
 # ObjectIds, evidence counters/status/thresholds, and replay state. They are not
@@ -1110,7 +1116,7 @@ run_ubs() {
 # suppressing them locally: any future increase OR decrease still fails closed.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=183"
-  "panic!/unreachable!/todo!/unimplemented!=133"
+  "panic!/unreachable!/todo!/unimplemented!=132"
   "JWT decode, validation bypass, or missing claim binding=122"
   "Security-sensitive non-crypto randomness=2"
 )

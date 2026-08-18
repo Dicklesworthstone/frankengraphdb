@@ -615,12 +615,12 @@ mod tests {
     /// Drive a future that never actually suspends. The barrier composes
     /// ready futures in these tests, so a single poll must complete it; a
     /// `Pending` here would mean the test harness, not the barrier, blocked.
-    fn poll_ready<F: Future>(future: F) -> F::Output {
+    fn poll_ready<F: Future>(future: F) -> Option<F::Output> {
         let waker = Waker::noop();
         let mut task = Context::from_waker(waker);
         match pin!(future).poll(&mut task) {
-            Poll::Ready(output) => output,
-            Poll::Pending => panic!("barrier future suspended in a ready-only test"),
+            Poll::Ready(output) => Some(output),
+            Poll::Pending => None,
         }
     }
 
@@ -641,6 +641,7 @@ mod tests {
                 std::future::ready(Ok(()))
             },
         ))
+        .expect("barrier future must not suspend")
         .expect("barrier");
 
         assert_eq!(
@@ -665,7 +666,8 @@ mod tests {
                 events.borrow_mut().push("parent-directory");
                 std::future::ready(Ok(()))
             },
-        ));
+        ))
+        .expect("barrier future must not suspend");
 
         assert!(result.is_err());
         assert_eq!(events.into_inner(), ["file", "crash-hook"]);
@@ -676,6 +678,7 @@ mod tests {
         let exact = vec![0x5a; ROOT_FILE_LEN];
         assert_eq!(
             poll_ready(read_bounded_root(std::io::Cursor::new(exact.clone())))
+                .expect("cursor read must not suspend")
                 .expect("the exact fixed root length is admitted"),
             exact
         );
@@ -685,6 +688,7 @@ mod tests {
             ROOT_FILE_LEN
                 - 1
         ])))
+        .expect("cursor read must not suspend")
         .expect_err("a short stream is not a root file");
         assert!(matches!(
             short,
@@ -701,6 +705,7 @@ mod tests {
             ROOT_FILE_LEN
                 * 4
         ])))
+        .expect("cursor read must not suspend")
         .expect_err("post-metadata growth is bounded and refused");
         assert!(matches!(
             overlong,
