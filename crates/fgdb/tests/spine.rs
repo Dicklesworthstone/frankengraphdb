@@ -24,8 +24,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    CrashPoint, Database, DatabaseKeys, OpenError, PreparedCapsule, WriteBatch, WriteError,
-    WriteMismatchPolicy,
+    CompareAndSetMismatch, CrashPoint, Database, DatabaseKeys, OpenError, PreparedCapsule,
+    WriteBatch, WriteError, WriteMismatchPolicy,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::symbolize::RecoveryTarget;
@@ -173,6 +173,77 @@ fn prepared_capsule_debug_redacts_canonical_plaintext() {
     );
     assert!(rendered.contains("bytes_len: 12"));
     assert!(rendered.contains("bytes: \"[REDACTED]\""));
+}
+
+#[test]
+fn user_graph_plaintext_is_redacted_from_diagnostic_containers_and_errors() {
+    const PLAINTEXT: &str = "fgdb-user-plaintext-92a65f";
+    let key = PropertyKeyId(71);
+    let value = CanonicalScalar::ucs_basic_text(PLAINTEXT).expect("admissible text");
+
+    let mut batch = WriteBatch::new(KNOWS);
+    batch.create_vertex(VId(41), vec![LabelId(9)], vec![(key, value.clone())]);
+    let batch_debug = format!("{batch:?}");
+    assert!(
+        !batch_debug.contains(PLAINTEXT),
+        "pending batch Debug exposed user plaintext: {batch_debug}"
+    );
+    assert!(batch_debug.contains("row_count: 1"));
+    assert!(batch_debug.contains("rows: \"[REDACTED]\""));
+
+    let mismatch = CompareAndSetMismatch {
+        elem: ElementId::Vertex(VId(41)),
+        name: key,
+        expected: Some(value.clone()),
+        actual: Some(value),
+    };
+    let mismatch_debug = format!("{mismatch:?}");
+    assert!(
+        !mismatch_debug.contains(PLAINTEXT),
+        "mismatch Debug exposed user plaintext: {mismatch_debug}"
+    );
+    assert!(mismatch_debug.contains("expected: \"[REDACTED]\""));
+    assert!(mismatch_debug.contains("actual: \"[REDACTED]\""));
+
+    let error = WriteError::CompareAndSetMismatch(Box::new(mismatch));
+    for rendered in [format!("{error:?}"), error.to_string()] {
+        assert!(
+            !rendered.contains(PLAINTEXT),
+            "write error diagnostic exposed user plaintext: {rendered}"
+        );
+        assert!(rendered.to_ascii_lowercase().contains("redacted"));
+    }
+
+    let dir = scratch("redacted-user-plaintext-debug");
+    under_lab(8_210, move |cx| async move {
+        let mut database = Database::create(&cx, &dir, keys())
+            .await
+            .expect("creates database");
+        let mut committed = WriteBatch::new(KNOWS);
+        committed.create_vertex(
+            VId(41),
+            vec![LabelId(9)],
+            vec![(
+                key,
+                CanonicalScalar::ucs_basic_text(PLAINTEXT).expect("admissible text"),
+            )],
+        );
+        database
+            .write(&cx, committed)
+            .await
+            .expect("commits planted plaintext");
+
+        let rendered = format!("{database:?}");
+        assert!(
+            !rendered.contains(PLAINTEXT),
+            "database Debug traversed stored graph plaintext: {rendered}"
+        );
+        assert!(rendered.contains("graph_state: \"[REDACTED]\""));
+        assert!(rendered.contains("published_frontier: CommitSeq(1)"));
+        assert!(rendered.contains("DatabaseKeys([REDACTED])"));
+        assert!(rendered.contains("CapsuleKeys([REDACTED])"));
+        assert!(rendered.contains("BlockStore([REDACTED])"));
+    });
 }
 
 /// Commit the fixture history: three vertices, two `KNOWS` edges across two

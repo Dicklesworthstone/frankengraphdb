@@ -615,8 +615,9 @@ impl core::fmt::Display for WriteError {
             }
             Self::CompareAndSetMismatch(mismatch) => write!(
                 f,
-                "compare-and-set of {:?} {:?} expected {:?}, found {:?}",
-                mismatch.elem, mismatch.name, mismatch.expected, mismatch.actual
+                "compare-and-set of {:?} {:?} found a different value \
+                 (expected and actual are redacted)",
+                mismatch.elem, mismatch.name
             ),
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
@@ -702,7 +703,11 @@ pub enum WriteMismatchPolicy {
 
 /// The two values a failed CompareAndSet compared, boxed through
 /// [`WriteError::CompareAndSetMismatch`] so the error enum stays small.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` deliberately reports the guarded coordinate but redacts both
+/// values. Property values are user graph data; a failed guard does not turn
+/// them into safe diagnostic metadata.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CompareAndSetMismatch {
     pub elem: ElementId,
     pub name: PropertyKeyId,
@@ -710,7 +715,22 @@ pub struct CompareAndSetMismatch {
     pub actual: Option<CanonicalScalar>,
 }
 
+impl core::fmt::Debug for CompareAndSetMismatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CompareAndSetMismatch")
+            .field("elem", &self.elem)
+            .field("name", &self.name)
+            .field("expected", &"[REDACTED]")
+            .field("actual", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// One batch of graph mutations, committed atomically.
+///
+/// `Debug` reports only the relation and row count. Pending rows can contain
+/// user graph properties and therefore stay redacted until the batch is
+/// consumed by the write path.
 ///
 /// **THIS IS NOT THE TRANSACTION MODEL AND MUST NOT BE READ AS ONE.** There is
 /// no snapshot, no conflict detection, no isolation level, and no abort: a batch
@@ -733,10 +753,20 @@ pub struct CompareAndSetMismatch {
 /// what keeps the two derivations honest without sharing code). The
 /// provenance envelopes and `NetEffectNormalForm` canonicalization stay with
 /// `fgdb-w5-effects-normal-form-819`, which absorbs this surface.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WriteBatch {
     relation: RelationId,
     rows: Vec<PendingRow>,
+}
+
+impl core::fmt::Debug for WriteBatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WriteBatch")
+            .field("relation", &self.relation)
+            .field("row_count", &self.rows.len())
+            .field("rows", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1425,7 +1455,11 @@ fn chain_commitment_at(chain: &fgdb_chronicle::MarkerChain, at: CommitSeq) -> Op
     Some(entry.chain_hash)
 }
 
-#[derive(Debug)]
+/// An embedded database handle.
+///
+/// Its `Debug` view is deliberately structural: state, publication frontier,
+/// and retained-shape counts are visible, while keys, pending durability
+/// internals, and the decoded graph snapshot remain redacted.
 pub struct Database<V: Vfs = UnixVfs> {
     coordinator: CommitCoordinator<V>,
     store: BlockStore,
@@ -1468,6 +1502,23 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// forward them to the eventual observatory without a silent/no-op sink.
     /// They are diagnostic evidence only, never recovery authority.
     crypto_verification_events: Vec<CryptoVerificationEvent>,
+}
+
+impl<V: Vfs> core::fmt::Debug for Database<V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "Database {{ state: {:?}, slot_generation: {}, published_frontier: {:?}, \
+             snapshot_block_count: {}, snapshot_patch_count: {}, coordinator: \
+             CommitCoordinator(CapsuleKeys([REDACTED])), store: BlockStore([REDACTED]), \
+             keys: DatabaseKeys([REDACTED]), graph_state: \"[REDACTED]\" }}",
+            self.state,
+            self.slot_generation,
+            self.snapshot.frontier,
+            self.snapshot.blocks.len(),
+            self.snapshot.patches.len()
+        )
+    }
 }
 
 impl Database<UnixVfs> {
