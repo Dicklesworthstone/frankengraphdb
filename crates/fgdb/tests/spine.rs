@@ -25,7 +25,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     CompareAndSetMismatch, CrashPoint, Database, DatabaseKeys, OpenError, PreparedCapsule,
-    WriteBatch, WriteError, WriteMismatchPolicy,
+    RebuildError, WriteBatch, WriteError, WriteMismatchPolicy,
 };
 use fgdb_chronicle::capsule::CapsuleKeys;
 use fgdb_chronicle::symbolize::RecoveryTarget;
@@ -2830,6 +2830,165 @@ fn the_root_slot_names_the_current_manifest_and_open_reconciles_it() {
             Database::open(cx, &dir, keys()).await,
             Err(fgdb::OpenError::ForeignSlot { .. })
         ));
+    });
+}
+
+/// Root generation exhaustion is a pre-commit refusal, not a derived-state
+/// failure after D2. The max-1 control proves the last representable
+/// generation remains usable; the next write and compaction must leave the
+/// selected root and Chronicle frontier byte-for-byte where they were.
+#[test]
+fn root_slot_generation_exhaustion_refuses_before_commit_or_compaction() {
+    let dir = scratch("root-slot-generation-exhaustion");
+    under_lab(9_517, move |cx| async move {
+        let cx = &cx;
+        Database::create(cx, &dir, keys())
+            .await
+            .expect("creates the origin generation");
+
+        let slot_store = fgdb_chronicle::RootStore::new(&dir);
+        let mut penultimate = slot_store.current(cx).await.expect("origin slot exists");
+        penultimate.slot_generation = u64::MAX - 1;
+        slot_store
+            .publish_evidenced(cx, &penultimate)
+            .await
+            .expect("the final successor remains representable");
+
+        let mut database = Database::open(cx, &dir, keys())
+            .await
+            .expect("an agreeing penultimate slot opens");
+        let mut last_lawful = WriteBatch::new(KNOWS);
+        last_lawful.create_vertex(VId(1), vec![], vec![]);
+        assert_eq!(
+            database
+                .write(cx, last_lawful)
+                .await
+                .expect("max-1 advances exactly once"),
+            CommitSeq(1)
+        );
+
+        let selected_at_max = slot_store.current(cx).await.expect("max slot selects");
+        assert_eq!(selected_at_max.slot_generation, u64::MAX);
+        let frontier_at_max = database.frontier().expect("healthy frontier");
+        let manifest_at_max = database.manifest().expect("healthy manifest");
+        let root_at_max = database.partition_root().expect("healthy root");
+
+        let mut impossible = WriteBatch::new(KNOWS);
+        impossible.create_vertex(VId(2), vec![], vec![]);
+        let refusal = database.write(cx, impossible).await;
+        assert!(
+            matches!(
+                refusal,
+                Err(WriteError::SlotGenerationExhausted(error))
+                    if error.current == u64::MAX
+            ),
+            "generation exhaustion must be a pre-D2 refusal: {refusal:?}"
+        );
+        assert_eq!(
+            database.frontier().expect("handle remains healthy"),
+            frontier_at_max
+        );
+        assert_eq!(
+            database.manifest().expect("manifest unchanged"),
+            manifest_at_max
+        );
+        assert_eq!(
+            database.partition_root().expect("root unchanged"),
+            root_at_max
+        );
+        assert!(
+            database.vertex(VId(2)).expect("reads still work").is_none(),
+            "the refused row did not become durable"
+        );
+
+        let compaction = database.compact(cx).await;
+        assert!(
+            matches!(
+                compaction,
+                Err(RebuildError::SlotGenerationExhausted(error))
+                    if error.current == u64::MAX
+            ),
+            "compaction must refuse before replacement publication: {compaction:?}"
+        );
+        assert_eq!(
+            database.manifest().expect("manifest still unchanged"),
+            manifest_at_max
+        );
+        assert_eq!(
+            database.partition_root().expect("root still unchanged"),
+            root_at_max
+        );
+        let after_refusals = slot_store.current(cx).await.expect("slot still selects");
+        assert_eq!(after_refusals, selected_at_max);
+
+        drop(database);
+        let reopened = Database::open(cx, &dir, keys())
+            .await
+            .expect("an agreeing max-generation root remains readable");
+        assert_eq!(
+            reopened.frontier().expect("reopened frontier"),
+            CommitSeq(1)
+        );
+        assert!(reopened.vertex(VId(1)).expect("last lawful row").is_some());
+        assert!(reopened.vertex(VId(2)).expect("refused row").is_none());
+        assert_eq!(reopened.manifest().expect("same manifest"), manifest_at_max);
+        assert_eq!(reopened.partition_root().expect("same root"), root_at_max);
+    });
+}
+
+/// A stale slot at the terminal generation cannot be healed without wrapping.
+/// Open must name that terminal condition and leave the selected bytes intact;
+/// returning an older snapshot would silently discard a committed suffix.
+#[test]
+fn stale_max_generation_slot_refuses_open_without_wrapping_or_mutation() {
+    let dir = scratch("stale-max-generation-slot");
+    under_lab(9_518, move |cx| async move {
+        let cx = &cx;
+        let stale_slot = {
+            let mut database = Database::create(cx, &dir, keys()).await.expect("creates");
+            let mut first = WriteBatch::new(KNOWS);
+            first.create_vertex(VId(1), vec![], vec![]);
+            database.write(cx, first).await.expect("first commit");
+            let slot = fgdb_chronicle::RootStore::new(&dir)
+                .current(cx)
+                .await
+                .expect("first slot");
+            let mut second = WriteBatch::new(KNOWS);
+            second.create_vertex(VId(2), vec![], vec![]);
+            database.write(cx, second).await.expect("second commit");
+            slot
+        };
+
+        let slot_store = fgdb_chronicle::RootStore::new(&dir);
+        let mut terminal_stale = stale_slot;
+        terminal_stale.slot_generation = u64::MAX;
+        slot_store
+            .publish_evidenced(cx, &terminal_stale)
+            .await
+            .expect("plants a resolvable but terminal stale slot");
+        let bytes_before = std::fs::read(dir.join("manifest.root")).expect("root bytes before");
+
+        let refusal = Database::open(cx, &dir, keys()).await;
+        assert!(
+            matches!(
+                refusal,
+                Err(OpenError::SlotGenerationExhausted(error))
+                    if error.current == u64::MAX
+            ),
+            "terminal stale slot must not wrap or open stale: {refusal:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("manifest.root")).expect("root bytes after"),
+            bytes_before,
+            "failed healing mutated the terminal slot"
+        );
+        assert_eq!(
+            slot_store
+                .current(cx)
+                .await
+                .expect("terminal slot still selects"),
+            terminal_stale
+        );
     });
 }
 

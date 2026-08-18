@@ -237,6 +237,26 @@ impl DatabaseKeys {
     }
 }
 
+/// The root-slot generation cannot advance any further.
+///
+/// Recovery selects the highest credible generation, so wrapping or
+/// saturating would make the next publication permanently unselectable. A
+/// caller must migrate or clone under a fresh fenced identity instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotGenerationExhausted {
+    pub current: u64,
+}
+
+impl core::fmt::Display for SlotGenerationExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "root-slot generation {} is exhausted; migrate or clone under a fresh fenced identity",
+            self.current
+        )
+    }
+}
+
 /// Why a database directory could not be opened or created.
 #[derive(Debug)]
 pub enum OpenError {
@@ -262,6 +282,9 @@ pub enum OpenError {
     },
     /// The root slot file failed at the storage boundary (fgdb-ge6a).
     Slot(SlotStoreError),
+    /// A lagging slot cannot be healed because its generation is already the
+    /// largest representable value.
+    SlotGenerationExhausted(SlotGenerationExhausted),
     /// The selected slot is well-formed and is NOT this database's: its
     /// identity tuple or PLAIN-opener form disagrees with the keys in hand.
     /// Refused, never reinterpreted — a slot from another database, another
@@ -360,6 +383,9 @@ pub enum RebuildError {
     /// The commit and the manifest are durable; the slot is at most one
     /// publication behind, which the next open heals.
     Slot(SlotStoreError),
+    /// Maintenance cannot publish a replacement root because the slot
+    /// generation is already the largest representable value.
+    SlotGenerationExhausted(SlotGenerationExhausted),
     /// The derived in-memory window refused a batch the recovered chain
     /// committed. The stream is the source of truth; this is a derived
     /// reconstruction failure (FG-INV-18), never a second authority.
@@ -476,6 +502,10 @@ pub enum WriteError {
     /// A prior durable commit failed during derived publication. The handle is
     /// fenced so another write cannot publish from its stale fold.
     RecoveryRequired(RecoveryRequired),
+    /// The root slot cannot name another generation. This refusal is computed
+    /// before Chronicle receives capsule bytes, so no commit sequence is
+    /// consumed and no recovery obligation is created.
+    SlotGenerationExhausted(SlotGenerationExhausted),
     /// This call committed at D2, then failed while publishing derived state.
     /// The commit is NOT lost; `recovery` names the exact stale/current split.
     CommittedNeedsRecovery {
@@ -531,10 +561,17 @@ from_error!(OpenError, Io, std::io::Error);
 from_error!(OpenError, Commit, CommitError);
 from_error!(OpenError, Store, StoreError);
 from_error!(OpenError, Rebuild, RebuildError);
+from_error!(OpenError, SlotGenerationExhausted, SlotGenerationExhausted);
 from_error!(RebuildError, Commit, CommitError);
 from_error!(RebuildError, Store, StoreError);
+from_error!(
+    RebuildError,
+    SlotGenerationExhausted,
+    SlotGenerationExhausted
+);
 from_error!(WriteError, Canonical, CanonicalError);
 from_error!(WriteError, Commit, CommitError);
+from_error!(WriteError, SlotGenerationExhausted, SlotGenerationExhausted);
 from_error!(ReadError, Root, RootError);
 
 impl core::fmt::Display for OpenError {
@@ -544,6 +581,7 @@ impl core::fmt::Display for OpenError {
                 write!(f, "{} exists and is not a directory", path.display())
             }
             Self::Slot(error) => write!(f, "root slot: {error}"),
+            Self::SlotGenerationExhausted(error) => error.fmt(f),
             Self::ForeignSlot { path } => write!(
                 f,
                 "the root slot in {} is not this database's — identity tuple or \
@@ -627,6 +665,7 @@ impl core::fmt::Display for RebuildError {
                 "root slot publication after a durable publish: {error} (the \
                  slot is at most one publication behind; the next open heals it)"
             ),
+            Self::SlotGenerationExhausted(error) => error.fmt(f),
             Self::Index { commit_seq, error } => write!(
                 f,
                 "commit {commit_seq}: derived delta index refused the committed batch: {error}"
@@ -687,6 +726,7 @@ impl core::fmt::Display for WriteError {
                  {:?} failed; reopen before writing",
                 recovery.published_frontier, recovery.durable_frontier, recovery.failed_stage
             ),
+            Self::SlotGenerationExhausted(error) => error.fmt(f),
             Self::CommittedNeedsRecovery { recovery, source } => write!(
                 f,
                 "commit {:?} is durable, but {:?} failed after the handle's published \
@@ -1452,6 +1492,17 @@ fn spine_slot(
     }
 }
 
+/// Derive the one lawful successor generation.
+///
+/// Keep this authority shared by ordinary writes, maintenance publication,
+/// and open-time healing: duplicating the arithmetic would let one path wrap
+/// after the others learned to fail closed.
+fn next_slot_generation(current: u64) -> Result<u64, SlotGenerationExhausted> {
+    current
+        .checked_add(1)
+        .ok_or(SlotGenerationExhausted { current })
+}
+
 /// The zero-validation half of the PLAIN opener ruling: a slot whose
 /// identity tuple, opener form, or must-be-zero region disagrees is not this
 /// database's slot and is refused, never reinterpreted.
@@ -1938,7 +1989,7 @@ impl<V: Vfs + Clone> Database<V> {
                             slot_manifest: ObjectId(slot.root_manifest_oid),
                         });
                     }
-                    let healed = slot.slot_generation + 1;
+                    let healed = next_slot_generation(slot.slot_generation)?;
                     let next = spine_slot(&keys, healed, snapshot.manifest, manifest_len);
                     slot_store
                         .publish_evidenced(cx, &next)
@@ -2641,6 +2692,10 @@ impl<V: Vfs + Clone> Database<V> {
             }],
         )?;
 
+        // Slot exhaustion is a publication impossibility, not a post-commit
+        // recovery condition. Refuse before Chronicle receives the capsule so
+        // D2 cannot make a commit whose derived root has no selectable name.
+        let next_generation = next_slot_generation(self.slot_generation)?;
         let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
         let marker_ref = match self
             .coordinator
@@ -2850,7 +2905,6 @@ impl<V: Vfs + Clone> Database<V> {
         let manifest_len = encode_manifest(&manifest_records)
             .map(|bytes| bytes.len() as u64)
             .expect("records_of already proved these records canonical");
-        let next_generation = self.slot_generation + 1;
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishRootSlot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         self.slot_store
@@ -3206,6 +3260,10 @@ impl<V: Vfs + Clone> Database<V> {
         if !matches!(self.state, DatabaseState::Healthy { .. }) {
             return Err(RebuildError::HandleNotHealthy(self.state));
         }
+        // Compaction is optional derived publication. Do not write even an
+        // unreferenced replacement object when no successor slot can ever
+        // select it.
+        let next_generation = next_slot_generation(self.slot_generation)?;
         let compaction = fgdb_strata::compact::compact_with_props(
             &self.snapshot.blocks,
             &self.snapshot.block_props,
@@ -3341,7 +3399,6 @@ impl<V: Vfs + Clone> Database<V> {
         let manifest_len = encode_manifest(&manifest_records)
             .map(|bytes| bytes.len() as u64)
             .expect("one root is one canonical record");
-        let next_generation = self.slot_generation + 1;
         self.slot_store
             .publish_evidenced(
                 cx,
