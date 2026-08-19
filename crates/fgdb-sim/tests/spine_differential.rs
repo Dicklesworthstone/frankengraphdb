@@ -35,7 +35,7 @@ use fgdb::{
     WriteError, WriteMismatchPolicy,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
-use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator};
+use fgdb_chronicle::commit::{CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CrashPoint};
 use fgdb_chronicle::identity::{VerificationOperation, VerificationOutcome};
 use fgdb_chronicle::store::{ROOT_FILE_NAME, StoreError as SlotStoreError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -1295,6 +1295,158 @@ fn root_slot_fsync_lie_is_detected_fenced_and_recovered_from_chronicle() {
         vfs.crash().await.expect("simulate process loss");
         drop(db);
         assert_reopened_vertex_matches_oracle(cx, &dir).await;
+    });
+}
+
+/// Dropping an async write is the cancellation boundary callers actually own.
+/// Chronicle poisons its coordinator before appending the marker, but a
+/// cancelled outer future cannot execute the error arm that copies that fact
+/// into `DatabaseState`. The public handle must therefore be fenced before the
+/// first commit await, not after the await reports an outcome.
+#[test]
+fn commit_d2_cancellation_leaves_the_borrowed_handle_fenced_and_recoverable() {
+    let dir = scratch("database-vfs-commit-d2-cancel");
+    under_lab_with_root(0x8_5e00_0001, move |root, cx| async move {
+        let cx = &cx;
+        create_genesis(cx, &dir).await;
+
+        // Make D2's primary file sync report a planted success without
+        // clearing the dirty marker bytes. That keeps the reinforcement
+        // eligible for FaultVfs latency, so the fifth eligible sync is the
+        // exact clean-up barrier the bead names rather than an earlier file or
+        // directory boundary.
+        let vfs = FaultVfs::unix_with_clock(
+            FaultPlan {
+                fsync_lie: Trigger::At(2),
+                latency: Trigger::At(5),
+                latency_micros: 60_000_000,
+                ..FaultPlan::faultless()
+            },
+            root,
+        );
+        let mut db = Database::open_with_vfs(cx, vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("faultable database opens");
+
+        // An explicit pre-marker refusal returns through the outer future, so
+        // the handle can prove that Chronicle stayed unpoisoned and restore
+        // its original healthy state. This positive control also proves the
+        // fifth latency trigger still belongs to the ordinary write below.
+        let safe_refusal = db
+            .write_with_crash(cx, vfs_fault_batch(), Some(CrashPoint::BeforeCapsule))
+            .await
+            .expect_err("the planted pre-capsule refusal must fire");
+        assert!(
+            matches!(safe_refusal, WriteError::Commit(_)),
+            "pre-marker refusal lost its typed commit error: {safe_refusal:?}"
+        );
+        assert_eq!(
+            db.state(),
+            DatabaseState::Healthy {
+                published_frontier: CommitSeq(0)
+            },
+            "an explicit refusal before Chronicle poisoning is safely retryable"
+        );
+
+        let mut write = Box::pin(db.write(cx, vfs_fault_batch()));
+        let pending = poll_fn(|task_cx| {
+            if let Poll::Ready(result) = write.as_mut().poll(task_cx) {
+                return Poll::Ready(Err(format!(
+                    "write completed before cancellation reached D2 reinforcement: {result:?}"
+                )));
+            }
+            let pending = vfs.pending_latency_paths();
+            if pending.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(pending))
+            }
+        })
+        .await
+        .expect("the write must suspend at an injected durability boundary");
+        assert_eq!(
+            pending,
+            vec![dir.join(COMMIT_LOG_NAME)],
+            "cancellation must target Chronicle's commit-log D2 reinforcement"
+        );
+
+        drop(write);
+        assert!(
+            vfs.pending_latency_paths().is_empty(),
+            "dropping the write must retire its pending latency waiter"
+        );
+        assert_eq!(
+            vfs.events().len(),
+            1,
+            "only the planted D2 primary-sync lie may complete before cancellation"
+        );
+        assert!(
+            matches!(vfs.events()[0].kind, FaultKind::FsyncLie { .. })
+                && vfs.events()[0].path == dir.join(COMMIT_LOG_NAME),
+            "the completed fault must be the planted commit-log D2 lie: {:?}",
+            vfs.events()
+        );
+
+        let expected = DatabaseState::CommitOutcomeUnknown {
+            published_frontier: CommitSeq(0),
+        };
+        assert_eq!(
+            db.state(),
+            expected,
+            "cancelled D2 left the pre-commit snapshot callable"
+        );
+        assert!(matches!(
+            db.frontier(),
+            Err(ReadError::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(0)
+            })
+        ));
+        assert!(matches!(
+            db.compact(cx).await,
+            Err(RebuildError::HandleNotHealthy(
+                DatabaseState::CommitOutcomeUnknown {
+                    published_frontier: CommitSeq(0)
+                }
+            ))
+        ));
+        let refused = db.write(cx, vfs_fault_batch()).await;
+        assert!(
+            matches!(
+                refused,
+                Err(WriteError::HandleCommitOutcomeUnknown {
+                    published_frontier: CommitSeq(0)
+                })
+            ),
+            "fenced database accepted another write: {refused:?}"
+        );
+
+        // The planted primary-D2 lie leaves the marker volatile and the
+        // cancelled reinforcement never repairs it, so process loss removes
+        // the marker. The product reopen and independent replay must agree on
+        // that absence; the stale handle was not allowed to guess it.
+        vfs.crash().await.expect("simulate process loss");
+        drop(db);
+        let engine = Database::open(cx, &dir, engine_keys())
+            .await
+            .expect("authoritative reopen decides the cancelled marker");
+        let engine_frontier = engine.frontier().expect("healthy recovered frontier");
+        let engine_vertex = engine.vertex(VId(1)).expect("healthy recovered read");
+        drop(engine);
+
+        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("oracle opens the post-crash stream");
+        let replayed = replay(cx, &coordinator).await.expect("stream replays");
+        assert_eq!(engine_frontier, replayed.index.frontier());
+        assert_eq!(engine_frontier, CommitSeq::ORIGIN);
+        assert!(
+            engine_vertex.is_none(),
+            "the cancelled reinforcement cannot make a lying primary D2 durable"
+        );
+        assert!(
+            replayed.database.graph(GRAPH, BRANCH).is_none(),
+            "the independent oracle found a commit the product correctly discarded"
+        );
     });
 }
 

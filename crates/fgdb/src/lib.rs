@@ -432,8 +432,9 @@ pub enum DatabaseState {
     Healthy {
         published_frontier: CommitSeq,
     },
-    /// Chronicle crossed the point where a marker may be durable but did not
-    /// complete D2 observably. Only reopen can decide whether it committed.
+    /// A cancellable Chronicle commit began and the outer write did not
+    /// observe a safe pre-marker refusal or a completed D2. Only reopen can
+    /// decide whether the marker committed.
     CommitOutcomeUnknown {
         published_frontier: CommitSeq,
     },
@@ -2697,6 +2698,14 @@ impl<V: Vfs + Clone> Database<V> {
         // D2 cannot make a commit whose derived root has no selectable name.
         let next_generation = next_slot_generation(self.slot_generation)?;
         let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
+        let published_frontier = self.snapshot.frontier;
+        // `commit_with_crash` is cancellable at every VFS await. Chronicle
+        // poisons its own coordinator immediately before marker append, but a
+        // dropped OUTER future never executes the error arm below that copies
+        // the poison into this public handle. Fence before the first await;
+        // only an explicit error from an unpoisoned coordinator proves that it
+        // is safe to restore the old published generation as Healthy.
+        self.state = DatabaseState::CommitOutcomeUnknown { published_frontier };
         let marker_ref = match self
             .coordinator
             .commit_with_crash(
@@ -2709,14 +2718,15 @@ impl<V: Vfs + Clone> Database<V> {
         {
             Ok(marker_ref) => marker_ref,
             Err(source) if self.coordinator.is_poisoned() => {
-                let published_frontier = self.snapshot.frontier;
-                self.state = DatabaseState::CommitOutcomeUnknown { published_frontier };
                 return Err(WriteError::CommitOutcomeUnknown {
                     published_frontier,
                     source,
                 });
             }
-            Err(source) => return Err(WriteError::Commit(source)),
+            Err(source) => {
+                self.state = DatabaseState::Healthy { published_frontier };
+                return Err(WriteError::Commit(source));
+            }
         };
 
         // Incremental snapshot maintenance (fgdb-fujt): the template in hand IS
@@ -2732,7 +2742,7 @@ impl<V: Vfs + Clone> Database<V> {
         let frontier = marker_ref.commit_seq;
         let mut recovery = RecoveryRequired {
             durable_frontier: frontier,
-            published_frontier: self.snapshot.frontier,
+            published_frontier,
             failed_stage: DerivedPublicationStage::FoldCommittedTemplate,
         };
         // D2 has completed. From this assignment until the final snapshot
