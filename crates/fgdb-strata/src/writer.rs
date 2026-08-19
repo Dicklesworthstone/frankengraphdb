@@ -80,6 +80,7 @@ type EncodedEdgeSeal = (
     Vec<SealedBlock>,
     BTreeMap<(VId, RelationId), DeltaBlockVersion>,
 );
+type EdgeStatementKey = (VId, RelationId, VId, EId, CommitSeq);
 
 /// One staged adjacency statement: the entry and its properties.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,7 +279,7 @@ pub struct BlockWriter {
     partition: u64,
     /// Entries not yet sealed, keyed by the complete stable adjacency
     /// identity, each with the properties its statement carries.
-    pending: BTreeMap<(VId, RelationId, VId, EId, CommitSeq), PendingStatement>,
+    pending: BTreeMap<EdgeStatementKey, PendingStatement>,
     /// The full statement of every edge currently live — endpoints, creation,
     /// AND properties, because a tombstone must RESTATE the properties so a
     /// pre-retirement snapshot keeps answering them (fgdb-yqor), exactly as
@@ -661,28 +662,62 @@ impl BlockWriter {
                 // early-seal refuses, and apply returns with a partial
                 // cascade — the shape preflight is written to forbid.
                 let mut incoming = 0usize;
+                let mut deferred_same_commit = BTreeSet::new();
                 for eid in sorted_retired_incident_edges {
-                    if let Some((entry, _)) = self.retirement_entry(*eid, seq)? {
-                        let key = (entry.src, entry.relation, entry.dst, *eid, entry.created_at);
-                        incoming += usize::from(!self.pending.contains_key(&key));
+                    match self.retirement_entry(*eid, seq)? {
+                        Some((entry, _)) => {
+                            let key =
+                                (entry.src, entry.relation, entry.dst, *eid, entry.created_at);
+                            incoming += usize::from(!self.pending.contains_key(&key));
+                        }
+                        None => {
+                            let edge = self
+                                .live
+                                .get(eid)
+                                .expect("retirement preflight proved the edge live");
+                            deferred_same_commit.insert((
+                                edge.src,
+                                edge.relation,
+                                edge.dst,
+                                *eid,
+                                edge.created_at,
+                            ));
+                        }
                     }
                 }
-                let need_edge_seal = self.pending.len() + incoming
+                // Model the set that remains AFTER same-commit incident
+                // creations fold away. They cannot be sealed (that would
+                // freeze a ghost live row), but they also must not suppress
+                // a pre-seal needed by the old-edge tombstones that follow.
+                let remaining_pending = self
+                    .pending
+                    .keys()
+                    .filter(|key| !deferred_same_commit.contains(key))
+                    .count();
+                let remaining_has_live_at = self.pending.iter().any(|(key, pending)| {
+                    !deferred_same_commit.contains(key)
+                        && pending.entry.created_at == seq
+                        && pending.entry.retired_at.is_none()
+                });
+                let need_edge_seal = remaining_pending + incoming
                     > usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX)
-                    && !self.pending_has_live_at(seq);
+                    && !remaining_has_live_at;
                 // DeleteVertex is the only apply arm that may pre-seal BOTH
                 // maps. Committing the vertex seal and then refusing the
                 // edge seal used to leave pending vertices durable while
                 // apply returned a no-op-shaped error.
                 if need_vertex_seal && need_edge_seal {
                     let vertex_sealed = self.encode_pending_vertices(keys)?;
-                    let (edge_sealed, next_heads) = self.encode_pending_edges(keys)?;
+                    let (edge_sealed, next_heads) =
+                        self.encode_pending_edges_except(keys, &deferred_same_commit)?;
                     self.commit_vertex_seal(vertex_sealed);
-                    self.commit_edge_seal(edge_sealed, next_heads);
+                    self.commit_edge_seal_except(edge_sealed, next_heads, &deferred_same_commit);
                 } else if need_vertex_seal {
                     self.seal_vertices(keys)?;
                 } else if need_edge_seal {
-                    self.seal(keys)?;
+                    let (edge_sealed, next_heads) =
+                        self.encode_pending_edges_except(keys, &deferred_same_commit)?;
+                    self.commit_edge_seal_except(edge_sealed, next_heads, &deferred_same_commit);
                 }
                 for eid in sorted_retired_incident_edges {
                     self.retire(keys, *eid, seq)?;
@@ -929,12 +964,27 @@ impl BlockWriter {
         &self,
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
     ) -> Result<EncodedEdgeSeal, WriteError> {
+        self.encode_pending_edges_except(keys, &BTreeSet::new())
+    }
+
+    /// Encode every pending edge except same-commit creations that the
+    /// current `DeleteVertex` cascade will fold away. Those rows must remain
+    /// mutable until retirement; sealing them would make an empty interval
+    /// durable as a live ghost.
+    fn encode_pending_edges_except(
+        &self,
+        keys: (&[u8; 32], DatabaseSecurityNamespaceId),
+        deferred: &BTreeSet<EdgeStatementKey>,
+    ) -> Result<EncodedEdgeSeal, WriteError> {
         let mut by_descriptor: BTreeMap<(VId, RelationId), Vec<PendingStatement>> = BTreeMap::new();
-        for statement in self.pending.values().cloned() {
+        for (key, statement) in &self.pending {
+            if deferred.contains(key) {
+                continue;
+            }
             by_descriptor
                 .entry((statement.entry.src, statement.entry.relation))
                 .or_default()
-                .push(statement);
+                .push(statement.clone());
         }
         struct StagedChunk {
             first_seq: CommitSeq,
@@ -1075,14 +1125,25 @@ impl BlockWriter {
         sealed: Vec<SealedBlock>,
         next_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
     ) {
-        for statement in self.pending.values() {
-            if statement.entry.retired_at.is_none() {
+        self.commit_edge_seal_except(sealed, next_heads, &BTreeSet::new());
+    }
+
+    /// Commit an edge seal while retaining same-commit creations that the
+    /// active vertex-delete cascade is about to fold away.
+    fn commit_edge_seal_except(
+        &mut self,
+        sealed: Vec<SealedBlock>,
+        next_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+        deferred: &BTreeSet<EdgeStatementKey>,
+    ) {
+        for (key, statement) in &self.pending {
+            if !deferred.contains(key) && statement.entry.retired_at.is_none() {
                 self.sealed_live_edges
                     .insert((statement.entry.eid, statement.entry.created_at));
             }
         }
         self.chain_heads = next_heads;
-        self.pending.clear();
+        self.pending.retain(|key, _| deferred.contains(key));
         self.sealed.extend(sealed);
     }
 
@@ -1799,6 +1860,120 @@ mod tests {
             writer.pending_len(),
             ceiling - 1,
             "the planted illegal families stay; the cascade added nothing"
+        );
+    }
+
+    /// A same-commit incident edge suppresses the ordinary pre-seal because
+    /// sealing it would freeze a live row that must fold away. If that edge
+    /// sorts before older incident edges, however, retiring it removes the
+    /// suppression before the rest of the cascade is staged. A later old-edge
+    /// tombstone can then reach the ceiling and refuse a seal after earlier
+    /// members have already retired. The mixed cascade must be just as atomic
+    /// as an all-old cascade.
+    #[test]
+    fn a_failed_mixed_cascade_seal_does_not_partially_retire() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        let rel = RelationId(1);
+        for vid in [1_u128, 2] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateVertex {
+                        vid: VId(vid),
+                        birth_ordinal: u64::try_from(vid).expect("test vid fits"),
+                        labels: vec![],
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("vertices");
+        }
+        for eid in [10_u128, 11, 12] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &DeltaRow::CreateEdge {
+                        eid: EId(eid),
+                        birth_ordinal: u64::try_from(eid).expect("test eid fits"),
+                        src: VId(1),
+                        relation: rel,
+                        dst: VId(2),
+                        canonical_key: None,
+                        props: vec![],
+                        valid_time: None,
+                    },
+                )
+                .expect("old edge");
+        }
+        writer.seal(keys()).expect("old edge births durable");
+        writer.seal_vertices(keys()).expect("vertex births durable");
+
+        writer
+            .apply(
+                keys(),
+                CommitSeq(2),
+                &DeltaRow::CreateEdge {
+                    eid: EId(1),
+                    birth_ordinal: 4,
+                    src: VId(1),
+                    relation: rel,
+                    dst: VId(2),
+                    canonical_key: None,
+                    props: vec![],
+                    valid_time: None,
+                },
+            )
+            .expect("same-commit edge");
+
+        let ceiling = usize::try_from(MAX_BLOCK_ENTRIES).unwrap();
+        for i in 0..(ceiling - 2) {
+            let src = VId(1000 + i as u128);
+            writer.pending.insert(
+                (src, rel, VId(3), EId(1000 + i as u128), CommitSeq(0)),
+                PendingStatement {
+                    entry: AdjacencyEntry {
+                        src,
+                        relation: rel,
+                        dst: VId(3),
+                        eid: EId(1000 + i as u128),
+                        created_at: CommitSeq(0),
+                        retired_at: None,
+                    },
+                    props: vec![],
+                },
+            );
+        }
+        assert_eq!(writer.pending_len(), ceiling - 1);
+
+        let refusal = writer.apply(
+            keys(),
+            CommitSeq(2),
+            &DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: fgdb_types::ids::ObjectId([0u8; 32]),
+                sorted_retired_incident_edges: vec![EId(1), EId(10), EId(11), EId(12)],
+            },
+        );
+        assert_eq!(
+            refusal,
+            Err(WriteError::Block(BlockError::CreatedAtZero { at: 0 }))
+        );
+        assert!(
+            writer.is_vertex_live(VId(2)),
+            "the refused delete must leave the vertex live"
+        );
+        for eid in [1_u128, 10, 11, 12] {
+            assert!(
+                writer.live_edge(EId(eid)).is_some(),
+                "the refused mixed cascade must leave E{eid} live"
+            );
+        }
+        assert_eq!(
+            writer.pending_len(),
+            ceiling - 1,
+            "the refused mixed cascade must restore the same-commit creation"
         );
     }
 
