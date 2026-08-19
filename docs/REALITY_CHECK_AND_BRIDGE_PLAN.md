@@ -1,9 +1,78 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-08-16.** This document is revised in place. Older
+**Current measurement: 2026-08-18.** This document is revised in place. Older
 commit-bound assessments are retained below as superseded historical snapshots because
 they explain several decisions; their counts and statements about missing seams are not
-current unless the 2026-08-16 delta repeats them.
+current unless the 2026-08-18 delta repeats them.
+
+---
+
+## Current delta — 2026-08-18
+
+### Product verdict
+
+**The product classification has not changed: FrankenGraphDB has a real embedded
+durability spine, but it is still not the graph-database product described by the
+README.** The 23 commits after the prior measurement materially harden that spine and
+its evidence rather than adding a new product posture:
+
+1. graph publication and its delta are now installed as one authoritative cut, while
+   compaction-safe read views pin the exact immutable objects they observe;
+2. creation durably synchronizes the database parent directory, VFS-backed open is
+   namespace-confined, root-generation exhaustion fails closed, and root/capsule reads
+   are bounded before allocation or decoding;
+3. secret-bearing failures use redacted error surfaces and shared scrubbed key
+   ownership, including drop-path coverage; and
+4. the LAB dual-run harness can force schedules, persists replay artifacts, and shrinks
+   both event and scheduler-decision axes.
+
+Those are worthwhile B1/B2/B5 advances. They do not make `WriteBatch` a transaction,
+remove the fixed graph/branch/partition coordinates, or add sessions, prepared
+statements, GQL/openCypher execution, Loom, Ripple, secure query views, streaming typed
+results, a product CLI, `fgdbd`, a Python package, or an installable release. Tier R,
+archived anchors, product-scale admission/spill, and §17 benchmark proof are also still
+absent. No G1-G4 product gate follows from this hardening work.
+
+### Current evidence boundary
+
+This delta is pinned to tracked commit
+`8d295653354b05ee448f1d5164bcdf12c9cdf448`. `README.md`, the comprehensive plan,
+and the threat model are byte-unchanged from the 2026-08-16 assessment baseline. The
+shared checkout again contained the same three untracked foreign artifacts
+(`.beads/beads.db-wal-cert`, `.beads/beads.db-wal-cert-head`, and
+`tools/registry-check/src/claims.rs`); they were neither edited nor removed.
+
+Current static measurements remain 70 topology slots (19 active, 50 planned, one
+reserved), 20 Cargo packages, 20 library targets, 97 integration-test targets, five
+examples, five checker-tool binaries, and zero benchmark targets. There is still no
+product `fgdb` or `fgdbd` binary. The invariant ledger still has 20 IDs with zero
+enforced clauses and zero enforced invariants; the checker registry has 57 live and 42
+stub rows; and one of ten formal lanes is checked.
+
+The tracker now contains 759 records: 462 closed, 275 open, 14 in progress, and eight
+explicitly blocked. `br stats` classifies 284 records as dependency-blocked and reports
+zero ready records, while `bv --robot-triage` reports 19 actionable records under its
+broader predicate. `bv --robot-insights` still reports zero dependency cycles; this
+snapshot's data hash is `732fd3b8336b8a63`.
+
+Focused remote execution at this exact source identity proved the integrated
+open/write/read/drop/reopen test (`1 passed`, exit 0). The runnable example also reached
+`OK: opened, wrote, dropped, reopened, agreed.` on its remote worker, but RCH then failed
+artifact retrieval with `RCH-E309` and returned 102; it is therefore useful behavioral
+output, not a green command. The authoritative full-repository gate is intentionally
+reported with the landing rather than asserted inside bytes that it has not yet checked.
+A subsequent local rerun of the example completed with the same agreement and exit 0;
+it is local runnable-behavior evidence, not a substitute for that repository gate.
+
+### Bridge consequence
+
+The six current priorities from the 2026-08-16 delta remain correctly ordered. In
+particular, `fgdb-5uw2` already owns the command-union/body/result/handler closure and is
+in progress under another owner; this audit does not fork that lane. The next capability
+step is still to turn the registered command universe into executable contracts, then
+build real transaction/session ownership and the minimum GQL-to-GLA-to-Loom streaming
+slice over the proven storage spine. Storage hardening is necessary groundwork, not a
+substitute for those missing product layers.
 
 ---
 
