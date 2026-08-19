@@ -14,7 +14,8 @@
 
 use fgdb_chronicle::IdentifiedObject;
 use fgdb_chronicle::capsule::{
-    CAPSULE_MAGIC, CapsuleError, CapsuleProfile, decode_container, encode_container, recover, seal,
+    CAPSULE_HEADER_BYTES_V1, CAPSULE_MAGIC, CapsuleError, CapsuleProfile,
+    MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container, encode_container, recover, seal,
 };
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
@@ -61,6 +62,12 @@ fn a_capsule_round_trips_through_its_container() {
     let capsule = sealed();
     let bytes = encode_container(&capsule);
     assert_eq!(&bytes[..4], &CAPSULE_MAGIC);
+    assert_eq!(
+        MAX_CAPSULE_CONTAINER_BYTES_V1, 24_031_256,
+        "the recovery ceiling is derived from the closed V1 profile and RFC source-symbol bound"
+    );
+    assert_eq!(CAPSULE_HEADER_BYTES_V1, 170);
+    assert!(bytes.len() < MAX_CAPSULE_CONTAINER_BYTES_V1);
 
     let (descriptor, symbols) = decode_container(&bytes).expect("decodes");
     assert_eq!(descriptor, capsule.descriptor);
@@ -417,6 +424,46 @@ fn an_unsupported_container_version_is_refused() {
     assert!(matches!(
         decode_container(&bytes),
         Err(CapsuleError::UnsupportedFormat { format: 99 })
+    ));
+}
+
+#[test]
+fn a_complete_container_with_trailing_bytes_is_refused() {
+    let capsule = sealed();
+    let mut bytes = encode_container(&capsule);
+    bytes.extend_from_slice(b"hidden trailing bytes");
+    assert!(matches!(
+        decode_container(&bytes),
+        Err(CapsuleError::MalformedContainer)
+    ));
+}
+
+#[test]
+fn a_declared_inventory_that_hides_a_whole_symbol_is_refused() {
+    let capsule = sealed();
+    let original = encode_container(&capsule);
+    let count_offset = CAPSULE_HEADER_BYTES_V1 - 4;
+    let original_count = u32::from_be_bytes(
+        original[count_offset..CAPSULE_HEADER_BYTES_V1]
+            .try_into()
+            .expect("declared count occupies four bytes"),
+    );
+    assert!(original_count > 1, "the control needs a hidden symbol");
+
+    let mut bytes = original.clone();
+    bytes[count_offset..CAPSULE_HEADER_BYTES_V1]
+        .copy_from_slice(&(original_count - 1).to_be_bytes());
+    assert!(matches!(
+        decode_container(&bytes),
+        Err(CapsuleError::MalformedContainer)
+    ));
+
+    let mut oversized_inventory = original;
+    oversized_inventory[count_offset..CAPSULE_HEADER_BYTES_V1]
+        .copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(matches!(
+        decode_container(&oversized_inventory),
+        Err(CapsuleError::MalformedContainer)
     ));
 }
 

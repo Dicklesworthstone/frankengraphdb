@@ -36,7 +36,10 @@ use crate::identity::{
     CipherDescriptor, CryptoVerificationSink, EncodedObject, EncodingDescriptor, IdentifiedObject,
     IdentityMismatch,
 };
-use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
+use crate::symbol::{HEADER_LEN_V1, SYMBOL_MAC_LEN_V1};
+use crate::symbolize::{
+    MAX_SOURCE_SYMBOLS_PER_BLOCK, RecoveryTarget, SymbolizeError, decode_object, encode_object,
+};
 use fgdb_crypto::{Digest, zeroize::SharedSecret};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
@@ -46,6 +49,12 @@ pub const CAPSULE_MAGIC: [u8; 4] = *b"FGCP";
 
 /// Container format version (§16.6: durable formats are versioned from day one).
 pub const CAPSULE_FORMAT_V1: u16 = 1;
+
+/// Fixed bytes before the first length-prefixed symbol in a V1 capsule.
+///
+/// Keeping this named beside the encoder makes the declared-symbol offset and
+/// the maximum-container calculation reviewable against one format authority.
+pub const CAPSULE_HEADER_BYTES_V1: usize = 170;
 
 /// A capsule's self-sufficient descriptor: everything recovery needs to rebuild
 /// the object's identity from the file alone.
@@ -161,10 +170,35 @@ impl CapsuleProfile {
     }
 }
 
+/// Largest capsule container the closed V1 writer profile can produce.
+///
+/// This is a recovery allocation boundary, not a product-size promise. The
+/// V1 writer emits one RFC 6330 source block, the `balanced` profile is the
+/// only registered capsule profile, and each serialized symbol has one u32
+/// container-length prefix around the fixed V1 symbol record. Recovery probes
+/// one byte beyond this ceiling before refusing an overgrown file.
+const MAX_CAPSULE_SYMBOLS_V1: usize =
+    MAX_SOURCE_SYMBOLS_PER_BLOCK + CapsuleProfile::BALANCED.repair_symbols as usize;
+
+pub const MAX_CAPSULE_CONTAINER_BYTES_V1: usize = CAPSULE_HEADER_BYTES_V1
+    + MAX_CAPSULE_SYMBOLS_V1
+        * (4 + HEADER_LEN_V1 as usize
+            + CapsuleProfile::BALANCED.symbol_size as usize
+            + SYMBOL_MAC_LEN_V1 as usize);
+
 /// Why sealing or recovering a capsule failed.
 #[derive(Debug)]
 pub enum CapsuleError {
     Io(std::io::Error),
+    /// The capsule stream exceeded the largest container the closed V1 writer
+    /// profile can produce. `observed_at_least` is deliberately a lower bound:
+    /// recovery stops after the first byte that proves the violation.
+    ContainerTooLarge {
+        observed_at_least: usize,
+        max: usize,
+    },
+    /// A bounded recovery allocation could not be satisfied.
+    AllocationFailed,
     /// The container's framing is not a capsule this reader understands.
     MalformedContainer,
     UnsupportedFormat {
@@ -193,6 +227,14 @@ impl core::fmt::Display for CapsuleError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(error) => write!(f, "capsule I/O failed: {error}"),
+            Self::ContainerTooLarge {
+                observed_at_least,
+                max,
+            } => write!(
+                f,
+                "capsule container is at least {observed_at_least} bytes, above the {max}-byte V1 limit"
+            ),
+            Self::AllocationFailed => f.write_str("capsule recovery allocation failed"),
             Self::MalformedContainer => write!(f, "not a capsule container"),
             Self::UnsupportedFormat { format } => {
                 write!(f, "unsupported capsule format version {format}")
@@ -482,6 +524,7 @@ pub fn encode_container(sealed: &SealedCapsule) -> Vec<u8> {
     out.extend_from_slice(&d.encoding_id);
     out.extend_from_slice(&d.repair_symbols.to_be_bytes());
     out.extend_from_slice(&(sealed.symbols.len() as u32).to_be_bytes());
+    debug_assert_eq!(out.len(), CAPSULE_HEADER_BYTES_V1);
     for symbol in &sealed.symbols {
         out.extend_from_slice(&(symbol.len() as u32).to_be_bytes());
         out.extend_from_slice(symbol);
@@ -526,13 +569,47 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         repair_symbols: r.u32()?,
     };
     let declared = r.u32()? as usize;
-    let mut symbols = Vec::with_capacity(declared.min(4096));
+    if let Some(registered) = CapsuleProfile::registered(descriptor.fec_profile)
+        && descriptor.repair_symbols != registered.repair_symbols
+    {
+        return Err(CapsuleError::RepairBudgetMismatch {
+            fec_profile: descriptor.fec_profile,
+            declared_repair_symbols: descriptor.repair_symbols,
+            registered_repair_symbols: registered.repair_symbols,
+        });
+    }
+    let symbol_size = u64::from(descriptor.symbol_size);
+    if symbol_size == 0 {
+        return Err(CapsuleError::MalformedContainer);
+    }
+    let expected_source_symbols = descriptor.transfer_length.div_ceil(symbol_size);
+    let expected_symbols = expected_source_symbols
+        .checked_add(u64::from(descriptor.repair_symbols))
+        .ok_or(CapsuleError::MalformedContainer)?;
+    if expected_symbols > MAX_CAPSULE_SYMBOLS_V1 as u64 || declared as u64 != expected_symbols {
+        return Err(CapsuleError::MalformedContainer);
+    }
+
+    let mut symbols = Vec::new();
+    symbols
+        .try_reserve_exact(declared)
+        .map_err(|_| CapsuleError::AllocationFailed)?;
+    let mut parsed = 0usize;
     for _ in 0..declared {
         let Ok(len) = r.u32() else { break };
         let Ok(payload) = r.take(len as usize) else {
             break;
         };
-        symbols.push(payload.to_vec());
+        let mut symbol = Vec::new();
+        symbol
+            .try_reserve_exact(payload.len())
+            .map_err(|_| CapsuleError::AllocationFailed)?;
+        symbol.extend_from_slice(payload);
+        symbols.push(symbol);
+        parsed += 1;
+    }
+    if parsed == declared && !r.is_at_end() {
+        return Err(CapsuleError::MalformedContainer);
     }
     Ok((descriptor, symbols))
 }
@@ -654,6 +731,10 @@ impl<'a> Reader<'a> {
             .ok_or(CapsuleError::MalformedContainer)?;
         self.position = end;
         Ok(slice)
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.position == self.bytes.len()
     }
 
     fn u16(&mut self) -> Result<u16, CapsuleError> {

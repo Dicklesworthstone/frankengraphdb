@@ -123,7 +123,7 @@ pub fn erasure_budget(repair_symbols: usize) -> usize {
     repair_symbols
 }
 
-const MAX_SOURCE_SYMBOLS_PER_BLOCK: usize = 56_403;
+pub(crate) const MAX_SOURCE_SYMBOLS_PER_BLOCK: usize = 56_403;
 
 /// Allocation authority for exactly one RFC-valid source block.
 ///
