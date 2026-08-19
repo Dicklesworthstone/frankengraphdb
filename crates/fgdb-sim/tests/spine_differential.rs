@@ -1398,6 +1398,138 @@ fn root_slot_cancellation_leaves_the_borrowed_handle_fenced_and_recoverable() {
     });
 }
 
+/// Compaction reaches the same cancellable `manifest.root` publication as a
+/// write, even though Chronicle's semantic frontier does not advance. Dropping
+/// that future while the root-slot sync is pending leaves the publication
+/// outcome unknown to the borrowed handle: it must not retain its old
+/// generation as `Healthy` and later try to reuse the generation that may have
+/// reached durable storage.
+#[test]
+fn compaction_root_slot_cancellation_fences_the_borrowed_handle() {
+    let dir = scratch("database-vfs-compact-root-slot-cancel");
+    under_lab_with_root(1_213, move |root, cx| async move {
+        let cx = &cx;
+        create_genesis(cx, &dir).await;
+        let mut seeded = Database::open(cx, &dir, engine_keys())
+            .await
+            .expect("seed database opens");
+        seeded
+            .write(cx, vfs_fault_batch())
+            .await
+            .expect("seed commit reaches frontier one");
+        drop(seeded);
+
+        // Compaction performs no Chronicle write. Its only eligible sync on
+        // this VFS is the replacement root slot, so the first delay is the
+        // exact cancellation boundary and the observed path independently
+        // prevents this witness from drifting to another operation.
+        let vfs = FaultVfs::unix_with_clock(
+            FaultPlan {
+                latency: Trigger::Nth(1),
+                latency_micros: 60_000_000,
+                ..FaultPlan::faultless()
+            },
+            root,
+        );
+        let mut db = Database::open_with_vfs(cx, vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("faultable database opens");
+
+        let mut compaction = Box::pin(db.compact(cx));
+        let pending = poll_fn(|task_cx| {
+            if let Poll::Ready(result) = compaction.as_mut().poll(task_cx) {
+                return Poll::Ready(Err(format!(
+                    "compaction completed before cancellation reached root publication: {result:?}"
+                )));
+            }
+            let pending = vfs.pending_latency_paths();
+            if pending.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(pending))
+            }
+        })
+        .await
+        .expect("compaction must suspend at its root durability boundary");
+        assert_eq!(
+            pending,
+            vec![dir.join(ROOT_FILE_NAME)],
+            "compaction cancellation must target the replacement root-slot sync"
+        );
+
+        drop(compaction);
+        assert!(
+            vfs.pending_latency_paths().is_empty(),
+            "dropping compaction must retire its pending latency waiter"
+        );
+        assert_eq!(
+            vfs.events(),
+            Vec::new(),
+            "a cancelled compaction delay must not be reported as fully awaited"
+        );
+
+        let state = db.state();
+        assert!(
+            matches!(state, DatabaseState::NeedsAuthoritativeRecovery(_)),
+            "cancelled root publication left the old compaction generation callable: {state:?}"
+        );
+        let DatabaseState::NeedsAuthoritativeRecovery(fence) = state else {
+            return;
+        };
+        assert_eq!(fence.durable_frontier, CommitSeq(1));
+        assert_eq!(fence.published_frontier, CommitSeq(1));
+        assert_eq!(fence.failed_stage, DerivedPublicationStage::PublishRootSlot);
+        assert_recovery_fence(
+            DerivedPublicationStage::PublishRootSlot,
+            fence,
+            db.frontier(),
+        );
+        assert_recovery_fence(
+            DerivedPublicationStage::PublishRootSlot,
+            fence,
+            db.vertex(VId(1)),
+        );
+        assert_recovery_fence(
+            DerivedPublicationStage::PublishRootSlot,
+            fence,
+            db.manifest(),
+        );
+        let refused = db.write(cx, vfs_fault_batch()).await;
+        assert!(
+            matches!(refused, Err(WriteError::RecoveryRequired(_))),
+            "fenced post-compaction handle accepted another write: {refused:?}"
+        );
+        let Err(WriteError::RecoveryRequired(found)) = refused else {
+            return;
+        };
+        assert_eq!(found.durable_frontier, fence.durable_frontier);
+        assert_eq!(found.published_frontier, fence.published_frontier);
+        assert_eq!(found.failed_stage, fence.failed_stage);
+
+        // Process loss discards the unsynced replacement slot. Consuming the
+        // fenced handle must reopen from Chronicle plus the last durable root,
+        // producing a healthy handle at the same semantic frontier.
+        vfs.crash().await.expect("simulate process loss");
+        let recovered = db
+            .recover_authoritatively(cx)
+            .await
+            .expect("authoritative same-VFS reopen repairs cancellation");
+        assert_eq!(
+            recovered.state(),
+            DatabaseState::Healthy {
+                published_frontier: CommitSeq(1)
+            }
+        );
+        assert!(
+            recovered
+                .vertex(VId(1))
+                .expect("recovered graph is readable")
+                .is_some(),
+            "authoritative recovery must preserve the committed vertex"
+        );
+    });
+}
+
 /// Strata's production publisher already models the two instants around
 /// canonical-name publication. This proves the integrated database does not
 /// erase that seam: D2 remains authoritative, the borrowed handle is fenced at

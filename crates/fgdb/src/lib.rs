@@ -3256,6 +3256,13 @@ impl<V: Vfs + Clone> Database<V> {
     /// generation, which the next open lands on unchanged. The slot swap
     /// itself is the dual-slot atomic publication the root-store laws pin,
     /// and the slot law's lag case covers the one observable window.
+    ///
+    /// **CANCELLATION FENCES THE BORROWED HANDLE.** The root-slot await can be
+    /// dropped after bytes moved but before its evidence returns. Immediately
+    /// before that await this method enters [`DatabaseState::NeedsAuthoritativeRecovery`]
+    /// at the unchanged semantic frontier; only the successful, same-poll
+    /// snapshot/generation swap restores `Healthy`. A caller can therefore
+    /// never reuse the old generation after an ambiguous compaction publish.
     pub async fn compact(&mut self, cx: &CommitCx) -> Result<(), RebuildError> {
         if !matches!(self.state, DatabaseState::Healthy { .. }) {
             return Err(RebuildError::HandleNotHealthy(self.state));
@@ -3399,6 +3406,21 @@ impl<V: Vfs + Clone> Database<V> {
         let manifest_len = encode_manifest(&manifest_records)
             .map(|bytes| bytes.len() as u64)
             .expect("one root is one canonical record");
+        // The slot write is the first cancellable operation that can make the
+        // replacement generation externally observable. Fence BEFORE the
+        // await, even though Chronicle's frontier is unchanged: dropping the
+        // future can otherwise return the mutable borrow with `slot_generation`
+        // still naming the predecessor while durable storage may already hold
+        // `next_generation`. The next write would then try to reuse a durable
+        // generation for different content. There is no await after a
+        // successful publication before the generation/snapshot swap and
+        // Healthy restoration, so those actions complete in the same poll.
+        let recovery = RecoveryRequired {
+            durable_frontier: frontier,
+            published_frontier: frontier,
+            failed_stage: DerivedPublicationStage::PublishRootSlot,
+        };
+        self.state = DatabaseState::NeedsAuthoritativeRecovery(recovery);
         self.slot_store
             .publish_evidenced(
                 cx,
@@ -3412,6 +3434,9 @@ impl<V: Vfs + Clone> Database<V> {
         // Receipts describe the superseded generation; the replacement earns
         // its own on the next publish.
         self.receipts = PublishReceipts::new();
+        self.state = DatabaseState::Healthy {
+            published_frontier: frontier,
+        };
         Ok(())
     }
 
