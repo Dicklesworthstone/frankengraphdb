@@ -140,3 +140,8 @@ __pycache__/
 # Real checker source lives under tools/registry-check/; this directory is
 # only the accidental `-o rc/...` output tree.
 /rc/
+
+# Skill-loop / repo-janitor scratch
+.skill-loop-progress.md
+.skill-loop-progress-*.md
+
