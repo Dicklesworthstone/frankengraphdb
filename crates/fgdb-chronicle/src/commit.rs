@@ -27,7 +27,9 @@
 //! normal outcome of crashing, not corruption. A torn entry anywhere EARLIER
 //! is corruption, because entries before it were durable.
 
-use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_container};
+use crate::capsule::{
+    CapsuleError, CapsuleKeys, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container, encode_container,
+};
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
 use crate::store::{sync_created_entry, sync_directory, sync_file};
 use crate::validate::{CommitDraft, CommitValidator, PassThroughValidator, ValidationRejection};
@@ -56,6 +58,11 @@ const COORDINATOR_LOCK_NAME: &str = ".commit-coordinator.lock";
 /// deterministic candidate without allocating a second capsule-sized `Vec`.
 const CAPSULE_COMPARE_BUFFER_BYTES: usize = 8 * 1024;
 
+/// Stack buffer used by the bounded capsule reader. The allocation grows only
+/// after each successful bounded read rather than reserving the entire V1
+/// ceiling for every small capsule.
+const CAPSULE_READ_BUFFER_BYTES: usize = 8 * 1024;
+
 /// Version-3 per-entry framing magic.
 ///
 /// Version 3 widens marker graph/branch coordinates to their canonical 128-bit
@@ -80,6 +87,41 @@ const ENTRY_TRAILER_BYTES: usize = 8;
 /// entry after it. A marker is a bounded record — `head_updates` is the only
 /// variable part — so a body beyond this is not a marker this code wrote.
 pub const MAX_ENTRY_BODY: usize = 64 * 1024;
+
+async fn read_bounded_capsule_container<R: AsyncRead + Unpin>(
+    reader: R,
+) -> Result<Vec<u8>, CapsuleError> {
+    read_bounded_capsule_container_with_limit(reader, MAX_CAPSULE_CONTAINER_BYTES_V1).await
+}
+
+async fn read_bounded_capsule_container_with_limit<R: AsyncRead + Unpin>(
+    reader: R,
+    max: usize,
+) -> Result<Vec<u8>, CapsuleError> {
+    let probe_limit = max.saturating_add(1);
+    let mut reader = reader.take(u64::try_from(probe_limit).unwrap_or(u64::MAX));
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; CAPSULE_READ_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        if bytes.capacity() - bytes.len() < read {
+            bytes
+                .try_reserve_exact(read)
+                .map_err(|_| CapsuleError::AllocationFailed)?;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    if bytes.len() > max {
+        return Err(CapsuleError::ContainerTooLarge {
+            observed_at_least: bytes.len(),
+            max,
+        });
+    }
+    Ok(bytes)
+}
 
 /// Why a commit or a recovery failed.
 #[derive(Debug)]
@@ -519,10 +561,11 @@ impl<V: Vfs> CommitCoordinator<V> {
         verification: &mut dyn crate::identity::CryptoVerificationSink,
     ) -> Result<Vec<u8>, CommitError> {
         cx.with_restriction_async(async {
-            let container = self
+            let file = self
                 .vfs
-                .read(&Self::capsule_path(&self.dir, capsule_oid))
+                .open_read(&Self::capsule_path(&self.dir, capsule_oid))
                 .await?;
+            let container = read_bounded_capsule_container(file).await?;
             let (descriptor, symbols) = decode_container(&container)?;
             Ok(self
                 .keys
@@ -1172,8 +1215,11 @@ fn decode_hex_oid(hex: &str) -> Option<ObjectId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitCoordinator, ENTRY_HEADER_BYTES, EntryDefect, UnixVfs};
-    use crate::capsule::{CapsuleKeys, CapsuleProfile};
+    use super::{
+        CommitCoordinator, ENTRY_HEADER_BYTES, EntryDefect, UnixVfs,
+        read_bounded_capsule_container_with_limit,
+    };
+    use crate::capsule::{CapsuleError, CapsuleKeys, CapsuleProfile};
     use asupersync::io::{AsyncRead, ReadBuf};
     use asupersync::lab::run_async_under_lab;
     use fgdb_types::context::PurposeContexts;
@@ -1181,6 +1227,8 @@ mod tests {
     use std::future::Future;
     use std::io;
     use std::pin::{Pin, pin};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
 
     /// A hostile source with an invalid fixed header and an arbitrarily large
@@ -1188,6 +1236,26 @@ mod tests {
     /// for the old whole-log `read_to_end` behavior.
     struct InvalidHeaderWithForbiddenSuffix {
         header_delivered: bool,
+    }
+
+    struct EndlessReadyReader {
+        delivered: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for EndlessReadyReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let offered = buf.remaining();
+            assert!(offered > 0, "the reader must offer a nonempty buffer");
+            let fill = [0xa5; 128];
+            let written = offered.min(fill.len());
+            buf.put_slice(&fill[..written]);
+            self.delivered.fetch_add(written, Ordering::Relaxed);
+            Poll::Ready(Ok(()))
+        }
     }
 
     impl AsyncRead for InvalidHeaderWithForbiddenSuffix {
@@ -1238,6 +1306,35 @@ mod tests {
             .expect("a header was present");
         assert!(matches!(decoded, Err(EntryDefect::Corrupt)));
         assert_eq!(entry.len(), ENTRY_HEADER_BYTES);
+    }
+
+    #[test]
+    fn capsule_reader_stops_after_the_first_byte_past_its_limit() {
+        const LIMIT: usize = 64;
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let source = EndlessReadyReader {
+            delivered: Arc::clone(&delivered),
+        };
+        let polled = poll_once(read_bounded_capsule_container_with_limit(source, LIMIT));
+        assert!(
+            matches!(polled, Poll::Ready(_)),
+            "ready-only hostile source unexpectedly suspended"
+        );
+        let Poll::Ready(result) = polled else {
+            return;
+        };
+        assert!(matches!(
+            result,
+            Err(CapsuleError::ContainerTooLarge {
+                observed_at_least: 65,
+                max: LIMIT,
+            })
+        ));
+        assert_eq!(
+            delivered.load(Ordering::Relaxed),
+            LIMIT + 1,
+            "the hostile suffix must not be consumed past the proof byte"
+        );
     }
 
     #[test]

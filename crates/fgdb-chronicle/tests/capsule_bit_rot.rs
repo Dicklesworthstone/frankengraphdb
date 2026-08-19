@@ -39,7 +39,9 @@
 //! depends on it.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile, decode_container};
+use fgdb_chronicle::capsule::{
+    CapsuleError, CapsuleKeys, CapsuleProfile, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container,
+};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate, MarkerChain};
 use fgdb_crypto::Digest;
@@ -256,6 +258,38 @@ fn an_undamaged_capsule_reads_back_exactly() {
             "the fixture must hold more symbols than the repair budget, or \
              'within budget' and 'the whole object' are the same test"
         );
+    });
+}
+
+/// A hostile file is refused after the first byte that proves it cannot be a
+/// V1 capsule. This goes through the production coordinator rather than only
+/// the reader helper, so replacing the bounded open with a whole-file read
+/// changes the typed verdict and reddens the control.
+#[test]
+fn an_overgrown_capsule_is_refused_by_the_production_read_boundary() {
+    let dir = scratch_dir("overgrown");
+    under_lab(0x6b8b, move |cx| async move {
+        let cx = &cx;
+        let (path, oid) = committed(&dir, cx).await;
+        let original_len = std::fs::metadata(&path).expect("capsule metadata").len();
+        assert!(original_len < MAX_CAPSULE_CONTAINER_BYTES_V1 as u64);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open capsule for hostile growth")
+            .set_len((MAX_CAPSULE_CONTAINER_BYTES_V1 + 1) as u64)
+            .expect("grow capsule one byte past the V1 ceiling");
+
+        let coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("reopen");
+        assert!(matches!(
+            coordinator.read_capsule(cx, oid, &mut Vec::new()).await,
+            Err(CommitError::Capsule(CapsuleError::ContainerTooLarge {
+                observed_at_least,
+                max: MAX_CAPSULE_CONTAINER_BYTES_V1,
+            })) if observed_at_least == MAX_CAPSULE_CONTAINER_BYTES_V1 + 1
+        ));
     });
 }
 
