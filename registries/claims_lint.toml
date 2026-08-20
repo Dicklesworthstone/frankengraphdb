@@ -148,15 +148,15 @@ unmarked_rows = [
 # ---------------------------------------------------------------------------
 
 [[exclude]]
-path = "COMPREHENSIVE_PLAN_REVIEW_BY_KIMI_K3.md"
+path = "docs/planning/COMPREHENSIVE_PLAN_REVIEW_BY_KIMI_K3.md"
 reason = "Historical external review; quotes draft text; superseded by the adjudicated revision program."
 
 [[exclude]]
-path = "META_ANALYSIS_OF_KIMI_K3_REVIEW_BY_FABLE.md"
+path = "docs/planning/META_ANALYSIS_OF_KIMI_K3_REVIEW_BY_FABLE.md"
 reason = "Historical adjudication record of the Kimi K3 review; not a normative claim surface."
 
 [[exclude]]
-path = "PLAN_AUDIT_BY_SOL_ULTRA.md"
+path = "docs/planning/PLAN_AUDIT_BY_SOL_ULTRA.md"
 reason = "Historical audit; references pre-adjudication invariant numbering (FG-INV-2x) that never entered the twenty-ID spine."
 
 [[exclude]]
@@ -165,9 +165,9 @@ presence = "optional"
 reason = "Historical proposal document; proposed FG-INV-21+ IDs were absorbed into the twenty-ID spine's clauses, not minted as new IDs. presence=optional because it is gitignored: present in the authoring tree, absent in a clean checkout, so requiring it would fail a fresh clone."
 
 [[exclude]]
-path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__FABLE.md"
+path = "docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__FABLE.md"
 reason = "Historical plan variant retained for provenance; the merged master plan is the normative artifact."
 
 [[exclude]]
-path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__SOL.md"
+path = "docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__SOL.md"
 reason = "Historical plan variant retained for provenance; the merged master plan is the normative artifact."
