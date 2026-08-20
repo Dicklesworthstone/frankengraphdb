@@ -404,6 +404,11 @@ coverage_of() {
     formal/lean/lean-toolchain)          echo "g0_proof_lanes_e2e (the prover pin: the gate reds if it is missing, malformed, or does not match the lean that actually ran)" ;;
     COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md)
                                          echo "registry-check (source_block pins + claims-lint)" ;;
+    # Hand-written release history: the lint owns prose-closure membership and
+    # marker resolution, not the narrative's completeness. MUTATION-PROVEN
+    # 2026-08-20: an appended FG-ZZZ-99 made `registry-check lint` exit 1 with
+    # `unregistered_marker`; restoring the file returned it to exit 0.
+    CHANGELOG.md)                        echo "registry-check lint (prose-closure membership + claim markers resolve; NOT changelog content)" ;;
     README.md)                           echo "registry-check lint (claim markers, + every §Performance gate row must cite one)" ;;
     AGENTS.md)                           echo "registry-check lint (claim markers only, not content)" ;;
     *)                                   echo "" ;;
