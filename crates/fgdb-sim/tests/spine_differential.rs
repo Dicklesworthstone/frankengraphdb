@@ -27,7 +27,8 @@
 //! them — only the durable stream, which is the only thing they are supposed to
 //! agree about.
 
-use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs};
+use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs, VfsFile};
+use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     BlockStoreCrashPoint, CAPSULE_OBJECT_KIND, Database, DatabaseCreateCrashPoint, DatabaseKeys,
@@ -48,9 +49,11 @@ use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 use std::future::{Future, poll_fn};
-use std::io;
+use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::task::Poll;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll};
 
 const GRAPH: GraphId = GraphId(1);
 const BRANCH: BranchId = BranchId(1);
@@ -120,6 +123,246 @@ impl<V: Vfs> Vfs for GatedNamespaceVfs<V> {
                 "planted namespace-authority refusal",
             ));
         }
+        self.inner.symlink_metadata(path).await
+    }
+
+    async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(path, permissions).await
+    }
+
+    async fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir(path).await
+    }
+
+    async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir_all(path).await
+    }
+
+    async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+        self.inner.read_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.inner.rename(from, to).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+        self.inner.hard_link(original, link).await
+    }
+
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.canonicalize(path).await
+    }
+
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.read_link(path).await
+    }
+
+    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.inner.read(path).await
+    }
+
+    async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.inner.read_to_string(path).await
+    }
+
+    async fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        self.inner.write(path, contents).await
+    }
+}
+
+/// A VFS gate that suspends one selected file sync only after the inner VFS
+/// has completed it successfully. Pre-sync latency proves the lost-marker arm
+/// of an interrupted D2; this gate proves the opposite arm, where storage has
+/// the marker but the borrowed caller never observes the sync's return.
+#[derive(Clone)]
+struct PostSyncGateVfs<V> {
+    inner: V,
+    gate: Arc<PostSyncGate>,
+}
+
+struct PostSyncGate {
+    path: PathBuf,
+    target_sync: u32,
+    state: Mutex<PostSyncGateState>,
+}
+
+#[derive(Default)]
+struct PostSyncGateState {
+    matching_syncs: u32,
+    pending: bool,
+}
+
+impl<V> PostSyncGateVfs<V> {
+    fn new(inner: V, path: PathBuf, target_sync: u32) -> Self {
+        Self {
+            inner,
+            gate: Arc::new(PostSyncGate {
+                path,
+                target_sync,
+                state: Mutex::new(PostSyncGateState::default()),
+            }),
+        }
+    }
+
+    fn pending_paths(&self) -> Vec<PathBuf> {
+        let state = self.gate.state();
+        state
+            .pending
+            .then(|| self.gate.path.clone())
+            .into_iter()
+            .collect()
+    }
+
+    fn matching_syncs(&self) -> u32 {
+        self.gate.state().matching_syncs
+    }
+}
+
+impl PostSyncGate {
+    fn state(&self) -> MutexGuard<'_, PostSyncGateState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn arm_after_sync(&self, path: &Path) -> bool {
+        if path != self.path {
+            return false;
+        }
+        let mut state = self.state();
+        state.matching_syncs = state.matching_syncs.saturating_add(1);
+        if state.matching_syncs != self.target_sync {
+            return false;
+        }
+        state.pending = true;
+        true
+    }
+
+    fn retire(&self) {
+        self.state().pending = false;
+    }
+}
+
+struct PendingPostSync {
+    gate: Arc<PostSyncGate>,
+}
+
+impl Drop for PendingPostSync {
+    fn drop(&mut self) {
+        self.gate.retire();
+    }
+}
+
+struct PostSyncGateFile<F> {
+    inner: F,
+    path: PathBuf,
+    gate: Arc<PostSyncGate>,
+}
+
+impl<F: VfsFile> AsyncRead for PostSyncGateFile<F> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<F: VfsFile> AsyncWrite for PostSyncGateFile<F> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl<F: VfsFile> AsyncSeek for PostSyncGateFile<F> {
+    fn poll_seek(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        Pin::new(&mut self.inner).poll_seek(cx, pos)
+    }
+}
+
+impl<F: VfsFile + Sync> VfsFile for PostSyncGateFile<F> {
+    async fn metadata(&self) -> io::Result<Metadata> {
+        self.inner.metadata().await
+    }
+
+    async fn sync_all(&self) -> io::Result<()> {
+        self.inner.sync_all().await?;
+        if self.gate.arm_after_sync(&self.path) {
+            let _pending = PendingPostSync {
+                gate: Arc::clone(&self.gate),
+            };
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+
+    async fn sync_data(&self) -> io::Result<()> {
+        self.inner.sync_data().await
+    }
+
+    async fn set_len(&self, size: u64) -> io::Result<()> {
+        self.inner.set_len(size).await
+    }
+
+    async fn set_permissions(&self, permissions: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(permissions).await
+    }
+}
+
+impl<V: Vfs> Vfs for PostSyncGateVfs<V>
+where
+    V::File: Sync,
+{
+    type File = PostSyncGateFile<V::File>;
+
+    async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+        Ok(PostSyncGateFile {
+            inner: self.inner.open(path, options).await?,
+            path: path.to_path_buf(),
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
         self.inner.symlink_metadata(path).await
     }
 
@@ -1447,6 +1690,101 @@ fn commit_d2_cancellation_leaves_the_borrowed_handle_fenced_and_recoverable() {
             replayed.database.graph(GRAPH, BRANCH).is_none(),
             "the independent oracle found a commit the product correctly discarded"
         );
+    });
+}
+
+/// The surviving half of the same uncertain D2 outcome. The gate lets both
+/// commit-log syncs finish against the real fault model, then suspends before
+/// the reinforcement future can report success. Dropping the public write at
+/// that boundary must preserve the same conservative fence even though a
+/// process loss and authoritative reopen ultimately retain the marker.
+#[test]
+fn commit_d2_cancellation_with_a_durable_marker_recovers_as_committed() {
+    let dir = scratch("database-vfs-commit-d2-cancel-durable");
+    under_lab(0x8_5e00_0002, move |cx| async move {
+        let cx = &cx;
+        create_genesis(cx, &dir).await;
+
+        let durable_vfs = FaultVfs::unix(FaultPlan::faultless());
+        let gated_vfs = PostSyncGateVfs::new(durable_vfs.clone(), dir.join(COMMIT_LOG_NAME), 2);
+        let mut db = Database::open_with_vfs(cx, gated_vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("post-sync-gated database opens");
+
+        let mut write = Box::pin(db.write(cx, vfs_fault_batch()));
+        let pending = poll_fn(|task_cx| {
+            if let Poll::Ready(result) = write.as_mut().poll(task_cx) {
+                return Poll::Ready(Err(format!(
+                    "write completed before the post-D2 gate armed: {result:?}"
+                )));
+            }
+            let pending = gated_vfs.pending_paths();
+            if pending.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(pending))
+            }
+        })
+        .await
+        .expect("the write must suspend after a completed D2 reinforcement");
+        assert_eq!(
+            pending,
+            vec![dir.join(COMMIT_LOG_NAME)],
+            "the post-sync gate must target Chronicle's commit log"
+        );
+        assert_eq!(
+            gated_vfs.matching_syncs(),
+            2,
+            "the gate must arm after D2's reinforcement, not its primary sync"
+        );
+
+        drop(write);
+        assert!(
+            gated_vfs.pending_paths().is_empty(),
+            "dropping the write must retire the post-sync waiter"
+        );
+        assert_eq!(
+            durable_vfs.events(),
+            Vec::new(),
+            "the surviving outcome must not depend on a planted fault"
+        );
+
+        let expected = DatabaseState::CommitOutcomeUnknown {
+            published_frontier: CommitSeq(0),
+        };
+        assert_eq!(
+            db.state(),
+            expected,
+            "a durable marker cannot make a cancelled caller know the outcome"
+        );
+        assert!(matches!(
+            db.frontier(),
+            Err(ReadError::CommitOutcomeUnknown {
+                published_frontier: CommitSeq(0)
+            })
+        ));
+        assert!(matches!(
+            db.compact(cx).await,
+            Err(RebuildError::HandleNotHealthy(
+                DatabaseState::CommitOutcomeUnknown {
+                    published_frontier: CommitSeq(0)
+                }
+            ))
+        ));
+        let refused = db.write(cx, vfs_fault_batch()).await;
+        assert!(
+            matches!(
+                refused,
+                Err(WriteError::HandleCommitOutcomeUnknown {
+                    published_frontier: CommitSeq(0)
+                })
+            ),
+            "fenced database accepted another write: {refused:?}"
+        );
+
+        durable_vfs.crash().await.expect("simulate process loss");
+        drop(db);
+        assert_reopened_vertex_matches_oracle(cx, &dir).await;
     });
 }
 
