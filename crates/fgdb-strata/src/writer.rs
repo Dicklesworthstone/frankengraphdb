@@ -1947,9 +1947,39 @@ mod tests {
         }
         assert_eq!(writer.pending_len(), ceiling - 1);
 
+        let seq = CommitSeq(2);
+        assert!(
+            writer.pending_has_live_at(seq),
+            "the same-commit edge must exercise the old pre-seal suppression predicate"
+        );
+        let old_incoming = [EId(10), EId(11), EId(12)]
+            .into_iter()
+            .map(|eid| {
+                let (entry, _) = writer
+                    .retirement_entry(eid, seq)
+                    .expect("old edge retirement preflights")
+                    .expect("old edge requires a tombstone");
+                let key = (entry.src, entry.relation, entry.dst, eid, entry.created_at);
+                usize::from(!writer.pending.contains_key(&key))
+            })
+            .sum::<usize>();
+        assert_eq!(old_incoming, 3, "all old edges add pending tombstones");
+        assert!(
+            writer.pending_len() + old_incoming > ceiling,
+            "the old edge tombstones must require a pre-seal once the same-commit row folds"
+        );
+        assert!(
+            writer
+                .retirement_entry(EId(1), seq)
+                .expect("same-commit retirement preflights")
+                .is_none(),
+            "the same-commit edge must fold instead of adding a tombstone"
+        );
+        let before = writer.clone();
+
         let refusal = writer.apply(
             keys(),
-            CommitSeq(2),
+            seq,
             &DeltaRow::DeleteVertex {
                 vid: VId(2),
                 before_version: fgdb_types::ids::ObjectId([0u8; 32]),
@@ -1975,6 +2005,42 @@ mod tests {
             ceiling - 1,
             "the refused mixed cascade must restore the same-commit creation"
         );
+        assert_eq!(writer.graph, before.graph, "graph identity changed");
+        assert_eq!(writer.branch, before.branch, "branch identity changed");
+        assert_eq!(writer.partition, before.partition, "partition changed");
+        assert_eq!(writer.pending, before.pending, "pending edge bytes changed");
+        assert_eq!(writer.live, before.live, "live edge state changed");
+        assert_eq!(writer.spent, before.spent, "spent edge state changed");
+        assert_eq!(writer.sealed, before.sealed, "sealed edge bytes changed");
+        assert_eq!(
+            writer.chain_heads, before.chain_heads,
+            "edge chain heads changed"
+        );
+        assert_eq!(
+            writer.pending_vertices, before.pending_vertices,
+            "pending vertex bytes changed"
+        );
+        assert_eq!(
+            writer.live_vertices, before.live_vertices,
+            "live vertex state changed"
+        );
+        assert_eq!(
+            writer.spent_vertices, before.spent_vertices,
+            "spent vertex state changed"
+        );
+        assert_eq!(
+            writer.sealed_patches, before.sealed_patches,
+            "sealed vertex bytes changed"
+        );
+        assert_eq!(
+            writer.sealed_live_edges, before.sealed_live_edges,
+            "sealed-live edge state changed"
+        );
+        assert_eq!(
+            writer.sealed_live_vertices, before.sealed_live_vertices,
+            "sealed-live vertex state changed"
+        );
+        assert_eq!(writer.last_seq, before.last_seq, "sequence state changed");
     }
 
     /// DeleteVertex used to `seal_vertices` first and only then `seal` the
