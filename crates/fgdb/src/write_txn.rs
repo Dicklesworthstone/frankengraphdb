@@ -365,6 +365,65 @@ impl WriteTxn {
         Ok(overlay)
     }
 
+    /// Read every edge from the pinned basis through this transaction's
+    /// staged row-order overlay, sorted by edge identity.
+    pub fn edges<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+    ) -> Result<Vec<EdgeRecord>, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+
+        let mut eids: std::collections::BTreeSet<EId> = database
+            .edges_at(self.basis)?
+            .into_iter()
+            .map(|record| record.entry.eid)
+            .collect();
+        for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
+            match pending {
+                PendingRow::Edge { eid, .. }
+                | PendingRow::DeleteEdge { eid, .. }
+                | PendingRow::SetEdgeProperty { eid, .. }
+                | PendingRow::CompareAndSet {
+                    elem: ElementId::Edge(eid),
+                    ..
+                } => {
+                    eids.insert(*eid);
+                }
+                PendingRow::Vertex { .. }
+                | PendingRow::DeleteVertex { .. }
+                | PendingRow::SetLabel { .. }
+                | PendingRow::SetProperty { .. }
+                | PendingRow::CompareAndSet { .. } => {}
+            }
+        }
+
+        let mut rows = Vec::new();
+        for eid in eids {
+            if let Some(record) = self.edge(database, eid)? {
+                rows.push(record);
+            }
+        }
+        rows.sort_by_key(|record| record.entry.eid);
+
+        let mut read_set = self.read_set.borrow_mut();
+        read_set.extend(
+            rows.iter()
+                .map(|record| ElementId::Edge(record.entry.eid)),
+        );
+        read_set.extend(
+            rows.iter()
+                .map(|record| ElementId::Vertex(record.entry.src)),
+        );
+        drop(read_set);
+        self.match_expansions.borrow_mut().extend(
+            rows.iter()
+                .map(|record| (record.entry.src, record.entry.relation)),
+        );
+        Ok(rows)
+    }
+
     /// Read the pinned neighbours of one relation through staged edge
     /// creates and deletes. Destinations retain the database API's sorted,
     /// deduplicated result shape even when parallel edges exist.
