@@ -66,12 +66,19 @@ impl From<ParseError> for BindError {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReturnProjection {
+    Source,
+    Destination,
+}
+
 /// The executor-ready result of binding the pinned pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundPlan {
     pub relation: RelationId,
     pub src_var: String,
     pub dst_var: String,
+    pub projection: ReturnProjection,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -130,6 +137,7 @@ impl RelationBind {
             relation,
             src_var: ast.src_var,
             dst_var: ast.dst_var,
+            projection: ast.projection,
         })
     }
 }
@@ -139,6 +147,7 @@ struct MatchAst {
     src_var: String,
     relation: String,
     dst_var: String,
+    projection: ReturnProjection,
 }
 
 struct Parser<'a> {
@@ -168,15 +177,19 @@ impl<'a> Parser<'a> {
         self.token(")")?;
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
-        if returned != dst_var {
+        let projection = if returned == dst_var {
+            ReturnProjection::Destination
+        } else if returned == src_var {
+            ReturnProjection::Source
+        } else {
             return Err(ParseError {
                 offset: self.offset.saturating_sub(returned.len()),
                 kind: ParseErrorKind::ReturnedVariableMismatch {
-                    expected: dst_var,
+                    expected: dst_var.clone(),
                     found: returned,
                 },
             });
-        }
+        };
         self.skip_whitespace();
         if self.offset != self.source.len() {
             return Err(ParseError {
@@ -187,7 +200,8 @@ impl<'a> Parser<'a> {
         Ok(MatchAst {
             src_var,
             relation,
-            dst_var: returned,
+            dst_var,
+            projection,
         })
     }
 
@@ -281,6 +295,7 @@ mod tests {
                 relation: RelationId(17),
                 src_var: "a".into(),
                 dst_var: "b".into(),
+                projection: ReturnProjection::Destination,
             }
         );
     }
