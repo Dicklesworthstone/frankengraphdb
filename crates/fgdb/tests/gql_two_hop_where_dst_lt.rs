@@ -125,10 +125,22 @@ fn two_hop_far_end_less_than_keeps_only_the_lesser_chain() {
             "without WHERE all four chains answer"
         );
 
-        // Off-grammar edges: <= and the C-style alias on c, and a WHERE on
-        // the incoming chain.
+        // Retargeted by fgdb-w5-parsers-nje.39: hop-2 c.k <= graduated to
+        // grammar, so it moves from the Parse list to a positive pin on
+        // this same fixture — moved, not weakened.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <= 1 RETURN c",
+                &bind,
+            )
+            .expect("hop-2 <= is grammar since nje.39"),
+            vec![VId(3), VId(12)],
+            "the boundary and below-boundary far ends answer <="
+        );
+
+        // Off-grammar edges: the C-style alias on c, and a WHERE on the
+        // incoming chain.
         for off_grammar in [
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <= 1 RETURN c",
             "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN a",
         ] {
