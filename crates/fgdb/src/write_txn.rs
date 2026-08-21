@@ -262,6 +262,48 @@ impl WriteTxn {
         Ok(overlay)
     }
 
+    /// Read every vertex from the pinned basis through this transaction's
+    /// staged row-order overlay, sorted by vertex identity.
+    pub fn vertices<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+    ) -> Result<Vec<VertexRow>, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+
+        let mut vids: std::collections::BTreeSet<VId> = database
+            .vertices_at(self.basis)?
+            .into_iter()
+            .map(|row| row.vid)
+            .collect();
+        for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
+            match pending {
+                PendingRow::Vertex { vid, .. } | PendingRow::DeleteVertex { vid, .. } => {
+                    vids.insert(*vid);
+                }
+                PendingRow::Edge { .. }
+                | PendingRow::DeleteEdge { .. }
+                | PendingRow::SetLabel { .. }
+                | PendingRow::SetEdgeProperty { .. }
+                | PendingRow::SetProperty { .. }
+                | PendingRow::CompareAndSet { .. } => {}
+            }
+        }
+
+        let mut rows = Vec::new();
+        for vid in vids {
+            if let Some(row) = self.vertex(database, vid)? {
+                rows.push(row);
+            }
+        }
+        rows.sort_by_key(|row| row.vid);
+        self.read_set
+            .borrow_mut()
+            .extend(rows.iter().map(|row| ElementId::Vertex(row.vid)));
+        Ok(rows)
+    }
+
     /// Read one edge from the pinned durable basis plus this transaction's
     /// staged create/delete overlay, without publishing the transaction.
     pub fn edge<V: Vfs + Clone>(
