@@ -131,9 +131,18 @@ fn incoming_two_hop_near_end_greater_or_equal_keeps_inclusive_chains() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
+                &bind
+            )
+            .expect("nje.53 near-end <= is grammar, not a Parse"),
+            vec![VId(6)],
+            "only the k=1 destination meets <= 1; the keyless destination stays OUT"
+        );
+
         for off_grammar in [
             "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k >= 9 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 9 RETURN a",
         ] {

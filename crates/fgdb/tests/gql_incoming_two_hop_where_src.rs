@@ -159,8 +159,17 @@ fn incoming_two_hop_near_end_equality_keeps_the_matching_chain() {
             "both keyed destinations meet >= 1; the keyless destination stays OUT"
         );
 
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
+                &bind
+            )
+            .expect("nje.53 near-end <= is grammar, not a Parse"),
+            vec![VId(6)],
+            "only the k=1 destination meets <= 1; the keyless destination stays OUT"
+        );
+
         for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN a",
         ] {
