@@ -2439,12 +2439,31 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &CommitCx,
         prepared: PreparedWrite,
     ) -> Result<CommitSeq, WriteError> {
+        self.commit_prepared_with_crash(cx, prepared, None).await
+    }
+
+    /// [`Database::commit_prepared`], optionally stopping the durable
+    /// protocol at `crash_at` (fgdb-writetxn-crash-k6cw). The ordinary path
+    /// delegates HERE with no crash point — one code path, not a twin
+    /// protocol — for the same crash-matrix reason `write_with_crash` and
+    /// Chronicle's `commit_with_crash` are public: the crash path must be
+    /// the SAME code as the durable path up to the stopping instant. The
+    /// basis-picked FCW validator discipline is unchanged: a basis-current
+    /// prepared batch installs a fresh validator, a stale one keeps the
+    /// accumulated write-set memory.
+    #[doc(hidden)]
+    pub async fn commit_prepared_with_crash(
+        &mut self,
+        cx: &CommitCx,
+        prepared: PreparedWrite,
+        crash_at: Option<CrashPoint>,
+    ) -> Result<CommitSeq, WriteError> {
         self.ensure_writable()?;
         if prepared.basis == self.snapshot.frontier {
             self.coordinator
                 .set_validator(Box::new(FirstCommitterWinsValidator::default()));
         }
-        self.commit_template(cx, prepared.template, None, None, None)
+        self.commit_template(cx, prepared.template, crash_at, None, None)
             .await
     }
 
