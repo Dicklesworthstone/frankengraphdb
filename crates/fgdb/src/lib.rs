@@ -3597,6 +3597,20 @@ impl<V: Vfs + Clone> Database<V> {
         gql_exec::execute(&plan, self).map_err(GqlError::Read)
     }
 
+    /// Execute the pinned GQL MATCH against one historical commit sequence.
+    pub fn execute_gql_at(
+        &self,
+        src: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, GqlError> {
+        let plan = bind.bind(src).map_err(|error| match error {
+            fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+            unbound => GqlError::Bind(unbound),
+        })?;
+        gql_exec::execute_at(&plan, self, as_of).map_err(GqlError::Read)
+    }
+
     /// [`Database::execute_gql`], plus the replayable certificate Genesis
     /// criterion 5 asks for (fgdb-gate-genesis-lce.1): the rows AND a
     /// [`GqlCertificate`] binding them to this handle's published frontier,
