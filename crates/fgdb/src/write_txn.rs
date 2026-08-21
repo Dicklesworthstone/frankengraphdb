@@ -783,6 +783,31 @@ impl WriteTxn {
                 })
             },
         )?;
+        // The projected-role label filter (fgdb-w5-parsers-nje.5), mirroring
+        // gql_exec: rows answer for the projected variable, so its bound
+        // label is the one that gates them — read through the OVERLAY vertex
+        // face, so a staged label is visible and a staged delete hides the
+        // row. Unlabeled plans consult no vertex at all.
+        let wanted_label = match plan.projection {
+            fgdb_gql::ReturnProjection::Source => plan.src_label,
+            fgdb_gql::ReturnProjection::Destination => plan.dst_label,
+            fgdb_gql::ReturnProjection::Hop2Destination => None,
+        };
+        let destinations = match wanted_label {
+            None => destinations,
+            Some(label) => {
+                let mut kept = Vec::with_capacity(destinations.len());
+                for vid in destinations {
+                    if self
+                        .vertex(database, vid)?
+                        .is_some_and(|row| row.labels.contains(&label))
+                    {
+                        kept.push(vid);
+                    }
+                }
+                kept
+            }
+        };
         let mut read_set = self.read_set.borrow_mut();
         read_set.extend(observed);
         // MATCH result materialization is itself a vertex observation. Keep

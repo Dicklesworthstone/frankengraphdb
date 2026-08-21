@@ -17,7 +17,7 @@
 
 use crate::{Database, EdgeRecord, ReadError};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
 use fgdb_types::{CommitSeq, VId};
 use std::collections::BTreeMap;
@@ -174,6 +174,19 @@ fn execute_over_adjacencies(
     })
 }
 
+/// The label the PROJECTED role must carry, if the plan binds one
+/// (fgdb-w5-parsers-nje.5): `RETURN a` rows answer for the source variable
+/// and its label, `RETURN b` rows for the destination's. An unlabeled plan
+/// binds nothing here and must consult no vertex row at all; the two-hop
+/// far end has no label field in this bounded grammar.
+fn projected_label(plan: &BoundPlan) -> Option<LabelId> {
+    match plan.projection {
+        ReturnProjection::Source => plan.src_label,
+        ReturnProjection::Destination => plan.dst_label,
+        ReturnProjection::Hop2Destination => None,
+    }
+}
+
 /// Execute the pinned bound MATCH expansion over the database's live Strata
 /// view.
 pub(crate) fn execute<V: Vfs + Clone>(
@@ -181,16 +194,29 @@ pub(crate) fn execute<V: Vfs + Clone>(
     db: &Database<V>,
 ) -> Result<Vec<VId>, ReadError> {
     let records = db.edges()?;
-    if plan.direction == EdgeDirection::Undirected {
+    let rows = if plan.direction == EdgeDirection::Undirected {
         let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
-        return execute_over_adjacencies(plan, hop1, hop2);
-    }
-    if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
+        execute_over_adjacencies(plan, hop1, hop2)?
+    } else if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
         let (hop1, hop2) = inverted_adjacencies(&records, plan.relation, plan.hop2_relation);
-        return execute_over_adjacencies(plan, hop1, hop2);
+        execute_over_adjacencies(plan, hop1, hop2)?
+    } else {
+        let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
+        execute_over_adjacencies(plan, hop1, hop2)?
+    };
+    let Some(label) = projected_label(plan) else {
+        return Ok(rows);
+    };
+    let mut kept = Vec::with_capacity(rows.len());
+    for vid in rows {
+        if db
+            .vertex(vid)?
+            .is_some_and(|row| row.labels.contains(&label))
+        {
+            kept.push(vid);
+        }
     }
-    let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
-    execute_over_adjacencies(plan, hop1, hop2)
+    Ok(kept)
 }
 
 /// Execute the pinned bound MATCH expansion at one historical frontier —
@@ -201,14 +227,27 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
     as_of: CommitSeq,
 ) -> Result<Vec<VId>, ReadError> {
     let records = db.edges_at(as_of)?;
-    if plan.direction == EdgeDirection::Undirected {
+    let rows = if plan.direction == EdgeDirection::Undirected {
         let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
-        return execute_over_adjacencies(plan, hop1, hop2);
-    }
-    if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
+        execute_over_adjacencies(plan, hop1, hop2)?
+    } else if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
         let (hop1, hop2) = inverted_adjacencies(&records, plan.relation, plan.hop2_relation);
-        return execute_over_adjacencies(plan, hop1, hop2);
+        execute_over_adjacencies(plan, hop1, hop2)?
+    } else {
+        let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
+        execute_over_adjacencies(plan, hop1, hop2)?
+    };
+    let Some(label) = projected_label(plan) else {
+        return Ok(rows);
+    };
+    let mut kept = Vec::with_capacity(rows.len());
+    for vid in rows {
+        if db
+            .vertex_at(vid, as_of)?
+            .is_some_and(|row| row.labels.contains(&label))
+        {
+            kept.push(vid);
+        }
     }
-    let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
-    execute_over_adjacencies(plan, hop1, hop2)
+    Ok(kept)
 }
