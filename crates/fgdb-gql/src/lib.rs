@@ -111,6 +111,8 @@ pub struct BoundPlan {
     pub eq: Option<(String, String)>,
     /// Source-property integer equality on the outgoing one-hop form.
     pub src_prop: Option<(PropertyKeyId, i64)>,
+    /// Destination-property integer equality on the outgoing one-hop form.
+    pub dst_prop: Option<(PropertyKeyId, i64)>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -219,16 +221,8 @@ impl RelationBind {
             .transpose()?;
         let src_label = bind_label(&self.labels, ast.src_label)?;
         let dst_label = bind_label(&self.labels, ast.dst_label)?;
-        let src_prop = ast
-            .src_prop
-            .map(|(name, value)| {
-                self.properties
-                    .get(&name)
-                    .copied()
-                    .map(|property| (property, value))
-                    .ok_or(BindError::UnknownProperty { name })
-            })
-            .transpose()?;
+        let src_prop = bind_property(&self.properties, ast.src_prop)?;
+        let dst_prop = bind_property(&self.properties, ast.dst_prop)?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
@@ -243,6 +237,7 @@ impl RelationBind {
             neq: ast.neq,
             eq: ast.eq,
             src_prop,
+            dst_prop,
         })
     }
 }
@@ -260,6 +255,21 @@ fn bind_label(
     .transpose()
 }
 
+fn bind_property(
+    properties: &BTreeMap<String, PropertyKeyId>,
+    predicate: Option<(String, i64)>,
+) -> Result<Option<(PropertyKeyId, i64)>, BindError> {
+    predicate
+        .map(|(name, value)| {
+            properties
+                .get(&name)
+                .copied()
+                .map(|property| (property, value))
+                .ok_or(BindError::UnknownProperty { name })
+        })
+        .transpose()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MatchAst {
     src_var: String,
@@ -275,6 +285,7 @@ struct MatchAst {
     neq: Option<(String, String)>,
     eq: Option<(String, String)>,
     src_prop: Option<(String, i64)>,
+    dst_prop: Option<(String, i64)>,
 }
 
 struct Parser<'a> {
@@ -327,6 +338,7 @@ impl<'a> Parser<'a> {
                 neq: None,
                 eq: None,
                 src_prop: None,
+                dst_prop: None,
             });
         }
         let incoming = if self.source[self.offset..].starts_with('<') {
@@ -402,7 +414,7 @@ impl<'a> Parser<'a> {
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
-        let (neq, eq, src_prop) = if direction == EdgeDirection::Outgoing
+        let (neq, eq, src_prop, dst_prop) = if direction == EdgeDirection::Outgoing
             && hop2_relation.is_none()
             && self.source[self.offset..].starts_with("WHERE")
         {
@@ -410,11 +422,11 @@ impl<'a> Parser<'a> {
             let left = self.identifier()?;
             self.skip_whitespace();
             if self.source[self.offset..].starts_with('.') {
-                if left != src_var {
+                if left != src_var && left != dst_var {
                     return Err(ParseError {
                         offset: self.offset.saturating_sub(left.len()),
                         kind: ParseErrorKind::ReturnedVariableMismatch {
-                            expected: src_var.clone(),
+                            expected: format!("{src_var} or {dst_var}"),
                             found: left,
                         },
                     });
@@ -423,7 +435,11 @@ impl<'a> Parser<'a> {
                 let property = self.identifier()?;
                 self.token("=")?;
                 let value = self.integer()?;
-                (None, None, Some((property, value)))
+                if left == src_var {
+                    (None, None, Some((property, value)), None)
+                } else {
+                    (None, None, None, Some((property, value)))
+                }
             } else {
                 // The operator decides which predicate slot fills; the parser
                 // structure makes eq-and-neq-both-Some unrepresentable.
@@ -453,13 +469,13 @@ impl<'a> Parser<'a> {
                     variables = (variables.1, variables.0);
                 }
                 if is_neq {
-                    (Some(variables), None, None)
+                    (Some(variables), None, None, None)
                 } else {
-                    (None, Some(variables), None)
+                    (None, Some(variables), None, None)
                 }
             }
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
@@ -499,6 +515,7 @@ impl<'a> Parser<'a> {
             neq,
             eq,
             src_prop,
+            dst_prop,
         })
     }
 
@@ -639,6 +656,7 @@ mod tests {
                 neq: None,
                 eq: None,
                 src_prop: None,
+                dst_prop: None,
             }
         );
     }
@@ -762,7 +780,7 @@ mod tests {
             Err(BindError::Parse(_))
         ));
         assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b) WHERE b.k = 1 RETURN b"),
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k = b RETURN b"),
             Err(BindError::Parse(_))
         ));
 
@@ -770,6 +788,35 @@ mod tests {
             .bind("MATCH (a)-[:R]->(b) WHERE a <> b RETURN b")
             .expect("endpoint inequality remains grammar");
         assert_eq!(inequality.neq, Some(("a".into(), "b".into())));
+    }
+
+    #[test]
+    fn destination_property_integer_equality_binds() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_property("k", PropertyKeyId(7));
+        let plan = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b.k = 1 RETURN a")
+            .expect("destination property equality binds");
+        assert_eq!(plan.dst_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(plan.src_prop, None);
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE b.k = a RETURN a"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind(
+                "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.k = 1 RETURN b"
+            ),
+            Err(BindError::Parse(_))
+        ));
+
+        let source = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
+            .expect("source property equality remains grammar");
+        assert_eq!(source.src_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(source.dst_prop, None);
     }
 
     #[test]
