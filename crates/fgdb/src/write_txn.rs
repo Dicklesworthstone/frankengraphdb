@@ -317,6 +317,28 @@ impl WriteTxn {
                             Self::overlay_property(&mut record.props, *key, value.as_ref());
                         }
                     }
+                    PendingRow::CompareAndSet {
+                        elem: ElementId::Edge(row_eid),
+                        key,
+                        expected,
+                        value,
+                        ..
+                    } if *row_eid == eid => {
+                        if let Some(record) = overlay.as_mut() {
+                            let actual = record
+                                .props
+                                .binary_search_by_key(key, |(property, _)| *property)
+                                .ok()
+                                .map(|at| &record.props[at].1);
+                            if actual == expected.as_deref() {
+                                Self::overlay_property(
+                                    &mut record.props,
+                                    *key,
+                                    Some(value.as_ref()),
+                                );
+                            }
+                        }
+                    }
                     PendingRow::DeleteVertex { vid, .. } => {
                         if overlay.as_ref().is_some_and(|record| {
                             record.entry.src == *vid || record.entry.dst == *vid
