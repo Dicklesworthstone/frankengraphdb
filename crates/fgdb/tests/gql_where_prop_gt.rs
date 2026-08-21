@@ -6,8 +6,8 @@
 //! source's dest — the `k = 0` source separates `>` from `<>`, and the
 //! missing-`k` source stays OUT (a vertex with no `k` is not "greater",
 //! not "unequal", not anything). Equality and inequality beside it keep
-//! their landed answers, and the unlanded `>=` and `<` spellings stay
-//! off-grammar.
+//! their landed answers. `<` is nje.23 grammar (sibling lock `[6]`);
+//! `>=` stays off-grammar.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -93,10 +93,12 @@ fn source_property_greater_than_keeps_greater_sources() {
             .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k >= 1 RETURN b", &bind)
             .expect_err("the >= spelling is outside the bounded grammar");
         assert!(matches!(ge, GqlError::Parse(_)));
-        let lt = db
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k < 1 RETURN b", &bind)
-            .expect_err("the < spelling is outside the bounded grammar");
-        assert!(matches!(lt, GqlError::Parse(_)));
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k < 1 RETURN b", &bind)
+                .expect("nje.23 < is grammar, not a Parse"),
+            vec![VId(6)],
+            "nje.23 sibling lock: k<1 keeps dest 6"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }
