@@ -13,7 +13,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_types::context::{CommitCx, PurposeContexts};
+use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
 use std::path::PathBuf;
@@ -35,14 +35,14 @@ fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("fgdb-return-src-{}-{name}", std::process::id()))
 }
 
-fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(PurposeContexts) -> Fut + Send + 'static) -> T
 where
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(contexts.commit()).await
+        test(contexts).await
     });
     assert!(
         report.lab_test_passed(),
@@ -58,7 +58,7 @@ fn bind_r() -> RelationBind {
 /// Two edges into ONE destination, sources written descending: the source
 /// and destination projections must give different, correctly sorted
 /// answers from the same graph.
-async fn seeded(cx: &CommitCx, dir: &PathBuf) -> Database {
+async fn seeded(cx: &fgdb_types::context::CommitCx, dir: &PathBuf) -> Database {
     let mut db = Database::create(cx, dir, keys()).await.expect("creates");
     let mut seed = WriteBatch::new(R);
     seed.create_vertex(VId(1), vec![LabelId(3)], vec![]);
@@ -76,8 +76,8 @@ async fn seeded(cx: &CommitCx, dir: &PathBuf) -> Database {
 /// sets disjoint.
 #[test]
 fn return_a_projects_the_sources_sorted() {
-    under_lab(0x6a_01, |cx| async move {
-        let cx = &cx;
+    under_lab(0x6a_01, |contexts| async move {
+        let cx = &contexts.commit();
         let dir = scratch("sources");
         let db = seeded(cx, &dir).await;
 
@@ -96,8 +96,8 @@ fn return_a_projects_the_sources_sorted() {
 /// projection must not have moved the first.
 #[test]
 fn return_b_still_projects_the_destinations() {
-    under_lab(0x6a_02, |cx| async move {
-        let cx = &cx;
+    under_lab(0x6a_02, |contexts| async move {
+        let cx = &contexts.commit();
         let dir = scratch("dests");
         let db = seeded(cx, &dir).await;
 
@@ -115,8 +115,8 @@ fn return_b_still_projects_the_destinations() {
 /// silent fallback to either bound variable.
 #[test]
 fn return_of_an_unbound_variable_is_a_typed_parse_error() {
-    under_lab(0x6a_03, |cx| async move {
-        let cx = &cx;
+    under_lab(0x6a_03, |contexts| async move {
+        let cx = &contexts.commit();
         let dir = scratch("unbound");
         let db = seeded(cx, &dir).await;
 
@@ -124,6 +124,9 @@ fn return_of_an_unbound_variable_is_a_typed_parse_error() {
             "MATCH (a)-[:R]->(b) RETURN c",
             "MATCH (a)-[:R]->(b) RETURN ab",
             "MATCH (a)-[:R]->(b) RETURN",
+            // A legal projection variable does not legalize a shorter
+            // pattern: the grammar is still exactly one statement shape.
+            "MATCH (a) RETURN a",
         ] {
             let err = db.execute_gql(off_grammar, &bind_r()).expect_err(off_grammar);
             assert!(
@@ -131,5 +134,43 @@ fn return_of_an_unbound_variable_is_a_typed_parse_error() {
                 "{off_grammar:?} must be the typed parse arm, got {err:?}"
             );
         }
+    });
+}
+
+/// The overlay speaks the new projection too: a staged edge's SOURCE joins
+/// the txn's `RETURN a` answer while the shared handle — at the same
+/// instant — still answers without it. The staged source (9) sorts after
+/// the durable ones, so the overlay answer also re-proves the CGSE
+/// contract over mixed durable+staged rows.
+#[test]
+fn the_overlay_return_a_includes_the_staged_source() {
+    under_lab(0x6a_04, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let dir = scratch("overlay-src");
+        let mut db = seeded(&commit, &dir).await;
+
+        let mut txn = db.begin(&txn_cx).expect("txn begins");
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(VId(9), vec![], vec![]);
+        batch.add_edge(EId(12), VId(9), VId(2), vec![]);
+        txn.write(&mut db, batch).expect("stages the new source edge");
+
+        let overlay = txn
+            .execute_gql(&db, RETURN_A, &bind_r())
+            .expect("the txn's RETURN a executes");
+        assert_eq!(
+            overlay,
+            vec![VId(1), VId(3), VId(9)],
+            "the staged source joins the overlay projection, CGSE-sorted \
+             among the durable ones"
+        );
+        assert_eq!(
+            db.execute_gql(RETURN_A, &bind_r()).expect("base RETURN a executes"),
+            vec![VId(1), VId(3)],
+            "DIRTY READ: the staged source leaked into the shared handle's \
+             projection before commit"
+        );
+        txn.abort();
     });
 }
