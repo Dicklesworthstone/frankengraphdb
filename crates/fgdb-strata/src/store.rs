@@ -1752,11 +1752,13 @@ mod durability_tests {
         run_ordered_creation_barrier,
     };
     use crate::DeltaBlockVersion;
+    use asupersync::fs::{UnixVfs, Vfs};
     use asupersync::lab::run_async_under_lab;
     use fgdb_types::context::{CommitCx, PurposeContexts};
     use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
     use std::cell::RefCell;
     use std::fs::File;
+    use std::future::Future;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, mpsc::sync_channel};
     use std::thread::JoinHandle;
@@ -1773,13 +1775,14 @@ mod durability_tests {
         dir
     }
 
-    fn under_lab<T: Send + 'static>(
-        seed: u64,
-        test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-    ) -> T {
+    fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+    where
+        T: Send + 'static,
+        Fut: Future<Output = T>,
+    {
         let (output, report) = run_async_under_lab(seed, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
-            test(&contexts.commit())
+            test(contexts.commit()).await
         });
         assert!(
             report.invariant_violations.is_empty(),
@@ -1793,10 +1796,12 @@ mod durability_tests {
         let dir = scratch_dir("bounded-read");
         let path = dir.join("object");
         std::fs::write(&path, [1, 2, 3]).expect("fixture");
-        let mut file = File::open(path).expect("open fixture");
 
         assert!(matches!(
-            under_lab(49, move |cx| read_bounded(cx, &mut file, 2)),
+            under_lab(49, move |cx| async move {
+                let file = UnixVfs::new().open_read(&path).await.expect("open fixture");
+                read_bounded(&cx, file, 2).await
+            }),
             Err(StoreError::ObjectTooLarge {
                 limit: 2,
                 observed: 3
@@ -1807,15 +1812,17 @@ mod durability_tests {
     #[test]
     fn oversized_canonical_inode_is_refused_before_identity_materialization() {
         let dir = scratch_dir("oversized-canonical-inode");
-        under_lab(48, move |cx| {
-            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        under_lab(48, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
             let id = ObjectId([0x48; 32]);
             let file = File::create(store.path(id)).expect("create sparse fixture");
             file.set_len(MAX_STORED_OBJECT_BYTES + 1)
                 .expect("extend sparse fixture");
 
             assert!(matches!(
-                store.get_bytes(cx, DeltaBlockVersion(id)),
+                store.get_bytes(&cx, DeltaBlockVersion(id)).await,
                 Err(StoreError::ObjectTooLarge {
                     limit: MAX_STORED_OBJECT_BYTES,
                     observed
@@ -1826,44 +1833,50 @@ mod durability_tests {
 
     #[test]
     fn creation_barrier_runs_inode_hook_then_parent() {
-        let order = RefCell::new(Vec::new());
-        run_ordered_creation_barrier(
-            || {
-                order.borrow_mut().push("inode");
-                Ok(())
-            },
-            || {
-                order.borrow_mut().push("hook");
-                Ok(())
-            },
-            || {
-                order.borrow_mut().push("parent");
-                Ok(())
-            },
-        )
-        .expect("barrier");
-        assert_eq!(*order.borrow(), ["inode", "hook", "parent"]);
+        under_lab(50, move |_cx| async move {
+            let order = RefCell::new(Vec::new());
+            run_ordered_creation_barrier(
+                || async {
+                    order.borrow_mut().push("inode");
+                    Ok(())
+                },
+                || {
+                    order.borrow_mut().push("hook");
+                    Ok(())
+                },
+                || async {
+                    order.borrow_mut().push("parent");
+                    Ok(())
+                },
+            )
+            .await
+            .expect("barrier");
+            assert_eq!(*order.borrow(), ["inode", "hook", "parent"]);
+        });
     }
 
     #[test]
     fn crash_hook_prevents_parent_directory_publication() {
-        let order = RefCell::new(Vec::new());
-        let outcome = run_ordered_creation_barrier(
-            || {
-                order.borrow_mut().push("inode");
-                Ok(())
-            },
-            || {
-                order.borrow_mut().push("hook");
-                Err(std::io::Error::other("crash"))
-            },
-            || {
-                order.borrow_mut().push("parent");
-                Ok(())
-            },
-        );
-        assert!(outcome.is_err());
-        assert_eq!(*order.borrow(), ["inode", "hook"]);
+        under_lab(51, move |_cx| async move {
+            let order = RefCell::new(Vec::new());
+            let outcome = run_ordered_creation_barrier(
+                || async {
+                    order.borrow_mut().push("inode");
+                    Ok(())
+                },
+                || {
+                    order.borrow_mut().push("hook");
+                    Err(std::io::Error::other("crash"))
+                },
+                || async {
+                    order.borrow_mut().push("parent");
+                    Ok(())
+                },
+            )
+            .await;
+            assert!(outcome.is_err());
+            assert_eq!(*order.borrow(), ["inode", "hook"]);
+        });
     }
 
     /// The interleaving is channel-driven, not timing-driven: the winner holds
@@ -1884,33 +1897,45 @@ mod durability_tests {
         let loser_handle: Arc<Mutex<Option<PutHandle>>> = Arc::new(Mutex::new(None));
         let hook_handle = Arc::clone(&loser_handle);
 
-        let winner = under_lab(45, move |cx| {
-            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("winner opens");
-            store.put_with_steps(
-                cx,
-                &bytes,
-                None,
-                || {},
-                move || {
-                    let handle = std::thread::spawn(move || {
-                        under_lab(46, move |loser_cx| {
-                            let store = BlockStore::open(loser_cx, &loser_dir, K_OID, NAMESPACE)
-                                .expect("loser opens");
-                            store.put_with_steps(
-                                loser_cx,
-                                &loser_bytes,
-                                None,
-                                move || loser_attempting_tx.send(()).expect("attempt handshake"),
-                                || {},
-                            )
-                        })
-                    });
-                    *hook_handle.lock().expect("handle slot") = Some(handle);
-                    loser_attempting_rx
-                        .recv()
-                        .expect("loser reached the permit boundary");
-                },
-            )
+        let winner = under_lab(45, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("winner opens");
+            store
+                .put_with_steps(
+                    &cx,
+                    &bytes,
+                    None,
+                    || {},
+                    move || {
+                        let handle = std::thread::spawn(move || {
+                            under_lab(46, move |loser_cx| async move {
+                                let store =
+                                    BlockStore::open(&loser_cx, &loser_dir, K_OID, NAMESPACE)
+                                        .await
+                                        .expect("loser opens");
+                                store
+                                    .put_with_steps(
+                                        &loser_cx,
+                                        &loser_bytes,
+                                        None,
+                                        move || {
+                                            loser_attempting_tx
+                                                .send(())
+                                                .expect("attempt handshake");
+                                        },
+                                        || {},
+                                    )
+                                    .await
+                            })
+                        });
+                        *hook_handle.lock().expect("handle slot") = Some(handle);
+                        loser_attempting_rx
+                            .recv()
+                            .expect("loser reached the permit boundary");
+                    },
+                )
+                .await
         })
         .expect("winner publishes");
 
@@ -1931,10 +1956,12 @@ mod durability_tests {
     #[test]
     fn a_multiply_linked_staging_inode_cannot_rewrite_a_canonical_block() {
         let dir = scratch_dir("multiply-linked-staging");
-        under_lab(47, move |cx| {
-            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        under_lab(47, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
             let original = b"already canonical";
-            let original_id = store.put(cx, original).expect("initial publication");
+            let original_id = store.put(&cx, original).await.expect("initial publication");
             std::fs::hard_link(
                 store.path(original_id.0),
                 store.dir.join(PUBLICATION_STAGING_FILE),
@@ -1942,12 +1969,15 @@ mod durability_tests {
             .expect("construct multiply linked staging control");
 
             assert!(matches!(
-                store.put(cx, b"a different block"),
+                store.put(&cx, b"a different block").await,
                 Err(StoreError::Io(error))
                     if error.kind() == std::io::ErrorKind::InvalidData
             ));
             assert_eq!(
-                store.get_bytes(cx, original_id).expect("original survives"),
+                store
+                    .get_bytes(&cx, original_id)
+                    .await
+                    .expect("original survives"),
                 original
             );
         });
