@@ -256,9 +256,7 @@ impl WriteTxn {
                 | PendingRow::CompareAndSet { .. } => {}
             }
         }
-        self.read_set
-            .borrow_mut()
-            .insert(ElementId::Vertex(vid));
+        self.read_set.borrow_mut().insert(ElementId::Vertex(vid));
         Ok(overlay)
     }
 
@@ -450,10 +448,7 @@ impl WriteTxn {
         rows.sort_by_key(|record| record.entry.eid);
 
         let mut read_set = self.read_set.borrow_mut();
-        read_set.extend(
-            rows.iter()
-                .map(|record| ElementId::Edge(record.entry.eid)),
-        );
+        read_set.extend(rows.iter().map(|record| ElementId::Edge(record.entry.eid)));
         read_set.extend(
             rows.iter()
                 .map(|record| ElementId::Vertex(record.entry.src)),
@@ -740,24 +735,22 @@ impl WriteTxn {
 
         let mut observed = std::collections::BTreeSet::new();
         let mut vertices = std::collections::BTreeSet::new();
-        let mut edges: std::collections::BTreeMap<
-            fgdb_types::EId,
-            (VId, RelationId, VId),
-        > = database
-            .edges_at(self.basis)?
-            .into_iter()
-            .map(|row| {
-                observed.insert(ElementId::Edge(row.entry.eid));
-                observed.insert(ElementId::Vertex(row.entry.src));
-                observed.insert(ElementId::Vertex(row.entry.dst));
-                vertices.insert(row.entry.src);
-                vertices.insert(row.entry.dst);
-                (
-                    row.entry.eid,
-                    (row.entry.src, row.entry.relation, row.entry.dst),
-                )
-            })
-            .collect();
+        let mut edges: std::collections::BTreeMap<fgdb_types::EId, (VId, RelationId, VId)> =
+            database
+                .edges_at(self.basis)?
+                .into_iter()
+                .map(|row| {
+                    observed.insert(ElementId::Edge(row.entry.eid));
+                    observed.insert(ElementId::Vertex(row.entry.src));
+                    observed.insert(ElementId::Vertex(row.entry.dst));
+                    vertices.insert(row.entry.src);
+                    vertices.insert(row.entry.dst);
+                    (
+                        row.entry.eid,
+                        (row.entry.src, row.entry.relation, row.entry.dst),
+                    )
+                })
+                .collect();
 
         for batch in &self.staged {
             for pending in &batch.rows {
@@ -831,10 +824,9 @@ impl WriteTxn {
         };
         let src_labeled = plan.src_label.map(&label_holders).transpose()?;
         let dst_labeled = plan.dst_label.map(&label_holders).transpose()?;
-        let prop_holders = |key: fgdb_delta_types::PropertyKeyId, value: i64| -> Result<
-            std::collections::BTreeSet<VId>,
-            WriteTxnError,
-        > {
+        let prop_holders = |key: fgdb_delta_types::PropertyKeyId,
+                            value: i64|
+         -> Result<std::collections::BTreeSet<VId>, WriteTxnError> {
             let wanted = CanonicalScalar::Int(value);
             let mut holders = std::collections::BTreeSet::new();
             for vid in vertices.iter().copied() {
@@ -1054,6 +1046,26 @@ impl WriteTxn {
             None => None,
             Some((key, value)) => Some(prop_holders(key, value)?),
         };
+        let hop2_dst_prop_ne_ok = match plan.hop2_dst_prop_ne {
+            None => None,
+            Some((key, value)) => {
+                let mut holders = std::collections::BTreeSet::new();
+                for vid in vertices.iter().copied() {
+                    if self.vertex(database, vid)?.is_some_and(|row| {
+                        row.props.iter().any(|(property, scalar)| {
+                            *property == key
+                                && matches!(
+                                    scalar,
+                                    CanonicalScalar::Int(actual) if *actual != value
+                                )
+                        })
+                    }) {
+                        holders.insert(vid);
+                    }
+                }
+                Some(holders)
+            }
+        };
         let anchors: Vec<VId> = vertices
             .iter()
             .copied()
@@ -1081,103 +1093,101 @@ impl WriteTxn {
                         .is_none_or(|holders| holders.contains(anchor))
             })
             .collect();
-        let destinations = crate::execute_bound_plan_over(
-            &plan,
-            anchors,
-            |source, relation| {
-                // One orientation-aware neighbour walk serves every face
-                // (fgdb-w5-parsers-nje.2 one-hop, fgdb-gql-two-hop-8pfw,
-                // fgdb-gql-undir-2hop-7mrc): a directed plan expands
-                // edge-flow only; an undirected plan expands both
-                // orientations — the overlay twin of gql_exec's
-                // per-direction adjacency builders.
-                let undirected = plan.direction == fgdb_gql::EdgeDirection::Undirected;
-                // The incoming TWO-hop chain reverse-composes: every step
-                // walks against edge flow (fgdb-w5-parsers-nje.4). Incoming
-                // ONE-hop stays forward — the parser normalized its variable
-                // roles, exactly as on the durable faces.
-                let reverse = plan.direction == fgdb_gql::EdgeDirection::Incoming
-                    && plan.hop2_relation.is_some();
-                let step = |anchor: VId, step_relation: fgdb_delta_types::RelationId| -> Vec<VId> {
-                    edges
-                        .values()
-                        .filter_map(|(edge_src, edge_relation, edge_dst)| {
-                            if *edge_relation != step_relation {
-                                return None;
-                            }
-                            if !reverse && *edge_src == anchor && vertices.contains(edge_dst) {
-                                Some(*edge_dst)
-                            } else if (reverse || undirected)
-                                && *edge_dst == anchor
-                                && vertices.contains(edge_src)
-                            {
-                                Some(*edge_src)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-                // WHERE a <> b and WHERE a = b filter exactly the hop-1
-                // step, mirroring gql_exec (fgdb-gql-where-neq-v476,
-                // fgdb-w5-parsers-nje.6): inequality drops staged or durable
-                // self-loops before projection or composition; equality
-                // keeps only them.
-                let mut vias = step(source, relation);
-                if plan.neq.is_some() {
-                    vias.retain(|via| *via != source);
+        let destinations = crate::execute_bound_plan_over(&plan, anchors, |source, relation| {
+            // One orientation-aware neighbour walk serves every face
+            // (fgdb-w5-parsers-nje.2 one-hop, fgdb-gql-two-hop-8pfw,
+            // fgdb-gql-undir-2hop-7mrc): a directed plan expands
+            // edge-flow only; an undirected plan expands both
+            // orientations — the overlay twin of gql_exec's
+            // per-direction adjacency builders.
+            let undirected = plan.direction == fgdb_gql::EdgeDirection::Undirected;
+            // The incoming TWO-hop chain reverse-composes: every step
+            // walks against edge flow (fgdb-w5-parsers-nje.4). Incoming
+            // ONE-hop stays forward — the parser normalized its variable
+            // roles, exactly as on the durable faces.
+            let reverse =
+                plan.direction == fgdb_gql::EdgeDirection::Incoming && plan.hop2_relation.is_some();
+            let step = |anchor: VId, step_relation: fgdb_delta_types::RelationId| -> Vec<VId> {
+                edges
+                    .values()
+                    .filter_map(|(edge_src, edge_relation, edge_dst)| {
+                        if *edge_relation != step_relation {
+                            return None;
+                        }
+                        if !reverse && *edge_src == anchor && vertices.contains(edge_dst) {
+                            Some(*edge_dst)
+                        } else if (reverse || undirected)
+                            && *edge_dst == anchor
+                            && vertices.contains(edge_src)
+                        {
+                            Some(*edge_src)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            // WHERE a <> b and WHERE a = b filter exactly the hop-1
+            // step, mirroring gql_exec (fgdb-gql-where-neq-v476,
+            // fgdb-w5-parsers-nje.6): inequality drops staged or durable
+            // self-loops before projection or composition; equality
+            // keeps only them.
+            let mut vias = step(source, relation);
+            if plan.neq.is_some() {
+                vias.retain(|via| *via != source);
+            }
+            if plan.eq.is_some() {
+                vias.retain(|via| *via == source);
+            }
+            if let Some(labeled) = dst_labeled.as_ref() {
+                vias.retain(|via| labeled.contains(via));
+            }
+            if let Some(holders) = dst_prop_ok.as_ref() {
+                vias.retain(|via| holders.contains(via));
+            }
+            if let Some(holders) = dst_prop_ne_ok.as_ref() {
+                vias.retain(|via| holders.contains(via));
+            }
+            if let Some(holders) = dst_prop_gt_ok.as_ref() {
+                vias.retain(|via| holders.contains(via));
+            }
+            if let Some(holders) = dst_prop_lt_ok.as_ref() {
+                vias.retain(|via| holders.contains(via));
+            }
+            if let Some(holders) = dst_prop_ge_ok.as_ref() {
+                vias.retain(|via| holders.contains(via));
+            }
+            if let Some(holders) = dst_prop_le_ok.as_ref() {
+                vias.retain(|via| holders.contains(via));
+            }
+            let Some(hop2_relation) = plan.hop2_relation else {
+                return Ok(vias);
+            };
+            let hop2_step = |via: VId| {
+                let mut far_ends = step(via, hop2_relation);
+                if let Some(holders) = hop2_dst_prop_ok.as_ref() {
+                    far_ends.retain(|far_end| holders.contains(far_end));
                 }
-                if plan.eq.is_some() {
-                    vias.retain(|via| *via == source);
+                if let Some(holders) = hop2_dst_prop_ne_ok.as_ref() {
+                    far_ends.retain(|far_end| holders.contains(far_end));
                 }
-                if let Some(labeled) = dst_labeled.as_ref() {
-                    vias.retain(|via| labeled.contains(via));
+                far_ends
+            };
+            // Two-hop composition, projection-shaped exactly as gql_exec
+            // composes the durable adjacency: the via projection keeps
+            // intermediates that continue, every other projection expands
+            // to the composed hop-2 neighbours.
+            Ok(match plan.projection {
+                fgdb_gql::ReturnProjection::Destination => vias
+                    .into_iter()
+                    .filter(|via| !hop2_step(*via).is_empty())
+                    .collect(),
+                fgdb_gql::ReturnProjection::Source
+                | fgdb_gql::ReturnProjection::Hop2Destination => {
+                    vias.into_iter().flat_map(hop2_step).collect()
                 }
-                if let Some(holders) = dst_prop_ok.as_ref() {
-                    vias.retain(|via| holders.contains(via));
-                }
-                if let Some(holders) = dst_prop_ne_ok.as_ref() {
-                    vias.retain(|via| holders.contains(via));
-                }
-                if let Some(holders) = dst_prop_gt_ok.as_ref() {
-                    vias.retain(|via| holders.contains(via));
-                }
-                if let Some(holders) = dst_prop_lt_ok.as_ref() {
-                    vias.retain(|via| holders.contains(via));
-                }
-                if let Some(holders) = dst_prop_ge_ok.as_ref() {
-                    vias.retain(|via| holders.contains(via));
-                }
-                if let Some(holders) = dst_prop_le_ok.as_ref() {
-                    vias.retain(|via| holders.contains(via));
-                }
-                let Some(hop2_relation) = plan.hop2_relation else {
-                    return Ok(vias);
-                };
-                let hop2_step = |via: VId| {
-                    let mut far_ends = step(via, hop2_relation);
-                    if let Some(holders) = hop2_dst_prop_ok.as_ref() {
-                        far_ends.retain(|far_end| holders.contains(far_end));
-                    }
-                    far_ends
-                };
-                // Two-hop composition, projection-shaped exactly as gql_exec
-                // composes the durable adjacency: the via projection keeps
-                // intermediates that continue, every other projection expands
-                // to the composed hop-2 neighbours.
-                Ok(match plan.projection {
-                    fgdb_gql::ReturnProjection::Destination => vias
-                        .into_iter()
-                        .filter(|via| !hop2_step(*via).is_empty())
-                        .collect(),
-                    fgdb_gql::ReturnProjection::Source
-                    | fgdb_gql::ReturnProjection::Hop2Destination => vias
-                        .into_iter()
-                        .flat_map(hop2_step)
-                        .collect(),
-                })
-            },
-        )?;
+            })
+        })?;
         let mut read_set = self.read_set.borrow_mut();
         read_set.extend(observed);
         // MATCH result materialization is itself a vertex observation. Keep
@@ -1335,10 +1345,7 @@ impl WriteTxn {
             for coordinate in batch.coordinate_entries() {
                 for row in &coordinate.rows {
                     if let fgdb_delta_types::DeltaRow::CreateEdge {
-                        eid,
-                        src,
-                        relation,
-                        ..
+                        eid, src, relation, ..
                     } = row
                         && match_expansions.contains(&(*src, *relation))
                     {
@@ -1354,7 +1361,10 @@ impl WriteTxn {
             {
                 return Ok(Some((element, batch.commit_seq())));
             }
-            if let Some(element) = touched.into_iter().find(|element| read_set.contains(element)) {
+            if let Some(element) = touched
+                .into_iter()
+                .find(|element| read_set.contains(element))
+            {
                 return Ok(Some((element, batch.commit_seq())));
             }
         }
@@ -1380,7 +1390,10 @@ impl core::fmt::Debug for WriteTxn {
                 "match_expansion_count",
                 &self.match_expansions.borrow().len(),
             )
-            .field("pin_obligation", &self.pin.as_ref().map(PurposeObligation::id))
+            .field(
+                "pin_obligation",
+                &self.pin.as_ref().map(PurposeObligation::id),
+            )
             .finish()
     }
 }

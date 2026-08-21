@@ -221,8 +221,7 @@ fn filter_hop1_by_labels<V: Vfs + Clone>(
         hop1.retain(|anchor, _| labeled.contains(anchor));
     }
     if let Some(label) = plan.dst_label {
-        let dests: std::collections::BTreeSet<VId> =
-            hop1.values().flatten().copied().collect();
+        let dests: std::collections::BTreeSet<VId> = hop1.values().flatten().copied().collect();
         let mut labeled = std::collections::BTreeSet::new();
         for vid in dests {
             if has_label(vid, label)? {
@@ -397,10 +396,9 @@ fn filter_hop2_by_dst_prop<V: Vfs + Clone>(
     as_of: Option<CommitSeq>,
     hop2: &mut BTreeMap<VId, Vec<VId>>,
 ) -> Result<(), ReadError> {
-    let Some((key, value)) = plan.hop2_dst_prop else {
+    if plan.hop2_dst_prop.is_none() && plan.hop2_dst_prop_ne.is_none() {
         return Ok(());
-    };
-    let wanted = CanonicalScalar::Int(value);
+    }
     let far_ends: std::collections::BTreeSet<VId> = hop2.values().flatten().copied().collect();
     let mut kept = std::collections::BTreeSet::new();
     for vid in far_ends {
@@ -409,9 +407,18 @@ fn filter_hop2_by_dst_prop<V: Vfs + Clone>(
             None => db.vertex(vid)?,
         };
         if row.is_some_and(|row| {
-            row.props
-                .iter()
-                .any(|(property, scalar)| *property == key && *scalar == wanted)
+            let equal = plan.hop2_dst_prop.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key && *scalar == CanonicalScalar::Int(value)
+                })
+            });
+            let not_equal = plan.hop2_dst_prop_ne.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
+                })
+            });
+            equal && not_equal
         }) {
             kept.insert(vid);
         }
