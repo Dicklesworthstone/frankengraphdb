@@ -302,16 +302,19 @@ fn filter_hop1_by_src_prop<V: Vfs + Clone>(
 
 /// Dest-property integer predicates drop hop-1 DESTINATIONS whose vertex
 /// props do not satisfy the bound comparison. Equality requires
-/// `(key, Int(n))`; inequality requires the key to be present as an integer
-/// other than `n` (fgdb-w5-parsers-nje.16). No-WHERE plans consult no
-/// property row.
+/// `(key, Int(n))`; inequality and strict greater-than require the key to be
+/// present as an integer satisfying the comparison (fgdb-w5-parsers-nje.16,
+/// fgdb-w5-parsers-nje.24). No-WHERE plans consult no property row.
 fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
     as_of: Option<CommitSeq>,
     hop1: &mut BTreeMap<VId, Vec<VId>>,
 ) -> Result<(), ReadError> {
-    if plan.dst_prop.is_none() && plan.dst_prop_ne.is_none() {
+    if plan.dst_prop.is_none()
+        && plan.dst_prop_ne.is_none()
+        && plan.dst_prop_gt.is_none()
+    {
         return Ok(());
     }
     let dests: std::collections::BTreeSet<VId> = hop1.values().flatten().copied().collect();
@@ -334,7 +337,13 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
                         && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
                 })
             });
-            equal && not_equal
+            let greater = plan.dst_prop_gt.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
+                })
+            });
+            equal && not_equal && greater
         }) {
             kept.insert(vid);
         }
