@@ -5,7 +5,7 @@
 //! `MATCH (dst)<-[:Relation]-(src) RETURN var` or
 //! `MATCH (left)-[:Relation]-(right) RETURN var`. Whitespace is optional
 //! between tokens. The outgoing one-hop form may include `WHERE src <> dst`
-//! before `RETURN`. Everything else fails closed with a [`ParseError`]; this
+//! or `WHERE src = dst` before `RETURN`. Everything else fails closed with a [`ParseError`]; this
 //! crate does not interpret a partial AST or silently widen the supported
 //! language.
 
@@ -100,6 +100,10 @@ pub struct BoundPlan {
     pub projection: ReturnProjection,
     pub direction: EdgeDirection,
     pub neq: Option<(String, String)>,
+    /// `WHERE a = b` on the outgoing one-hop form, canonicalized like
+    /// [`BoundPlan::neq`] (pair sorted); the parser guarantees at most one
+    /// of `eq`/`neq` is `Some`.
+    pub eq: Option<(String, String)>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -197,6 +201,7 @@ impl RelationBind {
             projection: ast.projection,
             direction: ast.direction,
             neq: ast.neq,
+            eq: ast.eq,
         })
     }
 }
@@ -227,6 +232,7 @@ struct MatchAst {
     projection: ReturnProjection,
     direction: EdgeDirection,
     neq: Option<(String, String)>,
+    eq: Option<(String, String)>,
 }
 
 struct Parser<'a> {
@@ -319,14 +325,24 @@ impl<'a> Parser<'a> {
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
-        let neq = if direction == EdgeDirection::Outgoing
+        let (neq, eq) = if direction == EdgeDirection::Outgoing
             && hop2_relation.is_none()
             && self.source[self.offset..].starts_with("WHERE")
         {
             self.keyword("WHERE")?;
             let left = self.identifier()?;
-            self.token("<")?;
-            self.token(">")?;
+            self.skip_whitespace();
+            // The operator decides which predicate slot fills; the parser
+            // structure makes eq-and-neq-both-Some unrepresentable.
+            let is_neq = self.source[self.offset..].starts_with('<');
+            let operator = if is_neq {
+                self.token("<")?;
+                self.token(">")?;
+                "<>"
+            } else {
+                self.token("=")?;
+                "="
+            };
             let right = self.identifier()?;
             let binds_endpoints = (left == src_var && right == dst_var)
                 || (left == dst_var && right == src_var);
@@ -334,8 +350,8 @@ impl<'a> Parser<'a> {
                 return Err(ParseError {
                     offset: self.offset.saturating_sub(right.len()),
                     kind: ParseErrorKind::ReturnedVariableMismatch {
-                        expected: format!("{src_var} <> {dst_var}"),
-                        found: format!("{left} <> {right}"),
+                        expected: format!("{src_var} {operator} {dst_var}"),
+                        found: format!("{left} {operator} {right}"),
                     },
                 });
             }
@@ -343,9 +359,13 @@ impl<'a> Parser<'a> {
             if variables.0 > variables.1 {
                 variables = (variables.1, variables.0);
             }
-            Some(variables)
+            if is_neq {
+                (Some(variables), None)
+            } else {
+                (None, Some(variables))
+            }
         } else {
-            None
+            (None, None)
         };
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
@@ -383,6 +403,7 @@ impl<'a> Parser<'a> {
             projection,
             direction,
             neq,
+            eq,
         })
     }
 
@@ -493,6 +514,7 @@ mod tests {
                 projection: ReturnProjection::Destination,
                 direction: EdgeDirection::Outgoing,
                 neq: None,
+                eq: None,
             }
         );
     }
@@ -537,6 +559,30 @@ mod tests {
 
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b) WHERE a <> c RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn where_equality_fills_eq_and_leaves_neq_empty() {
+        let binder = RelationBind::new().with_relation("R", RelationId(17));
+        let plan = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a = b RETURN b")
+            .expect("endpoint equality binds");
+        assert_eq!(plan.eq, Some(("a".to_owned(), "b".to_owned())));
+        assert_eq!(plan.neq, None, "the two predicate slots are exclusive");
+
+        let flipped = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b = a RETURN b")
+            .expect("reversed endpoint equality binds");
+        assert_eq!(
+            flipped.eq,
+            Some(("a".to_owned(), "b".to_owned())),
+            "the pair canonicalizes exactly like neq"
+        );
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a = c RETURN b"),
             Err(BindError::Parse(_))
         ));
     }
