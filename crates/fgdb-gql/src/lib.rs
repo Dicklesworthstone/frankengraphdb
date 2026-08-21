@@ -651,7 +651,7 @@ impl<'a> Parser<'a> {
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
                 if is_prop_bang_ne
                     && !is_incoming_two_hop_near_end
-                    && !is_hop2_destination
+                    && !(is_hop2_destination && direction == EdgeDirection::Incoming)
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
