@@ -253,6 +253,7 @@ fn filter_hop1_by_src_prop<V: Vfs + Clone>(
         && plan.src_prop_ne.is_none()
         && plan.src_prop_gt.is_none()
         && plan.src_prop_lt.is_none()
+        && plan.src_prop_ge.is_none()
     {
         return Ok(());
     }
@@ -286,7 +287,13 @@ fn filter_hop1_by_src_prop<V: Vfs + Clone>(
                         && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
                 })
             });
-            equal && not_equal && greater && less
+            let greater_or_equal = plan.src_prop_ge.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual >= value)
+                })
+            });
+            equal && not_equal && greater && less && greater_or_equal
         }))
     };
     let keys: Vec<VId> = hop1.keys().copied().collect();
@@ -408,7 +415,14 @@ fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
                         && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
                 }),
             };
-            equal && not_equal && greater && less
+            let greater_or_equal = match plan.src_prop_ge {
+                None => true,
+                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual >= value)
+                }),
+            };
+            equal && not_equal && greater && less && greater_or_equal
         })
         .map(|row| row.vid)
         .collect();

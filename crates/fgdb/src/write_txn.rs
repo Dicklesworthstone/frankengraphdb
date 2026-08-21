@@ -705,7 +705,17 @@ impl WriteTxn {
                                 )
                         }),
                     };
-                    equal && not_equal && greater && less
+                    let greater_or_equal = match plan.src_prop_ge {
+                        None => true,
+                        Some((key, value)) => row.props.iter().any(|(property, scalar)| {
+                            *property == key
+                                && matches!(
+                                    scalar,
+                                    CanonicalScalar::Int(actual) if *actual >= value
+                                )
+                        }),
+                    };
+                    equal && not_equal && greater && less && greater_or_equal
                 })
                 .map(|row| row.vid)
                 .collect();
@@ -892,6 +902,26 @@ impl WriteTxn {
                 Some(holders)
             }
         };
+        let src_prop_ge_ok = match plan.src_prop_ge {
+            None => None,
+            Some((key, value)) => {
+                let mut holders = std::collections::BTreeSet::new();
+                for vid in vertices.iter().copied() {
+                    if self.vertex(database, vid)?.is_some_and(|row| {
+                        row.props.iter().any(|(property, scalar)| {
+                            *property == key
+                                && matches!(
+                                    scalar,
+                                    CanonicalScalar::Int(actual) if *actual >= value
+                                )
+                        })
+                    }) {
+                        holders.insert(vid);
+                    }
+                }
+                Some(holders)
+            }
+        };
         let dst_prop_ok = match plan.dst_prop {
             None => None,
             Some((key, value)) => Some(prop_holders(key, value)?),
@@ -967,6 +997,9 @@ impl WriteTxn {
                         .as_ref()
                         .is_none_or(|holders| holders.contains(anchor))
                     && src_prop_lt_ok
+                        .as_ref()
+                        .is_none_or(|holders| holders.contains(anchor))
+                    && src_prop_ge_ok
                         .as_ref()
                         .is_none_or(|holders| holders.contains(anchor))
             })
