@@ -715,6 +715,7 @@ impl<'a> Parser<'a> {
                     self.token("=")?;
                 } else if is_prop_gt {
                     if !is_hop2_destination
+                        && !is_incoming_two_hop_near_end
                         && (direction != EdgeDirection::Outgoing || hop2_relation.is_some())
                     {
                         return Err(ParseError {
