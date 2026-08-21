@@ -15,10 +15,10 @@
 //! inequality siblings stay unmoved, the far-end `>` is EMPTY (no origin
 //! carries `k`), and the direction control runs on the OUTGOING equality
 //! (already grammar), which composes nothing on the reversed fixture. The
-//! refusals hold: the remaining ordered comparators on `a.k`, the C-style
-//! alias, the `RETURN a` projection, and the OUTGOING hop-2 source `>` (a
-//! separate grammar slice) stay typed Parse. The `< 1` spelling executes
-//! but answers nothing.
+//! refusals hold: `<=`, the C-style alias, the `RETURN a` projection, and
+//! the OUTGOING hop-2 source `>` (a separate grammar slice) stay typed
+//! Parse. The `< 1` spelling executes but answers nothing, while `>= 1`
+//! answers both keyed chains `[3, 6]`.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -36,6 +36,7 @@ const IN_A_GT_9: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 9 RETURN c";
 const IN_A_EQ: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN c";
 const IN_A_NE: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN c";
 const IN_A_LT_1: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 1 RETURN c";
+const IN_A_GE_1: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c";
 const IN_C_GT: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c";
 const IN_UNFILTERED: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c";
 const OUT_A_EQ: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c";
@@ -162,12 +163,18 @@ fn incoming_two_hop_near_end_greater_than_keeps_the_greater_chain() {
             "k=9 and k=1 both fail < 1; the keyless destination stays OUT"
         );
 
-        // The refusals: the remaining ordered comparators on the near
-        // end, the C-style alias, the RETURN a projection, and the OUTGOING
-        // hop-2 source > (a separate grammar slice) stay typed Parse.
+        assert_eq!(
+            db.execute_gql(IN_A_GE_1, &bind)
+                .expect("nje.52 near-end >= is grammar, not a Parse"),
+            vec![VId(3), VId(6)],
+            "both keyed destinations meet >= 1; the keyless destination stays OUT"
+        );
+
+        // The refusals: <= on the near end, the C-style alias, the RETURN a
+        // projection, and the OUTGOING hop-2 source > (a separate grammar
+        // slice) stay typed Parse.
         for off_grammar in [
             "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k > 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 1 RETURN a",
