@@ -417,14 +417,19 @@ impl<'a> Parser<'a> {
                     self.token(".")?;
                     let property = self.identifier()?;
                     let remaining = self.source[self.offset..].trim_start();
-                    let is_ne = remaining.starts_with("<>");
+                    let is_angle_ne = remaining.starts_with("<>");
+                    let is_bang_ne = remaining.starts_with("!=");
+                    let is_ne = is_angle_ne || is_bang_ne;
                     let is_le = remaining.starts_with("<=");
                     let is_lt = remaining.starts_with('<') && !is_ne && !is_le;
                     let is_ge = remaining.starts_with(">=");
                     let is_gt = remaining.starts_with('>') && !is_ge;
-                    if is_ne {
+                    if is_angle_ne {
                         self.token("<")?;
                         self.token(">")?;
+                    } else if is_bang_ne {
+                        self.token("!")?;
+                        self.token("=")?;
                     } else if is_le {
                         self.token("<")?;
                         self.token("=")?;
@@ -2179,9 +2184,15 @@ mod tests {
         assert_eq!(greater.src_prop_gt, Some((PropertyKeyId(7), 1)));
         assert_eq!(greater.src_prop_ge, None);
 
+        let bang_inequality = binder
+            .bind("MATCH (a:Person) WHERE a.k != 1 RETURN a")
+            .expect("labeled node-only bang inequality binds");
+        assert_eq!(bang_inequality.relation, None);
+        assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
+
         for statement in [
-            "MATCH (a:Person) WHERE a.k != 1 RETURN a",
             "MATCH (a) WHERE a.k >= 1 RETURN a",
+            "MATCH (a) WHERE a.k != 1 RETURN a",
         ] {
             assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
         }
