@@ -1756,7 +1756,6 @@ mod durability_tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_types::context::{CommitCx, PurposeContexts};
     use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-    use std::cell::RefCell;
     use std::fs::File;
     use std::future::Future;
     use std::path::PathBuf;
@@ -1834,48 +1833,48 @@ mod durability_tests {
     #[test]
     fn creation_barrier_runs_inode_hook_then_parent() {
         under_lab(50, move |_cx| async move {
-            let order = RefCell::new(Vec::new());
+            let order = Mutex::new(Vec::new());
             run_ordered_creation_barrier(
                 || async {
-                    order.borrow_mut().push("inode");
+                    order.lock().expect("order log").push("inode");
                     Ok(())
                 },
                 || {
-                    order.borrow_mut().push("hook");
+                    order.lock().expect("order log").push("hook");
                     Ok(())
                 },
                 || async {
-                    order.borrow_mut().push("parent");
+                    order.lock().expect("order log").push("parent");
                     Ok(())
                 },
             )
             .await
             .expect("barrier");
-            assert_eq!(*order.borrow(), ["inode", "hook", "parent"]);
+            assert_eq!(*order.lock().expect("order log"), ["inode", "hook", "parent"]);
         });
     }
 
     #[test]
     fn crash_hook_prevents_parent_directory_publication() {
         under_lab(51, move |_cx| async move {
-            let order = RefCell::new(Vec::new());
+            let order = Mutex::new(Vec::new());
             let outcome = run_ordered_creation_barrier(
                 || async {
-                    order.borrow_mut().push("inode");
+                    order.lock().expect("order log").push("inode");
                     Ok(())
                 },
                 || {
-                    order.borrow_mut().push("hook");
+                    order.lock().expect("order log").push("hook");
                     Err(std::io::Error::other("crash"))
                 },
                 || async {
-                    order.borrow_mut().push("parent");
+                    order.lock().expect("order log").push("parent");
                     Ok(())
                 },
             )
             .await;
             assert!(outcome.is_err());
-            assert_eq!(*order.borrow(), ["inode", "hook"]);
+            assert_eq!(*order.lock().expect("order log"), ["inode", "hook"]);
         });
     }
 
