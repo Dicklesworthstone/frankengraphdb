@@ -1178,17 +1178,8 @@ impl<'a> Parser<'a> {
         };
         if direction == EdgeDirection::Incoming
             && hop2_relation.is_some()
-            && dst_prop_ne.is_some()
-            && projection != ReturnProjection::Source
-        {
-            return Err(ParseError {
-                offset: self.offset.saturating_sub(returned.len()),
-                kind: ParseErrorKind::ExpectedToken("incoming two-hop near-end source after WHERE"),
-            });
-        }
-        if direction == EdgeDirection::Incoming
-            && hop2_relation.is_some()
             && (dst_prop.is_some()
+                || dst_prop_ne.is_some()
                 || hop2_dst_prop.is_some()
                 || hop2_dst_prop_ne.is_some()
                 || hop2_dst_prop_gt.is_some()
@@ -2443,7 +2434,7 @@ mod tests {
         assert_eq!(incoming_near_end.src_prop, None);
         assert_eq!(incoming_near_end.hop2_dst_prop, None);
         let incoming_near_end_inequality = binder
-            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN a")
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN c")
             .expect("incoming two-hop near-end property inequality binds");
         assert_eq!(
             incoming_near_end_inequality.dst_prop_ne,
@@ -2453,7 +2444,7 @@ mod tests {
         assert_eq!(incoming_near_end_inequality.hop2_dst_prop_ne, None);
         for statement in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN a",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
