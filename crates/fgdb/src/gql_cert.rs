@@ -102,6 +102,15 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             hasher.update(&limit.to_be_bytes());
         }
     }
+    match plan.skip {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(skip) => {
+            hasher.update(&[1]);
+            hasher.update(&skip.to_be_bytes());
+        }
+    }
     hasher.update(&snapshot_seq.0.to_be_bytes());
 
     GqlPlanCertificate {
@@ -164,6 +173,7 @@ mod tests {
             src_prop: None,
             dst_prop: None,
             limit: None,
+            skip: None,
         }
     }
 

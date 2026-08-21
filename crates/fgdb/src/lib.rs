@@ -930,10 +930,21 @@ where
     Ok(apply_limit(plan, rows))
 }
 
-/// LIMIT n (fgdb-w5-parsers-nje.12) truncates AFTER CGSE sort+dedup, so
-/// LIMIT 1 is the smallest projected VId among matches — never a different
-/// match set. Parser refuses LIMIT 0, so Some always means a positive cap.
-pub(crate) fn apply_limit(plan: &BoundPlan, mut rows: Vec<VId>) -> Vec<VId> {
+/// SKIP n (fgdb-w5-parsers-nje.13) drops rows only AFTER CGSE sort+dedup.
+/// A missing skip or SKIP 0 is the identity; an oversized skip yields no rows.
+pub(crate) fn apply_skip(plan: &BoundPlan, mut rows: Vec<VId>) -> Vec<VId> {
+    if let Some(skip) = plan.skip {
+        let n = skip.min(rows.len() as u64) as usize;
+        rows.drain(..n);
+    }
+    rows
+}
+
+/// Apply SKIP, then LIMIT, after CGSE sort+dedup. LIMIT 1 therefore keeps
+/// the smallest projected VId remaining after SKIP, never a different match
+/// set. Parser refuses LIMIT 0, so Some always means a positive cap.
+pub(crate) fn apply_limit(plan: &BoundPlan, rows: Vec<VId>) -> Vec<VId> {
+    let mut rows = apply_skip(plan, rows);
     if let Some(limit) = plan.limit {
         let n = limit.min(usize::MAX as u64) as usize;
         rows.truncate(n);
