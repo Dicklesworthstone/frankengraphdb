@@ -17,7 +17,7 @@
 
 use crate::{Database, EdgeRecord, ReadError};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
 use fgdb_types::{CanonicalScalar, CommitSeq, VId};
 use std::collections::BTreeMap;
@@ -236,35 +236,46 @@ fn filter_hop1_by_labels<V: Vfs + Clone>(
     Ok(())
 }
 
-/// Source-property integer equality (fgdb-w5-parsers-nje.8) drops hop-1
-/// SOURCE keys whose vertex props do not carry `(key, Int(n))`. No-WHERE
-/// plans consult no property row. Node-only labeled WHERE applies the same
-/// `(key, Int(n))` test inside [`node_scan`] (fgdb-w5-parsers-nje.11).
+/// Source-property integer predicates drop hop-1 SOURCE keys whose vertex
+/// props do not satisfy the bound comparison. Equality requires
+/// `(key, Int(n))`; inequality requires the key to be present as an integer
+/// other than `n` (fgdb-w5-parsers-nje.15). No-WHERE plans consult no
+/// property row. Node-only labeled WHERE applies the same tests inside
+/// [`node_scan`] (fgdb-w5-parsers-nje.11).
 fn filter_hop1_by_src_prop<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
     as_of: Option<CommitSeq>,
     hop1: &mut BTreeMap<VId, Vec<VId>>,
 ) -> Result<(), ReadError> {
-    let Some((key, value)) = plan.src_prop else {
+    if plan.src_prop.is_none() && plan.src_prop_ne.is_none() {
         return Ok(());
-    };
-    let wanted = CanonicalScalar::Int(value);
-    let carries = |vid: VId, key: PropertyKeyId| -> Result<bool, ReadError> {
+    }
+    let carries = |vid: VId| -> Result<bool, ReadError> {
         let row = match as_of {
             Some(seq) => db.vertex_at(vid, seq)?,
             None => db.vertex(vid)?,
         };
         Ok(row.is_some_and(|row| {
-            row.props
-                .iter()
-                .any(|(property, scalar)| *property == key && *scalar == wanted)
+            let equal = plan.src_prop.is_none_or(|(key, value)| {
+                let wanted = CanonicalScalar::Int(value);
+                row.props
+                    .iter()
+                    .any(|(property, scalar)| *property == key && *scalar == wanted)
+            });
+            let not_equal = plan.src_prop_ne.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
+                })
+            });
+            equal && not_equal
         }))
     };
     let keys: Vec<VId> = hop1.keys().copied().collect();
     let mut kept = std::collections::BTreeSet::new();
     for vid in keys {
-        if carries(vid, key)? {
+        if carries(vid)? {
             kept.insert(vid);
         }
     }
@@ -313,8 +324,8 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
 /// unrepresentable (it is a Parse refusal), so the missing-label arm fails
 /// closed to no rows instead of inventing an all-vertices scan.
 ///
-/// When `src_prop` is `Some` (fgdb-w5-parsers-nje.11), the same vertex row
-/// must also carry that integer property; no-WHERE node-only plans still
+/// When `src_prop` or `src_prop_ne` is `Some`, the same vertex row must also
+/// satisfy that integer-property predicate; no-WHERE node-only plans still
 /// consult no property field.
 fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
     let Some(label) = plan.src_label else {
@@ -323,14 +334,24 @@ fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
     let mut vids: Vec<VId> = rows
         .into_iter()
         .filter(|row| row.labels.contains(&label))
-        .filter(|row| match plan.src_prop {
-            None => true,
-            Some((key, value)) => {
-                let wanted = CanonicalScalar::Int(value);
-                row.props
-                    .iter()
-                    .any(|(property, scalar)| *property == key && *scalar == wanted)
-            }
+        .filter(|row| {
+            let equal = match plan.src_prop {
+                None => true,
+                Some((key, value)) => {
+                    let wanted = CanonicalScalar::Int(value);
+                    row.props
+                        .iter()
+                        .any(|(property, scalar)| *property == key && *scalar == wanted)
+                }
+            };
+            let not_equal = match plan.src_prop_ne {
+                None => true,
+                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
+                }),
+            };
+            equal && not_equal
         })
         .map(|row| row.vid)
         .collect();

@@ -665,14 +665,27 @@ impl WriteTxn {
                 .vertices(database)?
                 .into_iter()
                 .filter(|row| row.labels.contains(&label))
-                .filter(|row| match plan.src_prop {
-                    None => true,
-                    Some((key, value)) => {
-                        let wanted = CanonicalScalar::Int(value);
-                        row.props
-                            .iter()
-                            .any(|(property, scalar)| *property == key && *scalar == wanted)
-                    }
+                .filter(|row| {
+                    let equal = match plan.src_prop {
+                        None => true,
+                        Some((key, value)) => {
+                            let wanted = CanonicalScalar::Int(value);
+                            row.props
+                                .iter()
+                                .any(|(property, scalar)| *property == key && *scalar == wanted)
+                        }
+                    };
+                    let not_equal = match plan.src_prop_ne {
+                        None => true,
+                        Some((key, value)) => row.props.iter().any(|(property, scalar)| {
+                            *property == key
+                                && matches!(
+                                    scalar,
+                                    CanonicalScalar::Int(actual) if *actual != value
+                                )
+                        }),
+                    };
+                    equal && not_equal
                 })
                 .map(|row| row.vid)
                 .collect();
@@ -799,6 +812,26 @@ impl WriteTxn {
             None => None,
             Some((key, value)) => Some(prop_holders(key, value)?),
         };
+        let src_prop_ne_ok = match plan.src_prop_ne {
+            None => None,
+            Some((key, value)) => {
+                let mut holders = std::collections::BTreeSet::new();
+                for vid in vertices.iter().copied() {
+                    if self.vertex(database, vid)?.is_some_and(|row| {
+                        row.props.iter().any(|(property, scalar)| {
+                            *property == key
+                                && matches!(
+                                    scalar,
+                                    CanonicalScalar::Int(actual) if *actual != value
+                                )
+                        })
+                    }) {
+                        holders.insert(vid);
+                    }
+                }
+                Some(holders)
+            }
+        };
         let dst_prop_ok = match plan.dst_prop {
             None => None,
             Some((key, value)) => Some(prop_holders(key, value)?),
@@ -811,6 +844,9 @@ impl WriteTxn {
                     .as_ref()
                     .is_none_or(|labeled| labeled.contains(anchor))
                     && src_prop_ok
+                        .as_ref()
+                        .is_none_or(|holders| holders.contains(anchor))
+                    && src_prop_ne_ok
                         .as_ref()
                         .is_none_or(|holders| holders.contains(anchor))
             })
