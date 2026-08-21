@@ -604,16 +604,28 @@ impl<'a> Parser<'a> {
             dst_prop_lt,
             dst_prop_ge,
             dst_prop_le,
-        ) = if (hop2_relation.is_none() || direction == EdgeDirection::Outgoing)
+        ) = if (hop2_relation.is_none() || direction != EdgeDirection::Undirected)
             && self.source[self.offset..].starts_with("WHERE")
         {
             self.keyword("WHERE")?;
             let left = self.identifier()?;
             self.skip_whitespace();
+            let is_incoming_two_hop =
+                direction == EdgeDirection::Incoming && hop2_relation.is_some();
+            if is_incoming_two_hop
+                && (hop2_dst_var.as_ref() != Some(&left)
+                    || !self.source[self.offset..].starts_with('.'))
+            {
+                return Err(ParseError {
+                    offset: self.offset.saturating_sub(left.len()),
+                    kind: ParseErrorKind::ExpectedToken(
+                        "incoming hop-2 destination property equality before RETURN",
+                    ),
+                });
+            }
             if self.source[self.offset..].starts_with('.') {
-                let is_hop2_destination = direction == EdgeDirection::Outgoing
-                    && hop2_relation.is_some()
-                    && hop2_dst_var.as_ref() == Some(&left);
+                let is_hop2_destination =
+                    hop2_relation.is_some() && hop2_dst_var.as_ref() == Some(&left);
                 if left != src_var && left != dst_var && !is_hop2_destination {
                     return Err(ParseError {
                         offset: self.offset.saturating_sub(left.len()),
@@ -634,6 +646,16 @@ impl<'a> Parser<'a> {
                 let is_prop_lt = remaining.starts_with('<') && !is_prop_ne && !is_prop_le;
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
+                if is_incoming_two_hop
+                    && (is_prop_ne || is_prop_le || is_prop_lt || is_prop_ge || is_prop_gt)
+                {
+                    return Err(ParseError {
+                        offset: self.offset,
+                        kind: ParseErrorKind::ExpectedToken(
+                            "incoming hop-2 destination property equality before RETURN",
+                        ),
+                    });
+                }
                 if is_prop_ne {
                     self.token("<")?;
                     self.token(">")?;
@@ -2364,10 +2386,43 @@ mod tests {
             binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
             Err(BindError::Parse(_))
         ));
-        assert!(matches!(
-            binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let incoming = binder
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c")
+            .expect("incoming two-hop far-end property equality binds");
+        assert_eq!(incoming.hop2_dst_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(incoming.hop2_dst_prop_ne, None);
+        assert_eq!(incoming.hop2_dst_prop_gt, None);
+        assert_eq!(incoming.hop2_dst_prop_lt, None);
+        assert_eq!(incoming.hop2_dst_prop_ge, None);
+        assert_eq!(incoming.hop2_dst_prop_le, None);
+    }
+
+    #[test]
+    fn incoming_two_hop_destination_property_equality_binds() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23))
+            .with_property("k", PropertyKeyId(7));
+
+        let plan = binder
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c")
+            .expect("incoming two-hop far-end property equality binds");
+        assert_eq!(plan.hop2_dst_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(plan.hop2_dst_prop_ne, None);
+        assert_eq!(plan.hop2_dst_prop_gt, None);
+        assert_eq!(plan.hop2_dst_prop_lt, None);
+        assert_eq!(plan.hop2_dst_prop_ge, None);
+        assert_eq!(plan.hop2_dst_prop_le, None);
+
+        for statement in [
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
+        ] {
+            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
+        }
     }
 
     #[test]
