@@ -2404,6 +2404,19 @@ mod tests {
         assert_eq!(equality_with_bang.src_prop, Some((PropertyKeyId(7), 1)));
         assert_eq!(equality_with_bang.dst_prop_ne, Some((PropertyKeyId(9), 9)));
 
+        for statement in [
+            "MATCH (a)-[:R]->(b) WHERE a.k != 1 AND b.m != 9 RETURN b",
+            "MATCH (a)-[:R]->(b) WHERE b.m != 9 AND a.k != 1 RETURN b",
+        ] {
+            let plan = binder
+                .bind(statement)
+                .expect("source and destination bang inequalities bind");
+            assert_eq!(plan.src_prop_ne, Some((PropertyKeyId(7), 1)));
+            assert_eq!(plan.dst_prop_ne, Some((PropertyKeyId(9), 9)));
+            assert_eq!(plan.src_prop, None);
+            assert_eq!(plan.dst_prop, None);
+        }
+
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 AND a.m <> 9 RETURN b"),
             Err(BindError::Parse(_))
