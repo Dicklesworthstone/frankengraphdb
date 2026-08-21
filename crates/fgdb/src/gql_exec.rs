@@ -390,6 +390,7 @@ pub(crate) fn execute<V: Vfs + Clone>(
     };
     filter_hop1_by_labels(plan, db, None, &mut hop1)?;
     filter_hop1_by_src_prop(plan, db, None, &mut hop1)?;
+    // nje.17 AND is parser-only: dual `Some` slots retain this same hop-1 map in sequence.
     filter_hop1_by_dst_prop(plan, db, None, &mut hop1)?;
     execute_over_adjacencies(plan, hop1, hop2)
 }
