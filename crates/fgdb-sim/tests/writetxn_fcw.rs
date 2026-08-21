@@ -1,5 +1,7 @@
 use asupersync::lab::run_async_under_lab;
-use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteError};
+use fgdb::{
+    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError,
+};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -74,20 +76,23 @@ fn overlapping_write_txns_are_fcw_and_abort_is_trace_free() {
             "each open WriteTxn must own one snapshot pin"
         );
         first
-            .write(property_update(11))
+            .write(&mut database, property_update(11))
             .expect("prepare first overlapping update");
         second
-            .write(property_update(22))
+            .write(&mut database, property_update(22))
             .expect("prepare second overlapping update");
 
         let winner_seq = first
-            .commit(&commit_cx)
+            .commit(&mut database, &commit_cx)
             .await
             .expect("first committer wins");
         assert_eq!(txn_cx.outstanding_obligations(), 1);
-        let loser = second.commit(&commit_cx).await;
+        let loser = second.commit(&mut database, &commit_cx).await;
         assert!(
-            matches!(loser, Err(WriteError::FirstCommitterWins { .. })),
+            matches!(
+                loser,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+            ),
             "second overlapping pinned transaction must lose under FCW: {loser:?}"
         );
         assert_eq!(
@@ -100,7 +105,7 @@ fn overlapping_write_txns_are_fcw_and_abort_is_trace_free() {
         assert_eq!(frontier_before_abort, winner_seq);
         let mut aborted = database.begin(&txn_cx).expect("begin transaction to abort");
         aborted
-            .write(property_update(33))
+            .write(&mut database, property_update(33))
             .expect("prepare update that will be aborted");
         assert_eq!(txn_cx.outstanding_obligations(), 1);
         let _ = aborted.abort();
