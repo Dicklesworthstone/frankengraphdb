@@ -156,14 +156,14 @@ fn disjoint_concurrent_create_preserves_the_readers_later_commit() {
         creator
             .write(&mut database, create_vertex(VId(2), 20))
             .expect("stage disjoint vertex creation");
+        reader
+            .write(&mut database, set_property(VId(1), 31))
+            .expect("stage mutation of unchanged read target at the pinned basis");
         creator
             .commit(&mut database, &commit_cx)
             .await
             .expect("disjoint creator commits");
 
-        reader
-            .write(&mut database, set_property(VId(1), 31))
-            .expect("stage mutation of unchanged read target");
         reader
             .commit(&mut database, &commit_cx)
             .await
