@@ -2488,7 +2488,8 @@ mod tests {
         let binder = RelationBind::new()
             .with_relation("R", RelationId(17))
             .with_relation("S", RelationId(23))
-            .with_property("k", PropertyKeyId(7));
+            .with_property("k", PropertyKeyId(7))
+            .with_property("m", PropertyKeyId(9));
 
         let source_eq = binder
             .bind("MATCH (a)<-[:R]-(b) WHERE b.k = 1 RETURN a")
@@ -2534,6 +2535,24 @@ mod tests {
         assert_eq!(source_bang_ne.src_var, "b");
         assert_eq!(source_bang_ne.dst_var, "a");
         assert_eq!(source_bang_ne.src_prop_ne, Some((PropertyKeyId(7), 1)));
+
+        for statement in [
+            "MATCH (a)<-[:R]-(b) WHERE a.k != 1 AND b.m != 9 RETURN b",
+            "MATCH (a)<-[:R]-(b) WHERE b.m != 9 AND a.k != 1 RETURN b",
+        ] {
+            let plan = binder
+                .bind(statement)
+                .expect("incoming source and destination bang inequalities bind");
+            assert_eq!(plan.src_var, "b");
+            assert_eq!(plan.dst_var, "a");
+            assert_eq!(plan.src_prop_ne, Some((PropertyKeyId(9), 9)));
+            assert_eq!(plan.dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        }
+
+        assert!(matches!(
+            binder.bind("MATCH (a)<-[:R]-(b) WHERE a.k != 1 AND a.m != 9 RETURN b"),
+            Err(BindError::Parse(_))
+        ));
     }
 
     #[test]
