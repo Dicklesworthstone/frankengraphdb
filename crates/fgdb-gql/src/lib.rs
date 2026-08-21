@@ -110,7 +110,8 @@ pub struct BoundPlan {
     /// [`BoundPlan::neq`] (pair sorted); the parser guarantees at most one
     /// of `eq`/`neq` is `Some`.
     pub eq: Option<(String, String)>,
-    /// Source-property integer equality on the outgoing one-hop form.
+    /// Source-property integer equality on an outgoing one-hop or labeled
+    /// node-only form.
     pub src_prop: Option<(PropertyKeyId, i64)>,
     /// Destination-property integer equality on the outgoing one-hop form.
     pub dst_prop: Option<(PropertyKeyId, i64)>,
@@ -306,7 +307,29 @@ impl<'a> Parser<'a> {
         let left_label = self.optional_label()?;
         self.token(")")?;
         self.skip_whitespace();
-        if left_label.is_some() && self.source[self.offset..].starts_with("RETURN") {
+        if left_label.is_some()
+            && (self.source[self.offset..].starts_with("RETURN")
+                || self.source[self.offset..].starts_with("WHERE"))
+        {
+            let src_prop = if self.source[self.offset..].starts_with("WHERE") {
+                self.keyword("WHERE")?;
+                let predicate_var = self.identifier()?;
+                if predicate_var != left_var {
+                    return Err(ParseError {
+                        offset: self.offset.saturating_sub(predicate_var.len()),
+                        kind: ParseErrorKind::ReturnedVariableMismatch {
+                            expected: left_var,
+                            found: predicate_var,
+                        },
+                    });
+                }
+                self.token(".")?;
+                let property = self.identifier()?;
+                self.token("=")?;
+                Some((property, self.integer()?))
+            } else {
+                None
+            };
             self.keyword("RETURN")?;
             let returned = self.identifier()?;
             if returned != left_var {
@@ -338,7 +361,7 @@ impl<'a> Parser<'a> {
                 direction: EdgeDirection::Outgoing,
                 neq: None,
                 eq: None,
-                src_prop: None,
+                src_prop,
                 dst_prop: None,
             });
         }
@@ -705,6 +728,7 @@ mod tests {
         assert_eq!(plan.relation, None);
         assert_eq!(plan.src_var, "a");
         assert_eq!(plan.src_label, Some(LabelId(7)));
+        assert_eq!(plan.src_prop, None);
         assert_eq!(plan.projection, ReturnProjection::Source);
 
         assert!(matches!(
@@ -724,6 +748,25 @@ mod tests {
             .bind("MATCH (a)-[:R]->(b) RETURN b")
             .expect("edge MATCH still binds");
         assert_eq!(edge.relation, Some(RelationId(17)));
+    }
+
+    #[test]
+    fn labeled_node_only_source_property_integer_equality_binds() {
+        let binder = RelationBind::new()
+            .with_label("Person", LabelId(7))
+            .with_property("k", PropertyKeyId(9));
+        let plan = binder
+            .bind("MATCH (a:Person) WHERE a.k = 1 RETURN a")
+            .expect("labeled node-only property predicate binds");
+        assert_eq!(plan.relation, None);
+        assert_eq!(plan.src_label, Some(LabelId(7)));
+        assert_eq!(plan.src_prop, Some((PropertyKeyId(9), 1)));
+        assert_eq!(plan.dst_prop, None);
+
+        assert!(matches!(
+            binder.bind("MATCH (a) WHERE a.k = 1 RETURN a"),
+            Err(BindError::Parse(_))
+        ));
     }
 
     #[test]
