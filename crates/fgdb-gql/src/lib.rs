@@ -651,7 +651,7 @@ impl<'a> Parser<'a> {
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
                 if is_prop_bang_ne
                     && !is_incoming_two_hop_near_end
-                    && !(is_hop2_destination && direction == EdgeDirection::Incoming)
+                    && !is_hop2_destination
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -2604,10 +2604,14 @@ mod tests {
         assert_eq!(source.hop2_dst_prop, None);
         assert_eq!(source.hop2_dst_prop_ne, None);
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c")
+            .expect("outgoing two-hop far-end bang inequality binds");
+        assert_eq!(
+            bang_inequality.hop2_dst_prop_ne,
+            Some((PropertyKeyId(7), 1))
+        );
+        assert_eq!(bang_inequality.hop2_dst_prop, None);
         let incoming = binder
             .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c")
             .expect("incoming two-hop far-end property equality binds");
@@ -2738,10 +2742,15 @@ mod tests {
         assert_eq!(equality.hop2_dst_prop, Some((PropertyKeyId(7), 1)));
         assert_eq!(equality.hop2_dst_prop_ne, None);
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c")
+            .expect("outgoing two-hop far-end bang inequality binds");
+        assert_eq!(
+            bang_inequality.hop2_dst_prop_ne,
+            Some((PropertyKeyId(7), 1))
+        );
+        assert_eq!(bang_inequality.hop2_dst_prop, None);
+        assert_eq!(bang_inequality.dst_prop_ne, None);
         let incoming = binder
             .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN c")
             .expect("incoming two-hop far-end property inequality binds");
