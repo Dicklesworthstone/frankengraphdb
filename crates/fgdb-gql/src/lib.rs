@@ -125,7 +125,7 @@ pub struct BoundPlan {
     pub src_prop_le: Option<(PropertyKeyId, i64)>,
     /// Destination-property integer equality on the outgoing one-hop form.
     pub dst_prop: Option<(PropertyKeyId, i64)>,
-    /// Destination-property integer inequality using the GQL `<>` spelling.
+    /// Destination-property integer inequality using GQL `<>` or its `!=` alias.
     pub dst_prop_ne: Option<(PropertyKeyId, i64)>,
     /// Destination-property strict integer greater-than predicate.
     pub dst_prop_gt: Option<(PropertyKeyId, i64)>,
@@ -641,14 +641,31 @@ impl<'a> Parser<'a> {
                 self.token(".")?;
                 let property = self.identifier()?;
                 let remaining = self.source[self.offset..].trim_start();
-                let is_prop_ne = remaining.starts_with("<>");
+                let is_prop_angle_ne = remaining.starts_with("<>");
+                let is_prop_bang_ne = remaining.starts_with("!=");
+                let is_prop_ne = is_prop_angle_ne || is_prop_bang_ne;
                 let is_prop_le = remaining.starts_with("<=");
-                let is_prop_lt = remaining.starts_with('<') && !is_prop_ne && !is_prop_le;
+                let is_prop_lt = remaining.starts_with('<') && !is_prop_angle_ne && !is_prop_le;
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
-                if is_prop_ne {
+                if is_prop_bang_ne
+                    && (direction != EdgeDirection::Outgoing
+                        || hop2_relation.is_some()
+                        || left != dst_var)
+                {
+                    return Err(ParseError {
+                        offset: self.offset,
+                        kind: ParseErrorKind::ExpectedToken(
+                            "outgoing one-hop destination property before !=",
+                        ),
+                    });
+                }
+                if is_prop_angle_ne {
                     self.token("<")?;
                     self.token(">")?;
+                } else if is_prop_bang_ne {
+                    self.token("!")?;
+                    self.token("=")?;
                 } else if is_prop_le {
                     if !is_hop2_destination
                         && (direction != EdgeDirection::Outgoing || hop2_relation.is_some())
@@ -1704,10 +1721,11 @@ mod tests {
         assert_eq!(plan.skip, Some(1));
         assert_eq!(plan.limit, Some(1));
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b) WHERE b.k != 1 RETURN a"),
-            Err(BindError::Parse(_))
-        ));
+        let alias = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b.k != 1 RETURN a")
+            .expect("destination property != alias binds");
+        assert_eq!(alias.dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(alias.dst_prop, None);
 
         let equality = binder
             .bind("MATCH (a)-[:R]->(b) WHERE b.k = 1 RETURN a")
@@ -1822,9 +1840,11 @@ mod tests {
         assert_eq!(source.src_prop_ge, Some((PropertyKeyId(7), 1)));
         assert_eq!(source.dst_prop_ge, None);
 
-        for statement in ["MATCH (a)-[:R]->(b) WHERE b.k != 1 RETURN a"] {
-            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
-        }
+        let alias = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b.k != 1 RETURN a")
+            .expect("destination != alias remains grammar");
+        assert_eq!(alias.dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(alias.dst_prop_ge, None);
     }
 
     #[test]
