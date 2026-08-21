@@ -870,6 +870,7 @@ impl WriteTxn {
         }
         for batch in database.delta_since(self.basis)? {
             let mut touched = std::collections::BTreeSet::new();
+            let mut endpoints = std::collections::BTreeSet::new();
             for coordinate in batch.coordinate_entries() {
                 for row in &coordinate.rows {
                     if let fgdb_delta_types::DeltaRow::CreateEdge {
@@ -882,8 +883,15 @@ impl WriteTxn {
                     {
                         return Ok(Some((ElementId::Edge(*eid), batch.commit_seq())));
                     }
+                    crate::adjacency_endpoints(row, &mut endpoints);
                     crate::touched_elements(row, &mut touched);
                 }
+            }
+            if let Some(element) = endpoints
+                .into_iter()
+                .find(|element| read_set.contains(element))
+            {
+                return Ok(Some((element, batch.commit_seq())));
             }
             if let Some(element) = touched.into_iter().find(|element| read_set.contains(element)) {
                 return Ok(Some((element, batch.commit_seq())));
