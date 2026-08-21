@@ -109,6 +109,7 @@ fn match_reads_staged_edge_but_abort_keeps_it_out_of_reference_replay() {
             graph.neighbours(SOURCE, R).is_empty(),
             "aborted overlay edge must leave no durable replay residue"
         );
+        assert!(graph.vertex(SOURCE).is_none() && graph.vertex(DESTINATION).is_none());
         assert!(graph.edge(EDGE).is_none());
     });
     assert!(
