@@ -94,6 +94,30 @@ impl RelationBind {
         self
     }
 
+    /// Canonical certificate input for this relation-name binding.
+    ///
+    /// The transcript is big-endian and self-delimiting: entry count, then for
+    /// each `(name, relation)` sorted by name and relation id, the UTF-8 name
+    /// length, name bytes, and the `RelationId` value. Counts use `u64`, so the
+    /// encoding never truncates an in-memory map or identifier length.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut entries: Vec<_> = self.relations.iter().collect();
+        entries.sort_by(|(left_name, left_relation), (right_name, right_relation)| {
+            left_name
+                .cmp(right_name)
+                .then_with(|| left_relation.0.cmp(&right_relation.0))
+        });
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+        for (name, relation) in entries {
+            bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&relation.0.to_be_bytes());
+        }
+        bytes
+    }
+
     /// Parse and bind one statement without exposing the internal AST.
     pub fn bind(&self, statement: &str) -> Result<BoundPlan, BindError> {
         let ast = Parser::new(statement).parse()?;
@@ -274,5 +298,27 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn relation_bind_bytes_ignore_insertion_order() {
+        let left = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23));
+        let right = RelationBind::new()
+            .with_relation("S", RelationId(23))
+            .with_relation("R", RelationId(17));
+
+        assert_eq!(left.canonical_bytes(), right.canonical_bytes());
+    }
+
+    #[test]
+    fn different_relation_maps_have_different_bytes() {
+        let left = RelationBind::new().with_relation("R", RelationId(17));
+        let different_id = RelationBind::new().with_relation("R", RelationId(18));
+        let different_name = RelationBind::new().with_relation("S", RelationId(17));
+
+        assert_ne!(left.canonical_bytes(), different_id.canonical_bytes());
+        assert_ne!(left.canonical_bytes(), different_name.canonical_bytes());
     }
 }

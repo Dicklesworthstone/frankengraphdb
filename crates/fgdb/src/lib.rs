@@ -115,7 +115,13 @@
 mod fcw;
 pub use fcw::FirstCommitterWinsValidator;
 
+mod gql_cert;
 mod gql_exec;
+/// The replayable certificate [`Database::execute_gql_certified`] returns
+/// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
+/// bind digests, so the same graph state, text, and bind are auditable as
+/// byte-identical.
+pub use gql_cert::GqlCertificate;
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
 /// catalog), and the plan is re-exported so tests can state that the executor
@@ -3459,6 +3465,39 @@ impl<V: Vfs + Clone> Database<V> {
             unbound => GqlError::Bind(unbound),
         })?;
         gql_exec::execute(&plan, self).map_err(GqlError::Read)
+    }
+
+    /// [`Database::execute_gql`], plus the replayable certificate Genesis
+    /// criterion 5 asks for (fgdb-gate-genesis-lce.1): the rows AND a
+    /// [`GqlCertificate`] binding them to this handle's published frontier,
+    /// the exact statement bytes, and the canonical bind encoding.
+    ///
+    /// The rows come from the SAME path as [`Database::execute_gql`] — this
+    /// method calls it, so the two can never drift. Determinism follows: the
+    /// same database state, source text, and bind produce byte-identical rows
+    /// and a byte-identical certificate, while any intervening commit
+    /// advances `snapshot_seq` and therefore changes the certificate. An
+    /// off-grammar text fails as [`GqlError::Parse`] before any certificate
+    /// exists. No-claim: this is a certificate over (snapshot seq, statement,
+    /// bind), not plan cost, not an operator tree, not FG-INV-19 whole-engine
+    /// replay.
+    pub fn execute_gql_certified(
+        &self,
+        src: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
+        let rows = self.execute_gql(src, bind)?;
+        // Read the frontier only after the rows succeeded: a refused read
+        // yields its typed error with no certificate, and under `&self` on
+        // the single-writer handle no commit can interleave between the scan
+        // and this observation.
+        let snapshot_seq = self.frontier().map_err(GqlError::Read)?;
+        let certificate = GqlCertificate {
+            snapshot_seq,
+            statement_digest: gql_cert::digest_statement(src),
+            bind_digest: gql_cert::digest_bind(bind),
+        };
+        Ok((rows, certificate))
     }
 
     /// The edge `eid` — its endpoints, relation, lifetime, AND properties —
