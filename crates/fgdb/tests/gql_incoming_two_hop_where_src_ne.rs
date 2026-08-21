@@ -168,11 +168,17 @@ fn incoming_two_hop_near_end_inequality_keeps_the_unequal_chain() {
             vec![VId(6)],
             "only the k=1 destination meets <= 1; the keyless destination stays OUT"
         );
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
+                &bind,
+            )
+            .expect("nje.54 near-end != aliases <>"),
+            vec![VId(3)],
+            "only the k=9 destination differs from 1"
+        );
 
-        for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN a",
-        ] {
+        for off_grammar in ["MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN a"] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
