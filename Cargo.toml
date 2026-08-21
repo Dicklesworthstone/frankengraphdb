@@ -23,6 +23,7 @@ members = [
     "crates/fgdb-crypto",
     "crates/fgdb-delta-types",
     "crates/fgdb-evidence",
+    "crates/fgdb-gql",
     "crates/fgdb-reference",
     "crates/fgdb-resource",
     "crates/fgdb-sim",

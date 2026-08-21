@@ -1,0 +1,12 @@
+[package]
+name = "fgdb-gql"
+version = "0.0.1"
+edition = "2024"
+description = "Bounded GQL parser and binder for FrankenGraphDB"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgdb-delta-types = { path = "../fgdb-delta-types" }
