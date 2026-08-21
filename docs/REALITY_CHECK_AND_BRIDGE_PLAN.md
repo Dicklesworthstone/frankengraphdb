@@ -1,9 +1,332 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-08-18.** This document is revised in place. Older
+**Current measurement: 2026-08-20.** This document is revised in place. Older
 commit-bound assessments are retained below as superseded historical snapshots because
 they explain several decisions; their counts and statements about missing seams are not
-current unless the 2026-08-18 delta repeats them.
+current unless the 2026-08-20 delta repeats them.
+
+---
+
+## Current delta — 2026-08-20
+
+### Product verdict
+
+**FrankenGraphDB still is not the database product the README describes in the
+present tense.** HEAD `df733010a46ac2a725df141204d7940b4e37d4b7` has a real
+embedded durability *spine*: a caller with a production asupersync `CommitCx`
+and raw keys can create a directory, commit a `WriteBatch` through Chronicle's
+authenticated-and-RaptorQ capsule plus two-fsync marker protocol, fold it into
+durable Strata Tier-D blocks, read neighbours/vertices/edges (including `*_at`
+historical sequences), compact, crash, drop the handle, and reopen the same
+content-addressed partition. Crate docs and `crates/fgdb/tests/spine.rs` earn
+that claim. The README's GQL shell, sessions, prepared statements, SSI
+transactions, git-style branches, Loom FreeJoin, Ripple views, Beacon HNSW,
+Prism `CALL fnx.*`, Warden macaroons, Fabric (`fgdbd` / FGP / Bolt), Aegis
+Raft, Python wheels, `scripts/install.sh`, and §17 performance gates **do not
+exist as runnable product**. Fifty of seventy topology slots remain `planned`
+directories that must not exist; the nineteen live crates are foundation,
+unsafe islands, Chronicle, Strata Tier D, the spine library, sim, and
+reference.
+
+The two days after the 2026-08-18 measurement did not change that
+classification. They fenced cancelled Chronicle commits (`fgdb-8x5e`), made
+mixed `DeleteVertex` cascades fail closed without partial retire, added a
+changelog, and moved historical plan-review markdown into `docs/planning/`.
+That is spine correctness work. It is not a product increment.
+
+### The five questions this skill asks
+
+1. **What is working right now.** Durable open/write/read/drop/reopen on one
+   hard-coded `(GraphId(1), BranchId(1), partition 0)`. Chronicle identity →
+   AEAD → RaptorQ capsules → D1/D2 markers → dual-slot `manifest.root`. Strata
+   Tier-D blocks, vertex/edge patches, partition roots, manifests, MVCC
+   `[created_at, retired_at)` visibility, incremental publish, compaction,
+   checkpoint-selected reopen bound to the marker-chain commitment. Production
+   `Runtime::request_cx_with_budget` → `CommitCx` (no lab scheduler).
+   `fgdb-reference` as a real semantics oracle. `fgdb-sim` as a real lab
+   harness. `fgdb-calibrate` as a real Sextant library with no product
+   controller consuming it. G0 claim machinery (registries, `registry-check`,
+   `scripts/check.sh` verdict contract) is real and self-aware that invariant
+   enforcement is zero. One Lean lane (`formal/lean/VersionChain.lean`) is
+   checked.
+
+2. **What is not working or not yet implemented.** Sessions, prepared
+   statements, any query language, the production transaction manager, secure
+   views, streaming typed results, multi-graph/branch/partition product APIs,
+   Tier I / Tier R / Tier A, retention-cooling as a temporal database, Strata
+   objects sealed as Chronicle capsules, CLI `fgdb`, server `fgdbd`, Python
+   package, `scripts/install.sh`, plan certificates, hybrid search, Prism,
+   Warden, Fabric, Aegis, §17 benches, 19 of 20 FG-INV checkers, 9 of 10
+   formal lanes, TLA+ tree (directory absent). `WriteBatch` is explicitly not
+   a transaction. `Database::open` is async, requires `&CommitCx` and
+   `DatabaseKeys`, and has no `:memory:` path.
+
+3. **What is blocking us.** Not a missing idea. Sequencing and an empty ready
+   queue. Before this audit's three new beads, `br stats` reported **763
+   records, 274 open, 15 in progress, 466 closed, 284 dependency-blocked,
+   0 ready**. After filing and rewiring them, the tracker is **766 / 277
+   open / 3 ready** (`fgdb-g0-doc-sync-usq.1`, `fgdb-tvg8.1`,
+   `fgdb-epic-w2-6hc.1`). G0 is not frozen: 176
+   `[[contract]]` rows in `command_contracts.toml` are `status = "reserved"`
+   and **zero are `live`**, so the plan §5.1 two-way bijection over inhabitable
+   command-union arms and exhaustive apply handlers still quantifies over an
+   empty live set. `fgdb-5uw2` owns that closure and is in progress under
+   another owner. Invariant clauses remain 20/20 stub,
+   `expected_enforced_clauses = 0`. Later workstreams (W4 txn, W5 Loom, W10
+   surfaces) cannot honestly start while those contracts and the Genesis slice
+   (`fgdb-gate-genesis-lce`) are unclosed. Swarm energy since 2026-08-18 went
+   into spine fences, which is correct locally and does not unblock the
+   product critical path.
+
+4. **If we implemented all open and in-progress beads, would we close the
+   gap?** **Yes for tracking, no as a one-line guarantee of 1.0.** All 22
+   epics remain open and they already name G0, W1–W12, Loom, Ripple, Beacon,
+   Prism, Warden, Fabric, Aegis, verification, performance, and observability.
+   Completing every open bead *to its written acceptance criteria* would
+   cover the README's 1.0 target. Completing them *as currently written* would
+   not automatically produce G4: many W5–W11 beads are still whole-subsystem
+   slices, G0 command rows are reserved rather than live, and zero FG-INV
+   clauses are enforced. The gap is execution and gate honesty, not an
+   untracked vision.
+
+5. **Vision goals with no bead.** Essentially none of the README's product
+   claims lack an owner epic. Thin spots, not `NO_BEAD` holes: (a) README
+   still documents `curl …/scripts/install.sh` and that file does not exist —
+   covered only generically by `fgdb-epic-w10-mhq.1` and `fgdb-g0-doc-sync-usq`;
+   (b) `fgdb-chronicle/src/lib.rs` crate header still says RaptorQ / capsules /
+   `WriteCoordinator` are later increments after those modules shipped; (c)
+   implemented P0/P1 spine bugs (`fgdb-8x5e`, `fgdb-w3-tier-d-ctj.4`) remain
+   `in_progress` after landing commits, so the tracker lags the tree.
+
+### Vision checklist (code = ground truth)
+
+| # | Goal | Source | Status | Bead coverage | Evidence |
+|---|---|---|---|---|---|
+| 1 | Embedded `Database::open(path\|:memory:)` sync library | README L257-273 | **PARTIAL** | `fgdb-j0vu`, `fgdb-w10-embedded-54r` | Async `create`/`open(cx, path, keys)` only; no `:memory:`; `crates/fgdb/src/lib.rs:50-71,1632+` |
+| 2 | Durable commit stream, no double-write journal | README L34, B1 | **PARTIAL** | `fgdb-epic-w2-6hc`, `fgdb-w2-g1-engine-core-yosi` | Capsules + D1/D2 + `manifest.root` real; retention tiers / product branches / replication not |
+| 3 | Temperature-tiered Strata (I/D/R/A) | README L37, B2 | **PARTIAL** | `fgdb-epic-w3-umx`, `fgdb-w3-tier-d-ctj` | Tier D only; I/R/A named absences in `fgdb-strata/src/lib.rs:25-28` |
+| 4 | GQL + openCypher + FQL | README L59-88, B3 | **NOT_STARTED** | `fgdb-epic-w5-ba9`, `fgdb-w5-parsers-nje`, `fgdb-g0-language-contracts-54g` | No parser crate; reference path-mode tests only |
+| 5 | FreeJoin / WCO / factorized execution | README L38 | **NOT_STARTED** | `fgdb-5vp9`, `fgdb-rz12`, `fgdb-w5-executor-olp` | Planned crates; no operator code |
+| 6 | Ripple incremental views / `SUBSCRIBE` | README L75, B4 | **NOT_STARTED** | `fgdb-epic-w6-65w` | `ZWeight` ring only |
+| 7 | Deterministic STRICT results + certificates | README L40, B5 | **PARTIAL** | `fgdb-epic-verif-phi` | Canonical encodings + reference + sim; no plan certificates |
+| 8 | Agent-native branches, macaroons, hybrid.search | README L41, B6 | **NOT_STARTED** | `fgdb-epic-w9-lcy`, `fgdb-w7-vector-79hu`, `fgdb-epic-w2-6hc` | Oracle branch tests; no product API |
+| 9 | Server `fgdbd` (FGP/HTTP2/gRPC/WS/Bolt) | README L221, L2 | **NOT_STARTED** | `fgdb-epic-w10-mhq`, `fgdb-w10-server-rte` | No crate, no binary |
+| 10 | CLI `fgdb` robot mode | README L196-232 | **NOT_STARTED** | `fgdb-huu9` | No crate, no binary |
+| 11 | Python ABI3 wheels | README L276-287 | **NOT_STARTED** | `fgdb-w10-python-kkb` | No package tree |
+| 12 | Install script / signed releases | README L17, L234-238 | **NOT_STARTED** | `fgdb-epic-w10-mhq.1` | `scripts/install.sh` **does not exist** |
+| 13 | SSI / Graph-SSI transactions | README L52, plan §7 | **STUB in production** | `fgdb-epic-w4-7en`, `fgdb-w4-g1-txn-core-qpmg` | Real in `fgdb-reference`; `WriteBatch` disclaims txn |
+| 14 | Larger-than-memory operators | README L12, AGENTS product shape | **NOT DEMONSTRATED** | `fgdb-tvg8`, W3/W5 spill beads | Durable objects exist; live `Snapshot` is decoded in RAM |
+| 15 | §17 empirical gates | README L354-374 | **UNPROVEN** | `fgdb-epic-perf-4xe` | Zero Cargo bench targets |
+| 16 | FG-INV-01..20 live checkers | AGENTS spec-first, plan §19 G1 | **STUB** | `fgdb-g0-invariant-spine-tmm` | `expected_enforced_invariants = 0` |
+| 17 | Lab VFS before first fsync | AGENTS W1 | **PARTIAL** | `fgdb-verif-sim-q97e` | Chronicle/root under VFS; Strata `BlockStore` still path-backed |
+| 18 | Closed dependency universe | README L45, doctrine 1 | **WORKING** | topology + deny policy | Enforced; no serde/tokio/rocksdb |
+| 19 | `unsafe_code = "forbid"` + ledger | README L44 | **WORKING** | `fgdb-w1-unsafe-islands-eqrq` | Three named islands, CI ledger |
+| 20 | G0 constitutional freeze | plan §19 | **PARTIAL** | `fgdb-epic-g0-597`, `fgdb-5uw2` | Registries exist; 176 command contracts reserved, 0 live |
+
+**Vision delivery: 2 of 20 fully working (closed-universe + unsafe ledger). The
+spine is a serious PARTIAL on goals 1–3, 7, 17, 20. Everything a user of the
+README would type is NOT_STARTED.**
+
+### Current evidence boundary
+
+Pinned to tracked commit `df733010a46ac2a725df141204d7940b4e37d4b7`
+(2026-08-20 17:24:21 -0400, `test(spine): recover D2 cancel after a durable
+commit-log marker`). The shared checkout again contained the same three
+untracked foreign artifacts (`.beads/beads.db-wal-cert`,
+`.beads/beads.db-wal-cert-head`, `tools/registry-check/src/claims.rs`); they
+were neither edited nor removed.
+
+README.md still carries the explicit target-state tense note at L20. The
+crate-level honesty in `crates/fgdb/src/lib.rs:50-62` is the more accurate
+product description.
+
+A fresh `rch exec -- cargo run -p fgdb --example open_a_database` on this
+HEAD compiled and printed:
+
+```
+OK: opened, wrote, dropped, reopened, agreed.
+```
+
+Remote command exit was 0 (`committed at seq CommitSeq(1)`, neighbours
+`[VId(2), VId(3)]` before drop and after reopen). RCH then failed artifact
+retrieval (`RCH-E309`) and returned 102, the same pattern as 2026-08-18.
+That is behavioral evidence that the spine example still runs, not a green
+local command and not a substitute for `scripts/check.sh`.
+
+### Current measured inventory
+
+| Measure | 2026-08-18 | 2026-08-20 | Interpretation |
+|---|---:|---:|---|
+| HEAD | `8d295653` | `df733010` | ~8 spine/docs commits, no new posture |
+| Topology | 70 slots: 19 active, 50 planned, 1 reserved | unchanged | server/CLI still deferred |
+| Cargo packages | 20 | 20 | 19 engine + `registry-check` |
+| Product binaries `fgdb`/`fgdbd` | 0 | 0 | five binaries are checker tools |
+| Cargo bench targets | 0 | 0 | no §17 harness |
+| Invariant enforcement | 0 / 0 | 0 / 0 | still deliberately zero |
+| Checker rows | 57 live / 42 stub | 58 live / 43 stub (102 tables) | G0 surface grew; not invariant promotion |
+| Formal lanes | 1 checked / 9 declared | unchanged | `formal/tla/` still absent |
+| Command contracts | metadata in progress | **176 reserved, 0 live** | bijection still empty on the live side |
+| Tracker | 759 / 462 closed / 0 ready | **766 / 466 closed / 3 ready** | three new ready seams from this audit; 15 in progress unchanged |
+| Epics | 22 open | 22 open | none of G0–W12 closed |
+| Engine `todo!()` | — | **0** in `crates/**` | gaps are named absences, not keyword stubs |
+
+`br list --status=blocked` reports 8 explicitly blocked records; `br stats`
+reports 284 dependency-blocked. `bv --robot-triage` uses a broader actionable
+predicate than `br ready`. Compare them only with that caveat. Dependency
+cycles were last reported empty; this audit did not wait out a hung `bv`
+insights job to re-hash.
+
+### What the code actually does (unchanged architecture)
+
+```text
+WriteBatch (one RelationId; not a transaction)
+  -> canonical LogicalDeltaTemplate
+  -> Chronicle capsule (AEAD + RaptorQ symbols)
+  -> fsync D1
+  -> chained commit marker
+  -> fsync D2                         commit authority
+  -> Tier-D Strata block/patch/root   derived publication (plain bytes)
+  -> decoded in-memory Snapshot
+  -> low-level vertex/edge/neighbour reads
+```
+
+Authority direction is still correct: Chronicle is source of truth; Strata is
+rebuildable derived state. Normal commit validation is still
+`PassThroughValidator`. Strata `BlockStore` still persists canonical plain
+bytes; capsule composition of derived objects is a sim proof, not the
+production path.
+
+### Bridge plan — close every remaining product gap
+
+Order is **vision impact**, not ease. Storage hardening after 2026-08-18 is
+necessary and must stop being treated as a substitute for the product seams.
+
+#### Gap 1 — G0 live command universe (`fgdb-5uw2`) — PARTIAL → WORKING
+
+**Current:** 176 reserved contract rows, 0 live; no generated inhabitable
+union/body/result/handler bijection.
+**Target:** every v1 Local (and the G1-required Meta subset) arm is `live`,
+has one handler, and the checker fails if a live row lacks an arm or an arm
+lacks a row.
+**Success:** registry-check bijection tests red on a deleted handler; a
+single typed apply path exists for the spine's current write commands.
+**Would existing beads close it?** Yes — do not fork `fgdb-5uw2`.
+**Complexity:** XL. **Blocks:** Genesis, txn, query.
+
+#### Gap 2 — Real transactions over the spine (`fgdb-w4-g1-txn-core-qpmg`) — NOT_STARTED in production → WORKING
+
+**Current:** `WriteBatch` atomic durability; SSI lives in `fgdb-reference`.
+**Target:** session/txn ownership, first-committer-wins, SSI validation on
+the commit validator seam, typed abort, purpose-narrowed `TxnCx`.
+**Success:** two concurrent writers, one aborts, reference oracle agrees;
+`PassThroughValidator` is gone from the product open path.
+**Would existing beads close it?** Yes, after Gap 1.
+**Complexity:** XL.
+
+#### Gap 3 — Minimum GQL → GLA → Loom → streaming results — NOT_STARTED → WORKING
+
+**Current:** no parser crate.
+**Target:** one generated GQL subset (node/edge match + return) lowered to a
+registered GLA operator set, executed over Strata cursors, differential
+against `fgdb-reference`. Parser breadth without algebra is not an increment.
+**Success:** `MATCH (a)-[:R]->(b) RETURN b` over the spine example graph
+returns the same rows as the oracle; a plan certificate stub hashes the
+bound statement + snapshot seq.
+**Would existing beads close it?** Partially — W5 beads exist but are staged
+as whole-engine work; the Genesis slice `fgdb-gate-genesis-lce` is the
+integration bead. Keep it as the vertical slice, not a fourth planner.
+**Complexity:** XL.
+
+#### Gap 4 — Bounded recovery and larger-than-memory — PARTIAL → WORKING
+
+**Current:** checkpoint-selected open exists; live snapshot is still a
+decoded graph; Tier R/A absent; Strata not fully VFS-injected.
+**Target:** open bounded by checkpoint size + suffix; selective block reads;
+Tier R seal path; lab VFS on `BlockStore`.
+**Would existing beads close it?** Yes (`fgdb-tvg8` and W3 children).
+**Complexity:** L.
+
+#### Gap 5 — Promote invariants only with live checkers — STUB → WORKING
+
+**Current:** 20 stub clauses, ledger pinned at zero.
+**Target:** promote FG-INV-03/08/09/18 only when their checker and a
+distinct negative test are live in the liveness.rs sense; bump
+`expected_enforced_*` in the same change.
+**Would existing beads close it?** Yes. Do not raise the ledger early.
+**Complexity:** M per clause.
+
+#### Gap 6 — One vertical product surface — NOT_STARTED → WORKING
+
+**Current:** example binary is not the CLI; install URL 404s.
+**Target:** after Gaps 2–3, absorb the spine into `fgdb-cli` robot mode and
+the documented sync `Database` API; stop advertising `install.sh` until it
+exists (`fgdb-g0-doc-sync-usq`).
+**Would existing beads close it?** Yes (`fgdb-huu9`, `fgdb-w10-embedded-54r`,
+`fgdb-epic-w10-mhq.1`).
+**Complexity:** L after Gaps 2–3; currently would wrap an API the README
+does not match.
+
+#### Gap 7 — Remaining 1.0 layers (Ripple, Beacon, Prism, Warden, Fabric, Aegis)
+
+Covered by open P2 epics. They are **not** the next capability step. Doing
+them before Gaps 1–3 produces more islands.
+
+### Ambition constraint (why more spine work is the wrong local optimum)
+
+The swarm's revealed preference is to deepen Chronicle/Strata evidence
+because those crates compile, have crash matrices, and close P0 bugs. That
+is locally rational and globally insufficient. The README's leapfrog is the
+*composition* of B1–B6. B1/B2 at Tier D without B3 language, B4 incremental,
+or a transaction model cannot pass G1's Genesis slice. The conservative
+deterministic fallback for this project is therefore: **freeze G0 live
+commands, wire the validator, land one GQL match, then harden**. Further
+compaction/cancel/fence work is welcome only when it unblocks those seams or
+repairs a red gate.
+
+### Tracker hygiene found by this measurement
+
+- `fgdb-8x5e` remains `in_progress` after `92ef0ed` / `df73301`. Close only
+  after independent review of the D2-cancel witness, not from the commit
+  message.
+- `fgdb-w3-tier-d-ctj.4` remains `in_progress` after `c73af64`. Same rule.
+- `fgdb-9p13` (CHANGELOG coverage) is in progress; `7957016` folded CHANGELOG
+  into claims-lint — verify before close.
+- Do not create parallel Loom/Ripple/CLI epics. The 22 existing epics already
+  own those goals.
+
+### Beads filed from this measurement (only uncovered seams)
+
+The existing 22 epics already cover the README's 1.0 surface. This audit
+refused to clone them. Three seams had no owner row:
+
+| ID | Gap |
+|---|---|
+| `fgdb-epic-w2-6hc.1` | Chronicle crate-root docs still describe landed capsules/RaptorQ/`CommitCoordinator` as future work |
+| `fgdb-g0-doc-sync-usq.1` | README advertises `scripts/install.sh` / `fgdb` / `fgdbd` / `pip install` commands that cannot run |
+| `fgdb-tvg8.1` | Strata `BlockStore` is not on the lab VFS, so post-D2 derived publication is not faultable |
+
+`fgdb-5uw2` already owns the 176-reserved/0-live command-contract closure;
+this audit left a measurement comment there instead of a fork.
+
+### Genesis slice (the only valid "are we a database yet?" test)
+
+G1's Genesis slice (`fgdb-gate-genesis-lce`) is the honest product
+integration target. Treat it as passed only when all of the following are
+true in one lab campaign, not as separate crate greens:
+
+1. Fresh directory → three-phase bootstrap → `Operational`.
+2. A pinned GQL subset statement binds, plans, and executes through an
+   authorized Strata cursor (not `WriteBatch` neighbour scans).
+3. Commit validation is not `PassThroughValidator`.
+4. Crash before/after D1, D2, and Strata publication; reopen matches
+   `fgdb-reference`.
+5. Result includes a replayable certificate over snapshot seq + bound
+   statement.
+6. Every FG-INV clause reachable from that capability manifest is `live`
+   with a distinct negative test.
+
+Anything short of that — including a richer crash matrix on neighbour
+scan — is still the spine, not G1.
 
 ---
 
