@@ -3491,7 +3491,8 @@ impl<V: Vfs + Clone> Database<V> {
             frontier,
             next_birth_ordinal,
             published_chain_hash,
-        )?;
+        )
+        .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
@@ -4012,14 +4013,16 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // store, which verifies identity on every read.
     let mut sealed = Vec::with_capacity(root.blocks.len());
     for (reference, decoded) in root.blocks.iter().zip(&blocks) {
-        let bytes = store.get_bytes(cx, fgdb_strata::DeltaBlockVersion(reference.block_id))?;
+        let bytes = store
+            .get_bytes(cx, fgdb_strata::DeltaBlockVersion(reference.block_id))
+            .await?;
         let property_patch = match fgdb_strata::decode_block_with_properties(&bytes)
             .map_err(StoreError::Malformed)?
             .1
         {
             Some((patch_id, _)) => Some(fgdb_strata::writer::SealedPropertyPatch {
                 patch_id,
-                bytes: store.get_edge_property_patch_bytes(cx, patch_id)?,
+                bytes: store.get_edge_property_patch_bytes(cx, patch_id).await?,
             }),
             None => None,
         };
@@ -4036,10 +4039,12 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     for reference in &root.vertex_patches {
         sealed_patches.push(fgdb_strata::writer::SealedPatch {
             patch_id: reference.patch_id,
-            bytes: store.get_patch_bytes(
-                cx,
-                fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
-            )?,
+            bytes: store
+                .get_patch_bytes(
+                    cx,
+                    fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
+                )
+                .await?,
             first_seq: reference.first_seq,
             last_seq: reference.last_seq,
         });
@@ -4095,7 +4100,8 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             frontier,
             next_birth_ordinal,
             published_chain_hash,
-        );
+        )
+        .await;
         return result;
     }
 
@@ -4165,6 +4171,7 @@ async fn rebuild<V: Vfs>(
         next_birth_ordinal,
         published_chain_hash,
     )
+    .await
 }
 
 /// Rebuild the derived delta window from the FULL recovered marker chain.
@@ -4383,9 +4390,9 @@ async fn fold_stream<V: Vfs>(
 /// the blocks/patches/root/manifest durable, and assemble the snapshot from
 /// a from-disk reopen — the encode -> address -> fsync -> decode round trip.
 #[allow(clippy::too_many_arguments)]
-fn publish_and_snapshot(
+async fn publish_and_snapshot<V: Vfs>(
     cx: &CommitCx,
-    store: &BlockStore,
+    store: &BlockStore<V>,
     keys: &DatabaseKeys,
     writer: BlockWriter,
     versions: std::collections::BTreeMap<ElementId, ObjectId>,
@@ -4405,18 +4412,19 @@ fn publish_and_snapshot(
         })?;
     for block in &blocks {
         if let Some(patch) = &block.property_patch {
-            store.put_edge_property_patch(cx, &patch.bytes)?;
+            store.put_edge_property_patch(cx, &patch.bytes).await?;
         }
-        store.put(cx, &block.bytes)?;
+        store.put(cx, &block.bytes).await?;
     }
     for patch in &patches {
-        store.put_patch(cx, &patch.bytes)?;
+        store.put_patch(cx, &patch.bytes).await?;
     }
-    let root_id = store.put_root(cx, &root)?;
+    let root_id = store.put_root(cx, &root).await?;
     let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
         .expect("one root is one canonical record");
-    let manifest = store.put_manifest(cx, &manifest_records)?;
-    let (reopened_root, decoded, decoded_props, decoded_patches) = store.reopen(cx, root_id)?;
+    let manifest = store.put_manifest(cx, &manifest_records).await?;
+    let (reopened_root, decoded, decoded_props, decoded_patches) =
+        store.reopen(cx, root_id).await?;
 
     Ok((
         Snapshot {

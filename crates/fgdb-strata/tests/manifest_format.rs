@@ -23,6 +23,7 @@ use fgdb_strata::{AdjacencyEntry, PartitionRootVersion, encode_block};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
+use std::future::Future;
 use std::path::PathBuf;
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -34,13 +35,14 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    T: Send + 'static,
+    Fut: Future<Output = T> + Send,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         report.invariant_violations.is_empty(),
@@ -206,7 +208,7 @@ fn entry(src: u128, dst: u128, eid: u128, created: u64) -> AdjacencyEntry {
 }
 
 /// Publish one single-block partition and return its root identity.
-fn publish_partition(
+async fn publish_partition(
     cx: &CommitCx,
     store: &BlockStore,
     partition: u64,
@@ -214,7 +216,7 @@ fn publish_partition(
 ) -> PartitionRootVersion {
     let bytes =
         encode_block(partition, None, &[entry(src, src + 1, src * 10, 1)]).expect("encodes");
-    let block_id = store.put(cx, &bytes).expect("stores block");
+    let block_id = store.put(cx, &bytes).await.expect("stores block");
     let root = PartitionRoot {
         graph: GraphId(1),
         branch: BranchId(1),
@@ -227,7 +229,7 @@ fn publish_partition(
         }],
         vertex_patches: vec![],
     };
-    store.put_root(cx, &root).expect("root admits")
+    store.put_root(cx, &root).await.expect("root admits")
 }
 
 /// **THE RESOLUTION LAW: a manifest written, closed, and re-read resolves
@@ -239,10 +241,12 @@ fn a_reopened_store_resolves_every_partition_the_manifest_names() {
     let dir = scratch_dir("resolution");
     let manifest_id = under_lab(61, {
         let dir = dir.clone();
-        move |cx| {
-            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-            let first = publish_partition(cx, &store, 0, 1);
-            let second = publish_partition(cx, &store, 1, 5);
+        move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            let first = publish_partition(&cx, &store, 0, 1).await;
+            let second = publish_partition(&cx, &store, 1, 5).await;
             let records = vec![
                 ManifestRecord {
                     graph: GraphId(1),
@@ -259,16 +263,22 @@ fn a_reopened_store_resolves_every_partition_the_manifest_names() {
                     published_chain_hash: fgdb_crypto::Digest([0xb2; 32]),
                 },
             ];
-            store.put_manifest(cx, &records).expect("manifest stores")
+            store
+                .put_manifest(&cx, &records)
+                .await
+                .expect("manifest stores")
         }
     });
 
     // NOTHING crosses this line except the directory, the keys, and the
     // manifest identity a root slot would carry.
-    under_lab(62, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens");
+    under_lab(62, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens");
         let resolved = store
-            .resolve_manifest(cx, manifest_id)
+            .resolve_manifest(&cx, manifest_id)
+            .await
             .expect("every named partition resolves");
         assert_eq!(resolved.len(), 2);
         assert_eq!(
@@ -296,9 +306,11 @@ fn a_reopened_store_resolves_every_partition_the_manifest_names() {
 #[test]
 fn a_manifest_naming_an_absent_root_fails_closed_with_the_identity() {
     let dir = scratch_dir("absent-root");
-    under_lab(63, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        let real = publish_partition(cx, &store, 0, 1);
+    under_lab(63, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let real = publish_partition(&cx, &store, 0, 1).await;
         let ghost = PartitionRootVersion(ObjectId([0xee; 32]));
         let records = vec![
             ManifestRecord {
@@ -316,8 +328,11 @@ fn a_manifest_naming_an_absent_root_fails_closed_with_the_identity() {
                 published_chain_hash: fgdb_crypto::Digest([0xc2; 32]),
             },
         ];
-        let id = store.put_manifest(cx, &records).expect("manifest stores");
-        let result = store.resolve_manifest(cx, id);
+        let id = store
+            .put_manifest(&cx, &records)
+            .await
+            .expect("manifest stores");
+        let result = store.resolve_manifest(&cx, id).await;
         let refusal = result.err().and_then(|error| match error {
             StoreError::ManifestRootLoad { at, root, .. } => Some((at, root)),
             _ => None,

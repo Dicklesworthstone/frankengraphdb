@@ -22,6 +22,7 @@ use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, EId, VId};
 use std::fs::OpenOptions;
+use std::future::Future;
 use std::path::PathBuf;
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -34,13 +35,14 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn under_lab<T: Send + 'static>(
-    seed: u64,
-    test: impl FnOnce(&CommitCx) -> T + Send + 'static,
-) -> T {
+fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
+where
+    T: Send + 'static,
+    Fut: Future<Output = T> + Send,
+{
     let (output, report) = run_async_under_lab(seed, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        test(&contexts.commit())
+        test(contexts.commit()).await
     });
     assert!(
         report.invariant_violations.is_empty(),
@@ -79,22 +81,24 @@ fn sample() -> Vec<u8> {
 #[test]
 fn a_stored_block_reads_back() {
     let dir = scratch_dir("roundtrip");
-    under_lab(31, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(31, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let bytes = sample();
-        let id = store.put(cx, &bytes).expect("stores");
+        let id = store.put(&cx, &bytes).await.expect("stores");
 
         assert_eq!(
             id.0,
             block_id(&K_OID, NAMESPACE, &bytes),
             "derived, not accepted"
         );
-        assert!(store.contains(cx, id));
+        assert!(store.contains(&cx, id).await);
         assert_eq!(
-            store.get(cx, id).expect("loads"),
+            store.get(&cx, id).await.expect("loads"),
             fgdb_strata::decode_block(&bytes).expect("decodes")
         );
-        assert_eq!(store.get_bytes(cx, id).expect("loads bytes"), bytes);
+        assert_eq!(store.get_bytes(&cx, id).await.expect("loads bytes"), bytes);
     });
 }
 
@@ -106,14 +110,15 @@ fn a_stored_block_reads_back() {
 fn store_directory_creation_waits_for_database_directory_sync() {
     let working_dir = scratch_dir("store-dirent-working");
     let crash_image = scratch_dir("store-dirent-image");
-    under_lab(39, move |cx| {
+    under_lab(39, move |cx| async move {
         let crashed = BlockStore::open_with_crash(
-            cx,
+            &cx,
             &working_dir,
             K_OID,
             NAMESPACE,
             Some(BlockStoreCrashPoint::AfterStoreDirectorySyncBeforeDatabaseDirectorySync),
-        );
+        )
+        .await;
         assert!(
             crashed.is_err(),
             "open must not acknowledge before parent sync"
@@ -127,17 +132,23 @@ fn store_directory_creation_waits_for_database_directory_sync() {
             "the legal loss-arm image has no unsynced directory entry"
         );
 
-        let lost =
-            BlockStore::open(cx, &crash_image, K_OID, NAMESPACE).expect("reopen loss-arm database");
-        assert!(!lost.contains(cx, DeltaBlockVersion(ObjectId([0x23; 32]))));
+        let lost = BlockStore::open(&cx, &crash_image, K_OID, NAMESPACE)
+            .await
+            .expect("reopen loss-arm database");
+        assert!(
+            !lost
+                .contains(&cx, DeltaBlockVersion(ObjectId([0x23; 32])))
+                .await
+        );
 
         // The other legal outcome is that the unsynced name survived. Reopen
         // re-establishes both directory barriers before any write is accepted.
-        let survived = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE)
+        let survived = BlockStore::open(&cx, &working_dir, K_OID, NAMESPACE)
+            .await
             .expect("reopen survival-arm database");
         let bytes = sample();
-        let id = survived.put(cx, &bytes).expect("store after reopen");
-        assert_eq!(survived.get_bytes(cx, id).expect("read"), bytes);
+        let id = survived.put(&cx, &bytes).await.expect("store after reopen");
+        assert_eq!(survived.get_bytes(&cx, id).await.expect("read"), bytes);
     });
 }
 
@@ -149,15 +160,19 @@ fn store_directory_creation_waits_for_database_directory_sync() {
 fn block_creation_waits_for_store_directory_sync() {
     let working_dir = scratch_dir("block-dirent-working");
     let crash_image = scratch_dir("block-dirent-image");
-    under_lab(40, move |cx| {
+    under_lab(40, move |cx| async move {
         let bytes = sample();
         let id = DeltaBlockVersion(block_id(&K_OID, NAMESPACE, &bytes));
-        let store = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE).expect("opens");
-        let crashed = store.put_with_crash(
-            cx,
-            &bytes,
-            Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync),
-        );
+        let store = BlockStore::open(&cx, &working_dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let crashed = store
+            .put_with_crash(
+                &cx,
+                &bytes,
+                Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync),
+            )
+            .await;
         assert!(
             crashed.is_err(),
             "put must not acknowledge before directory sync"
@@ -168,17 +183,22 @@ fn block_creation_waits_for_store_directory_sync() {
         );
         drop(store);
 
-        let lost =
-            BlockStore::open(cx, &crash_image, K_OID, NAMESPACE).expect("reopen loss-arm database");
+        let lost = BlockStore::open(&cx, &crash_image, K_OID, NAMESPACE)
+            .await
+            .expect("reopen loss-arm database");
         assert!(
-            !lost.contains(cx, id),
+            !lost.contains(&cx, id).await,
             "the legal loss arm cannot resolve an unsynced block name"
         );
 
-        let survived = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE)
+        let survived = BlockStore::open(&cx, &working_dir, K_OID, NAMESPACE)
+            .await
             .expect("reopen survival-arm database");
         assert_eq!(
-            survived.get_bytes(cx, id).expect("surviving dirent reads"),
+            survived
+                .get_bytes(&cx, id)
+                .await
+                .expect("surviving dirent reads"),
             bytes
         );
     });
@@ -190,16 +210,20 @@ fn block_creation_waits_for_store_directory_sync() {
 #[test]
 fn a_staging_crash_never_exposes_partial_canonical_bytes() {
     let dir = scratch_dir("staging-before-publication");
-    under_lab(43, move |cx| {
+    under_lab(43, move |cx| async move {
         let bytes = sample();
         let id = DeltaBlockVersion(block_id(&K_OID, NAMESPACE, &bytes));
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
 
-        let interrupted = store.put_with_crash(
-            cx,
-            &bytes,
-            Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
-        );
+        let interrupted = store
+            .put_with_crash(
+                &cx,
+                &bytes,
+                Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
+            )
+            .await;
         assert!(
             interrupted.is_err(),
             "staging completion is not canonical publication"
@@ -210,11 +234,14 @@ fn a_staging_crash_never_exposes_partial_canonical_bytes() {
         );
 
         assert_eq!(
-            store.put(cx, &bytes).expect("retry publishes"),
+            store.put(&cx, &bytes).await.expect("retry publishes"),
             id,
             "the next permit owner reuses the noncanonical staging slot"
         );
-        assert_eq!(store.get_bytes(cx, id).expect("published bytes"), bytes);
+        assert_eq!(
+            store.get_bytes(&cx, id).await.expect("published bytes"),
+            bytes
+        );
     });
 }
 
@@ -224,26 +251,33 @@ fn a_staging_crash_never_exposes_partial_canonical_bytes() {
 #[test]
 fn an_equal_existing_block_reestablishes_durability_after_reopen() {
     let dir = scratch_dir("idempotent-reopen-barrier");
-    under_lab(44, move |cx| {
+    under_lab(44, move |cx| async move {
         let bytes = sample();
         let id = {
-            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-            store.put(cx, &bytes).expect("initial store")
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            store.put(&cx, &bytes).await.expect("initial store")
         };
         let modified_at = std::fs::metadata(
-            BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+            BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
                 .expect("reopens")
                 .path(id.0),
         )
         .and_then(|metadata| metadata.modified())
         .expect("mtime");
 
-        let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens again");
-        let interrupted = reopened.put_with_crash(
-            cx,
-            &bytes,
-            Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync),
-        );
+        let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens again");
+        let interrupted = reopened
+            .put_with_crash(
+                &cx,
+                &bytes,
+                Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync),
+            )
+            .await;
         assert!(
             interrupted.is_err(),
             "equal existing bytes must not bypass the durability barrier"
@@ -255,7 +289,7 @@ fn an_equal_existing_block_reestablishes_durability_after_reopen() {
             modified_at,
             "re-establishing durability must not rewrite immutable bytes"
         );
-        assert_eq!(reopened.get_bytes(cx, id).expect("read"), bytes);
+        assert_eq!(reopened.get_bytes(&cx, id).await.expect("read"), bytes);
     });
 }
 
@@ -268,10 +302,12 @@ fn an_equal_existing_block_reestablishes_durability_after_reopen() {
 #[test]
 fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
     let dir = scratch_dir("wrongblock");
-    under_lab(32, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(32, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let mine = sample();
-        let id = store.put(cx, &mine).expect("stores");
+        let id = store.put(&cx, &mine).await.expect("stores");
 
         // A different, perfectly lawful block written over the path.
         let other = encode_block(0, None, &[entry(9, 9, 7)]).expect("encodes");
@@ -281,7 +317,7 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
         let actual = block_id(&K_OID, NAMESPACE, &other);
         assert!(
             matches!(
-                store.get(cx, id),
+                store.get(&cx, id).await,
                 Err(StoreError::IdentityMismatch { expected, actual: got })
                     if expected == id.0 && got == actual
             ),
@@ -290,7 +326,7 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
         // And the raw-bytes path enforces it too — a caller that skips decoding
         // must not thereby skip the identity check.
         assert!(matches!(
-            store.get_bytes(cx, id),
+            store.get_bytes(&cx, id).await,
             Err(StoreError::IdentityMismatch { .. })
         ));
     });
@@ -304,9 +340,11 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
 #[test]
 fn damaged_bytes_are_refused_by_identity_first() {
     let dir = scratch_dir("damaged");
-    under_lab(33, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        let id = store.put(cx, &sample()).expect("stores");
+    under_lab(33, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let id = store.put(&cx, &sample()).await.expect("stores");
 
         let mut bytes = std::fs::read(store.path(id.0)).expect("read");
         let at = bytes.len() / 2;
@@ -314,7 +352,7 @@ fn damaged_bytes_are_refused_by_identity_first() {
         std::fs::write(store.path(id.0), &bytes).expect("write");
 
         assert!(matches!(
-            store.get(cx, id),
+            store.get(&cx, id).await,
             Err(StoreError::IdentityMismatch { .. })
         ));
     });
@@ -329,15 +367,17 @@ fn damaged_bytes_are_refused_by_identity_first() {
 #[test]
 fn storing_the_same_bytes_twice_is_a_no_op() {
     let dir = scratch_dir("idempotent");
-    under_lab(34, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(34, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let bytes = sample();
-        let first = store.put(cx, &bytes).expect("stores");
+        let first = store.put(&cx, &bytes).await.expect("stores");
         let modified_at = std::fs::metadata(store.path(first.0))
             .and_then(|m| m.modified())
             .expect("mtime");
 
-        let second = store.put(cx, &bytes).expect("stores again");
+        let second = store.put(&cx, &bytes).await.expect("stores again");
         assert_eq!(first, second);
         assert_eq!(
             std::fs::metadata(store.path(first.0))
@@ -346,7 +386,7 @@ fn storing_the_same_bytes_twice_is_a_no_op() {
             modified_at,
             "the file must not have been rewritten"
         );
-        assert_eq!(store.get_bytes(cx, first).expect("loads"), bytes);
+        assert_eq!(store.get_bytes(&cx, first).await.expect("loads"), bytes);
     });
 }
 
@@ -359,16 +399,21 @@ fn storing_the_same_bytes_twice_is_a_no_op() {
 #[test]
 fn a_damaged_existing_file_is_not_misreported_as_a_collision() {
     let dir = scratch_dir("collision");
-    under_lab(35, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(35, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let bytes = sample();
-        let id = store.put(cx, &bytes).expect("stores");
+        let id = store.put(&cx, &bytes).await.expect("stores");
 
         // Something else has taken this identity's path with different bytes.
         let other = encode_block(0, None, &[entry(4, 5, 6)]).expect("encodes");
         std::fs::write(store.path(id.0), &other).expect("plant");
 
-        let error = store.put(cx, &bytes).expect_err("damage must be refused");
+        let error = store
+            .put(&cx, &bytes)
+            .await
+            .expect_err("damage must be refused");
         assert!(
             matches!(
                 error,
@@ -395,26 +440,33 @@ fn a_damaged_existing_file_is_not_misreported_as_a_collision() {
 #[test]
 fn two_stores_with_different_keys_do_not_share_blocks() {
     let dir = scratch_dir("scoped");
-    under_lab(36, move |cx| {
-        let mine = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
-        let theirs = BlockStore::open(cx, &dir, [0x11; 32], NAMESPACE).expect("opens");
+    under_lab(36, move |cx| async move {
+        let mine = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let theirs = BlockStore::open(&cx, &dir, [0x11; 32], NAMESPACE)
+            .await
+            .expect("opens");
         let bytes = sample();
 
-        let my_id = mine.put(cx, &bytes).expect("stores");
-        let their_id = theirs.put(cx, &bytes).expect("stores");
+        let my_id = mine.put(&cx, &bytes).await.expect("stores");
+        let their_id = theirs.put(&cx, &bytes).await.expect("stores");
         assert_ne!(my_id, their_id, "different keys, different objects");
         assert!(
-            !mine.contains(cx, their_id),
+            !mine.contains(&cx, their_id).await,
             "one key's store must not claim to hold another key's block, even \
              though the file is right there in the shared directory"
         );
-        assert!(theirs.contains(cx, their_id), "while its own store does");
+        assert!(
+            theirs.contains(&cx, their_id).await,
+            "while its own store does"
+        );
 
         // Each store resolves its OWN identity and refuses the other's.
-        assert_eq!(mine.get_bytes(cx, my_id).expect("loads"), bytes);
+        assert_eq!(mine.get_bytes(&cx, my_id).await.expect("loads"), bytes);
         assert!(
             matches!(
-                mine.get(cx, their_id),
+                mine.get(&cx, their_id).await,
                 Err(StoreError::IdentityMismatch { .. })
             ),
             "the same bytes under another key are not this store's object"
@@ -426,11 +478,16 @@ fn two_stores_with_different_keys_do_not_share_blocks() {
 #[test]
 fn a_missing_block_is_an_error() {
     let dir = scratch_dir("missing");
-    under_lab(37, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(37, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let absent = DeltaBlockVersion(ObjectId([0xab; 32]));
-        assert!(!store.contains(cx, absent));
-        assert!(matches!(store.get(cx, absent), Err(StoreError::Io(_))));
+        assert!(!store.contains(&cx, absent).await);
+        assert!(matches!(
+            store.get(&cx, absent).await,
+            Err(StoreError::Io(_))
+        ));
     });
 }
 
@@ -443,16 +500,22 @@ fn a_missing_block_is_an_error() {
 #[test]
 fn stored_bytes_that_are_not_a_block_are_refused_as_malformed() {
     let dir = scratch_dir("notablock");
-    under_lab(38, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(38, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         // Stored honestly — the store derives the identity, so this IS the object
         // it names. It simply is not a block.
         let id = store
-            .put(cx, b"this is not a strata block")
+            .put(&cx, b"this is not a strata block")
+            .await
             .expect("stores");
-        assert!(matches!(store.get(cx, id), Err(StoreError::Malformed(_))));
+        assert!(matches!(
+            store.get(&cx, id).await,
+            Err(StoreError::Malformed(_))
+        ));
         assert!(
-            store.get_bytes(cx, id).is_ok(),
+            store.get_bytes(&cx, id).await.is_ok(),
             "and the raw path still returns them, since identity is all it claims"
         );
     });
@@ -540,10 +603,12 @@ fn assert_identity_conflict<T>(
 #[test]
 fn putting_a_root_refuses_a_false_block_range_before_publication() {
     let dir = scratch_dir("root-range-admission");
-    under_lab(44, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(44, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let bytes = sample();
-        let block_id = store.put(cx, &bytes).expect("stores block");
+        let block_id = store.put(&cx, &bytes).await.expect("stores block");
         let root = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -560,7 +625,7 @@ fn putting_a_root_refuses_a_false_block_range_before_publication() {
         let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
 
         assert!(matches!(
-            store.put_root(cx, &root),
+            store.put_root(&cx, &root).await,
             Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch {
                 at: 0,
                 declared: (CommitSeq(2), CommitSeq(2)),
@@ -581,12 +646,17 @@ fn putting_a_root_refuses_a_false_block_range_before_publication() {
 #[test]
 fn root_admission_refuses_eid_reuse_in_a_future_block() {
     let dir = scratch_dir("root-eid-admission");
-    under_lab(50, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(50, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let early = edge(10, 1, 2, 1, Some(3));
         let future = edge(10, 1, 2, 5, None);
         let early_bytes = encode_block(0, None, &[early]).expect("early block encodes");
-        let early_id = store.put(cx, &early_bytes).expect("stores early block");
+        let early_id = store
+            .put(&cx, &early_bytes)
+            .await
+            .expect("stores early block");
         // The future block LINKS the early one lawfully (V6), so the refusal
         // under test stays the identity law rather than the chain law.
         let future_bytes = encode_block(
@@ -595,7 +665,10 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
             &[future],
         )
         .expect("future block encodes");
-        let future_id = store.put(cx, &future_bytes).expect("stores future block");
+        let future_id = store
+            .put(&cx, &future_bytes)
+            .await
+            .expect("stores future block");
         let root = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -628,7 +701,7 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
 
         let root_bytes = fgdb_strata::root::encode_root(&root).expect("root encodes");
         let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
-        assert_identity_conflict(store.put_root(cx, &root), EId(10), expected, found);
+        assert_identity_conflict(store.put_root(&cx, &root).await, EId(10), expected, found);
         assert!(
             !store.path(root_id).exists(),
             "failed admission must not publish the malformed root"
@@ -640,7 +713,7 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
         // retain only the early block.
         let planted_id = plant_unadmitted_root(&store, &root_bytes);
         assert_identity_conflict(
-            store.reopen_at(cx, planted_id, CommitSeq(2)),
+            store.reopen_at(&cx, planted_id, CommitSeq(2)).await,
             EId(10),
             expected,
             found,
@@ -653,8 +726,10 @@ fn root_admission_refuses_eid_reuse_in_a_future_block() {
 #[test]
 fn putting_a_root_requires_every_named_block_before_publication() {
     let dir = scratch_dir("root-block-presence-admission");
-    under_lab(46, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(46, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let root = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -671,7 +746,7 @@ fn putting_a_root_requires_every_named_block_before_publication() {
         let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
 
         assert!(matches!(
-            store.put_root(cx, &root),
+            store.put_root(&cx, &root).await,
             Err(StoreError::RootBlockLoad { at: 0, error })
                 if matches!(*error, StoreError::Io(ref io)
                     if io.kind() == std::io::ErrorKind::NotFound)
@@ -689,8 +764,10 @@ fn putting_a_root_requires_every_named_block_before_publication() {
 #[test]
 fn a_root_read_uses_the_root_formats_exact_byte_ceiling() {
     let dir = scratch_dir("root-byte-ceiling");
-    under_lab(45, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(45, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let id = PartitionRootVersion(ObjectId([0x51; 32]));
         let file = OpenOptions::new()
             .write(true)
@@ -701,7 +778,7 @@ fn a_root_read_uses_the_root_formats_exact_byte_ceiling() {
             .expect("extends sparse planted root");
 
         assert!(matches!(
-            store.get_root(cx, id),
+            store.get_root(&cx, id).await,
             Err(StoreError::ObjectTooLarge { limit, observed })
                 if limit == MAX_ENCODED_ROOT_BYTES as u64
                     && observed == MAX_ENCODED_ROOT_BYTES as u64 + 1
@@ -719,7 +796,7 @@ fn a_root_read_uses_the_root_formats_exact_byte_ceiling() {
 #[test]
 fn a_partition_reopens_from_disk_with_no_stream_replay() {
     let dir = scratch_dir("reopen");
-    under_lab(41, move |cx| {
+    under_lab(41, move |cx| async move {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, strata_keys);
@@ -739,16 +816,19 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
         assert!(blocks.len() >= 2, "the fixture spans more than one block");
 
         let root_id = {
-            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
             for block in &blocks {
-                store.put(cx, &block.bytes).expect("stores a block");
+                store.put(&cx, &block.bytes).await.expect("stores a block");
             }
             for patch in &patches {
                 store
-                    .put_patch(cx, &patch.bytes)
+                    .put_patch(&cx, &patch.bytes)
+                    .await
                     .expect("stores a vertex patch");
             }
-            store.put_root(cx, &root).expect("stores the root")
+            store.put_root(&cx, &root).await.expect("stores the root")
         };
         let encoded_root = fgdb_strata::root::encode_root(&root).expect("encodes root");
         assert_eq!(
@@ -758,9 +838,13 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
         );
 
         // A FRESH handle, holding nothing but the root identity.
-        let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens");
-        let (loaded_root, loaded_blocks, _block_props, _patches) =
-            reopened.reopen(cx, root_id).expect("reopens the partition");
+        let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens");
+        let (loaded_root, loaded_blocks, _block_props, _patches) = reopened
+            .reopen(&cx, root_id)
+            .await
+            .expect("reopens the partition");
 
         assert_eq!(loaded_root, root, "the root came back exactly");
         assert_eq!(loaded_blocks.len(), blocks.len());
@@ -782,7 +866,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
 #[test]
 fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
     let dir = scratch_dir("selective-reopen");
-    under_lab(47, move |cx| {
+    under_lab(47, move |cx| async move {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, strata_keys);
@@ -798,19 +882,23 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs one skippable block");
 
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         for block in &blocks {
-            store.put(cx, &block.bytes).expect("stores block");
+            store.put(&cx, &block.bytes).await.expect("stores block");
         }
         for patch in &patches {
             store
-                .put_patch(cx, &patch.bytes)
+                .put_patch(&cx, &patch.bytes)
+                .await
                 .expect("stores a vertex patch");
         }
-        let root_id = store.put_root(cx, &root).expect("stores root");
+        let root_id = store.put_root(&cx, &root).await.expect("stores root");
 
         let (admitted, visible, _patches) = store
-            .reopen_at(cx, root_id, CommitSeq(3))
+            .reopen_at(&cx, root_id, CommitSeq(3))
+            .await
             .expect("selectively reopens");
         assert_eq!(admitted.root_id(), root_id);
         assert_eq!(admitted.root(), &root);
@@ -828,10 +916,12 @@ fn selective_reopen_retains_only_blocks_visible_at_the_snapshot() {
 #[test]
 fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
     let dir = scratch_dir("selective-reopen-range-admission");
-    under_lab(49, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(49, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let bytes = sample();
-        let block_id = store.put(cx, &bytes).expect("stores block");
+        let block_id = store.put(&cx, &bytes).await.expect("stores block");
         let lying = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -848,7 +938,7 @@ fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
         let root_id = plant_unadmitted_root(&store, &root_bytes);
 
         assert!(matches!(
-            store.reopen_at(cx, root_id, CommitSeq(3)),
+            store.reopen_at(&cx, root_id, CommitSeq(3)).await,
             Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch {
                 at: 0,
                 declared: (CommitSeq(7), CommitSeq(7)),
@@ -864,7 +954,7 @@ fn fresh_selective_reopen_refuses_an_unproved_skip_range() {
 #[test]
 fn an_admitted_root_skips_future_block_io_on_reuse() {
     let dir = scratch_dir("admitted-root-skip");
-    under_lab(48, move |cx| {
+    under_lab(48, move |cx| async move {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, strata_keys);
@@ -880,17 +970,23 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs one future block");
 
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         for block in &blocks {
-            store.put(cx, &block.bytes).expect("stores block");
+            store.put(&cx, &block.bytes).await.expect("stores block");
         }
         for patch in &patches {
             store
-                .put_patch(cx, &patch.bytes)
+                .put_patch(&cx, &patch.bytes)
+                .await
                 .expect("stores a vertex patch");
         }
-        let root_id = store.put_root(cx, &root).expect("stores root");
-        let admitted = store.admit_root(cx, root_id).expect("admits every range");
+        let root_id = store.put_root(&cx, &root).await.expect("stores root");
+        let admitted = store
+            .admit_root(&cx, root_id)
+            .await
+            .expect("admits every range");
         let future_block_id = root
             .blocks
             .get(1)
@@ -901,7 +997,8 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
             .expect("plants later damage");
 
         let early = admitted
-            .resolve_blocks_at(cx, CommitSeq(3))
+            .resolve_blocks_at(&cx, CommitSeq(3))
+            .await
             .expect("future-only damage is skipped");
         assert_eq!(early.len(), 1);
         assert_eq!(
@@ -909,7 +1006,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
             vec![VId(2)]
         );
         assert!(matches!(
-            admitted.resolve_blocks_at(cx, CommitSeq(7)),
+            admitted.resolve_blocks_at(&cx, CommitSeq(7)).await,
             Err(StoreError::RootBlockLoad { at: 1, error })
                 if matches!(*error, StoreError::IdentityMismatch { .. })
         ));
@@ -921,7 +1018,7 @@ fn an_admitted_root_skips_future_block_io_on_reuse() {
 #[test]
 fn reopening_with_a_missing_block_is_refused() {
     let dir = scratch_dir("reopen-missing");
-    under_lab(42, move |cx| {
+    under_lab(42, move |cx| async move {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, strata_keys);
@@ -936,17 +1033,19 @@ fn reopening_with_a_missing_block_is_refused() {
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         // Store only the FIRST block. `put_root` itself rejects this incomplete
         // publication; the root's raw identity path models a damaged/restored
         // store that still reaches read.
-        store.put(cx, &blocks[0].bytes).expect("stores");
+        store.put(&cx, &blocks[0].bytes).await.expect("stores");
         let root_bytes = fgdb_strata::root::encode_root(&root).expect("encodes root");
         let root_id = plant_unadmitted_root(&store, &root_bytes);
 
         assert!(
             matches!(
-                store.reopen(cx, root_id),
+                store.reopen(&cx, root_id).await,
                 Err(StoreError::RootBlockLoad { at: 1, error })
                     if matches!(*error, StoreError::Io(ref io)
                         if io.kind() == std::io::ErrorKind::NotFound)
@@ -955,7 +1054,13 @@ fn reopening_with_a_missing_block_is_refused() {
         );
         // The root itself is still perfectly readable — the failure is about the
         // partition, not about the root object, and the two are worth telling apart.
-        assert_eq!(store.get_root(cx, root_id).expect("the root is fine"), root);
+        assert_eq!(
+            store
+                .get_root(&cx, root_id)
+                .await
+                .expect("the root is fine"),
+            root
+        );
     });
 }
 
@@ -983,10 +1088,14 @@ fn delete(eid: u128) -> DeltaRow {
 fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
     let dir_plain = scratch_dir("receipts-differential-plain");
     let dir_receipted = scratch_dir("receipts-differential-receipted");
-    under_lab(51, move |cx| {
+    under_lab(51, move |cx| async move {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
-        let plain = BlockStore::open(cx, &dir_plain, K_OID, NAMESPACE).expect("opens");
-        let receipted = BlockStore::open(cx, &dir_receipted, K_OID, NAMESPACE).expect("opens");
+        let plain = BlockStore::open(&cx, &dir_plain, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let receipted = BlockStore::open(&cx, &dir_receipted, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let mut receipts = PublishReceipts::new();
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, strata_keys);
@@ -1009,25 +1118,31 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
                 writer.clone().publish(strata_keys, seq).expect("publishes");
 
             for block in &blocks {
-                plain.put(cx, &block.bytes).expect("plain put");
+                plain.put(&cx, &block.bytes).await.expect("plain put");
             }
             for patch in &patches {
-                plain.put_patch(cx, &patch.bytes).expect("plain put_patch");
+                plain
+                    .put_patch(&cx, &patch.bytes)
+                    .await
+                    .expect("plain put_patch");
             }
-            let plain_root = plain.put_root(cx, &root).expect("plain put_root");
+            let plain_root = plain.put_root(&cx, &root).await.expect("plain put_root");
 
             for block in &blocks {
                 receipted
-                    .put_verified(cx, &block.bytes, None, &mut receipts)
+                    .put_verified(&cx, &block.bytes, None, &mut receipts)
+                    .await
                     .expect("put_verified");
             }
             for patch in &patches {
                 receipted
-                    .put_patch_verified(cx, &patch.bytes, &mut receipts)
+                    .put_patch_verified(&cx, &patch.bytes, &mut receipts)
+                    .await
                     .expect("put_patch_verified");
             }
             let receipted_root = receipted
-                .put_root_verified(cx, &root, &mut receipts)
+                .put_root_verified(&cx, &root, &mut receipts)
+                .await
                 .expect("put_root_verified");
 
             assert_eq!(
@@ -1051,12 +1166,15 @@ fn the_receipted_path_publishes_the_same_roots_as_the_plain_path() {
 #[test]
 fn a_receipted_block_is_admitted_without_rereading_its_file() {
     let dir = scratch_dir("receipts-skip");
-    under_lab(52, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(52, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let mut receipts = PublishReceipts::new();
         let bytes = sample();
         let id = store
-            .put_verified(cx, &bytes, None, &mut receipts)
+            .put_verified(&cx, &bytes, None, &mut receipts)
+            .await
             .expect("earns the receipt");
         assert!(receipts.holds(id));
 
@@ -1065,20 +1183,24 @@ fn a_receipted_block_is_admitted_without_rereading_its_file() {
 
         assert!(
             matches!(
-                store.put(cx, &bytes),
+                store.put(&cx, &bytes).await,
                 Err(StoreError::DamagedExisting { .. })
             ),
             "the plain path re-reads the file and must see the damage"
         );
         assert_eq!(
             store
-                .put_verified(cx, &bytes, None, &mut receipts)
+                .put_verified(&cx, &bytes, None, &mut receipts)
+                .await
                 .expect("the receipt answers without the file"),
             id,
             "a receipted identity resolves from the session's own proof"
         );
         assert!(
-            matches!(store.get(cx, id), Err(StoreError::IdentityMismatch { .. })),
+            matches!(
+                store.get(&cx, id).await,
+                Err(StoreError::IdentityMismatch { .. })
+            ),
             "and every reading path still refuses the damaged bytes"
         );
     });
@@ -1091,12 +1213,15 @@ fn a_receipted_block_is_admitted_without_rereading_its_file() {
 #[test]
 fn a_root_lying_about_a_receipted_range_is_still_refused() {
     let dir = scratch_dir("receipts-range-lie");
-    under_lab(53, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(53, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let mut receipts = PublishReceipts::new();
         let bytes = sample();
         let block_id = store
-            .put_verified(cx, &bytes, None, &mut receipts)
+            .put_verified(&cx, &bytes, None, &mut receipts)
+            .await
             .expect("stores block");
         let lying = PartitionRoot {
             graph: GraphId(1),
@@ -1114,7 +1239,7 @@ fn a_root_lying_about_a_receipted_range_is_still_refused() {
         let root_id = derive_root_id(&K_OID, NAMESPACE, &root_bytes);
 
         assert!(matches!(
-            store.put_root_verified(cx, &lying, &mut receipts),
+            store.put_root_verified(&cx, &lying, &mut receipts).await,
             Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch {
                 at: 0,
                 declared: (CommitSeq(2), CommitSeq(2)),
@@ -1135,7 +1260,7 @@ fn a_root_lying_about_a_receipted_range_is_still_refused() {
 #[test]
 fn fresh_receipts_fall_back_to_full_disk_admission() {
     let dir = scratch_dir("receipts-fallback");
-    under_lab(54, move |cx| {
+    under_lab(54, move |cx| async move {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, strata_keys);
@@ -1151,20 +1276,26 @@ fn fresh_receipts_fall_back_to_full_disk_admission() {
             .expect("publishes");
         assert_eq!(blocks.len(), 2, "the fixture needs a sealed prefix");
 
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         for block in &blocks {
-            store.put(cx, &block.bytes).expect("plain put");
+            store.put(&cx, &block.bytes).await.expect("plain put");
         }
         for patch in &patches {
-            store.put_patch(cx, &patch.bytes).expect("plain put_patch");
+            store
+                .put_patch(&cx, &patch.bytes)
+                .await
+                .expect("plain put_patch");
         }
-        let expected = store.put_root(cx, &root).expect("plain put_root");
+        let expected = store.put_root(&cx, &root).await.expect("plain put_root");
 
         // A NEW session over the same store: no receipts, so admission must
         // come from disk — and must succeed, seeding every receipt.
         let mut receipts = PublishReceipts::new();
         let republished = store
-            .put_root_verified(cx, &root, &mut receipts)
+            .put_root_verified(&cx, &root, &mut receipts)
+            .await
             .expect("full-admission fallback");
         assert_eq!(republished, expected);
         for block in &blocks {
@@ -1184,8 +1315,10 @@ fn fresh_receipts_fall_back_to_full_disk_admission() {
 #[test]
 fn receipted_puts_refuse_eid_reuse_as_the_receipt_is_earned() {
     let dir = scratch_dir("receipts-eid-reuse");
-    under_lab(55, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(55, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let mut receipts = PublishReceipts::new();
         let early = edge(10, 1, 2, 1, Some(3));
         let future = edge(10, 1, 2, 5, None);
@@ -1193,10 +1326,13 @@ fn receipted_puts_refuse_eid_reuse_as_the_receipt_is_earned() {
         let future_bytes = encode_block(0, None, &[future]).expect("encodes");
 
         store
-            .put_verified(cx, &early_bytes, None, &mut receipts)
+            .put_verified(&cx, &early_bytes, None, &mut receipts)
+            .await
             .expect("the first birth is lawful");
         assert!(matches!(
-            store.put_verified(cx, &future_bytes, None, &mut receipts),
+            store
+                .put_verified(&cx, &future_bytes, None, &mut receipts)
+                .await,
             Err(StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
                 eid: EId(10),
                 ..
@@ -1210,7 +1346,7 @@ fn receipted_puts_refuse_eid_reuse_as_the_receipt_is_earned() {
 #[test]
 fn a_root_at_the_wrong_identity_is_refused() {
     let dir = scratch_dir("reopen-wrongroot");
-    under_lab(43, move |cx| {
+    under_lab(43, move |cx| async move {
         let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, strata_keys);
@@ -1221,16 +1357,19 @@ fn a_root_at_the_wrong_identity_is_refused() {
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         for block in &blocks {
-            store.put(cx, &block.bytes).expect("stores block");
+            store.put(&cx, &block.bytes).await.expect("stores block");
         }
         for patch in &patches {
             store
-                .put_patch(cx, &patch.bytes)
+                .put_patch(&cx, &patch.bytes)
+                .await
                 .expect("stores a vertex patch");
         }
-        let root_id = store.put_root(cx, &root).expect("stores");
+        let root_id = store.put_root(&cx, &root).await.expect("stores");
 
         // A different lawful root written over the path.
         let other = fgdb_strata::root::PartitionRoot {
@@ -1241,7 +1380,7 @@ fn a_root_at_the_wrong_identity_is_refused() {
         std::fs::write(store.path(root_id.0), &other_bytes).expect("plant");
 
         assert!(matches!(
-            store.get_root(cx, root_id),
+            store.get_root(&cx, root_id).await,
             Err(StoreError::MalformedRoot(
                 RootError::IdentityMismatch { .. }
             ))
@@ -1260,7 +1399,7 @@ fn a_root_at_the_wrong_identity_is_refused() {
 #[test]
 fn a_propertied_block_admits_only_with_its_patch_reachable() {
     let dir = scratch_dir("propertied-admission");
-    under_lab(0x9a_01, move |cx| {
+    under_lab(0x9a_01, move |cx| async move {
         use fgdb_delta_types::{DeltaRow, PropertyKeyId};
         use fgdb_strata::writer::BlockWriter;
         use fgdb_types::CanonicalScalar;
@@ -1332,18 +1471,24 @@ fn a_propertied_block_admits_only_with_its_patch_reachable() {
 
         // WITHOUT the patch stored, the root is refused at the unreachable
         // patch — reachability is root -> block -> patch.
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("store opens");
         for block in &blocks {
-            store.put(cx, &block.bytes).expect("stores the block");
+            store
+                .put(&cx, &block.bytes)
+                .await
+                .expect("stores the block");
         }
         for patch in &patches {
             store
-                .put_patch(cx, &patch.bytes)
+                .put_patch(&cx, &patch.bytes)
+                .await
                 .expect("stores vertex patch");
         }
         assert!(
             matches!(
-                store.put_root(cx, &root),
+                store.put_root(&cx, &root).await,
                 Err(StoreError::BlockPatchLoad { .. })
             ),
             "an unreachable hosted patch must refuse the root"
@@ -1351,10 +1496,12 @@ fn a_propertied_block_admits_only_with_its_patch_reachable() {
 
         // With the patch durable, admission and a fresh reopen both hold.
         store
-            .put_edge_property_patch(cx, &hosted.bytes)
+            .put_edge_property_patch(&cx, &hosted.bytes)
+            .await
             .expect("stores the hosted patch");
-        let root_id = store.put_root(cx, &root).expect("root admits");
-        let (_, reopened_blocks, _block_props, _) = store.reopen(cx, root_id).expect("reopens");
+        let root_id = store.put_root(&cx, &root).await.expect("root admits");
+        let (_, reopened_blocks, _block_props, _) =
+            store.reopen(&cx, root_id).await.expect("reopens");
         let total: usize = reopened_blocks.iter().map(Vec::len).sum();
         assert_eq!(total, 2, "both edges survive the round trip");
     });
@@ -1366,7 +1513,7 @@ fn a_propertied_block_admits_only_with_its_patch_reachable() {
 #[test]
 fn a_tombstone_restates_the_properties_in_its_own_patch() {
     let dir = scratch_dir("tombstone-props");
-    under_lab(0x9a_02, move |cx| {
+    under_lab(0x9a_02, move |cx| async move {
         use fgdb_delta_types::{DeltaRow, PropertyKeyId};
         use fgdb_strata::writer::BlockWriter;
         use fgdb_types::CanonicalScalar;
@@ -1437,23 +1584,28 @@ fn a_tombstone_restates_the_properties_in_its_own_patch() {
         );
 
         // Full round trip: store everything, admit, reopen.
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("store opens");
         for block in &blocks {
             if let Some(patch) = &block.property_patch {
                 store
-                    .put_edge_property_patch(cx, &patch.bytes)
+                    .put_edge_property_patch(&cx, &patch.bytes)
+                    .await
                     .expect("stores hosted patch");
             }
-            store.put(cx, &block.bytes).expect("stores block");
+            store.put(&cx, &block.bytes).await.expect("stores block");
         }
         for patch in &patches {
             store
-                .put_patch(cx, &patch.bytes)
+                .put_patch(&cx, &patch.bytes)
+                .await
                 .expect("stores vertex patch");
         }
-        let root_id = store.put_root(cx, &root).expect("root admits");
+        let root_id = store.put_root(&cx, &root).await.expect("root admits");
         store
-            .reopen(cx, root_id)
+            .reopen(&cx, root_id)
+            .await
             .expect("the history reopens whole");
     });
 }
@@ -1466,10 +1618,12 @@ fn a_tombstone_restates_the_properties_in_its_own_patch() {
 #[test]
 fn a_root_refuses_a_block_transplanted_from_another_partition() {
     let dir = scratch_dir("partition-transplant");
-    under_lab(52, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(52, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let foreign = encode_block(9, None, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
-        let block_id = store.put(cx, &foreign).expect("stores block");
+        let block_id = store.put(&cx, &foreign).await.expect("stores block");
         let root = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -1483,7 +1637,7 @@ fn a_root_refuses_a_block_transplanted_from_another_partition() {
             vertex_patches: vec![],
         };
         assert!(matches!(
-            store.put_root(cx, &root),
+            store.put_root(&cx, &root).await,
             Err(StoreError::MalformedRoot(
                 RootError::BlockPartitionMismatch {
                     at: 0,
@@ -1496,7 +1650,7 @@ fn a_root_refuses_a_block_transplanted_from_another_partition() {
         // CONTROL: the same content at the root's own partition admits — the
         // refusal above is the partition law firing, not fixture debris.
         let home = encode_block(0, None, &[entry(1, 2, 1), entry(1, 3, 2)]).expect("encodes");
-        let home_id = store.put(cx, &home).expect("stores block");
+        let home_id = store.put(&cx, &home).await.expect("stores block");
         let root = PartitionRoot {
             blocks: vec![BlockRef {
                 block_id: home_id.0,
@@ -1505,7 +1659,10 @@ fn a_root_refuses_a_block_transplanted_from_another_partition() {
             }],
             ..root
         };
-        store.put_root(cx, &root).expect("the home block admits");
+        store
+            .put_root(&cx, &root)
+            .await
+            .expect("the home block admits");
     });
 }
 
@@ -1520,8 +1677,10 @@ fn admission_refuses_a_propertied_block_with_a_forged_digest() {
     use fgdb_types::CanonicalScalar;
 
     let dir = scratch_dir("forged-joint-digest");
-    under_lab(53, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(53, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let rows = vec![vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))]];
         let patch_bytes = encode_property_patch(&rows).expect("encodes");
         let patch_id = property_patch_id(&K_OID, NAMESPACE, &patch_bytes);
@@ -1531,9 +1690,10 @@ fn admission_refuses_a_propertied_block_with_a_forged_digest() {
                 .expect("encodes");
         bytes[49] ^= 0x01; // forge the digest; content addressing follows the bytes
         store
-            .put_edge_property_patch(cx, &patch_bytes)
+            .put_edge_property_patch(&cx, &patch_bytes)
+            .await
             .expect("patch stores");
-        let block_id = store.put(cx, &bytes).expect("block stores");
+        let block_id = store.put(&cx, &bytes).await.expect("block stores");
         let root = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -1547,7 +1707,7 @@ fn admission_refuses_a_propertied_block_with_a_forged_digest() {
             vertex_patches: vec![],
         };
         assert!(matches!(
-            store.put_root(cx, &root),
+            store.put_root(&cx, &root).await,
             Err(StoreError::Malformed(
                 fgdb_strata::BlockError::LogicalDigestMismatch { .. }
             )),
@@ -1565,10 +1725,12 @@ fn a_root_refuses_a_broken_or_forged_family_chain() {
     use fgdb_strata::DeltaBlockVersion;
 
     let dir = scratch_dir("family-chain");
-    under_lab(54, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(54, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let first_bytes = encode_block(0, None, &[edge(10, 1, 2, 1, None)]).expect("encodes");
-        let first_id = store.put(cx, &first_bytes).expect("stores");
+        let first_id = store.put(&cx, &first_bytes).await.expect("stores");
         let reference = |id: fgdb_strata::DeltaBlockVersion, first: u64, last: u64| BlockRef {
             block_id: id.0,
             first_seq: CommitSeq(first),
@@ -1585,15 +1747,17 @@ fn a_root_refuses_a_broken_or_forged_family_chain() {
 
         // A second family block that LINKS NOTHING: the chain skips.
         let unlinked = encode_block(0, None, &[edge(11, 1, 3, 5, None)]).expect("encodes");
-        let unlinked_id = store.put(cx, &unlinked).expect("stores");
+        let unlinked_id = store.put(&cx, &unlinked).await.expect("stores");
         assert!(matches!(
-            store.put_root(
-                cx,
-                &root_of(vec![
-                    reference(first_id, 1, 1),
-                    reference(unlinked_id, 5, 5),
-                ])
-            ),
+            store
+                .put_root(
+                    &cx,
+                    &root_of(vec![
+                        reference(first_id, 1, 1),
+                        reference(unlinked_id, 5, 5),
+                    ])
+                )
+                .await,
             Err(StoreError::MalformedRoot(RootError::BlockChainMismatch {
                 at: 1,
                 declared: None,
@@ -1608,12 +1772,14 @@ fn a_root_refuses_a_broken_or_forged_family_chain() {
             &[edge(11, 1, 3, 5, None)],
         )
         .expect("encodes");
-        let forged_id = store.put(cx, &forged).expect("stores");
+        let forged_id = store.put(&cx, &forged).await.expect("stores");
         assert!(matches!(
-            store.put_root(
-                cx,
-                &root_of(vec![reference(first_id, 1, 1), reference(forged_id, 5, 5),])
-            ),
+            store
+                .put_root(
+                    &cx,
+                    &root_of(vec![reference(first_id, 1, 1), reference(forged_id, 5, 5),])
+                )
+                .await,
             Err(StoreError::MalformedRoot(RootError::BlockChainMismatch {
                 at: 1,
                 ..
@@ -1622,27 +1788,29 @@ fn a_root_refuses_a_broken_or_forged_family_chain() {
 
         // CONTROL: the lawful link admits.
         let chained = encode_block(0, Some(first_id), &[edge(11, 1, 3, 5, None)]).expect("encodes");
-        let chained_id = store.put(cx, &chained).expect("stores");
+        let chained_id = store.put(&cx, &chained).await.expect("stores");
         store
             .put_root(
-                cx,
+                &cx,
                 &root_of(vec![reference(first_id, 1, 1), reference(chained_id, 5, 5)]),
             )
+            .await
             .expect("the lawful chain admits");
 
         // And a DIFFERENT family in between does not break the chain: the
         // law is family-scoped, not adjacency-scoped.
         let other_family = encode_block(0, None, &[edge(20, 2, 4, 3, None)]).expect("encodes");
-        let other_id = store.put(cx, &other_family).expect("stores");
+        let other_id = store.put(&cx, &other_family).await.expect("stores");
         store
             .put_root(
-                cx,
+                &cx,
                 &root_of(vec![
                     reference(first_id, 1, 1),
                     reference(other_id, 3, 3),
                     reference(chained_id, 5, 5),
                 ]),
             )
+            .await
             .expect("an interleaved foreign family leaves the chain lawful");
     });
 }
@@ -1655,8 +1823,10 @@ fn a_root_refuses_a_broken_or_forged_family_chain() {
 #[test]
 fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
     let dir = scratch_dir("edge-chains");
-    under_lab(57, move |cx| {
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(57, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
         let reference = |id: fgdb_strata::DeltaBlockVersion, first: u64, last: u64| BlockRef {
             block_id: id.0,
             first_seq: CommitSeq(first),
@@ -1673,19 +1843,21 @@ fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
 
         // The predecessor statement: eid 10, alive [1, 5).
         let first_bytes = encode_block(0, None, &[edge(10, 1, 2, 1, Some(5))]).expect("encodes");
-        let first_id = store.put(cx, &first_bytes).expect("stores");
+        let first_id = store.put(&cx, &first_bytes).await.expect("stores");
 
         // ALIASING: a successor that begins inside the predecessor's life.
         // Its span reaches PAST the predecessor's frontier so the root-order
         // law stays satisfied and the refusal under test is the chain law.
         let overlap =
             encode_block(0, Some(first_id), &[edge(10, 1, 2, 3, Some(9))]).expect("frame-lawful");
-        let overlap_id = store.put(cx, &overlap).expect("stores");
+        let overlap_id = store.put(&cx, &overlap).await.expect("stores");
         assert!(matches!(
-            store.put_root(
-                cx,
-                &root_of(vec![reference(first_id, 1, 5), reference(overlap_id, 3, 9),])
-            ),
+            store
+                .put_root(
+                    &cx,
+                    &root_of(vec![reference(first_id, 1, 5), reference(overlap_id, 3, 9),])
+                )
+                .await,
             Err(StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
                 eid: EId(10),
                 ..
@@ -1695,12 +1867,14 @@ fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
         // TOPOLOGY DRIFT: contiguous, but the successor moved the edge.
         let drift =
             encode_block(0, Some(first_id), &[edge(10, 1, 3, 5, None)]).expect("frame-lawful");
-        let drift_id = store.put(cx, &drift).expect("stores");
+        let drift_id = store.put(&cx, &drift).await.expect("stores");
         assert!(matches!(
-            store.put_root(
-                cx,
-                &root_of(vec![reference(first_id, 1, 5), reference(drift_id, 5, 5),])
-            ),
+            store
+                .put_root(
+                    &cx,
+                    &root_of(vec![reference(first_id, 1, 5), reference(drift_id, 5, 5),])
+                )
+                .await,
             Err(StoreError::MalformedRoot(RootError::EdgeIdentityMismatch {
                 eid: EId(10),
                 ..
@@ -1710,12 +1884,13 @@ fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
         // CONTROL: the contiguous same-topology successor admits, and each
         // version answers in its own interval.
         let lawful = encode_block(0, Some(first_id), &[edge(10, 1, 2, 5, None)]).expect("encodes");
-        let lawful_id = store.put(cx, &lawful).expect("stores");
+        let lawful_id = store.put(&cx, &lawful).await.expect("stores");
         store
             .put_root(
-                cx,
+                &cx,
                 &root_of(vec![reference(first_id, 1, 5), reference(lawful_id, 5, 5)]),
             )
+            .await
             .expect("the lawful chain admits");
         let history = vec![
             vec![edge(10, 1, 2, 1, Some(5))],

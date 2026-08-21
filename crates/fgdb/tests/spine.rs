@@ -136,6 +136,7 @@ fn key_material_is_redacted_from_direct_and_containing_debug_surfaces() {
             database_keys_clone.shared_k_oid(),
             NAMESPACE,
         )
+        .await
         .expect("reopens the planted keyed store");
         assert!(
             core::ptr::eq(database_keys_clone.k_oid(), store.k_oid()),
@@ -2450,10 +2451,12 @@ fn every_publish_leaves_a_resolvable_manifest() {
         // The manifest resolves through a fresh store handle to the root the
         // database is actually serving from.
         drop(db);
-        let store =
-            fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+        let store = fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("store opens");
         let resolved = store
             .resolve_manifest(cx, manifest_after_writes)
+            .await
             .expect("the manifest resolves");
         assert_eq!(resolved.len(), 1, "one partition in the spine");
         let root_bytes = fgdb_strata::root::encode_root(&resolved[0].1).expect("re-encodes");
@@ -3037,17 +3040,24 @@ fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
         // The destination can resolve and admit this manifest; only its absent
         // Chronicle-prefix binding makes it unlawful here.
         let source = fgdb_strata::store::BlockStore::open(cx, &divergent, K_OID, NAMESPACE)
+            .await
             .expect("opens divergent object store");
         let destination = fgdb_strata::store::BlockStore::open(cx, &primary, K_OID, NAMESPACE)
+            .await
             .expect("opens primary object store");
         let root = source
             .get_root(cx, divergent_root)
+            .await
             .expect("reads divergent root");
         for reference in &root.blocks {
             let bytes = source
                 .get_bytes(cx, fgdb_strata::DeltaBlockVersion(reference.block_id))
+                .await
                 .expect("reads divergent block");
-            let stored = destination.put(cx, &bytes).expect("copies divergent block");
+            let stored = destination
+                .put(cx, &bytes)
+                .await
+                .expect("copies divergent block");
             assert_eq!(stored.0, reference.block_id);
         }
         for reference in &root.vertex_patches {
@@ -3056,14 +3066,17 @@ fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
                     cx,
                     fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
                 )
+                .await
                 .expect("reads divergent vertex patch");
             let stored = destination
                 .put_patch(cx, &bytes)
+                .await
                 .expect("copies divergent vertex patch");
             assert_eq!(stored.0, reference.patch_id);
         }
         let stored_root = destination
             .put_root(cx, &root)
+            .await
             .expect("admits divergent root");
         assert_eq!(stored_root, divergent_root);
         // The transplant carries the divergent history's OWN record verbatim —
@@ -3074,12 +3087,14 @@ fn a_resolvable_checkpoint_from_a_divergent_history_is_refused() {
         // the one comparison.
         let divergent_records: Vec<_> = source
             .resolve_manifest(cx, divergent_manifest)
+            .await
             .expect("resolves the divergent manifest in its own store")
             .into_iter()
             .map(|(record, _)| record)
             .collect();
         let stored_manifest = destination
             .put_manifest(cx, &divergent_records)
+            .await
             .expect("copies divergent manifest");
         assert_eq!(stored_manifest, divergent_manifest);
 
@@ -3333,10 +3348,12 @@ fn compaction_is_durable_and_answer_preserving_at_every_sequence() {
         // Vertex churn built restatement chains across three per-commit
         // patches; consolidation collapses them into one canonical patch.
         let resolved = {
-            let store =
-                fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            let store = fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
             store
                 .get_root(cx, db.partition_root().expect("healthy compacted root"))
+                .await
                 .expect("the compacted root resolves")
         };
         assert_eq!(

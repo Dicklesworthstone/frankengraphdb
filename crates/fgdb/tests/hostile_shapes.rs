@@ -504,11 +504,13 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
             );
             assert_history(&db);
 
-            let store =
-                fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            let store = fgdb_strata::store::BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
             let root_before_id = db.partition_root().expect("healthy root");
             let root_before = store
                 .get_root(cx, root_before_id)
+                .await
                 .expect("resolves pre-compaction root");
             let blocks_before = root_before.blocks.len();
             assert!(

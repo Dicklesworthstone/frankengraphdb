@@ -318,7 +318,13 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
         .expect("replica coordinator opens");
     stages.open_recover_chain = start.elapsed();
 
-    let store = BlockStore::open(&commit, dir, keys.shared_k_oid(), keys.namespace)
+    let store = runtime
+        .block_on(BlockStore::open(
+            &commit,
+            dir,
+            keys.shared_k_oid(),
+            keys.namespace,
+        ))
         .expect("replica store opens");
 
     let entries: Vec<_> = coordinator.chain().entries().to_vec();
@@ -383,15 +389,21 @@ fn rebuild_replica(dir: &PathBuf) -> ReplicaStages {
         .publish((keys.k_oid(), keys.namespace), frontier)
         .expect("replica publish");
     for block in &blocks {
-        store.put(&commit, &block.bytes).expect("replica block put");
+        runtime
+            .block_on(store.put(&commit, &block.bytes))
+            .expect("replica block put");
     }
     for patch in &patches {
-        store
-            .put_patch(&commit, &patch.bytes)
+        runtime
+            .block_on(store.put_patch(&commit, &patch.bytes))
             .expect("replica patch put");
     }
-    let root_id = store.put_root(&commit, &root).expect("replica root put");
-    store.reopen(&commit, root_id).expect("replica reopen");
+    let root_id = runtime
+        .block_on(store.put_root(&commit, &root))
+        .expect("replica root put");
+    runtime
+        .block_on(store.reopen(&commit, root_id))
+        .expect("replica reopen");
     stages.publish_and_reopen = start.elapsed();
 
     stages
