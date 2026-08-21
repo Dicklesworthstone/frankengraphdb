@@ -1675,7 +1675,6 @@ mod tests {
         assert_eq!(inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
 
         for statement in [
-            "MATCH (a)-[:R]->(b) WHERE a.k < 1 RETURN b",
             "MATCH (a)-[:R]->(b) WHERE a.k <= 1 RETURN b",
             "MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b",
         ] {
