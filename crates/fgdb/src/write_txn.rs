@@ -89,6 +89,7 @@ pub struct WriteTxn {
     basis: CommitSeq,
     staged: Vec<WriteBatch>,
     prepared: Option<PreparedWrite>,
+    read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
     pin: Option<PurposeObligation<Acquired>>,
 }
 
@@ -103,6 +104,7 @@ impl WriteTxn {
             basis,
             staged: Vec::new(),
             prepared: None,
+            read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             pin: Some(pin),
         })
     }
@@ -251,6 +253,9 @@ impl WriteTxn {
                 | PendingRow::CompareAndSet { .. } => {}
             }
         }
+        self.read_set
+            .borrow_mut()
+            .insert(ElementId::Vertex(vid));
         Ok(overlay)
     }
 
@@ -272,10 +277,14 @@ impl WriteTxn {
             })
         })?;
 
-        let mut vertices: std::collections::BTreeSet<VId> = database
-            .vertices_at(self.basis)?
+        let basis_vertices = database.vertices_at(self.basis)?;
+        let mut observed = std::collections::BTreeSet::new();
+        let mut vertices: std::collections::BTreeSet<VId> = basis_vertices
             .into_iter()
-            .map(|row| row.vid)
+            .map(|row| {
+                observed.insert(ElementId::Vertex(row.vid));
+                row.vid
+            })
             .collect();
         let mut edges: std::collections::BTreeMap<
             fgdb_types::EId,
@@ -284,6 +293,7 @@ impl WriteTxn {
             .edges_at(self.basis)?
             .into_iter()
             .map(|row| {
+                observed.insert(ElementId::Edge(row.entry.eid));
                 (
                     row.entry.eid,
                     (row.entry.src, row.entry.relation, row.entry.dst),
@@ -295,6 +305,7 @@ impl WriteTxn {
             for pending in &batch.rows {
                 match pending {
                     PendingRow::Vertex { vid, .. } => {
+                        observed.insert(ElementId::Vertex(*vid));
                         vertices.insert(*vid);
                     }
                     PendingRow::Edge {
@@ -304,15 +315,18 @@ impl WriteTxn {
                         ensure,
                         ..
                     } => {
+                        observed.insert(ElementId::Edge(*eid));
                         let triple = (*src, batch.relation, *dst);
                         if !ensure || !edges.values().any(|existing| *existing == triple) {
                             edges.insert(*eid, triple);
                         }
                     }
                     PendingRow::DeleteEdge { eid, .. } => {
+                        observed.insert(ElementId::Edge(*eid));
                         edges.remove(eid);
                     }
                     PendingRow::DeleteVertex { vid, .. } => {
+                        observed.insert(ElementId::Vertex(*vid));
                         vertices.remove(vid);
                         edges.retain(|_, (src, _, dst)| *src != *vid && *dst != *vid);
                     }
@@ -324,17 +338,22 @@ impl WriteTxn {
             }
         }
 
-        let mut destinations = Vec::new();
-        for src in vertices.iter().copied() {
-            destinations.extend(edges.values().filter_map(|(edge_src, relation, dst)| {
-                (*edge_src == src
-                    && *relation == plan.relation
-                    && vertices.contains(dst))
-                .then_some(*dst)
-            }));
-        }
-        destinations.sort_unstable();
-        destinations.dedup();
+        let destinations = crate::execute_bound_plan_over(
+            &plan,
+            vertices.iter().copied(),
+            |src, relation| {
+                Ok(edges
+                    .values()
+                    .filter_map(|(edge_src, edge_relation, dst)| {
+                        (*edge_src == src
+                            && *edge_relation == relation
+                            && vertices.contains(dst))
+                        .then_some(*dst)
+                    })
+                    .collect())
+            },
+        )?;
+        self.read_set.borrow_mut().extend(observed);
         Ok(destinations)
     }
 
@@ -358,10 +377,31 @@ impl WriteTxn {
         if self.pin.is_none() {
             return Err(WriteTxnError::Finished);
         }
-        let Some(prepared) = self.prepared.take() else {
+        if self.prepared.is_none() {
             self.release_pin();
             return Err(WriteTxnError::NoPreparedWrite);
+        }
+        let conflict = match self.read_conflict(database) {
+            Ok(conflict) => conflict,
+            Err(source) => {
+                self.release_pin();
+                return Err(WriteTxnError::Read(source));
+            }
         };
+        if let Some((element, committed_at)) = conflict {
+            self.release_pin();
+            return Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                law: "FG-LAW-FCW-READ-01",
+                detail: format!(
+                    "read-set element {element:?} was written at {committed_at:?} after pinned basis {:?}",
+                    self.basis
+                ),
+            }));
+        }
+        let prepared = self
+            .prepared
+            .take()
+            .expect("the prepared write was checked immediately above");
         self.staged.clear();
 
         let result = database
@@ -409,6 +449,28 @@ impl WriteTxn {
         }
     }
 
+    fn read_conflict<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+    ) -> Result<Option<(ElementId, CommitSeq)>, ReadError> {
+        let read_set = self.read_set.borrow();
+        if read_set.is_empty() {
+            return Ok(None);
+        }
+        for batch in database.delta_since(self.basis)? {
+            let mut touched = std::collections::BTreeSet::new();
+            for coordinate in batch.coordinate_entries() {
+                for row in &coordinate.rows {
+                    crate::touched_elements(row, &mut touched);
+                }
+            }
+            if let Some(element) = touched.into_iter().find(|element| read_set.contains(element)) {
+                return Ok(Some((element, batch.commit_seq())));
+            }
+        }
+        Ok(None)
+    }
+
     fn release_pin(&mut self) {
         if let Some(pin) = self.pin.take() {
             let _receipt = pin.abort();
@@ -423,6 +485,7 @@ impl core::fmt::Debug for WriteTxn {
             .field("basis", &self.basis)
             .field("staged_batches", &self.staged.len())
             .field("has_prepared_write", &self.prepared.is_some())
+            .field("read_set_len", &self.read_set.borrow().len())
             .field("pin_obligation", &self.pin.as_ref().map(PurposeObligation::id))
             .finish()
     }
