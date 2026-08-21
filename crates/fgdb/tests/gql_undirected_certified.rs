@@ -5,55 +5,62 @@ use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
 
+const R: RelationId = RelationId(1);
+const UNDIRECTED_B: &str = "MATCH (a)-[:R]-(b) RETURN b";
+const DIRECTED_B: &str = "MATCH (a)-[:R]->(b) RETURN b";
+
+fn keys() -> DatabaseKeys {
+    DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    )
+}
+
 #[test]
-fn undirected_execute_gql_certified_rows_and_digest() {
-    let ((), report) = run_async_under_lab(0x9a_03, |root| async move {
+fn undirected_certified_rows_and_digest_match_the_bound_plan() {
+    let ((), report) = run_async_under_lab(0x35_03, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit_cx = contexts.commit();
+        let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-undirected-certified-{}",
+            "fgdb-undirected-certified-{}",
             std::process::id()
         ));
-        let keys = DatabaseKeys::new(
-            [0x5a; 32],
-            DatabaseSecurityNamespaceId([0x77; 32]),
-            [0x3c; 32],
-        );
-        let relation = RelationId(1);
-        let mut database = Database::create(&commit_cx, &dir, keys)
+        let mut db = Database::create(&commit, &dir, keys())
             .await
-            .expect("create database");
-        let mut seed = WriteBatch::new(relation);
-        seed.create_vertex(VId(1), vec![], vec![]);
-        seed.create_vertex(VId(2), vec![], vec![]);
-        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed edge");
+            .expect("creates");
 
-        let bind = RelationBind::new().with_relation("R", relation);
-        let undirected = "MATCH (a)-[:R]-(b) RETURN b";
-        let directed = "MATCH (a)-[:R]->(b) RETURN b";
-        let transaction = database.begin(&txn_cx).expect("begin transaction");
-        let (undirected_rows, undirected_cert) = transaction
-            .execute_gql_certified(&database, undirected, &bind)
-            .expect("certified undirected MATCH");
-        let plan_cert = transaction
-            .gql_plan_certificate(undirected, &bind)
-            .expect("undirected plan certificate");
-        let (repeat_rows, repeat_cert) = transaction
-            .execute_gql_certified(&database, undirected, &bind)
-            .expect("repeat certified undirected MATCH");
-        let (directed_rows, directed_cert) = transaction
-            .execute_gql_certified(&database, directed, &bind)
-            .expect("certified directed MATCH");
+        let mut batch = WriteBatch::new(R);
+        for vid in [1u128, 2, 3] {
+            batch.create_vertex(VId(vid), vec![], vec![]);
+        }
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        batch.add_edge(EId(11), VId(3), VId(2), vec![]);
+        db.write(&commit, batch).await.expect("fixture commits");
 
-        assert_eq!(undirected_rows, vec![VId(1), VId(2)]);
-        assert_eq!(undirected_cert.digest, plan_cert.digest);
+        let bind = RelationBind::new().with_relation("R", R);
+        let txn = db.begin(&txn_cx).expect("transaction begins");
+        let (undirected_rows, undirected_certificate) = txn
+            .execute_gql_certified(&db, UNDIRECTED_B, &bind)
+            .expect("certified undirected MATCH executes");
+        let plan_certificate = txn
+            .gql_plan_certificate(UNDIRECTED_B, &bind)
+            .expect("undirected plan certifies");
+        let (repeat_rows, repeat_certificate) = txn
+            .execute_gql_certified(&db, UNDIRECTED_B, &bind)
+            .expect("certified undirected MATCH repeats");
+        let (directed_rows, directed_certificate) = txn
+            .execute_gql_certified(&db, DIRECTED_B, &bind)
+            .expect("certified directed MATCH executes");
+
+        assert_eq!(undirected_rows, vec![VId(1), VId(2), VId(3)]);
+        assert_eq!(undirected_certificate.digest, plan_certificate.digest);
         assert_eq!(repeat_rows, undirected_rows);
-        assert_eq!(repeat_cert, undirected_cert);
+        assert_eq!(repeat_certificate, undirected_certificate);
         assert_eq!(directed_rows, vec![VId(2)]);
-        assert_ne!(directed_cert.digest, undirected_cert.digest);
-        transaction.abort();
+        assert_ne!(directed_certificate.digest, undirected_certificate.digest);
+        txn.abort();
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }
