@@ -127,11 +127,20 @@ fn incoming_two_hop_far_end_greater_equal_keeps_boundary_and_greater_origins() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
-        // The remaining refusals: the unlanded comparators, the C-style
-        // alias, and the RETURN a projection on the incoming chain.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
+                &bind,
+            )
+            .expect("nje.55 incoming far-end != aliases <>"),
+            vec![VId(6)],
+            "only the far end with k=2 differs from 1"
+        );
+
+        // The remaining refusals: the unlanded comparator and the RETURN a
+        // projection on the incoming chain.
         for off_grammar in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN a",
         ] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);

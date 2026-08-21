@@ -135,12 +135,21 @@ fn incoming_two_hop_far_end_greater_than_keeps_the_greater_origin() {
             "no far end carries k < 1 on this fixture"
         );
 
-        // The remaining refusals: the other ordered comparators, the
-        // C-style alias, and the RETURN a projection on the incoming chain.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
+                &bind,
+            )
+            .expect("nje.55 incoming far-end != aliases <>"),
+            vec![VId(6)],
+            "only the far end with k=2 differs from 1"
+        );
+
+        // The remaining refusals: the other ordered comparators and the
+        // RETURN a projection on the incoming chain.
         for off_grammar in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN a",
         ] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);

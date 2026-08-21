@@ -84,10 +84,7 @@ fn incoming_two_hop_far_end_equality_keeps_the_matching_origin() {
             !filtered.contains(&VId(9)),
             "the no-k origin is OUT: missing-is-OUT crosses the direction too"
         );
-        assert!(
-            !filtered.contains(&VId(6)),
-            "the k=9 origin fails equality"
-        );
+        assert!(!filtered.contains(&VId(6)), "the k=9 origin fails equality");
 
         assert_eq!(
             db.execute_gql(IN_NE, &bind)
@@ -113,15 +110,23 @@ fn incoming_two_hop_far_end_equality_keeps_the_matching_origin() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
+                &bind,
+            )
+            .expect("nje.55 incoming far-end != aliases <>"),
+            vec![VId(6)],
+            "only the far end with k=2 differs from 1"
+        );
+
         // Equality and inequality with RETURN c graduate. Every ordered
-        // incoming comparator, the C-style alias, and the RETURN a projection
-        // (the outgoing suite's plant, honored here) stay Parse.
+        // incoming comparator and the RETURN a projections stay Parse.
         for off_grammar in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a",
         ] {
