@@ -767,6 +767,23 @@ impl WriteTxn {
         Ok((rows, certificate))
     }
 
+    pub fn gql_plan_certificate(
+        &self,
+        src: &str,
+        bind: &RelationBind,
+    ) -> Result<crate::GqlPlanCertificate, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+        let plan = bind.bind(src).map_err(|error| {
+            WriteTxnError::Gql(match error {
+                fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+                unbound => GqlError::Bind(unbound),
+            })
+        })?;
+        Ok(crate::gql_cert::certify(&plan, self.basis()))
+    }
+
     /// Commit the prepared batch exactly as derived, then release the pin.
     pub async fn commit<V: Vfs + Clone>(
         &mut self,
