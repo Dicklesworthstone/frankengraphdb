@@ -73,6 +73,16 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             update_string(&mut hasher, right);
         }
     }
+    match plan.src_prop {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
     hasher.update(&snapshot_seq.0.to_be_bytes());
 
     GqlPlanCertificate {
@@ -132,6 +142,7 @@ mod tests {
             direction: EdgeDirection::Outgoing,
             neq: None,
             eq: None,
+            src_prop: None,
         }
     }
 
