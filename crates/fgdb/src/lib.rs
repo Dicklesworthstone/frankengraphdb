@@ -3644,6 +3644,22 @@ impl<V: Vfs + Clone> Database<V> {
         Ok((rows, certificate))
     }
 
+    /// Execute and certify the pinned GQL MATCH at one historical sequence.
+    pub fn execute_gql_certified_at(
+        &self,
+        src: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
+        let rows = self.execute_gql_at(src, bind, as_of)?;
+        let certificate = GqlCertificate {
+            snapshot_seq: as_of,
+            statement_digest: gql_cert::digest_statement(src),
+            bind_digest: gql_cert::digest_bind(bind),
+        };
+        Ok((rows, certificate))
+    }
+
     /// The plan-level certificate for one pinned statement WITHOUT executing
     /// it (fgdb-gql-oracle-cert-jjn0): parse and bind exactly as
     /// [`Database::execute_gql`] does, then certify the [`BoundPlan`] against
