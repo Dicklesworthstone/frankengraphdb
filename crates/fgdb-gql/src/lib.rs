@@ -650,6 +650,7 @@ impl<'a> Parser<'a> {
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
                 if is_prop_bang_ne
+                    && !is_incoming_two_hop_near_end
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -2544,6 +2545,15 @@ mod tests {
         );
         assert_eq!(incoming_near_end_less_or_equal.src_prop_le, None);
         assert_eq!(incoming_near_end_less_or_equal.hop2_dst_prop_le, None);
+        let incoming_near_end_bang_inequality = binder
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c")
+            .expect("incoming two-hop near-end C-style inequality binds");
+        assert_eq!(
+            incoming_near_end_bang_inequality.dst_prop_ne,
+            Some((PropertyKeyId(7), 1))
+        );
+        assert_eq!(incoming_near_end_bang_inequality.src_prop_ne, None);
+        assert_eq!(incoming_near_end_bang_inequality.hop2_dst_prop_ne, None);
         for statement in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN a",
@@ -2551,7 +2561,7 @@ mod tests {
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 9 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 9 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN a",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE b.k = 1 RETURN c",
         ] {
             assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
