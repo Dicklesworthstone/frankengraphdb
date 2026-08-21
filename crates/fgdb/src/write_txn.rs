@@ -1146,6 +1146,28 @@ impl WriteTxn {
                 Some(holders)
             }
         };
+        let incoming_two_hop_dst_prop_on_anchor =
+            plan.direction == fgdb_gql::EdgeDirection::Incoming && plan.hop2_relation.is_some();
+        let dst_props_keep = |vid: &VId| {
+            dst_prop_ok
+                .as_ref()
+                .is_none_or(|holders| holders.contains(vid))
+                && dst_prop_ne_ok
+                    .as_ref()
+                    .is_none_or(|holders| holders.contains(vid))
+                && dst_prop_gt_ok
+                    .as_ref()
+                    .is_none_or(|holders| holders.contains(vid))
+                && dst_prop_lt_ok
+                    .as_ref()
+                    .is_none_or(|holders| holders.contains(vid))
+                && dst_prop_ge_ok
+                    .as_ref()
+                    .is_none_or(|holders| holders.contains(vid))
+                && dst_prop_le_ok
+                    .as_ref()
+                    .is_none_or(|holders| holders.contains(vid))
+        };
         let anchors: Vec<VId> = vertices
             .iter()
             .copied()
@@ -1171,6 +1193,7 @@ impl WriteTxn {
                     && src_prop_le_ok
                         .as_ref()
                         .is_none_or(|holders| holders.contains(anchor))
+                    && (!incoming_two_hop_dst_prop_on_anchor || dst_props_keep(anchor))
             })
             .collect();
         let destinations = crate::execute_bound_plan_over(&plan, anchors, |source, relation| {
@@ -1222,23 +1245,8 @@ impl WriteTxn {
             if let Some(labeled) = dst_labeled.as_ref() {
                 vias.retain(|via| labeled.contains(via));
             }
-            if let Some(holders) = dst_prop_ok.as_ref() {
-                vias.retain(|via| holders.contains(via));
-            }
-            if let Some(holders) = dst_prop_ne_ok.as_ref() {
-                vias.retain(|via| holders.contains(via));
-            }
-            if let Some(holders) = dst_prop_gt_ok.as_ref() {
-                vias.retain(|via| holders.contains(via));
-            }
-            if let Some(holders) = dst_prop_lt_ok.as_ref() {
-                vias.retain(|via| holders.contains(via));
-            }
-            if let Some(holders) = dst_prop_ge_ok.as_ref() {
-                vias.retain(|via| holders.contains(via));
-            }
-            if let Some(holders) = dst_prop_le_ok.as_ref() {
-                vias.retain(|via| holders.contains(via));
+            if !incoming_two_hop_dst_prop_on_anchor {
+                vias.retain(|via| dst_props_keep(via));
             }
             let Some(hop2_relation) = plan.hop2_relation else {
                 return Ok(vias);

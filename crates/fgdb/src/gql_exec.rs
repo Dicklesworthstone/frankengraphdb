@@ -314,7 +314,9 @@ fn filter_hop1_by_src_prop<V: Vfs + Clone>(
 }
 
 /// Dest-property integer predicates drop hop-1 DESTINATIONS whose vertex
-/// props do not satisfy the bound comparison. Equality requires
+/// props do not satisfy the bound comparison. Incoming two-hop adjacency is
+/// inverted, so its pattern destination is the map key rather than a value.
+/// Equality requires
 /// `(key, Int(n))`; inequality and strict greater-than require the key to be
 /// present as an integer satisfying the comparison (fgdb-w5-parsers-nje.16,
 /// fgdb-w5-parsers-nje.24). No-WHERE plans consult no property row.
@@ -333,7 +335,12 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
     {
         return Ok(());
     }
-    let dests: std::collections::BTreeSet<VId> = hop1.values().flatten().copied().collect();
+    let filter_keys = plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some();
+    let dests: std::collections::BTreeSet<VId> = if filter_keys {
+        hop1.keys().copied().collect()
+    } else {
+        hop1.values().flatten().copied().collect()
+    };
     let mut kept = std::collections::BTreeSet::new();
     for vid in dests {
         let row = match as_of {
@@ -382,8 +389,12 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
             kept.insert(vid);
         }
     }
-    for expansion in hop1.values_mut() {
-        expansion.retain(|dst| kept.contains(dst));
+    if filter_keys {
+        hop1.retain(|dst, _| kept.contains(dst));
+    } else {
+        for expansion in hop1.values_mut() {
+            expansion.retain(|dst| kept.contains(dst));
+        }
     }
     Ok(())
 }
