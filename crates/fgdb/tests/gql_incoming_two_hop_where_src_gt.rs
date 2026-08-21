@@ -13,10 +13,11 @@
 //! `> 9` answers nothing (nothing exceeds the top key). The keyless
 //! dest's chain satisfies no ordered comparator, the equality and
 //! inequality siblings stay unmoved, the far-end `>` is EMPTY (no origin
-//! carries `k`), and the OUTGOING hop-2 source `>` spelling stays typed
-//! Parse (the direction control). The refusals hold: the
-//! still-unlanded ordered comparators on `a.k`, the C-style alias, and
-//! the `RETURN a` projection stay typed Parse.
+//! carries `k`), and the direction control runs on the OUTGOING equality
+//! (already grammar), which composes nothing on the reversed fixture. The
+//! refusals hold: the still-unlanded ordered comparators on `a.k`, the
+//! C-style alias, the `RETURN a` projection, and the OUTGOING hop-2
+//! source `>` (a separate grammar slice) stay typed Parse.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -35,7 +36,7 @@ const IN_A_EQ: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN c";
 const IN_A_NE: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN c";
 const IN_C_GT: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c";
 const IN_UNFILTERED: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c";
-const OUT_A_GT: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k > 1 RETURN c";
+const OUT_A_EQ: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c";
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -143,20 +144,20 @@ fn incoming_two_hop_near_end_greater_than_keeps_the_greater_chain() {
             "without WHERE all three reversed chains answer"
         );
 
-        // The direction control: outgoing hop-2 source `>` is a separate
-        // grammar slice and stays a typed Parse refusal.
-        let outgoing_err = db
-            .execute_gql(OUT_A_GT, &bind)
-            .expect_err("outgoing hop-2 source greater-than stays off grammar");
+        // The direction control: the OUTGOING equality (already grammar)
+        // composes nothing on this reversed fixture.
         assert!(
-            matches!(outgoing_err, GqlError::Parse(_)),
-            "OUT_A_GT must be the typed parse arm: {outgoing_err:?}"
+            db.execute_gql(OUT_A_EQ, &bind)
+                .expect("the outgoing equality spelling still executes")
+                .is_empty(),
+            "no :S edge leaves an :R destination on the reversed fixture"
         );
 
         // The refusals: the still-unlanded ordered comparators on the near
-        // end, the C-style alias, and the RETURN a projection stay typed
-        // Parse.
+        // end, the C-style alias, the RETURN a projection, and the OUTGOING
+        // hop-2 source > (a separate grammar slice) stay typed Parse.
         for off_grammar in [
+            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
