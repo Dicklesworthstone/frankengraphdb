@@ -477,7 +477,7 @@ impl<'a> Parser<'a> {
         self.skip_whitespace();
         let (neq, eq, src_prop, src_prop_ne, dst_prop, dst_prop_ne) = if matches!(
             direction,
-            EdgeDirection::Outgoing | EdgeDirection::Incoming
+            EdgeDirection::Outgoing | EdgeDirection::Incoming | EdgeDirection::Undirected
         )
             && hop2_relation.is_none()
             && self.source[self.offset..].starts_with("WHERE")
@@ -1397,6 +1397,43 @@ mod tests {
         ));
         assert!(matches!(
             binder.bind("MATCH (a)<-[:R]-(b) WHERE b.k != 1 RETURN a"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn undirected_one_hop_where_binds_left_as_source() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23))
+            .with_property("k", PropertyKeyId(7));
+
+        let source_eq = binder
+            .bind("MATCH (a)-[:R]-(b) WHERE a.k = 1 RETURN b")
+            .expect("undirected source property equality binds");
+        assert_eq!(source_eq.direction, EdgeDirection::Undirected);
+        assert_eq!(source_eq.src_var, "a");
+        assert_eq!(source_eq.dst_var, "b");
+        assert_eq!(source_eq.src_prop, Some((PropertyKeyId(7), 1)));
+
+        let source_ne = binder
+            .bind("MATCH (a)-[:R]-(b) WHERE a.k <> 1 RETURN b")
+            .expect("undirected source property inequality binds");
+        assert_eq!(source_ne.src_prop_ne, Some((PropertyKeyId(7), 1)));
+
+        let destination_eq = binder
+            .bind("MATCH (a)-[:R]-(b) WHERE b.k = 1 RETURN b")
+            .expect("undirected destination property equality binds");
+        assert_eq!(destination_eq.dst_prop, Some((PropertyKeyId(7), 1)));
+
+        assert!(binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
+            .is_ok());
+        assert!(binder
+            .bind("MATCH (a)<-[:R]-(b) WHERE b.k = 1 RETURN a")
+            .is_ok());
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k = 1 RETURN c"),
             Err(BindError::Parse(_))
         ));
     }
