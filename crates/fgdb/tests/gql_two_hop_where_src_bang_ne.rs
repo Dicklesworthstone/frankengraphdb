@@ -10,11 +10,11 @@
 //! leak in), the equality sibling still answers `[3]`, and the unfiltered
 //! statement answers all three. The far-end `!=` (grammar since
 //! fgdb-tdrh) still executes and answers nothing here — no far end
-//! carries `k` on this fixture. One refusal holds the grammar's edge:
-//! the `RETURN a` projection under the anchor `!=` stays typed Parse.
+//! carries `k` on this fixture. Projecting the matching anchor itself
+//! returns `[4]`.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -117,15 +117,15 @@ fn two_hop_anchor_bang_inequality_aliases_the_angle_spelling() {
              separated"
         );
 
-        // The refusal: the RETURN a projection under the anchor != stays
-        // typed Parse.
-        for off_grammar in ["MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN a"] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN a",
+                &bind,
+            )
+            .expect("anchor projection under != executes"),
+            vec![VId(4)],
+            "the k=9 anchor is the only anchor unequal to 1"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }
