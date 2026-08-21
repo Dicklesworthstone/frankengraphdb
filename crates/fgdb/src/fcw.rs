@@ -96,7 +96,7 @@ mod tests {
     use fgdb_delta_types::{CoordinateEntry, LabelId, RelationId, SchemaEpoch};
     use fgdb_types::{BranchId, GraphId, ObjectId, VId};
 
-    fn template(vertices: &[u64]) -> Vec<u8> {
+    fn template(vertices: &[u128]) -> Vec<u8> {
         let rows = vertices
             .iter()
             .map(|vertex| DeltaRow::LabelMembership {
