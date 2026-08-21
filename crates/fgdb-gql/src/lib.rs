@@ -652,6 +652,9 @@ impl<'a> Parser<'a> {
                 if is_prop_bang_ne
                     && !is_incoming_two_hop_near_end
                     && !is_hop2_destination
+                    && !(direction == EdgeDirection::Outgoing
+                        && hop2_relation.is_some()
+                        && left == src_var)
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -2489,8 +2492,13 @@ mod tests {
             .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k <> 1 RETURN c")
             .expect("outgoing two-hop source property inequality binds");
         assert_eq!(inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN c")
+            .expect("outgoing two-hop source bang inequality binds");
+        assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(bang_inequality.hop2_dst_prop_ne, None);
         assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN c"),
+            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN a"),
             Err(BindError::Parse(_))
         ));
 
