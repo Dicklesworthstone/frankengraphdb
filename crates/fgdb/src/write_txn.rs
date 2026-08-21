@@ -1,8 +1,9 @@
-use crate::{Database, PreparedWrite, ReadError, WriteBatch, WriteError};
+use crate::{Database, PendingRow, PreparedWrite, ReadError, VertexRow, WriteBatch, WriteError};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{ElementId, RelationId};
 use fgdb_types::{
     Acquired, CommitCx, CommitSeq, ObligationAcquireError, ObligationId, PurposeObligation, TxnCx,
+    VId,
 };
 
 /// Failure to prepare or finish the bounded one-batch write transaction.
@@ -141,6 +142,106 @@ impl WriteTxn {
         Ok(())
     }
 
+    /// Read one vertex from the pinned durable basis plus this transaction's
+    /// staged row-order overlay. This performs no preparation or publication.
+    pub fn vertex<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        vid: VId,
+    ) -> Result<Option<VertexRow>, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+
+        let live = database.frontier()?;
+        let mut overlay = if live == self.basis {
+            database.vertex(vid)?
+        } else {
+            database.vertex_at(vid, self.basis)?
+        };
+
+        let mut intent_ordinal = 0u64;
+        for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
+            intent_ordinal = intent_ordinal
+                .checked_add(1)
+                .expect("a transaction cannot stage 2^64 rows");
+            match pending {
+                PendingRow::Vertex {
+                    vid: row_vid,
+                    labels,
+                    props,
+                    ensure: _,
+                } if *row_vid == vid && overlay.is_none() => {
+                    let mut labels = labels.clone();
+                    let mut props = props.clone();
+                    crate::sort_write_labels_and_props(&mut labels, &mut props);
+                    overlay = Some(VertexRow {
+                        vid,
+                        birth_ordinal: intent_ordinal,
+                        created_at: self.basis,
+                        retired_at: None,
+                        labels,
+                        props,
+                    });
+                }
+                PendingRow::DeleteVertex { vid: row_vid, .. } if *row_vid == vid => {
+                    overlay = None;
+                }
+                PendingRow::SetLabel {
+                    vid: row_vid,
+                    label,
+                    member,
+                } if *row_vid == vid => {
+                    if let Some(row) = overlay.as_mut() {
+                        match row.labels.binary_search(label) {
+                            Ok(at) if !member => {
+                                row.labels.remove(at);
+                            }
+                            Err(at) if *member => row.labels.insert(at, *label),
+                            Ok(_) | Err(_) => {}
+                        }
+                    }
+                }
+                PendingRow::SetProperty {
+                    vid: row_vid,
+                    key,
+                    value,
+                } if *row_vid == vid => {
+                    if let Some(row) = overlay.as_mut() {
+                        Self::overlay_property(&mut row.props, *key, value.as_ref());
+                    }
+                }
+                PendingRow::CompareAndSet {
+                    elem: ElementId::Vertex(row_vid),
+                    key,
+                    expected,
+                    value,
+                    ..
+                } if *row_vid == vid => {
+                    if let Some(row) = overlay.as_mut() {
+                        let actual = row
+                            .props
+                            .binary_search_by_key(key, |(property, _)| *property)
+                            .ok()
+                            .map(|at| &row.props[at].1);
+                        if actual == expected.as_deref() {
+                            Self::overlay_property(&mut row.props, *key, Some(value.as_ref()));
+                        }
+                    }
+                }
+                PendingRow::Vertex { .. }
+                | PendingRow::Edge { .. }
+                | PendingRow::DeleteEdge { .. }
+                | PendingRow::DeleteVertex { .. }
+                | PendingRow::SetLabel { .. }
+                | PendingRow::SetEdgeProperty { .. }
+                | PendingRow::SetProperty { .. }
+                | PendingRow::CompareAndSet { .. } => {}
+            }
+        }
+        Ok(overlay)
+    }
+
     /// Commit the prepared batch exactly as derived, then release the pin.
     pub async fn commit<V: Vfs + Clone>(
         &mut self,
@@ -190,6 +291,26 @@ impl WriteTxn {
             combined.rows.append(&mut batch.rows);
         }
         Some(combined)
+    }
+
+    fn overlay_property(
+        props: &mut Vec<(fgdb_delta_types::PropertyKeyId, fgdb_types::CanonicalScalar)>,
+        key: fgdb_delta_types::PropertyKeyId,
+        value: Option<&fgdb_types::CanonicalScalar>,
+    ) {
+        match props.binary_search_by_key(&key, |(property, _)| *property) {
+            Ok(at) => match value {
+                Some(value) => props[at].1 = value.clone(),
+                None => {
+                    props.remove(at);
+                }
+            },
+            Err(at) => {
+                if let Some(value) = value {
+                    props.insert(at, (key, value.clone()));
+                }
+            }
+        }
     }
 
     fn release_pin(&mut self) {
