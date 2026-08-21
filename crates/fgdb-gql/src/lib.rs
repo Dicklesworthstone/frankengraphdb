@@ -117,6 +117,10 @@ pub struct BoundPlan {
     pub dst_prop: Option<(PropertyKeyId, i64)>,
     /// Positive result-row bound applied after projection.
     pub limit: Option<u64>,
+    /// Result rows dropped from the front after projection, before `limit`.
+    /// `SKIP 0` is legal and binds `Some(0)` — the identity, the kernel
+    /// drops nothing — unlike `LIMIT`, whose zero is a parse error.
+    pub skip: Option<u64>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -243,6 +247,7 @@ impl RelationBind {
             src_prop,
             dst_prop,
             limit: ast.limit,
+            skip: ast.skip,
         })
     }
 }
@@ -292,6 +297,7 @@ struct MatchAst {
     src_prop: Option<(String, i64)>,
     dst_prop: Option<(String, i64)>,
     limit: Option<u64>,
+    skip: Option<u64>,
 }
 
 struct Parser<'a> {
@@ -345,6 +351,7 @@ impl<'a> Parser<'a> {
                     },
                 });
             }
+            let skip = self.optional_skip()?;
             let limit = self.optional_limit()?;
             self.skip_whitespace();
             if self.offset != self.source.len() {
@@ -369,6 +376,7 @@ impl<'a> Parser<'a> {
                 src_prop,
                 dst_prop: None,
                 limit,
+                skip,
             });
         }
         let incoming = if self.source[self.offset..].starts_with('<') {
@@ -558,6 +566,7 @@ impl<'a> Parser<'a> {
                 },
             });
         };
+        let skip = self.optional_skip()?;
         let limit = self.optional_limit()?;
         self.skip_whitespace();
         if self.offset != self.source.len() {
@@ -582,6 +591,7 @@ impl<'a> Parser<'a> {
             src_prop,
             dst_prop,
             limit,
+            skip,
         })
     }
 
@@ -669,6 +679,34 @@ impl<'a> Parser<'a> {
             })
     }
 
+    /// Optional `SKIP <unsigned>` after the RETURN variable and before an
+    /// optional `LIMIT` (fgdb-w5-parsers-nje.13). Unlike `LIMIT`, zero is
+    /// legal — `SKIP 0` is the identity and binds `Some(0)`. `OFFSET` is
+    /// deliberately not a spelling this slice accepts.
+    fn optional_skip(&mut self) -> Result<Option<u64>, ParseError> {
+        self.skip_whitespace();
+        if !self.source[self.offset..].starts_with("SKIP") {
+            return Ok(None);
+        }
+        self.keyword("SKIP")?;
+        self.skip_whitespace();
+        let start = self.offset;
+        while self.source[self.offset..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            self.offset += 1;
+        }
+        let value = self.source[start..self.offset]
+            .parse::<u64>()
+            .map_err(|_| ParseError {
+                offset: start,
+                kind: ParseErrorKind::ExpectedToken("unsigned SKIP"),
+            })?;
+        Ok(Some(value))
+    }
+
     fn optional_limit(&mut self) -> Result<Option<u64>, ParseError> {
         self.skip_whitespace();
         if !self.source[self.offset..].starts_with("LIMIT") {
@@ -754,6 +792,7 @@ mod tests {
                 src_prop: None,
                 dst_prop: None,
                 limit: None,
+                skip: None,
             }
         );
     }
@@ -773,6 +812,50 @@ mod tests {
 
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b) RETURN b LIMIT 0"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn skip_binds_before_limit_and_zero_is_identity() {
+        let binder = RelationBind::new().with_relation("R", RelationId(17));
+        let skipped = binder
+            .bind("MATCH (a)-[:R]->(b) RETURN b SKIP 1")
+            .expect("SKIP binds");
+        assert_eq!(skipped.skip, Some(1));
+        assert_eq!(skipped.limit, None);
+
+        let paged = binder
+            .bind("MATCH (a)-[:R]->(b) RETURN b SKIP 1 LIMIT 1")
+            .expect("SKIP before LIMIT binds");
+        assert_eq!(paged.skip, Some(1));
+        assert_eq!(paged.limit, Some(1));
+
+        // Zero is the identity, not an error — the LIMIT asymmetry is
+        // deliberate: an empty page bound is meaningless, an empty drop is
+        // not.
+        let identity = binder
+            .bind("MATCH (a)-[:R]->(b) RETURN b SKIP 0")
+            .expect("SKIP 0 binds");
+        assert_eq!(identity.skip, Some(0));
+
+        let plain = binder
+            .bind("MATCH (a)-[:R]->(b) RETURN b LIMIT 1")
+            .expect("LIMIT-only stays grammar");
+        assert_eq!(plain.skip, None);
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) RETURN b SKIP"),
+            Err(BindError::Parse(_))
+        ));
+        // LIMIT-first is not the pinned order: the leftover SKIP is
+        // trailing input, and OFFSET is not a spelling this slice accepts.
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) RETURN b LIMIT 1 SKIP 1"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) RETURN b OFFSET 1"),
             Err(BindError::Parse(_))
         ));
     }
