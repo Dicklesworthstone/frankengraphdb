@@ -1,4 +1,4 @@
-use crate::{Database, ReadError, WriteBatch, WriteError};
+use crate::{Database, PreparedWrite, ReadError, WriteBatch, WriteError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::RelationId;
 use fgdb_types::{
@@ -68,12 +68,14 @@ impl From<WriteError> for WriteTxnError {
 
 /// Write batches staged against a snapshot pinned by a [`TxnCx`].
 ///
-/// This is deliberately not SSI: it combines same-relation batches in call
-/// order, prepares them once, and delegates the commit verdict to
+/// This is deliberately not SSI: after each write it combines same-relation
+/// batches in call order and refreshes one prepared template against the
+/// pinned basis. Commit delegates that retained template's verdict to
 /// [`Database::commit_prepared`].
 pub struct WriteTxn {
     basis: CommitSeq,
     staged: Vec<WriteBatch>,
+    prepared: Option<PreparedWrite>,
     pin: Option<PurposeObligation<Acquired>>,
 }
 
@@ -87,6 +89,7 @@ impl WriteTxn {
         Ok(Self {
             basis,
             staged: Vec::new(),
+            prepared: None,
             pin: Some(pin),
         })
     }
@@ -124,6 +127,17 @@ impl WriteTxn {
             });
         }
         self.staged.push(batch);
+        let combined = Self::combined_batch(&self.staged)
+            .expect("a batch was staged immediately before combination");
+        let prepared = match database.prepare_write(combined) {
+            Ok(prepared) => prepared,
+            Err(source) => {
+                self.staged.pop();
+                return Err(WriteTxnError::Write(source));
+            }
+        };
+        debug_assert_eq!(prepared.basis(), self.basis);
+        self.prepared = Some(prepared);
         Ok(())
     }
 
@@ -147,38 +161,11 @@ impl WriteTxn {
         if self.pin.is_none() {
             return Err(WriteTxnError::Finished);
         }
-        let mut staged = core::mem::take(&mut self.staged).into_iter();
-        let Some(mut combined) = staged.next() else {
+        let Some(prepared) = self.prepared.take() else {
             self.release_pin();
             return Err(WriteTxnError::NoPreparedWrite);
         };
-        for mut batch in staged {
-            debug_assert_eq!(batch.relation, combined.relation);
-            combined.rows.append(&mut batch.rows);
-        }
-
-        let live = match database.frontier() {
-            Ok(live) => live,
-            Err(source) => {
-                self.release_pin();
-                return Err(WriteTxnError::Read(source));
-            }
-        };
-        if live != self.basis {
-            self.release_pin();
-            return Err(WriteTxnError::SnapshotAdvanced {
-                pinned: self.basis,
-                live,
-            });
-        }
-        let prepared = match database.prepare_write(combined) {
-            Ok(prepared) => prepared,
-            Err(source) => {
-                self.release_pin();
-                return Err(WriteTxnError::Write(source));
-            }
-        };
-        debug_assert_eq!(prepared.basis(), self.basis);
+        self.staged.clear();
 
         let result = database
             .commit_prepared_with_crash(cx, prepared, crash_at)
@@ -191,7 +178,18 @@ impl WriteTxn {
     /// End the transaction without publishing its prepared batch.
     pub fn abort(mut self) {
         self.staged.clear();
+        self.prepared = None;
         self.release_pin();
+    }
+
+    fn combined_batch(staged: &[WriteBatch]) -> Option<WriteBatch> {
+        let mut batches = staged.iter().cloned();
+        let mut combined = batches.next()?;
+        for mut batch in batches {
+            debug_assert_eq!(batch.relation, combined.relation);
+            combined.rows.append(&mut batch.rows);
+        }
+        Some(combined)
     }
 
     fn release_pin(&mut self) {
@@ -207,6 +205,7 @@ impl core::fmt::Debug for WriteTxn {
             .debug_struct("WriteTxn")
             .field("basis", &self.basis)
             .field("staged_batches", &self.staged.len())
+            .field("has_prepared_write", &self.prepared.is_some())
             .field("pin_obligation", &self.pin.as_ref().map(PurposeObligation::id))
             .finish()
     }
@@ -270,6 +269,10 @@ mod tests {
             assert!(
                 transaction.staged.is_empty(),
                 "snapshot refusal must not retain a staged batch"
+            );
+            assert!(
+                transaction.prepared.is_none(),
+                "snapshot refusal must not retain a prepared template"
             );
             assert_eq!(
                 txn_cx.outstanding_obligations(),
