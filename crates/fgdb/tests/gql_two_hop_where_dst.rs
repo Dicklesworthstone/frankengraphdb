@@ -103,8 +103,20 @@ fn two_hop_far_end_predicate_keeps_the_matching_chain() {
 
         // Off-grammar edges: the C-style alias on c, and a WHERE on the
         // incoming two-hop chain.
+        // fgdb-tdrh sibling lock: the outgoing far-end != is grammar now
+        // (parser 274f4d6a) and aliases <> — only the k=9 far end differs
+        // from 1 on this fixture.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c",
+                &bind
+            )
+            .expect("fgdb-tdrh outgoing far-end != is grammar, not a Parse"),
+            vec![VId(6)],
+            "!= aliases <>: the k=1 chain fails and the no-k far end stays OUT"
+        );
+
         for off_grammar in [
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a",
         ] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
