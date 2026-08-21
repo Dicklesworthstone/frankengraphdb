@@ -10,7 +10,8 @@
 //! fixture, so the baseline assert is what licenses the mutations.
 
 use registry_check::command_contracts::{
-    Contract, ContractRegistry, load_contracts, load_from_repo, validate_contracts,
+    Contract, ContractRegistry, LIVE_HANDLER_SOURCE_PATH, load_contracts, load_from_repo,
+    validate_contracts, validate_live_handler_source, validate_live_handlers_from_repo,
 };
 use std::path::{Path, PathBuf};
 
@@ -81,10 +82,52 @@ fn with_row(f: impl FnOnce(&mut Contract)) -> ContractRegistry {
 /// registry is not clean.
 #[test]
 fn real_registry_is_clean() {
-    let violations = validate_contracts(&registry());
+    let registry = registry();
+    let mut violations = validate_contracts(&registry);
+    violations.extend(validate_live_handlers_from_repo(&repo_root(), &registry));
     assert!(
         violations.is_empty(),
         "the shipped contract registry must validate clean, found: {violations:?}"
+    );
+}
+
+/// Planted negative required by fgdb-5uw2: removing the one live handler from
+/// the source inventory must turn the checker red.
+#[test]
+fn deleting_live_write_batch_handler_turns_checker_red() {
+    let registry = registry();
+    let source = std::fs::read_to_string(repo_root().join(LIVE_HANDLER_SOURCE_PATH))
+        .expect("handler source reads");
+    let mutated = source.replace(
+        "        \"cc:local:local-autocommit-write-spec\",\n        \"fgdb::Database::apply_local_write_batch\",\n        \"WriteBatch\",\n",
+        "",
+    );
+    assert_ne!(mutated, source, "negative must delete the planted handler");
+    let violations = validate_live_handler_source(&registry, &mutated);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "contract_live_handler_missing"),
+        "deleted handler must be red: {violations:?}"
+    );
+}
+
+/// The inverse half of the bijection: an inventoried handler cannot exist
+/// without its live registry row.
+#[test]
+fn handler_without_live_row_turns_checker_red() {
+    let mut registry = registry();
+    registry
+        .contracts
+        .retain(|row| row.command_contract_id != "cc:local:local-autocommit-write-spec");
+    let source = std::fs::read_to_string(repo_root().join(LIVE_HANDLER_SOURCE_PATH))
+        .expect("handler source reads");
+    let violations = validate_live_handler_source(&registry, &source);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "contract_handler_row_missing"),
+        "unregistered handler must be red: {violations:?}"
     );
 }
 
@@ -332,12 +375,16 @@ fn phase_b_seed_rows_are_present() {
         // Meta F12 is the evidence-bound paired lookup expiry transition.
         "cc:meta:global-outcome-expiry-spec",
     ] {
+        let expected_status = if id == "cc:local:local-autocommit-write-spec" {
+            "live"
+        } else {
+            "reserved"
+        };
         assert!(
-            registry
-                .contracts
-                .iter()
-                .any(|row| row.command_contract_id == id && row.status == "reserved"),
-            "confirmed seed row {id:?} is missing"
+            registry.contracts.iter().any(|row| {
+                row.command_contract_id == id && row.status == expected_status
+            }),
+            "confirmed seed row {id:?} is missing or has the wrong status"
         );
     }
     assert!(
@@ -3905,20 +3952,6 @@ fn unregistered_slot_plane_is_rejected() {
     let r = with_row(|c| c.consumed_state_slots = vec!["Payload|Local|branch_registry".into()]);
     assert!(
         codes(&r).contains(&"contract_state_slot_malformed".to_string()),
-        "{:?}",
-        codes(&r)
-    );
-}
-
-/// The plan-line-296 bijection quantifies over live rows; the enumerators that
-/// discharge a live row's obligations do not exist yet, so `live` is refused
-/// rather than silently accepted (green-over-unchecked is the failure class
-/// this registry exists to end).
-#[test]
-fn live_row_is_refused_until_bijection_enumerators_exist() {
-    let r = with_row(|c| c.status = "live".into());
-    assert!(
-        codes(&r).contains(&"contract_live_row_unverifiable".to_string()),
         "{:?}",
         codes(&r)
     );
