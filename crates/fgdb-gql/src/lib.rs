@@ -505,13 +505,7 @@ impl<'a> Parser<'a> {
                 let value = self.integer()?;
                 let first_is_source = left == src_var;
                 self.skip_whitespace();
-                if is_prop_ne {
-                    if first_is_source {
-                        (None, None, None, Some((property, value)), None, None)
-                    } else {
-                        (None, None, None, None, None, Some((property, value)))
-                    }
-                } else if self.source[self.offset..].starts_with("AND") {
+                if self.source[self.offset..].starts_with("AND") {
                     self.keyword("AND")?;
                     let second_var = self.identifier()?;
                     if second_var != src_var && second_var != dst_var {
@@ -534,15 +528,37 @@ impl<'a> Parser<'a> {
                     }
                     self.token(".")?;
                     let second_property = self.identifier()?;
-                    self.token("=")?;
+                    let second_is_ne = self.source[self.offset..].trim_start().starts_with('<');
+                    if second_is_ne {
+                        self.token("<")?;
+                        self.token(">")?;
+                    } else {
+                        self.token("=")?;
+                    }
+                    if second_is_ne != is_prop_ne {
+                        return Err(ParseError {
+                            offset: self.offset,
+                            kind: ParseErrorKind::ExpectedToken(
+                                "matching property predicate operators",
+                            ),
+                        });
+                    }
                     let second_value = self.integer()?;
                     let first = (property, value);
                     let second = (second_property, second_value);
-                    if first_is_source {
+                    if is_prop_ne && first_is_source {
+                        (None, None, None, Some(first), None, Some(second))
+                    } else if is_prop_ne {
+                        (None, None, None, Some(second), None, Some(first))
+                    } else if first_is_source {
                         (None, None, Some(first), None, Some(second), None)
                     } else {
                         (None, None, Some(second), None, Some(first), None)
                     }
+                } else if is_prop_ne && first_is_source {
+                    (None, None, None, Some((property, value)), None, None)
+                } else if is_prop_ne {
+                    (None, None, None, None, None, Some((property, value)))
                 } else if first_is_source {
                     (None, None, Some((property, value)), None, None, None)
                 } else {
@@ -1194,6 +1210,50 @@ mod tests {
 
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND a.m = 9 RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn source_and_destination_property_inequalities_bind_in_either_order() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_property("k", PropertyKeyId(7))
+            .with_property("m", PropertyKeyId(9));
+        for statement in [
+            "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m <> 9 RETURN b",
+            "MATCH (a)-[:R]->(b) WHERE b.m <> 9 AND a.k <> 1 RETURN b",
+        ] {
+            let plan = binder
+                .bind(statement)
+                .expect("both property inequalities bind");
+            assert_eq!(plan.src_prop_ne, Some((PropertyKeyId(7), 1)));
+            assert_eq!(plan.dst_prop_ne, Some((PropertyKeyId(9), 9)));
+            assert_eq!(plan.src_prop, None);
+            assert_eq!(plan.dst_prop, None);
+        }
+
+        assert!(matches!(
+            binder.bind(
+                "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m = 9 RETURN b"
+            ),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind(
+                "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND a.m <> 9 RETURN b"
+            ),
+            Err(BindError::Parse(_))
+        ));
+
+        assert!(binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k <> 1 RETURN b")
+            .is_ok());
+        assert!(binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m = 9 RETURN b")
+            .is_ok());
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"),
             Err(BindError::Parse(_))
         ));
     }
