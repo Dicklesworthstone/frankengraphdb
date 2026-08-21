@@ -1778,7 +1778,7 @@ mod durability_tests {
     fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
     where
         T: Send + 'static,
-        Fut: Future<Output = T>,
+        Fut: Future<Output = T> + Send,
     {
         let (output, report) = run_async_under_lab(seed, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
