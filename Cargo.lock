@@ -485,6 +485,7 @@ dependencies = [
  "fgdb-chronicle",
  "fgdb-crypto",
  "fgdb-delta-types",
+ "fgdb-gql",
  "fgdb-strata",
  "fgdb-types",
 ]
@@ -558,6 +559,13 @@ version = "0.0.1"
 dependencies = [
  "fgdb-claim",
  "fgdb-types",
+]
+
+[[package]]
+name = "fgdb-gql"
+version = "0.0.1"
+dependencies = [
+ "fgdb-delta-types",
 ]
 
 [[package]]
