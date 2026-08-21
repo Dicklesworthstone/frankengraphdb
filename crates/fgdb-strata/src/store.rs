@@ -749,7 +749,10 @@ impl<V: Vfs> BlockStore<V> {
         // held, so a conforming writer can see either no winner or one complete
         // winner. Equal bytes are never rewritten, but they are re-synced after
         // reopen because visibility alone is not a durability receipt.
-        match cx.with_restriction_async(self.vfs.symlink_metadata(&path)).await {
+        match cx
+            .with_restriction_async(self.vfs.symlink_metadata(&path))
+            .await
+        {
             Ok(metadata) => {
                 if !metadata.file_type().is_file() {
                     return Err(std::io::Error::new(
@@ -811,8 +814,7 @@ impl<V: Vfs> BlockStore<V> {
                 let metadata = cx
                     .with_restriction_async(self.vfs.symlink_metadata(&staging_path))
                     .await?;
-                if !metadata.file_type().is_file()
-                    || !staging_inode_is_exclusive(cx, &staging_path)
+                if !metadata.file_type().is_file() || !staging_inode_is_exclusive(cx, &staging_path)
                 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -1850,7 +1852,10 @@ mod durability_tests {
             )
             .await
             .expect("barrier");
-            assert_eq!(*order.lock().expect("order log"), ["inode", "hook", "parent"]);
+            assert_eq!(
+                *order.lock().expect("order log"),
+                ["inode", "hook", "parent"]
+            );
         });
     }
 

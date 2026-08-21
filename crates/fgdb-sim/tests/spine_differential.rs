@@ -2129,6 +2129,116 @@ fn strata_block_publication_crashes_fence_and_recover_the_integrated_spine() {
     });
 }
 
+/// **ONE I/O PLANE (fgdb-tvg8.1): a filesystem that lies to Chronicle now
+/// lies to Strata too, and a crash rolls the whole commit back coherently.**
+///
+/// Before the `BlockStore` rode the injected `Vfs`, its object files went
+/// through `std::fs`: a lab crash discarded Chronicle's unflushed commit
+/// while the derived blocks survived on the real filesystem — derived state
+/// from a commit the log never durably made, invisible to every crash matrix.
+/// This law pins the repair. A session whose every fsync lies completes a
+/// commit end to end believing it durable; the lie events must land on
+/// Strata's own `.block` content sync as well as Chronicle's files (the
+/// witness that the same injected plan bites both), and after the crash a
+/// cold reopen must agree with the oracle's replay of the durable stream at
+/// the pre-lie frontier — no orphaned derived state, no slot running ahead.
+#[test]
+fn a_lied_commit_rolls_back_strata_and_chronicle_together() {
+    let dir = scratch("one-plane-lie-crash");
+    under_lab(1_871, move |cx| async move {
+        let cx = &cx;
+        // SESSION 1 — honest filesystem: genesis plus one durable commit.
+        create_genesis(cx, &dir).await;
+        {
+            let mut db = Database::open(cx, &dir, engine_keys())
+                .await
+                .expect("database opens honestly");
+            db.write(cx, block_store_fault_batch())
+                .await
+                .expect("durable baseline commit");
+        }
+
+        // SESSION 2 — every sync lies. The engine believes this second commit
+        // is durable end to end; not one byte of it is.
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::Always,
+            ..FaultPlan::faultless()
+        });
+        {
+            let mut db = Database::open_with_vfs(cx, vfs.clone(), &dir, engine_keys())
+                .await
+                .expect("reopens through the lying filesystem");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.create_vertex(VId(3), vec![], vec![]);
+            batch.add_edge(EId(2), VId(1), VId(3), vec![]);
+            db.write(cx, batch)
+                .await
+                .expect("a lied-to writer cannot observe its own loss");
+        }
+
+        // THE WITNESS THIS SEAM EXISTS FOR: the lie landed on a Strata block
+        // file's own content sync — a boundary no injected filesystem could
+        // reach while the store wrote through `std::fs` — and on Chronicle's
+        // side of the same plan.
+        let lies: Vec<_> = vfs
+            .events()
+            .into_iter()
+            .filter(|event| matches!(event.kind, FaultKind::FsyncLie { .. }))
+            .collect();
+        assert!(
+            lies.iter()
+                .any(|event| event.path.extension().is_some_and(|ext| ext == "block")),
+            "no fsync lie reached a Strata block content sync: {lies:?}"
+        );
+        assert!(
+            lies.iter().any(|event| {
+                !event
+                    .path
+                    .components()
+                    .any(|part| part.as_os_str() == fgdb_strata::store::BLOCK_DIR)
+            }),
+            "the same plan must also be biting Chronicle's files: {lies:?}"
+        );
+
+        // Crash. Capsule, marker, blocks, root, manifest, and slot bytes were
+        // all unflushed on ONE plane, so they roll back together.
+        vfs.crash().await.expect("crash rolls back the lied commit");
+
+        // Cold reopen: the durable stream ends at the baseline commit, the
+        // slot still names the baseline manifest, and no derived object from
+        // the lied commit is reachable. The engine and the oracle agree.
+        let engine = Database::open(cx, &dir, engine_keys())
+            .await
+            .expect("reopen after the coherent rollback");
+        assert_eq!(
+            engine.frontier().expect("healthy frontier").0,
+            1,
+            "the lied commit must be gone in both planes"
+        );
+        assert!(
+            engine.vertex(VId(3)).expect("healthy read").is_none(),
+            "the lied vertex leaked through the rollback"
+        );
+        let engine_neighbours = engine.neighbours(VId(1), KNOWS).expect("healthy read");
+        let engine_vertices = engine.vertices().expect("healthy read");
+        let engine_edges = engine.edges().expect("healthy read");
+        drop(engine);
+
+        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("oracle opens the durable stream");
+        let replayed = replay(cx, &coordinator).await.expect("stream replays");
+        let graph = replayed
+            .database
+            .graph(GRAPH, BRANCH)
+            .expect("oracle materialized the coordinate");
+        assert_eq!(engine_neighbours, graph.neighbours(VId(1), KNOWS));
+        assert_eq!(engine_vertices.len(), graph.vertex_count());
+        assert_eq!(engine_edges.len(), graph.edge_count());
+        assert_eq!(engine_neighbours, vec![VId(2)]);
+    });
+}
+
 /// **THE TIME-TRAVEL DIFFERENTIAL (fgdb-90jx): at EVERY epoch frontier, the
 /// engine's as-of answers equal the oracle replayed through that prefix.**
 ///

@@ -622,6 +622,7 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
             );
             let root_after = store
                 .get_root(cx, compacted_root)
+                .await
                 .expect("resolves compacted root");
             assert!(
                 root_after.blocks.len() <= blocks_before,

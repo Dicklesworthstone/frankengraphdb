@@ -887,13 +887,11 @@ pub enum LocalSemanticApplyResult {
 
 /// Machine-readable inventory consumed by the G0 command-contract checker.
 /// Adding or removing a handler without the matching live registry row is red.
-pub const LIVE_LOCAL_SEMANTIC_HANDLER_INVENTORY: &[(&str, &str, &str)] = &[
-    (
-        "cc:local:local-autocommit-write-spec",
-        "fgdb::Database::apply_local_write_batch",
-        "WriteBatch",
-    ),
-];
+pub const LIVE_LOCAL_SEMANTIC_HANDLER_INVENTORY: &[(&str, &str, &str)] = &[(
+    "cc:local:local-autocommit-write-spec",
+    "fgdb::Database::apply_local_write_batch",
+    "WriteBatch",
+)];
 
 impl core::fmt::Debug for WriteBatch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -2205,9 +2203,10 @@ impl<V: Vfs + Clone> Database<V> {
         batch: WriteBatch,
     ) -> Result<CommitSeq, WriteError> {
         let applied = self
-            .apply_local_semantic_command(cx, LocalSemanticCommand::WriteBatch(
-                LocalAutocommitWriteSpec { batch },
-            ))
+            .apply_local_semantic_command(
+                cx,
+                LocalSemanticCommand::WriteBatch(LocalAutocommitWriteSpec { batch }),
+            )
             .await?;
         let LocalSemanticApplyResult::WriteBatch { result, .. } = applied;
         Ok(result.commit_seq)

@@ -210,16 +210,19 @@ async fn build_and_persist(
     }
 
     let (root, blocks, patches) = writer.publish(KEYS, frontier).expect("publishes");
-    let store = BlockStore::open(cx, dir, K_OID, NAMESPACE).expect("store opens");
+    let store = BlockStore::open(cx, dir, K_OID, NAMESPACE)
+        .await
+        .expect("store opens");
     for block in &blocks {
-        store.put(cx, &block.bytes).expect("stores a block");
+        store.put(cx, &block.bytes).await.expect("stores a block");
     }
     for patch in &patches {
         store
             .put_patch(cx, &patch.bytes)
+            .await
             .expect("stores a vertex patch");
     }
-    store.put_root(cx, &root).expect("stores the root")
+    store.put_root(cx, &root).await.expect("stores the root")
 }
 
 /// What the oracle says the durable stream implies, at its frontier.
@@ -244,9 +247,13 @@ fn a_persisted_partition_reopens_and_agrees_with_the_oracle() {
 
         // NOTHING survives from the phases above except the path and this id —
         // exactly what a restarted process would hold.
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
-        let (root, blocks, _block_props, _patches) =
-            store.reopen(cx, root_id).expect("the partition reopens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("store opens");
+        let (root, blocks, _block_props, _patches) = store
+            .reopen(cx, root_id)
+            .await
+            .expect("the partition reopens");
 
         for source in [1u128, 2, 3] {
             let (expected, frontier) = oracle_answer(&dir, cx, source).await;
@@ -290,9 +297,11 @@ fn a_compacted_partition_still_agrees_after_reopening() {
         let (_, frontier) = oracle_answer(&dir, cx, 1).await;
 
         let compacted_root_id = {
-            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("store opens");
             let (root, blocks, _block_props, _patches) =
-                store.reopen(cx, root_id).expect("reopens");
+                store.reopen(cx, root_id).await.expect("reopens");
             let result = compact(&blocks, frontier).expect("the persisted history compacts");
             assert!(
                 result.blocks.len() <= root.blocks.len(),
@@ -308,7 +317,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
             let mut references = Vec::new();
             for entries in &result.blocks {
                 let bytes = fgdb_strata::encode_block(0, None, entries).expect("lawful");
-                let id = store.put(cx, &bytes).expect("stores");
+                let id = store.put(cx, &bytes).await.expect("stores");
                 let span = fgdb_strata::root::span_of(entries).expect("non-empty");
                 references.push(fgdb_strata::root::BlockRef {
                     block_id: id.0,
@@ -329,13 +338,16 @@ fn a_compacted_partition_still_agrees_after_reopening() {
             };
             store
                 .put_root(cx, &compacted)
+                .await
                 .expect("stores the compacted root")
         };
 
         // A fresh handle, the compacted root identity, and nothing else.
-        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("store opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("store opens");
         let (_, blocks, _block_props, _patches) =
-            store.reopen(cx, compacted_root_id).expect("reopens");
+            store.reopen(cx, compacted_root_id).await.expect("reopens");
         for source in [1u128, 2, 3] {
             let (expected, _) = oracle_answer(&dir, cx, source).await;
             assert_eq!(
@@ -352,6 +364,7 @@ fn a_compacted_partition_still_agrees_after_reopening() {
         assert_ne!(compacted_root_id, root_id);
         let (_, old_blocks, _old_block_props, _old_patches) = store
             .reopen(cx, root_id)
+            .await
             .expect("the old root still reopens");
         assert_eq!(
             merge_neighbours(&old_blocks, VId(1), REL, frontier).expect("merges"),
