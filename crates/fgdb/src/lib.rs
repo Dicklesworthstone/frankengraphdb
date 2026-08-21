@@ -115,6 +115,12 @@
 mod fcw;
 pub use fcw::FirstCommitterWinsValidator;
 
+/// The stable law id [`FirstCommitterWinsValidator`] rejects under, keyed on
+/// by the typed [`WriteError::FirstCommitterWins`] arm. Kept identical to the
+/// private constant in `fcw.rs` the same way `touched_elements` is mirrored
+/// there: one product write-set contract, two named sites.
+const FCW_LAW_ID: &str = "FG-LAW-FCW-01";
+
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
@@ -489,6 +495,20 @@ pub enum WriteError {
     /// [`WriteMismatchPolicy::AbortWrite`]. Nothing durable happened.
     CompareAndSetMismatch(Box<CompareAndSetMismatch>),
     Canonical(CanonicalError),
+    /// The installed commit validator refused this draft under
+    /// first-committer-wins (fgdb-fcw-writebatch-6cxf): an element in the
+    /// batch's write-set was already committed by a writer this batch's basis
+    /// never saw. Nothing durable happened, no sequence was consumed, and the
+    /// handle stays Healthy — the remedy is to rebuild the batch against the
+    /// advanced snapshot, which is why this is not a [`WriteError::Commit`]
+    /// wrap: no transport or protocol repair applies.
+    FirstCommitterWins {
+        /// The stable law the validator rejected under (`FG-LAW-FCW-01`).
+        law: &'static str,
+        /// The validator's diagnostic naming the losing element and the
+        /// winning commit. Human-facing, never parsed.
+        detail: String,
+    },
     /// Chronicle failed before the marker could have become durable. Unlike
     /// [`WriteError::CommitOutcomeUnknown`], retrying after correcting the
     /// named cause cannot duplicate an unobserved commit.
@@ -710,6 +730,11 @@ impl core::fmt::Display for WriteError {
                 mismatch.elem, mismatch.name
             ),
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
+            Self::FirstCommitterWins { law, detail } => write!(
+                f,
+                "write lost first-committer-wins under {law}: {detail}; rebuild the \
+                 batch against the advanced snapshot and resubmit"
+            ),
             Self::Commit(error) => write!(f, "commit stream: {error}"),
             Self::CommitOutcomeUnknown {
                 published_frontier,
@@ -848,6 +873,28 @@ impl core::fmt::Debug for CompareAndSetMismatch {
 pub struct WriteBatch {
     relation: RelationId,
     rows: Vec<PendingRow>,
+}
+
+/// A batch whose canonical template was derived against one pinned live
+/// snapshot by [`Database::prepare_write`], awaiting
+/// [`Database::commit_prepared`].
+///
+/// The fields are private on purpose: the template is exactly what was
+/// prepared (committing anything else would silently rebase the batch), and
+/// the basis is the snapshot frontier the preparation read — the fact the
+/// first-committer-wins verdict is about. It carries no handle borrow, so two
+/// prepared writes can coexist against the same `Database`.
+#[derive(Clone, Debug)]
+pub struct PreparedWrite {
+    template: LogicalDeltaTemplate,
+    basis: CommitSeq,
+}
+
+impl PreparedWrite {
+    /// The snapshot frontier this batch's rows were derived against.
+    pub const fn basis(&self) -> CommitSeq {
+        self.basis
+    }
 }
 
 /// The smallest inhabitable Local semantic-command union in the embedded
@@ -1896,8 +1943,17 @@ impl<V: Vfs + Clone> Database<V> {
         keys: DatabaseKeys,
         force_rebuild: bool,
     ) -> Result<Self, OpenError> {
-        let coordinator =
+        let mut coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
+        // The product instance is first-committer-wins from the first commit
+        // (fgdb-fcw-writebatch-6cxf): every `Database` constructor funnels
+        // through this bind, so no product handle ever commits under
+        // Chronicle's PassThrough default — that fixture remains only on a
+        // bare coordinator. The write path re-pins the instance per basis
+        // (see `write_with_faults` / `commit_prepared`); installing it here
+        // guarantees the interval between open and first write is already
+        // governed.
+        coordinator.set_validator(Box::new(FirstCommitterWinsValidator::default()));
         let store =
             BlockStore::open_with_vfs(cx, vfs.clone(), path, keys.k_oid.clone(), keys.namespace)
                 .await?;
@@ -2242,6 +2298,67 @@ impl<V: Vfs + Clone> Database<V> {
         })
     }
 
+    /// Build a batch's canonical template against the CURRENT live snapshot
+    /// and retain it for a later [`Database::commit_prepared`], without
+    /// committing anything or advancing any state.
+    ///
+    /// Two batches prepared back to back therefore share one basis: the
+    /// second's preflights and before-images are derived from the same fold
+    /// the first saw, not from the first's effects. That is exactly the
+    /// "two concurrent writers" shape the single-writer handle can express
+    /// (fgdb-fcw-writebatch-6cxf) — and what makes first-committer-wins
+    /// decidable at commit time: the first prepared batch to commit wins, an
+    /// overlapping second aborts with [`WriteError::FirstCommitterWins`],
+    /// and a disjoint second commits.
+    pub fn prepare_write(&mut self, batch: WriteBatch) -> Result<PreparedWrite, WriteError> {
+        self.ensure_writable()?;
+        let template = self.build_write_template(batch)?;
+        Ok(PreparedWrite {
+            template,
+            basis: self.snapshot.frontier,
+        })
+    }
+
+    /// Commit a batch prepared earlier by [`Database::prepare_write`].
+    ///
+    /// The template's rows are committed EXACTLY as prepared — no rebuild, so
+    /// the second of two same-basis prepares never silently absorbs the
+    /// first's fold. Which validator instance judges the draft is this
+    /// method's basis statement:
+    ///
+    /// - a prepared batch whose basis is still the current frontier is in the
+    ///   same position as an ordinary [`Database::write`] — nothing committed
+    ///   since its snapshot — so a fresh first-committer-wins validator
+    ///   (empty write-set memory) is installed, and this commit seeds it with
+    ///   the batch's own write-set;
+    /// - a prepared batch whose basis went stale keeps the ACCUMULATED
+    ///   validator, whose memory is precisely the write-sets committed since
+    ///   the last basis-current commit — i.e. since this batch's snapshot —
+    ///   so an overlap with any of those first committers aborts as
+    ///   [`WriteError::FirstCommitterWins`], and a disjoint batch commits.
+    ///
+    /// No-claim boundary (deliberate, bounded slice — not SSI): the
+    /// accumulated memory reaches back exactly to the last basis-current
+    /// commit. Interleaving an ordinary `write` BETWEEN a prepare and its
+    /// stale commit resets that memory at the write's own (current) basis, so
+    /// conflicts against commits older than the reset are not re-detected.
+    /// The canonical prepare/prepare/commit/commit group the bead specifies
+    /// is exact; closing the general interleaving needs a basis-seeded
+    /// validator constructor and is named in the bead thread.
+    pub async fn commit_prepared(
+        &mut self,
+        cx: &CommitCx,
+        prepared: PreparedWrite,
+    ) -> Result<CommitSeq, WriteError> {
+        self.ensure_writable()?;
+        if prepared.basis == self.snapshot.frontier {
+            self.coordinator
+                .set_validator(Box::new(FirstCommitterWinsValidator::default()));
+        }
+        self.commit_template(cx, prepared.template, None, None, None)
+            .await
+    }
+
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
     ///
     /// **Public rather than test-gated, and the reason is the crash-point
@@ -2306,9 +2423,37 @@ impl<V: Vfs + Clone> Database<V> {
         batch: WriteBatch,
         crash_at: Option<CrashPoint>,
         publication_failure: Option<DerivedPublicationStage>,
-        mut block_store_crash_at: Option<BlockStoreCrashPoint>,
+        block_store_crash_at: Option<BlockStoreCrashPoint>,
     ) -> Result<CommitSeq, WriteError> {
         self.ensure_writable()?;
+        let template = self.build_write_template(batch)?;
+        // FCW basis discipline (fgdb-fcw-writebatch-6cxf): this batch's rows
+        // were derived against the LIVE fold under a single-writer handle, so
+        // its basis IS the current frontier — nothing can have committed past
+        // it. Installing a fresh validator (empty write-set memory) states
+        // exactly that: a sequential write is never a first-committer-wins
+        // abort. A prepared batch whose basis went stale deliberately does
+        // NOT reinstall — see [`Database::commit_prepared`].
+        self.coordinator
+            .set_validator(Box::new(FirstCommitterWinsValidator::default()));
+        self.commit_template(
+            cx,
+            template,
+            crash_at,
+            publication_failure,
+            block_store_crash_at,
+        )
+        .await
+    }
+
+    /// Derive the canonical logical-delta template for `batch` against the
+    /// live fold: every preflight refusal (`AlreadyLive`, `IdentitySpent`,
+    /// compare-and-set mismatch) and every before-image comes from the
+    /// CURRENT snapshot plus the batch prefix. Shared verbatim by
+    /// [`Database::write`], which commits it immediately, and
+    /// [`Database::prepare_write`], which retains it so a second batch can be
+    /// built against this same basis before the first commits.
+    fn build_write_template(&self, batch: WriteBatch) -> Result<LogicalDeltaTemplate, WriteError> {
         if batch.is_empty() {
             return Err(WriteError::EmptyBatch);
         }
@@ -2781,7 +2926,23 @@ impl<V: Vfs + Clone> Database<V> {
                 rows,
             }],
         )?;
+        Ok(template)
+    }
 
+    /// The durable tail every commit path shares: seal the capsule, run the
+    /// two-fsync protocol through whichever commit validator the caller just
+    /// installed, fold the template into the retained writer, and publish the
+    /// derived Tier-D objects. Which validator instance judges the draft is
+    /// the CALLER's statement about the template's basis — see
+    /// `write_with_faults` and [`Database::commit_prepared`].
+    async fn commit_template(
+        &mut self,
+        cx: &CommitCx,
+        template: LogicalDeltaTemplate,
+        crash_at: Option<CrashPoint>,
+        publication_failure: Option<DerivedPublicationStage>,
+        mut block_store_crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<CommitSeq, WriteError> {
         // Slot exhaustion is a publication impossibility, not a post-commit
         // recovery condition. Refuse before Chronicle receives the capsule so
         // D2 cannot make a commit whose derived root has no selectable name.
@@ -2813,8 +2974,22 @@ impl<V: Vfs + Clone> Database<V> {
                 });
             }
             Err(source) => {
+                // A refusal from an unpoisoned coordinator left nothing
+                // durable and freed its sequence, so the handle stays
+                // Healthy. A first-committer-wins verdict additionally gets
+                // its own arm: the caller repairs by REBUILDING the batch
+                // against the advanced snapshot, which is a different remedy
+                // than any transport or protocol failure in `Commit`.
                 self.state = DatabaseState::Healthy { published_frontier };
-                return Err(WriteError::Commit(source));
+                return Err(match source {
+                    CommitError::Rejected(rejection) if rejection.law == FCW_LAW_ID => {
+                        WriteError::FirstCommitterWins {
+                            law: rejection.law,
+                            detail: rejection.detail,
+                        }
+                    }
+                    other => WriteError::Commit(other),
+                });
             }
         };
 
