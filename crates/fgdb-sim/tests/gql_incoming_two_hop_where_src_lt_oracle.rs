@@ -27,7 +27,10 @@ const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const K: PropertyKeyId = PropertyKeyId(7);
 const IN_TWO_SRC_LT: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 9 RETURN c";
-const OUT_TWO_SRC_LT: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k < 9 RETURN c";
+// The direction control runs on the OUTGOING equality, which is already
+// grammar — the outgoing hop-2 source < is a separate grammar slice and
+// still Parses.
+const OUT_TWO_SRC_EQ: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c";
 
 /// Far ends (`:S` sources) of incoming two-hop paths whose NEAR end — the
 /// `:R` edge's stored DEST — carries `k` as an Int strictly less than 9.
@@ -105,8 +108,8 @@ fn incoming_two_hop_near_end_less_than_equals_its_reference() {
                 .execute_gql(IN_TWO_SRC_LT, &bind)
                 .expect("incoming two-hop WHERE a.k < 9 executes");
             outgoing_rows = db
-                .execute_gql(OUT_TWO_SRC_LT, &bind)
-                .expect("the outgoing spelling still executes");
+                .execute_gql(OUT_TWO_SRC_EQ, &bind)
+                .expect("the outgoing equality spelling still executes");
         }
 
         let keys = CapsuleKeys::new(
@@ -149,7 +152,8 @@ fn incoming_two_hop_near_end_less_than_equals_its_reference() {
         );
         assert!(
             outgoing_rows.is_empty(),
-            "an outgoing walk composes nothing on this reversed fixture"
+            "an outgoing walk (via the already-grammar equality) composes \
+             nothing on this reversed fixture"
         );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
