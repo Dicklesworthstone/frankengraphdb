@@ -3683,6 +3683,19 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(gql_cert::certify(&plan, snapshot_seq))
     }
 
+    pub fn gql_plan_certificate_at(
+        &self,
+        src: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<GqlPlanCertificate, GqlError> {
+        let plan = bind.bind(src).map_err(|error| match error {
+            fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+            unbound => GqlError::Bind(unbound),
+        })?;
+        Ok(gql_cert::certify(&plan, as_of))
+    }
+
     /// The edge `eid` — its endpoints, relation, lifetime, AND properties —
     /// at the published frontier, or `None` when no visible version exists.
     ///
