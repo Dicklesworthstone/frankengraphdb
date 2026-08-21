@@ -7,8 +7,9 @@
 //! fails; the `k = 0` dest separates `>=` from `<>` (not-equal would
 //! admit 5); and the keyless dest's source 7 stays out of the non-strict
 //! comparator too. The strict-greater, equality, strict-less, and
-//! unfiltered statements are pinned alongside, and BOTH still-unsupported
-//! `<=` spellings (dest and source) remain typed parse errors.
+//! unfiltered statements are pinned alongside, and the still-unsupported
+//! dest `<=` spelling remains a typed parse error (the source `<=`
+//! graduated under fgdb-w5-parsers-nje.29 into its own suite).
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
