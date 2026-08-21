@@ -86,6 +86,14 @@ perf.data.old
 .beads/recovery*/
 .beads_recovery/
 .beads_recovery_*/
+# WAL certification sidecars (`*.db-wal` does not match beads.db-wal-cert).
+# Per-machine br fsqlite probes, like -wal/-shm; never canonical tracker state.
+.beads/*.db-wal-cert
+.beads/*.db-wal-cert-head
+
+# Remote compilation helper target trees (worker-local cargo target, gigabytes).
+.rch-target/
+.rch-target-*/
 
 # Environment / local settings
 .env
