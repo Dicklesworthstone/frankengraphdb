@@ -183,6 +183,16 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             hasher.update(&value.to_be_bytes());
         }
     }
+    match plan.dst_prop_le {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
     match plan.limit {
         None => {
             hasher.update(&[0]);
@@ -271,6 +281,7 @@ mod tests {
             dst_prop_gt: None,
             dst_prop_lt: None,
             dst_prop_ge: None,
+            dst_prop_le: None,
             limit: None,
             skip: None,
         }
