@@ -130,8 +130,19 @@ fn incoming_two_hop_near_end_inequality_keeps_the_unequal_chain() {
 
         // The refusals: every ordered comparator on the near end, the
         // C-style alias, and the RETURN a projection stay typed Parse.
+        // nje.50 sibling lock: incoming near-end > is grammar now. Only
+        // the k=9 dest exceeds 1, so its chain's origin answers.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 1 RETURN c",
+                &bind
+            )
+            .expect("nje.50 near-end > is grammar, not a Parse"),
+            vec![VId(3)],
+            "only the k=9 dest's chain is strictly greater"
+        );
+
         for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
