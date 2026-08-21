@@ -1,4 +1,7 @@
-use crate::{Database, PendingRow, PreparedWrite, ReadError, VertexRow, WriteBatch, WriteError};
+use crate::{
+    Database, GqlError, PendingRow, PreparedWrite, ReadError, RelationBind, VertexRow, WriteBatch,
+    WriteError,
+};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, RelationId};
 use fgdb_types::{
@@ -20,6 +23,7 @@ pub enum WriteTxnError {
         live: CommitSeq,
     },
     Read(ReadError),
+    Gql(GqlError),
     Write(WriteError),
 }
 
@@ -37,6 +41,7 @@ impl core::fmt::Display for WriteTxnError {
                 "write transaction pinned {pinned:?}, but the live snapshot advanced to {live:?}"
             ),
             Self::Read(source) => write!(formatter, "could not read the pinned snapshot: {source}"),
+            Self::Gql(source) => write!(formatter, "transaction GQL failed: {source}"),
             Self::Write(source) => write!(formatter, "write transaction failed: {source}"),
         }
     }
@@ -46,6 +51,7 @@ impl core::error::Error for WriteTxnError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Read(source) => Some(source),
+            Self::Gql(source) => Some(source),
             Self::Write(source) => Some(source),
             Self::NoPreparedWrite
             | Self::Finished
@@ -64,6 +70,12 @@ impl From<ReadError> for WriteTxnError {
 impl From<WriteError> for WriteTxnError {
     fn from(source: WriteError) -> Self {
         Self::Write(source)
+    }
+}
+
+impl From<GqlError> for WriteTxnError {
+    fn from(source: GqlError) -> Self {
+        Self::Gql(source)
     }
 }
 
@@ -240,6 +252,90 @@ impl WriteTxn {
             }
         }
         Ok(overlay)
+    }
+
+    /// Execute the pinned MATCH expansion over the durable basis plus staged
+    /// vertex and edge mutations, without publishing the transaction.
+    pub fn execute_gql<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        src: &str,
+        bind: &RelationBind,
+    ) -> Result<Vec<VId>, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+        let plan = bind.bind(src).map_err(|error| {
+            WriteTxnError::Gql(match error {
+                fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+                unbound => GqlError::Bind(unbound),
+            })
+        })?;
+
+        let mut vertices: std::collections::BTreeSet<VId> = database
+            .vertices_at(self.basis)?
+            .into_iter()
+            .map(|row| row.vid)
+            .collect();
+        let mut edges: std::collections::BTreeMap<
+            fgdb_types::EId,
+            (VId, RelationId, VId),
+        > = database
+            .edges_at(self.basis)?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.entry.eid,
+                    (row.entry.src, row.entry.relation, row.entry.dst),
+                )
+            })
+            .collect();
+
+        for batch in &self.staged {
+            for pending in &batch.rows {
+                match pending {
+                    PendingRow::Vertex { vid, .. } => {
+                        vertices.insert(*vid);
+                    }
+                    PendingRow::Edge {
+                        eid,
+                        src,
+                        dst,
+                        ensure,
+                        ..
+                    } => {
+                        let triple = (*src, batch.relation, *dst);
+                        if !ensure || !edges.values().any(|existing| *existing == triple) {
+                            edges.insert(*eid, triple);
+                        }
+                    }
+                    PendingRow::DeleteEdge { eid, .. } => {
+                        edges.remove(eid);
+                    }
+                    PendingRow::DeleteVertex { vid, .. } => {
+                        vertices.remove(vid);
+                        edges.retain(|_, (src, _, dst)| *src != *vid && *dst != *vid);
+                    }
+                    PendingRow::SetLabel { .. }
+                    | PendingRow::SetEdgeProperty { .. }
+                    | PendingRow::SetProperty { .. }
+                    | PendingRow::CompareAndSet { .. } => {}
+                }
+            }
+        }
+
+        let mut destinations = Vec::new();
+        for src in vertices.iter().copied() {
+            destinations.extend(edges.values().filter_map(|(edge_src, relation, dst)| {
+                (*edge_src == src
+                    && *relation == plan.relation
+                    && vertices.contains(dst))
+                .then_some(*dst)
+            }));
+        }
+        destinations.sort_unstable();
+        destinations.dedup();
+        Ok(destinations)
     }
 
     /// Commit the prepared batch exactly as derived, then release the pin.
