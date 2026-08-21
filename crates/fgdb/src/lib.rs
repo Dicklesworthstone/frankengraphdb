@@ -513,6 +513,14 @@ pub enum WriteError {
     /// [`WriteMismatchPolicy::AbortWrite`]. Nothing durable happened.
     CompareAndSetMismatch(Box<CompareAndSetMismatch>),
     Canonical(CanonicalError),
+    /// [`WriteBatch::extend`] was handed a batch over a different relation
+    /// (fgdb-w4-g1-txn-core-qpmg.2). The relation is the batch's template
+    /// coordinate; concatenation must not silently re-home rows onto another
+    /// one. Nothing was appended.
+    MixedRelation {
+        expected: RelationId,
+        found: RelationId,
+    },
     /// The [`TxnCx`] refused to acquire the snapshot-pin obligation
     /// [`Database::begin`] asked for (fgdb-writetxn-pin-l8wb). Nothing was
     /// pinned and no transaction exists; the context's obligation ledger is
@@ -753,6 +761,11 @@ impl core::fmt::Display for WriteError {
                 mismatch.elem, mismatch.name
             ),
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
+            Self::MixedRelation { expected, found } => write!(
+                f,
+                "cannot extend a batch over {expected:?} with rows over {found:?}; \
+                 the relation is the batch's template coordinate"
+            ),
             Self::SnapshotPin(error) => {
                 write!(f, "could not pin the transaction snapshot: {error}")
             }
@@ -1078,6 +1091,26 @@ impl WriteBatch {
             relation,
             rows: Vec::new(),
         }
+    }
+
+    /// Append every pending row of `other`, in order, after this batch's own
+    /// (fgdb-w4-g1-txn-core-qpmg.2): the concatenation a transaction uses to
+    /// make two staged writes one capsule. Rows keep their evaluation order —
+    /// prefix semantics (same-batch before-images, cascade ownership,
+    /// birth-ordinal numbering) are derived later, at prepare time, over the
+    /// combined sequence exactly as if the caller had staged every row into
+    /// one batch. Batches over different relations refuse before anything
+    /// moves: the batch's relation is its template coordinate, and quietly
+    /// re-homing rows onto another coordinate would change what they mean.
+    pub fn extend(&mut self, other: WriteBatch) -> Result<(), WriteError> {
+        if other.relation != self.relation {
+            return Err(WriteError::MixedRelation {
+                expected: self.relation,
+                found: other.relation,
+            });
+        }
+        self.rows.extend(other.rows);
+        Ok(())
     }
 
     pub fn create_vertex(
