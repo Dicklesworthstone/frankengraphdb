@@ -13,7 +13,7 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
@@ -125,5 +125,105 @@ fn undirected_certified_at_names_s1_while_live_names_the_frontier() {
             "directed RETURN b at S1 answers only the edge-flow destination"
         );
         assert_eq!(directed_cert.snapshot_seq, s1);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Restored from commit 7b1eb5c, which this file's second landing (b3cf359)
+// unintentionally replaced in a same-wave same-filename collision. The body
+// is verbatim apart from a two-line harness adapter (their under_lab handed
+// the closure a CommitCx; this file's hands PurposeContexts) and aliasing
+// their statement consts onto this file's. It carries coverage the test
+// above lacks: the plan-certificate surface naming the same pinned seq as
+// the executing certificate (plus determinism there), and the directed vs
+// undirected statement digests differing at one seq.
+// ---------------------------------------------------------------------------
+
+const UN_RETURN_B: &str = UNDIRECTED_B;
+const OUT_RETURN_B: &str = DIRECTED_B;
+
+/// Pinned rows, pinned names, unwidened directed sibling.
+#[test]
+fn the_undirected_certified_at_pins_the_s1_incidents() {
+    under_lab(0x0e_02, |contexts| async move {
+        let cx = &contexts.commit();
+        let dir = scratch("pinned-incidents");
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![LabelId(3)], vec![]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.create_vertex(VId(3), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, seed).await.expect("seed commits");
+        let s1 = db.frontier().expect("healthy frontier");
+
+        let mut widen = WriteBatch::new(R);
+        widen.add_edge(EId(11), VId(3), VId(2), vec![]);
+        db.write(cx, widen).await.expect("the widening commit lands");
+
+        // The pinned certified execute: S1 rows, S1 named.
+        let (pinned_rows, pinned_cert) = db
+            .execute_gql_certified_at(UN_RETURN_B, &bind_r(), s1)
+            .expect("the pinned certified undirected MATCH executes");
+        assert_eq!(
+            pinned_rows,
+            vec![VId(1), VId(2)],
+            "as of S1 only the first edge's incidents exist"
+        );
+        assert_eq!(
+            pinned_cert.snapshot_seq, s1,
+            "the executing certificate names the caller's as_of"
+        );
+
+        // The plan certificate at the same coordinates names the same seq —
+        // the two certificate surfaces cannot disagree about WHICH snapshot
+        // was certified — and is deterministic there.
+        let plan_cert = db
+            .gql_plan_certificate_at(UN_RETURN_B, &bind_r(), s1)
+            .expect("the pinned plan certificate is issued");
+        assert_eq!(
+            plan_cert.snapshot_seq, s1,
+            "both certificate surfaces name exactly S1"
+        );
+        assert_eq!(
+            plan_cert,
+            db.gql_plan_certificate_at(UN_RETURN_B, &bind_r(), s1)
+                .expect("the pinned plan certificate is issued again"),
+            "determinism at the pinned seq"
+        );
+
+        // The live certified call: widened rows, live seq — and the SAME
+        // statement/bind digests, because statement identity does not move
+        // with the snapshot.
+        let (live_rows, live_cert) = db
+            .execute_gql_certified(UN_RETURN_B, &bind_r())
+            .expect("the live certified undirected MATCH executes");
+        assert_eq!(
+            live_rows,
+            vec![VId(1), VId(2), VId(3)],
+            "the live undirected answer is widened"
+        );
+        assert_ne!(live_cert.snapshot_seq, pinned_cert.snapshot_seq);
+        assert_eq!(
+            pinned_cert.statement_digest, live_cert.statement_digest,
+            "same source text at both seqs"
+        );
+        assert_eq!(
+            pinned_cert.bind_digest, live_cert.bind_digest,
+            "same bind at both seqs"
+        );
+
+        // The directed statement through the same certified-at surface:
+        // still narrow — direction erasure did not leak.
+        let (directed_rows, directed_cert) = db
+            .execute_gql_certified_at(OUT_RETURN_B, &bind_r(), s1)
+            .expect("the pinned certified directed MATCH executes");
+        assert_eq!(directed_rows, vec![VId(2)]);
+        assert_eq!(directed_cert.snapshot_seq, s1);
+        assert_ne!(
+            directed_cert.statement_digest, pinned_cert.statement_digest,
+            "two statements, two statement digests — the certified surface \
+             can tell the undirected plan from the directed one"
+        );
     });
 }
