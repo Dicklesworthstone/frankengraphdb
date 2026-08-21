@@ -13,8 +13,9 @@
 //! near end too), the `k = 9` dest fails equality, and the unfiltered
 //! statement answers all three. The OUTGOING spelling composes nothing on
 //! this reversed fixture (the direction control), and the refusals hold:
-//! every non-equality comparator on `a.k` and the `RETURN a` projection
-//! stay typed Parse.
+//! ordered comparators and `!=` on `a.k`, plus the `RETURN a` projection,
+//! stay typed Parse. The `<>` spelling keeps the `k = 9` destination's
+//! chain and answers its origin `[3]`.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -27,6 +28,7 @@ const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const K: PropertyKeyId = PropertyKeyId(7);
 const IN_A_EQ: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN c";
+const IN_A_NE: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN c";
 const IN_C_EQ: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c";
 const IN_UNFILTERED: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c";
 const OUT_A_EQ: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c";
@@ -93,6 +95,13 @@ fn incoming_two_hop_near_end_equality_keeps_the_matching_chain() {
             "the k=9 dest's chain fails equality"
         );
 
+        assert_eq!(
+            db.execute_gql(IN_A_NE, &bind)
+                .expect("incoming near-end inequality MATCH executes"),
+            vec![VId(3)],
+            "only the chain landing on the k=9 dest answers inequality"
+        );
+
         // The variable control: the far-end cell reads c, which carries no
         // k on this fixture — a variable-blind kernel answers [6] for both.
         assert!(
@@ -119,10 +128,9 @@ fn incoming_two_hop_near_end_equality_keeps_the_matching_chain() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
-        // The refusals: every non-equality comparator on the near end and
-        // the RETURN a projection stay typed Parse.
+        // The refusals: ordered comparators and != on the near end, plus
+        // the RETURN a projection, stay typed Parse.
         for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
