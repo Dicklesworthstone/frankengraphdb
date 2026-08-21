@@ -921,10 +921,16 @@ impl<'a> Parser<'a> {
                     }
                     self.token(".")?;
                     let second_property = self.identifier()?;
-                    let second_is_ne = self.source[self.offset..].trim_start().starts_with('<');
-                    if second_is_ne {
+                    let second_remaining = self.source[self.offset..].trim_start();
+                    let second_is_angle_ne = second_remaining.starts_with("<>");
+                    let second_is_bang_ne = second_remaining.starts_with("!=");
+                    let second_is_ne = second_is_angle_ne || second_is_bang_ne;
+                    if second_is_angle_ne {
                         self.token("<")?;
                         self.token(">")?;
+                    } else if second_is_bang_ne {
+                        self.token("!")?;
+                        self.token("=")?;
                     } else {
                         self.token("=")?;
                     }
@@ -2380,8 +2386,30 @@ mod tests {
             Some((PropertyKeyId(9), 9))
         );
 
+        let inequality_with_bang = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m != 9 RETURN b")
+            .expect("source inequality and destination bang inequality bind");
+        assert_eq!(
+            inequality_with_bang.src_prop_ne,
+            Some((PropertyKeyId(7), 1))
+        );
+        assert_eq!(
+            inequality_with_bang.dst_prop_ne,
+            Some((PropertyKeyId(9), 9))
+        );
+
+        let equality_with_bang = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m != 9 RETURN b")
+            .expect("source equality and destination bang inequality bind");
+        assert_eq!(equality_with_bang.src_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(equality_with_bang.dst_prop_ne, Some((PropertyKeyId(9), 9)));
+
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 AND a.m <> 9 RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND a.m != 9 RETURN b"),
             Err(BindError::Parse(_))
         ));
     }
