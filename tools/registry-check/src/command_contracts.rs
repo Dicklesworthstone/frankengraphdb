@@ -30,6 +30,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const REGISTRY_PATH: &str = "registries/command_contracts.toml";
+pub const LIVE_HANDLER_SOURCE_PATH: &str = "crates/fgdb/src/lib.rs";
+const LIVE_HANDLER_INVENTORY_NAME: &str = "LIVE_LOCAL_SEMANTIC_HANDLER_INVENTORY";
 
 /// Every key a `[[contract]]` row may carry — the exact §5.1 schema (plan line
 /// 294). A key outside this set is a load error, not a shrug.
@@ -250,6 +252,168 @@ pub fn registry_path(root: &Path) -> PathBuf {
     root.join(REGISTRY_PATH)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveHandlerDeclaration {
+    contract_id: String,
+    handler_symbol: String,
+    union_arm: String,
+}
+
+fn live_handler_declarations(source: &str) -> Result<Vec<LiveHandlerDeclaration>, String> {
+    let start = source
+        .find(LIVE_HANDLER_INVENTORY_NAME)
+        .ok_or_else(|| format!("missing {LIVE_HANDLER_INVENTORY_NAME}"))?;
+    let tail = &source[start..];
+    let end = tail
+        .find("];" )
+        .ok_or_else(|| format!("unterminated {LIVE_HANDLER_INVENTORY_NAME}"))?;
+    let quoted: Vec<String> = tail[..end]
+        .split('"')
+        .enumerate()
+        .filter_map(|(index, part)| (index % 2 == 1).then(|| part.to_owned()))
+        .collect();
+    if !quoted.len().is_multiple_of(3) {
+        return Err(format!(
+            "{LIVE_HANDLER_INVENTORY_NAME} must contain contract-id, handler-symbol, union-arm triples"
+        ));
+    }
+    Ok(quoted
+        .chunks_exact(3)
+        .map(|fields| LiveHandlerDeclaration {
+            contract_id: fields[0].clone(),
+            handler_symbol: fields[1].clone(),
+            union_arm: fields[2].clone(),
+        })
+        .collect())
+}
+
+fn source_declares_type(source: &str, type_name: &str) -> bool {
+    ["struct", "enum"]
+        .iter()
+        .any(|kind| source.contains(&format!("pub {kind} {type_name}")))
+}
+
+/// Enforce the live-row/inhabitable-handler bijection against the Rust source.
+///
+/// The source inventory is next to the exhaustive command dispatcher.  This
+/// makes both directions checkable: deleting a handler leaves a live row with
+/// no declaration, while adding a handler declaration without a live row is
+/// independently red.
+pub fn validate_live_handler_source(
+    registry: &ContractRegistry,
+    source: &str,
+) -> Vec<Violation> {
+    let mut out = Vec::new();
+    let declarations = match live_handler_declarations(source) {
+        Ok(declarations) => declarations,
+        Err(message) => {
+            out.push(Violation::new(
+                "contract_handler_inventory_invalid",
+                LIVE_HANDLER_SOURCE_PATH,
+                message,
+            ));
+            return out;
+        }
+    };
+    let mut seen = BTreeSet::new();
+    for declaration in &declarations {
+        if !seen.insert(declaration.contract_id.as_str()) {
+            out.push(Violation::new(
+                "contract_handler_duplicate",
+                &declaration.contract_id,
+                "one contract id has more than one live handler declaration",
+            ));
+        }
+        let Some(row) = registry.contracts.iter().find(|row| {
+            row.status == "live" && row.command_contract_id == declaration.contract_id
+        }) else {
+            out.push(Violation::new(
+                "contract_handler_row_missing",
+                &declaration.contract_id,
+                "a declared live handler has no matching live command-contract row",
+            ));
+            continue;
+        };
+        if row.handler_symbol != declaration.handler_symbol {
+            out.push(Violation::new(
+                "contract_handler_symbol_mismatch",
+                &declaration.contract_id,
+                format!(
+                    "registry handler {:?} differs from source declaration {:?}",
+                    row.handler_symbol, declaration.handler_symbol
+                ),
+            ));
+        }
+    }
+
+    for row in registry.contracts.iter().filter(|row| row.status == "live") {
+        let Some(declaration) = declarations
+            .iter()
+            .find(|declaration| declaration.contract_id == row.command_contract_id)
+        else {
+            out.push(Violation::new(
+                "contract_live_handler_missing",
+                &row.command_contract_id,
+                "live command-contract row has no source handler declaration",
+            ));
+            continue;
+        };
+        let handler_name = declaration
+            .handler_symbol
+            .rsplit("::")
+            .next()
+            .unwrap_or_default();
+        if !source.contains(&format!("fn {handler_name}(")) {
+            out.push(Violation::new(
+                "contract_live_handler_missing",
+                &row.command_contract_id,
+                format!("declared handler function {handler_name:?} is absent"),
+            ));
+        }
+        if !source.contains(&format!("pub enum {}", row.outer_command_union))
+            || !source.contains(&format!("{}(", declaration.union_arm))
+            || !source.contains(&format!(
+                "{}::{}",
+                row.outer_command_union, declaration.union_arm
+            ))
+        {
+            out.push(Violation::new(
+                "contract_live_arm_missing",
+                &row.command_contract_id,
+                "live row does not resolve to an inhabitable union arm and exhaustive apply match",
+            ));
+        }
+        for type_name in [
+            row.body_schema_id.as_str(),
+            row.result_schema_id.as_str(),
+            row.applied_record_schema_id.as_str(),
+        ] {
+            if !source_declares_type(source, type_name) {
+                out.push(Violation::new(
+                    "contract_live_type_missing",
+                    &row.command_contract_id,
+                    format!("live body/result/applied-record type {type_name:?} is absent"),
+                ));
+            }
+        }
+    }
+    out
+}
+
+pub fn validate_live_handlers_from_repo(
+    root: &Path,
+    registry: &ContractRegistry,
+) -> Vec<Violation> {
+    match fs::read_to_string(root.join(LIVE_HANDLER_SOURCE_PATH)) {
+        Ok(source) => validate_live_handler_source(registry, &source),
+        Err(error) => vec![Violation::new(
+            "contract_handler_source_unreadable",
+            LIVE_HANDLER_SOURCE_PATH,
+            error.to_string(),
+        )],
+    }
+}
+
 /// `0x0000` and `0xffff` are permanently invalid in every registry code space
 /// (plan line 290); everything else in u16 range is assignable.
 fn wire_tag_in_space(tag: i64) -> bool {
@@ -409,19 +573,6 @@ pub fn validate_contracts(registry: &ContractRegistry) -> Vec<Violation> {
                     ),
                 ));
             }
-        }
-        if contract.status == "live" {
-            // The plan-line-296 bijection quantifies over live rows: a live row
-            // must resolve to one union arm, one input, one triple, one handler.
-            // Those resolutions need enumerators that do not exist yet, so a
-            // live row is refused outright until they do — an honest UNRUN is
-            // not available inside a validator, and green-over-unchecked is the
-            // exact failure this registry exists to prevent.
-            out.push(Violation::new(
-                "contract_live_row_unverifiable",
-                id,
-                "a live row requires the arm/input/triple/handler bijection checks, which are not yet buildable; land the row as reserved (fgdb-5uw2 Phase B)",
-            ));
         }
     }
 

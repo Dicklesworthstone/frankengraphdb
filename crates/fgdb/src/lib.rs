@@ -851,12 +851,12 @@ pub struct WriteBatch {
 /// spine.  More lifecycle arms remain reserved in `command_contracts.toml`.
 #[derive(Clone, Debug)]
 pub enum LocalSemanticCommand {
-    WriteBatch(LocalWriteBatchCommandBody),
+    WriteBatch(LocalAutocommitWriteSpec),
 }
 
 /// Canonical input body for the live Local `WriteBatch` command arm.
 #[derive(Clone, Debug)]
-pub struct LocalWriteBatchCommandBody {
+pub struct LocalAutocommitWriteSpec {
     pub batch: WriteBatch,
 }
 
@@ -887,10 +887,11 @@ pub enum LocalSemanticApplyResult {
 
 /// Machine-readable inventory consumed by the G0 command-contract checker.
 /// Adding or removing a handler without the matching live registry row is red.
-pub const LIVE_LOCAL_SEMANTIC_HANDLER_INVENTORY: &[(&str, &str)] = &[
+pub const LIVE_LOCAL_SEMANTIC_HANDLER_INVENTORY: &[(&str, &str, &str)] = &[
     (
         "cc:local:local-autocommit-write-spec",
         "fgdb::Database::apply_local_write_batch",
+        "WriteBatch",
     ),
 ];
 
@@ -1608,7 +1609,7 @@ fn chain_commitment_at(chain: &fgdb_chronicle::MarkerChain, at: CommitSeq) -> Op
 /// internals, and the decoded graph snapshot remain redacted.
 pub struct Database<V: Vfs = UnixVfs> {
     coordinator: CommitCoordinator<V>,
-    store: BlockStore,
+    store: BlockStore<V>,
     /// The ONE mutable object in the directory (doctrine 5): the dual-slot
     /// root file whose selected slot names the current manifest (fgdb-ge6a,
     /// PLAIN opener ruling). Published after every manifest, reconciled at
@@ -1640,8 +1641,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     receipts: PublishReceipts,
     /// The durable I/O authority retained so same-handle recovery reopens
     /// through the SAME injected filesystem rather than silently escaping to
-    /// `UnixVfs`. Strata's `BlockStore` does not yet accept a VFS; callers of
-    /// `open_with_vfs` must not infer that its object files are faulted too.
+    /// `UnixVfs`. Chronicle and Strata's `BlockStore` both open through this
+    /// one value (fgdb-tvg8.1), so an injected fault plan bites the commit
+    /// log, `manifest.root`, and the derived Tier-D objects alike.
     vfs: V,
     /// Secret-free verification records emitted while this handle reopened
     /// Chronicle capsules. Retained on the handle so product callers can
@@ -1729,8 +1731,9 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// Production uses [`Database::create`]. The explicit form is the lab seam
     /// that proves the root directory obeys the same inode-then-parent ordering
-    /// as Chronicle and Strata entries below it. The current Strata block store
-    /// remains Unix-filesystem-backed; this method does not claim otherwise.
+    /// as Chronicle and Strata entries below it. The Strata block store opens
+    /// through this same `vfs` (fgdb-tvg8.1), so creation faults reach its
+    /// directory and lock-inode barriers too.
     #[doc(hidden)]
     pub async fn create_with_vfs(
         cx: &CommitCx,
@@ -1819,9 +1822,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// `manifest.root` I/O.
     ///
     /// This is the lab-runtime seam for faults at the two-fsync authority
-    /// protocol and the derived root-slot publication that follows it. The
-    /// current Tier-D `BlockStore` still uses its own Unix filesystem path, so
-    /// this method deliberately makes no claim about faulting Strata objects.
+    /// protocol, the derived root-slot publication that follows it, and — as
+    /// of fgdb-tvg8.1 — the Tier-D `BlockStore`'s block, patch, root, and
+    /// manifest publication. One injected filesystem is the whole I/O plane;
+    /// the only `std::fs` residue is process-liveness locking and a
+    /// link-count probe, neither of which carries durable bytes.
     /// Production callers use [`Database::open`], which supplies [`UnixVfs`].
     #[doc(hidden)]
     pub async fn open_with_vfs(
@@ -1892,7 +1897,9 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Self, OpenError> {
         let coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
-        let store = BlockStore::open(cx, path, keys.k_oid.clone(), keys.namespace)?;
+        let store =
+            BlockStore::open_with_vfs(cx, vfs.clone(), path, keys.k_oid.clone(), keys.namespace)
+                .await?;
         let mut crypto_verification_events = Vec::new();
         // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
         // resolvable manifest. Before accepting it, bind verifies the selected
@@ -1921,7 +1928,7 @@ impl<V: Vfs + Clone> Database<V> {
                         });
                     }
                     let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
-                    match store.resolve_manifest(cx, claimed) {
+                    match store.resolve_manifest(cx, claimed).await {
                         Ok(resolved) if resolved.len() == 1 => {
                             let (record, root) = &resolved[0];
                             let describes_spine = record.graph == GRAPH
@@ -2012,7 +2019,7 @@ impl<V: Vfs + Clone> Database<V> {
                     slot.slot_generation
                 } else {
                     let stale = ManifestVersion(ObjectId(slot.root_manifest_oid));
-                    let resolvable = match store.resolve_manifest(cx, stale) {
+                    let resolvable = match store.resolve_manifest(cx, stale).await {
                         Ok(resolved) if resolved.len() == 1 => {
                             let (record, root) = &resolved[0];
                             record.graph == GRAPH
@@ -2199,7 +2206,7 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<CommitSeq, WriteError> {
         let applied = self
             .apply_local_semantic_command(cx, LocalSemanticCommand::WriteBatch(
-                LocalWriteBatchCommandBody { batch },
+                LocalAutocommitWriteSpec { batch },
             ))
             .await?;
         let LocalSemanticApplyResult::WriteBatch { result, .. } = applied;
@@ -2222,7 +2229,7 @@ impl<V: Vfs + Clone> Database<V> {
     pub async fn apply_local_write_batch(
         &mut self,
         cx: &CommitCx,
-        body: LocalWriteBatchCommandBody,
+        body: LocalAutocommitWriteSpec,
     ) -> Result<LocalSemanticApplyResult, WriteError> {
         let commit_seq = self
             .write_with_faults(cx, body.batch, None, None, None)
@@ -2948,6 +2955,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &mut self.receipts,
                     crash_at,
                 )
+                .await
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
                     recovery,
                     source: Box::new(RebuildError::from(error)),
@@ -2958,6 +2966,7 @@ impl<V: Vfs + Clone> Database<V> {
         for patch in &patches {
             self.store
                 .put_patch_verified(cx, &patch.bytes, &mut self.receipts)
+                .await
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
                     recovery,
                     source: Box::new(RebuildError::from(error)),
@@ -2968,6 +2977,7 @@ impl<V: Vfs + Clone> Database<V> {
         let root_id = self
             .store
             .put_root_verified(cx, &root, &mut self.receipts)
+            .await
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
@@ -2985,6 +2995,7 @@ impl<V: Vfs + Clone> Database<V> {
         let manifest = self
             .store
             .put_manifest(cx, &manifest_records)
+            .await
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
@@ -3989,12 +4000,12 @@ fn derive_versions_and_ordinal(
 async fn reopen_from_verified_checkpoint<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
-    store: &BlockStore,
+    store: &BlockStore<V>,
     keys: &DatabaseKeys,
     root_id: PartitionRootVersion,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
-    let (root, blocks, block_props, patches) = store.reopen(cx, root_id)?;
+    let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
     let published_at = root.published_at;
 
     // The sealed lists a retained writer would hold: bytes re-read from the
@@ -4122,7 +4133,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
 async fn rebuild<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
-    store: &BlockStore,
+    store: &BlockStore<V>,
     keys: &DatabaseKeys,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
