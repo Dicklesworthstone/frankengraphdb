@@ -9,10 +9,9 @@
 //! the direction too), and the unfiltered statement answers all three.
 //! The OUTGOING spelling on this reversed fixture composes nothing — the
 //! direction control an arrow-blind kernel fails by answering `[3]` for
-//! both. Only the equality-with-RETURN-c cell graduates: every other
-//! comparator on the incoming chain, the C-style alias, and the
-//! `RETURN a` projection (the plant the outgoing suite carries) all stay
-//! typed Parse.
+//! both. Equality and `<>` with `RETURN c` graduate; every ordered comparator
+//! on the incoming chain, the C-style alias, and the `RETURN a` projection
+//! stay typed Parse. Inequality keeps only the non-equal origin.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -25,6 +24,7 @@ const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const K: PropertyKeyId = PropertyKeyId(7);
 const IN_EQ: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c";
+const IN_NE: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN c";
 const IN_UNFILTERED: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c";
 const OUT_EQ: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k = 1 RETURN c";
 
@@ -90,6 +90,13 @@ fn incoming_two_hop_far_end_equality_keeps_the_matching_origin() {
         );
 
         assert_eq!(
+            db.execute_gql(IN_NE, &bind)
+                .expect("incoming far-end inequality MATCH executes"),
+            vec![VId(6)],
+            "only the non-equal keyed origin answers the incoming inequality"
+        );
+
+        assert_eq!(
             db.execute_gql(IN_UNFILTERED, &bind)
                 .expect("unfiltered incoming two-hop executes"),
             vec![VId(3), VId(6), VId(9)],
@@ -106,17 +113,17 @@ fn incoming_two_hop_far_end_equality_keeps_the_matching_origin() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
-        // Only the equality-with-RETURN-c cell graduates: every other
-        // incoming comparator, the C-style alias, and the RETURN a
-        // projection (the outgoing suite's plant, honored here) stay Parse.
+        // Equality and inequality with RETURN c graduate. Every ordered
+        // incoming comparator, the C-style alias, and the RETURN a projection
+        // (the outgoing suite's plant, honored here) stay Parse.
         for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a",
         ] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
             assert!(
