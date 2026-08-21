@@ -166,3 +166,86 @@ fn committed_overlay_replays_the_certified_destination_set() {
         "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
     );
 }
+
+#[test]
+fn repeated_certification_of_one_overlay_and_basis_is_identical() {
+    let dir = scratch("basis-stable-digest");
+    let ((), report) = run_async_under_lab(0x7f_03, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txn_cx = contexts.txn();
+        let commit_cx = contexts.commit();
+        let bind = RelationBind::new().with_relation("R", R);
+        let mut database = Database::create(&commit_cx, &dir, engine_keys())
+            .await
+            .expect("create product database");
+
+        let mut transaction = database.begin(&txn_cx).expect("begin pinned transaction");
+        let basis = transaction.basis();
+        transaction
+            .write(&mut database, staged_edge(VId(1), VId(2), EId(1)))
+            .expect("stage private R edge");
+        let (first_rows, first) = transaction
+            .execute_gql_certified(&database, MATCH_R, &bind)
+            .expect("first certified overlay MATCH succeeds");
+        let (second_rows, second) = transaction
+            .execute_gql_certified(&database, MATCH_R, &bind)
+            .expect("second certified overlay MATCH succeeds");
+
+        assert_eq!(first_rows, second_rows);
+        assert_eq!(first.digest, second.digest, "same overlay and basis hash identically");
+        assert_eq!(first.snapshot_seq, basis);
+        assert_eq!(second.snapshot_seq, basis);
+
+        transaction.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+    assert!(
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+    );
+}
+
+#[test]
+fn a_new_basis_changes_the_overlay_certificate_digest() {
+    let dir = scratch("new-basis-new-digest");
+    let ((), report) = run_async_under_lab(0x7f_04, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txn_cx = contexts.txn();
+        let commit_cx = contexts.commit();
+        let bind = RelationBind::new().with_relation("R", R);
+        let mut database = Database::create(&commit_cx, &dir, engine_keys())
+            .await
+            .expect("create product database");
+
+        let mut first_transaction = database.begin(&txn_cx).expect("begin first transaction");
+        first_transaction
+            .write(&mut database, staged_edge(VId(1), VId(2), EId(1)))
+            .expect("stage private R edge");
+        let (before_rows, before) = first_transaction
+            .execute_gql_certified(&database, MATCH_R, &bind)
+            .expect("certify overlay at the original basis");
+        first_transaction
+            .commit(&mut database, &commit_cx)
+            .await
+            .expect("commit certified overlay");
+
+        let second_transaction = database.begin(&txn_cx).expect("begin at new basis");
+        let (after_rows, after) = second_transaction
+            .execute_gql_certified(&database, MATCH_R, &bind)
+            .expect("certify the same bound MATCH at the new basis");
+        assert_eq!(before_rows, after_rows, "the committed overlay preserves the rows");
+        assert_eq!(before.snapshot_seq.0 + 1, after.snapshot_seq.0);
+        assert_eq!(after.snapshot_seq, second_transaction.basis());
+        assert_ne!(
+            before.digest, after.digest,
+            "snapshot sequence is part of the certificate transcript"
+        );
+
+        second_transaction.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+    assert!(
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+    );
+}
