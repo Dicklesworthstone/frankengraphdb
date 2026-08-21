@@ -314,6 +314,7 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
     if plan.dst_prop.is_none()
         && plan.dst_prop_ne.is_none()
         && plan.dst_prop_gt.is_none()
+        && plan.dst_prop_lt.is_none()
     {
         return Ok(());
     }
@@ -343,7 +344,13 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
                         && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
                 })
             });
-            equal && not_equal && greater
+            let less = plan.dst_prop_lt.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
+                })
+            });
+            equal && not_equal && greater && less
         }) {
             kept.insert(vid);
         }
