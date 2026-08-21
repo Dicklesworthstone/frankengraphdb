@@ -1,13 +1,14 @@
 //! The first bounded GQL parser and binder slice.
 //!
-//! The only accepted grammar is a typed edge pattern:
+//! The accepted grammar is a typed edge pattern:
 //! `MATCH (src)-[:Relation]->(dst) RETURN var` or
 //! `MATCH (dst)<-[:Relation]-(src) RETURN var` or
-//! `MATCH (left)-[:Relation]-(right) RETURN var`. Whitespace is optional
-//! between tokens. The outgoing one-hop form may include `WHERE src <> dst`
-//! or `WHERE src = dst` before `RETURN`. Everything else fails closed with a [`ParseError`]; this
-//! crate does not interpret a partial AST or silently widen the supported
-//! language.
+//! `MATCH (left)-[:Relation]-(right) RETURN var`, plus the bounded node scan
+//! `MATCH (node:Label) RETURN node`. Whitespace is optional between tokens.
+//! The outgoing one-hop form may include `WHERE src <> dst` or
+//! `WHERE src = dst` before `RETURN`. Unlabeled node-only scans and everything
+//! else fail closed with a [`ParseError`]; this crate does not interpret a
+//! partial AST or silently widen the supported language.
 
 #![forbid(unsafe_code)]
 
@@ -89,7 +90,7 @@ pub enum EdgeDirection {
 /// The executor-ready result of binding the pinned pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundPlan {
-    pub relation: RelationId,
+    pub relation: Option<RelationId>,
     pub src_var: String,
     pub dst_var: String,
     pub src_label: Option<LabelId>,
@@ -172,11 +173,16 @@ impl RelationBind {
     /// Parse and bind one statement without exposing the internal AST.
     pub fn bind(&self, statement: &str) -> Result<BoundPlan, BindError> {
         let ast = Parser::new(statement).parse()?;
-        let relation = self.relations.get(&ast.relation).copied().ok_or_else(|| {
-            BindError::UnknownRelation {
-                name: ast.relation.clone(),
-            }
-        })?;
+        let relation = ast
+            .relation
+            .as_ref()
+            .map(|name| {
+                self.relations
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| BindError::UnknownRelation { name: name.clone() })
+            })
+            .transpose()?;
         let hop2_relation = ast
             .hop2_relation
             .as_ref()
@@ -222,7 +228,7 @@ fn bind_label(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MatchAst {
     src_var: String,
-    relation: String,
+    relation: Option<String>,
     dst_var: String,
     src_label: Option<String>,
     dst_label: Option<String>,
@@ -252,6 +258,40 @@ impl<'a> Parser<'a> {
         let left_label = self.optional_label()?;
         self.token(")")?;
         self.skip_whitespace();
+        if left_label.is_some() && self.source[self.offset..].starts_with("RETURN") {
+            self.keyword("RETURN")?;
+            let returned = self.identifier()?;
+            if returned != left_var {
+                return Err(ParseError {
+                    offset: self.offset.saturating_sub(returned.len()),
+                    kind: ParseErrorKind::ReturnedVariableMismatch {
+                        expected: left_var,
+                        found: returned,
+                    },
+                });
+            }
+            self.skip_whitespace();
+            if self.offset != self.source.len() {
+                return Err(ParseError {
+                    offset: self.offset,
+                    kind: ParseErrorKind::TrailingInput,
+                });
+            }
+            return Ok(MatchAst {
+                src_var: returned.clone(),
+                relation: None,
+                dst_var: returned.clone(),
+                src_label: left_label,
+                dst_label: None,
+                via_var: returned,
+                hop2_relation: None,
+                hop2_dst_var: None,
+                projection: ReturnProjection::Source,
+                direction: EdgeDirection::Outgoing,
+                neq: None,
+                eq: None,
+            });
+        }
         let incoming = if self.source[self.offset..].starts_with('<') {
             self.token("<")?;
             self.token("-")?;
@@ -393,7 +433,7 @@ impl<'a> Parser<'a> {
         }
         Ok(MatchAst {
             src_var,
-            relation,
+            relation: Some(relation),
             dst_var,
             src_label,
             dst_label,
@@ -503,7 +543,7 @@ mod tests {
         assert_eq!(
             plan,
             BoundPlan {
-                relation: RelationId(17),
+                relation: Some(RelationId(17)),
                 src_var: "a".into(),
                 dst_var: "b".into(),
                 src_label: None,
@@ -517,6 +557,36 @@ mod tests {
                 eq: None,
             }
         );
+    }
+
+    #[test]
+    fn labeled_node_only_match_binds_without_a_relation() {
+        let binder = RelationBind::new().with_label("Person", LabelId(7));
+        let plan = binder
+            .bind("MATCH (a:Person) RETURN a")
+            .expect("labeled node-only MATCH binds");
+        assert_eq!(plan.relation, None);
+        assert_eq!(plan.src_var, "a");
+        assert_eq!(plan.src_label, Some(LabelId(7)));
+        assert_eq!(plan.projection, ReturnProjection::Source);
+
+        assert!(matches!(
+            binder.bind("MATCH (a) RETURN a"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a:Person) RETURN b"),
+            Err(BindError::Parse(ParseError {
+                kind: ParseErrorKind::ReturnedVariableMismatch { .. },
+                ..
+            }))
+        ));
+
+        let edge = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .bind("MATCH (a)-[:R]->(b) RETURN b")
+            .expect("edge MATCH still binds");
+        assert_eq!(edge.relation, Some(RelationId(17)));
     }
 
     #[test]
