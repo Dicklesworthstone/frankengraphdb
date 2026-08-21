@@ -125,6 +125,8 @@ pub struct BoundPlan {
     pub dst_prop_ne: Option<(PropertyKeyId, i64)>,
     /// Destination-property strict integer greater-than predicate.
     pub dst_prop_gt: Option<(PropertyKeyId, i64)>,
+    /// Destination-property strict integer less-than predicate.
+    pub dst_prop_lt: Option<(PropertyKeyId, i64)>,
     /// Positive result-row bound applied after projection.
     pub limit: Option<u64>,
     /// Result rows dropped from the front after projection, before `limit`.
@@ -246,6 +248,7 @@ impl RelationBind {
         let dst_prop = bind_property(&self.properties, ast.dst_prop)?;
         let dst_prop_ne = bind_property(&self.properties, ast.dst_prop_ne)?;
         let dst_prop_gt = bind_property(&self.properties, ast.dst_prop_gt)?;
+        let dst_prop_lt = bind_property(&self.properties, ast.dst_prop_lt)?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
@@ -266,6 +269,7 @@ impl RelationBind {
             dst_prop,
             dst_prop_ne,
             dst_prop_gt,
+            dst_prop_lt,
             limit: ast.limit,
             skip: ast.skip,
         })
@@ -321,6 +325,7 @@ struct MatchAst {
     dst_prop: Option<(String, i64)>,
     dst_prop_ne: Option<(String, i64)>,
     dst_prop_gt: Option<(String, i64)>,
+    dst_prop_lt: Option<(String, i64)>,
     limit: Option<u64>,
     skip: Option<u64>,
 }
@@ -429,6 +434,7 @@ impl<'a> Parser<'a> {
                 dst_prop: None,
                 dst_prop_ne: None,
                 dst_prop_gt: None,
+                dst_prop_lt: None,
                 limit,
                 skip,
             });
@@ -516,6 +522,7 @@ impl<'a> Parser<'a> {
             dst_prop,
             dst_prop_ne,
             dst_prop_gt,
+            dst_prop_lt,
         ) = if (hop2_relation
             .is_none()
             || direction == EdgeDirection::Outgoing)
@@ -544,14 +551,11 @@ impl<'a> Parser<'a> {
                     self.token("<")?;
                     self.token(">")?;
                 } else if is_prop_lt {
-                    if direction != EdgeDirection::Outgoing
-                        || hop2_relation.is_some()
-                        || left != src_var
-                    {
+                    if direction != EdgeDirection::Outgoing || hop2_relation.is_some() {
                         return Err(ParseError {
                             offset: self.offset,
                             kind: ParseErrorKind::ExpectedToken(
-                                "outgoing one-hop source property before <",
+                                "outgoing one-hop property before <",
                             ),
                         });
                     }
@@ -648,6 +652,7 @@ impl<'a> Parser<'a> {
                         dst_prop,
                         dst_prop_ne,
                         None,
+                        None,
                     )
                 } else if is_prop_ne && first_is_source {
                     (
@@ -655,6 +660,7 @@ impl<'a> Parser<'a> {
                         None,
                         None,
                         Some((property, value)),
+                        None,
                         None,
                         None,
                         None,
@@ -672,6 +678,7 @@ impl<'a> Parser<'a> {
                         None,
                         Some((property, value)),
                         None,
+                        None,
                     )
                 } else if is_prop_gt && first_is_source {
                     (
@@ -680,6 +687,7 @@ impl<'a> Parser<'a> {
                         None,
                         None,
                         Some((property, value)),
+                        None,
                         None,
                         None,
                         None,
@@ -696,6 +704,20 @@ impl<'a> Parser<'a> {
                         None,
                         None,
                         Some((property, value)),
+                        None,
+                    )
+                } else if is_prop_lt && first_is_source {
+                    (
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some((property, value)),
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                 } else if is_prop_lt {
                     (
@@ -704,16 +726,18 @@ impl<'a> Parser<'a> {
                         None,
                         None,
                         None,
+                        None,
+                        None,
+                        None,
+                        None,
                         Some((property, value)),
-                        None,
-                        None,
-                        None,
                     )
                 } else if first_is_source {
                     (
                         None,
                         None,
                         Some((property, value)),
+                        None,
                         None,
                         None,
                         None,
@@ -730,6 +754,7 @@ impl<'a> Parser<'a> {
                         None,
                         None,
                         Some((property, value)),
+                        None,
                         None,
                         None,
                     )
@@ -763,13 +788,35 @@ impl<'a> Parser<'a> {
                     variables = (variables.1, variables.0);
                 }
                 if is_neq {
-                    (Some(variables), None, None, None, None, None, None, None, None)
+                    (
+                        Some(variables),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                 } else {
-                    (None, Some(variables), None, None, None, None, None, None, None)
+                    (
+                        None,
+                        Some(variables),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                 }
             }
         } else {
-            (None, None, None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None, None, None)
         };
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
@@ -817,6 +864,7 @@ impl<'a> Parser<'a> {
             dst_prop,
             dst_prop_ne,
             dst_prop_gt,
+            dst_prop_lt,
             limit,
             skip,
         })
@@ -1023,6 +1071,7 @@ mod tests {
                 dst_prop: None,
                 dst_prop_ne: None,
                 dst_prop_gt: None,
+                dst_prop_lt: None,
                 limit: None,
                 skip: None,
             }
@@ -1403,8 +1452,40 @@ mod tests {
 
         for statement in [
             "MATCH (a)-[:R]->(b) WHERE b.k >= 1 RETURN a",
-            "MATCH (a)-[:R]->(b) WHERE b.k < 1 RETURN a",
             "MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a",
+        ] {
+            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
+        }
+    }
+
+    #[test]
+    fn destination_property_strict_less_than_binds() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_property("k", PropertyKeyId(7));
+        let plan = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b.k < 1 RETURN a")
+            .expect("destination property strict less-than binds");
+        assert_eq!(plan.dst_prop_lt, Some((PropertyKeyId(7), 1)));
+        assert_eq!(plan.dst_prop, None);
+        assert_eq!(plan.dst_prop_ne, None);
+        assert_eq!(plan.dst_prop_gt, None);
+
+        let inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b.k <> 1 RETURN a")
+            .expect("destination inequality remains grammar");
+        assert_eq!(inequality.dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(inequality.dst_prop_lt, None);
+
+        let greater = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b.k > 1 RETURN a")
+            .expect("destination greater-than remains grammar");
+        assert_eq!(greater.dst_prop_gt, Some((PropertyKeyId(7), 1)));
+        assert_eq!(greater.dst_prop_lt, None);
+
+        for statement in [
+            "MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a",
+            "MATCH (a)-[:R]->(b) WHERE b.k >= 1 RETURN a",
         ] {
             assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
         }
