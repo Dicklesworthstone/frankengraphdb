@@ -174,17 +174,57 @@ fn execute_over_adjacencies(
     })
 }
 
-/// The label the PROJECTED role must carry, if the plan binds one
-/// (fgdb-w5-parsers-nje.5): `RETURN a` rows answer for the source variable
-/// and its label, `RETURN b` rows for the destination's. An unlabeled plan
-/// binds nothing here and must consult no vertex row at all; the two-hop
-/// far end has no label field in this bounded grammar.
-fn projected_label(plan: &BoundPlan) -> Option<LabelId> {
-    match plan.projection {
-        ReturnProjection::Source => plan.src_label,
-        ReturnProjection::Destination => plan.dst_label,
-        ReturnProjection::Hop2Destination => None,
+/// Apply the plan's node-label predicates to the hop-1 adjacency BEFORE the
+/// kernel runs (fgdb-w5-parsers-nje.5, corrected law): labels constrain the
+/// MATCH itself, independent of projection. `src_label` drops anchors — map
+/// keys — that lack it, so their whole expansions vanish (RETURN b of
+/// `(a:Person)-[:R]->(b)` answers only Person sources' dests); `dst_label`
+/// drops hop-1 destinations inside each expansion (RETURN a of
+/// `(a)-[:R]->(b:L)` keeps only sources still reaching an L dest, because
+/// the kernel's Source arm asks for a non-empty expansion). The parser
+/// already assigned each label to its edge-flow role — the incoming swap
+/// included — so no direction special-casing happens here. An unlabeled
+/// plan consults no vertex row at all.
+fn filter_hop1_by_labels<V: Vfs + Clone>(
+    plan: &BoundPlan,
+    db: &Database<V>,
+    as_of: Option<CommitSeq>,
+    hop1: &mut BTreeMap<VId, Vec<VId>>,
+) -> Result<(), ReadError> {
+    if plan.src_label.is_none() && plan.dst_label.is_none() {
+        return Ok(());
     }
+    let has_label = |vid: VId, label: LabelId| -> Result<bool, ReadError> {
+        let row = match as_of {
+            Some(seq) => db.vertex_at(vid, seq)?,
+            None => db.vertex(vid)?,
+        };
+        Ok(row.is_some_and(|row| row.labels.contains(&label)))
+    };
+    if let Some(label) = plan.src_label {
+        let keys: Vec<VId> = hop1.keys().copied().collect();
+        let mut labeled = std::collections::BTreeSet::new();
+        for vid in keys {
+            if has_label(vid, label)? {
+                labeled.insert(vid);
+            }
+        }
+        hop1.retain(|anchor, _| labeled.contains(anchor));
+    }
+    if let Some(label) = plan.dst_label {
+        let dests: std::collections::BTreeSet<VId> =
+            hop1.values().flatten().copied().collect();
+        let mut labeled = std::collections::BTreeSet::new();
+        for vid in dests {
+            if has_label(vid, label)? {
+                labeled.insert(vid);
+            }
+        }
+        for expansion in hop1.values_mut() {
+            expansion.retain(|dst| labeled.contains(dst));
+        }
+    }
+    Ok(())
 }
 
 /// Execute the pinned bound MATCH expansion over the database's live Strata
@@ -194,29 +234,15 @@ pub(crate) fn execute<V: Vfs + Clone>(
     db: &Database<V>,
 ) -> Result<Vec<VId>, ReadError> {
     let records = db.edges()?;
-    let rows = if plan.direction == EdgeDirection::Undirected {
-        let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
-        execute_over_adjacencies(plan, hop1, hop2)?
+    let (mut hop1, hop2) = if plan.direction == EdgeDirection::Undirected {
+        undirected_adjacencies(&records, plan.relation, plan.hop2_relation)
     } else if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
-        let (hop1, hop2) = inverted_adjacencies(&records, plan.relation, plan.hop2_relation);
-        execute_over_adjacencies(plan, hop1, hop2)?
+        inverted_adjacencies(&records, plan.relation, plan.hop2_relation)
     } else {
-        let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
-        execute_over_adjacencies(plan, hop1, hop2)?
+        relation_adjacencies(records, plan.relation, plan.hop2_relation)
     };
-    let Some(label) = projected_label(plan) else {
-        return Ok(rows);
-    };
-    let mut kept = Vec::with_capacity(rows.len());
-    for vid in rows {
-        if db
-            .vertex(vid)?
-            .is_some_and(|row| row.labels.contains(&label))
-        {
-            kept.push(vid);
-        }
-    }
-    Ok(kept)
+    filter_hop1_by_labels(plan, db, None, &mut hop1)?;
+    execute_over_adjacencies(plan, hop1, hop2)
 }
 
 /// Execute the pinned bound MATCH expansion at one historical frontier —
@@ -227,27 +253,13 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
     as_of: CommitSeq,
 ) -> Result<Vec<VId>, ReadError> {
     let records = db.edges_at(as_of)?;
-    let rows = if plan.direction == EdgeDirection::Undirected {
-        let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
-        execute_over_adjacencies(plan, hop1, hop2)?
+    let (mut hop1, hop2) = if plan.direction == EdgeDirection::Undirected {
+        undirected_adjacencies(&records, plan.relation, plan.hop2_relation)
     } else if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
-        let (hop1, hop2) = inverted_adjacencies(&records, plan.relation, plan.hop2_relation);
-        execute_over_adjacencies(plan, hop1, hop2)?
+        inverted_adjacencies(&records, plan.relation, plan.hop2_relation)
     } else {
-        let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
-        execute_over_adjacencies(plan, hop1, hop2)?
+        relation_adjacencies(records, plan.relation, plan.hop2_relation)
     };
-    let Some(label) = projected_label(plan) else {
-        return Ok(rows);
-    };
-    let mut kept = Vec::with_capacity(rows.len());
-    for vid in rows {
-        if db
-            .vertex_at(vid, as_of)?
-            .is_some_and(|row| row.labels.contains(&label))
-        {
-            kept.push(vid);
-        }
-    }
-    Ok(kept)
+    filter_hop1_by_labels(plan, db, Some(as_of), &mut hop1)?;
+    execute_over_adjacencies(plan, hop1, hop2)
 }

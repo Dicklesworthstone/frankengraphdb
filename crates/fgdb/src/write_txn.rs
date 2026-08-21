@@ -719,9 +719,41 @@ impl WriteTxn {
         // its overlay out-edges in the plan's relation is exactly the old
         // whole-map filter — but through the shared row discipline, so a
         // CGSE change cannot drift the two surfaces apart.
+        // Node-label predicates constrain the MATCH itself, independent of
+        // projection (fgdb-w5-parsers-nje.5, corrected law), read through the
+        // OVERLAY vertex face so a staged label is visible and a staged
+        // delete hides the row: src_label drops anchors before expansion,
+        // dst_label drops hop-1 step results below. Unlabeled plans consult
+        // no vertex row at all.
+        let label_holders = |label: fgdb_delta_types::LabelId| -> Result<
+            std::collections::BTreeSet<VId>,
+            WriteTxnError,
+        > {
+            let mut holders = std::collections::BTreeSet::new();
+            for vid in vertices.iter().copied() {
+                if self
+                    .vertex(database, vid)?
+                    .is_some_and(|row| row.labels.contains(&label))
+                {
+                    holders.insert(vid);
+                }
+            }
+            Ok(holders)
+        };
+        let src_labeled = plan.src_label.map(&label_holders).transpose()?;
+        let dst_labeled = plan.dst_label.map(&label_holders).transpose()?;
+        let anchors: Vec<VId> = vertices
+            .iter()
+            .copied()
+            .filter(|anchor| {
+                src_labeled
+                    .as_ref()
+                    .is_none_or(|labeled| labeled.contains(anchor))
+            })
+            .collect();
         let destinations = crate::execute_bound_plan_over(
             &plan,
-            vertices.iter().copied(),
+            anchors,
             |source, relation| {
                 // One orientation-aware neighbour walk serves every face
                 // (fgdb-w5-parsers-nje.2 one-hop, fgdb-gql-two-hop-8pfw,
@@ -763,6 +795,9 @@ impl WriteTxn {
                 if plan.neq.is_some() {
                     vias.retain(|via| *via != source);
                 }
+                if let Some(labeled) = dst_labeled.as_ref() {
+                    vias.retain(|via| labeled.contains(via));
+                }
                 let Some(hop2_relation) = plan.hop2_relation else {
                     return Ok(vias);
                 };
@@ -783,31 +818,6 @@ impl WriteTxn {
                 })
             },
         )?;
-        // The projected-role label filter (fgdb-w5-parsers-nje.5), mirroring
-        // gql_exec: rows answer for the projected variable, so its bound
-        // label is the one that gates them — read through the OVERLAY vertex
-        // face, so a staged label is visible and a staged delete hides the
-        // row. Unlabeled plans consult no vertex at all.
-        let wanted_label = match plan.projection {
-            fgdb_gql::ReturnProjection::Source => plan.src_label,
-            fgdb_gql::ReturnProjection::Destination => plan.dst_label,
-            fgdb_gql::ReturnProjection::Hop2Destination => None,
-        };
-        let destinations = match wanted_label {
-            None => destinations,
-            Some(label) => {
-                let mut kept = Vec::with_capacity(destinations.len());
-                for vid in destinations {
-                    if self
-                        .vertex(database, vid)?
-                        .is_some_and(|row| row.labels.contains(&label))
-                    {
-                        kept.push(vid);
-                    }
-                }
-                kept
-            }
-        };
         let mut read_set = self.read_set.borrow_mut();
         read_set.extend(observed);
         // MATCH result materialization is itself a vertex observation. Keep
