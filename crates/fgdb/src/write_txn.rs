@@ -353,7 +353,13 @@ impl WriteTxn {
                     .collect())
             },
         )?;
-        self.read_set.borrow_mut().extend(observed);
+        let mut read_set = self.read_set.borrow_mut();
+        read_set.extend(observed);
+        // MATCH result materialization is itself a vertex observation. Keep
+        // this explicit even when the scan already recorded the same vertex:
+        // future narrower expansion kernels must not silently lose result-row
+        // read dependencies.
+        read_set.extend(destinations.iter().copied().map(ElementId::Vertex));
         Ok(destinations)
     }
 
