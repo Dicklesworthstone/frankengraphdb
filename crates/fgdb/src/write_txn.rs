@@ -766,22 +766,30 @@ impl WriteTxn {
         };
         let src_labeled = plan.src_label.map(&label_holders).transpose()?;
         let dst_labeled = plan.dst_label.map(&label_holders).transpose()?;
+        let prop_holders = |key: fgdb_delta_types::PropertyKeyId, value: i64| -> Result<
+            std::collections::BTreeSet<VId>,
+            WriteTxnError,
+        > {
+            let wanted = CanonicalScalar::Int(value);
+            let mut holders = std::collections::BTreeSet::new();
+            for vid in vertices.iter().copied() {
+                if self.vertex(database, vid)?.is_some_and(|row| {
+                    row.props
+                        .iter()
+                        .any(|(property, scalar)| *property == key && *scalar == wanted)
+                }) {
+                    holders.insert(vid);
+                }
+            }
+            Ok(holders)
+        };
         let src_prop_ok = match plan.src_prop {
             None => None,
-            Some((key, value)) => {
-                let wanted = CanonicalScalar::Int(value);
-                let mut holders = std::collections::BTreeSet::new();
-                for vid in vertices.iter().copied() {
-                    if self.vertex(database, vid)?.is_some_and(|row| {
-                        row.props
-                            .iter()
-                            .any(|(property, scalar)| *property == key && *scalar == wanted)
-                    }) {
-                        holders.insert(vid);
-                    }
-                }
-                Some(holders)
-            }
+            Some((key, value)) => Some(prop_holders(key, value)?),
+        };
+        let dst_prop_ok = match plan.dst_prop {
+            None => None,
+            Some((key, value)) => Some(prop_holders(key, value)?),
         };
         let anchors: Vec<VId> = vertices
             .iter()
@@ -846,6 +854,9 @@ impl WriteTxn {
                 }
                 if let Some(labeled) = dst_labeled.as_ref() {
                     vias.retain(|via| labeled.contains(via));
+                }
+                if let Some(holders) = dst_prop_ok.as_ref() {
+                    vias.retain(|via| holders.contains(via));
                 }
                 let Some(hop2_relation) = plan.hop2_relation else {
                     return Ok(vias);

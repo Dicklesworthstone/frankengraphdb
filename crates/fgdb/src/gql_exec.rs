@@ -272,6 +272,40 @@ fn filter_hop1_by_src_prop<V: Vfs + Clone>(
     Ok(())
 }
 
+/// Dest-property integer equality (fgdb-w5-parsers-nje.9) drops hop-1
+/// DESTINATIONS whose vertex props do not carry `(key, Int(n))`. No-WHERE
+/// plans consult no property row.
+fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
+    plan: &BoundPlan,
+    db: &Database<V>,
+    as_of: Option<CommitSeq>,
+    hop1: &mut BTreeMap<VId, Vec<VId>>,
+) -> Result<(), ReadError> {
+    let Some((key, value)) = plan.dst_prop else {
+        return Ok(());
+    };
+    let wanted = CanonicalScalar::Int(value);
+    let dests: std::collections::BTreeSet<VId> = hop1.values().flatten().copied().collect();
+    let mut kept = std::collections::BTreeSet::new();
+    for vid in dests {
+        let row = match as_of {
+            Some(seq) => db.vertex_at(vid, seq)?,
+            None => db.vertex(vid)?,
+        };
+        if row.is_some_and(|row| {
+            row.props
+                .iter()
+                .any(|(property, scalar)| *property == key && *scalar == wanted)
+        }) {
+            kept.insert(vid);
+        }
+    }
+    for expansion in hop1.values_mut() {
+        expansion.retain(|dst| kept.contains(dst));
+    }
+    Ok(())
+}
+
 /// The node-only scan face (fgdb-w5-parsers-nje.7): a plan with no edge
 /// relation never touches the edge table — its rows are the vids whose
 /// labels carry the pattern's label, under the same CGSE row contract
@@ -311,6 +345,7 @@ pub(crate) fn execute<V: Vfs + Clone>(
     };
     filter_hop1_by_labels(plan, db, None, &mut hop1)?;
     filter_hop1_by_src_prop(plan, db, None, &mut hop1)?;
+    filter_hop1_by_dst_prop(plan, db, None, &mut hop1)?;
     execute_over_adjacencies(plan, hop1, hop2)
 }
 
@@ -334,5 +369,6 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
     };
     filter_hop1_by_labels(plan, db, Some(as_of), &mut hop1)?;
     filter_hop1_by_src_prop(plan, db, Some(as_of), &mut hop1)?;
+    filter_hop1_by_dst_prop(plan, db, Some(as_of), &mut hop1)?;
     execute_over_adjacencies(plan, hop1, hop2)
 }
