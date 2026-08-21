@@ -18,9 +18,32 @@
 use crate::{Database, EdgeRecord, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::RelationId;
-use fgdb_gql::{BoundPlan, ReturnProjection};
+use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
 use fgdb_types::{CommitSeq, VId};
 use std::collections::BTreeMap;
+
+/// Both-orientation adjacency for one relation, filled by ONE scan
+/// (fgdb-w5-parsers-nje.2): each edge lists its dst under its src AND its
+/// src under its dst, so a vertex's expansion is the union of its outgoing
+/// dests and incoming srcs — and the key set is every vertex incident to a
+/// matching edge, which is exactly the undirected pattern's source set (a
+/// dest-only vertex is still a `RETURN a` row).
+fn undirected_adjacency(records: &[EdgeRecord], relation: RelationId) -> BTreeMap<VId, Vec<VId>> {
+    let mut adjacency = BTreeMap::<VId, Vec<VId>>::new();
+    for record in records {
+        if record.entry.relation == relation {
+            adjacency
+                .entry(record.entry.src)
+                .or_default()
+                .push(record.entry.dst);
+            adjacency
+                .entry(record.entry.dst)
+                .or_default()
+                .push(record.entry.src);
+        }
+    }
+    adjacency
+}
 
 /// src → dsts adjacency for one relation, and the same for the optional
 /// hop-2 relation, filled by ONE scan of the fetched edge table.
@@ -89,7 +112,12 @@ pub(crate) fn execute<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
 ) -> Result<Vec<VId>, ReadError> {
-    let (hop1, hop2) = relation_adjacencies(db.edges()?, plan.relation, plan.hop2_relation);
+    let records = db.edges()?;
+    if plan.direction == EdgeDirection::Undirected && plan.hop2_relation.is_none() {
+        let adjacency = undirected_adjacency(&records, plan.relation);
+        return execute_over_adjacencies(plan, adjacency, BTreeMap::new());
+    }
+    let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
     execute_over_adjacencies(plan, hop1, hop2)
 }
 
@@ -100,6 +128,11 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
     db: &Database<V>,
     as_of: CommitSeq,
 ) -> Result<Vec<VId>, ReadError> {
-    let (hop1, hop2) = relation_adjacencies(db.edges_at(as_of)?, plan.relation, plan.hop2_relation);
+    let records = db.edges_at(as_of)?;
+    if plan.direction == EdgeDirection::Undirected && plan.hop2_relation.is_none() {
+        let adjacency = undirected_adjacency(&records, plan.relation);
+        return execute_over_adjacencies(plan, adjacency, BTreeMap::new());
+    }
+    let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
     execute_over_adjacencies(plan, hop1, hop2)
 }

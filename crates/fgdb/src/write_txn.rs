@@ -723,6 +723,29 @@ impl WriteTxn {
             &plan,
             vertices.iter().copied(),
             |source, relation| {
+                // Undirected one-hop (fgdb-w5-parsers-nje.2): a vertex
+                // expands to the union of its outgoing dests and incoming
+                // srcs over the staged triples — the overlay twin of
+                // gql_exec's both-orientation adjacency.
+                if plan.direction == fgdb_gql::EdgeDirection::Undirected
+                    && plan.hop2_relation.is_none()
+                {
+                    return Ok(edges
+                        .values()
+                        .filter_map(|(edge_src, edge_relation, edge_dst)| {
+                            if *edge_relation != relation {
+                                return None;
+                            }
+                            if *edge_src == source && vertices.contains(edge_dst) {
+                                Some(*edge_dst)
+                            } else if *edge_dst == source && vertices.contains(edge_src) {
+                                Some(*edge_src)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect());
+                }
                 let vias: Vec<VId> = edges
                     .values()
                     .filter_map(|(edge_src, edge_relation, dst)| {
