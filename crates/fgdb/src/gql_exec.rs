@@ -22,27 +22,46 @@ use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
 use fgdb_types::{CommitSeq, VId};
 use std::collections::BTreeMap;
 
-/// Both-orientation adjacency for one relation, filled by ONE scan
-/// (fgdb-w5-parsers-nje.2): each edge lists its dst under its src AND its
-/// src under its dst, so a vertex's expansion is the union of its outgoing
-/// dests and incoming srcs — and the key set is every vertex incident to a
-/// matching edge, which is exactly the undirected pattern's source set (a
-/// dest-only vertex is still a `RETURN a` row).
-fn undirected_adjacency(records: &[EdgeRecord], relation: RelationId) -> BTreeMap<VId, Vec<VId>> {
-    let mut adjacency = BTreeMap::<VId, Vec<VId>>::new();
+/// Both-orientation adjacency for the hop-1 relation AND the optional hop-2
+/// relation, filled by ONE loop over the fetched edge table
+/// (fgdb-w5-parsers-nje.2 one-hop, fgdb-gql-undir-2hop-7mrc two-hop) — the
+/// undirected twin of [`relation_adjacencies`]. Each edge lists its dst
+/// under its src AND its src under its dst, so a vertex's expansion is the
+/// union of outgoing dests and incoming srcs, and the hop-1 key set is
+/// every incident vertex (a dest-only vertex is still a `RETURN a` row).
+/// The composition downstream is map-agnostic, so feeding it these maps IS
+/// the undirected two-hop: vias are undirected hop-1 neighbours, and their
+/// undirected hop-2 neighbours (or the vias that have any) are the rows.
+fn undirected_adjacencies(
+    records: &[EdgeRecord],
+    hop1: RelationId,
+    hop2: Option<RelationId>,
+) -> (BTreeMap<VId, Vec<VId>>, BTreeMap<VId, Vec<VId>>) {
+    let mut hop1_adjacency = BTreeMap::<VId, Vec<VId>>::new();
+    let mut hop2_adjacency = BTreeMap::<VId, Vec<VId>>::new();
     for record in records {
-        if record.entry.relation == relation {
-            adjacency
+        if record.entry.relation == hop1 {
+            hop1_adjacency
                 .entry(record.entry.src)
                 .or_default()
                 .push(record.entry.dst);
-            adjacency
+            hop1_adjacency
+                .entry(record.entry.dst)
+                .or_default()
+                .push(record.entry.src);
+        }
+        if hop2 == Some(record.entry.relation) {
+            hop2_adjacency
+                .entry(record.entry.src)
+                .or_default()
+                .push(record.entry.dst);
+            hop2_adjacency
                 .entry(record.entry.dst)
                 .or_default()
                 .push(record.entry.src);
         }
     }
-    adjacency
+    (hop1_adjacency, hop2_adjacency)
 }
 
 /// src → dsts adjacency for one relation, and the same for the optional
@@ -113,9 +132,9 @@ pub(crate) fn execute<V: Vfs + Clone>(
     db: &Database<V>,
 ) -> Result<Vec<VId>, ReadError> {
     let records = db.edges()?;
-    if plan.direction == EdgeDirection::Undirected && plan.hop2_relation.is_none() {
-        let adjacency = undirected_adjacency(&records, plan.relation);
-        return execute_over_adjacencies(plan, adjacency, BTreeMap::new());
+    if plan.direction == EdgeDirection::Undirected {
+        let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
+        return execute_over_adjacencies(plan, hop1, hop2);
     }
     let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
     execute_over_adjacencies(plan, hop1, hop2)
@@ -129,9 +148,9 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
     as_of: CommitSeq,
 ) -> Result<Vec<VId>, ReadError> {
     let records = db.edges_at(as_of)?;
-    if plan.direction == EdgeDirection::Undirected && plan.hop2_relation.is_none() {
-        let adjacency = undirected_adjacency(&records, plan.relation);
-        return execute_over_adjacencies(plan, adjacency, BTreeMap::new());
+    if plan.direction == EdgeDirection::Undirected {
+        let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
+        return execute_over_adjacencies(plan, hop1, hop2);
     }
     let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
     execute_over_adjacencies(plan, hop1, hop2)

@@ -723,71 +723,50 @@ impl WriteTxn {
             &plan,
             vertices.iter().copied(),
             |source, relation| {
-                // Undirected one-hop (fgdb-w5-parsers-nje.2): a vertex
-                // expands to the union of its outgoing dests and incoming
-                // srcs over the staged triples — the overlay twin of
-                // gql_exec's both-orientation adjacency.
-                if plan.direction == fgdb_gql::EdgeDirection::Undirected
-                    && plan.hop2_relation.is_none()
-                {
-                    return Ok(edges
+                // One orientation-aware neighbour walk serves every face
+                // (fgdb-w5-parsers-nje.2 one-hop, fgdb-gql-two-hop-8pfw,
+                // fgdb-gql-undir-2hop-7mrc): a directed plan expands
+                // edge-flow only; an undirected plan expands both
+                // orientations — the overlay twin of gql_exec's
+                // per-direction adjacency builders.
+                let undirected = plan.direction == fgdb_gql::EdgeDirection::Undirected;
+                let step = |anchor: VId, step_relation: fgdb_delta_types::RelationId| -> Vec<VId> {
+                    edges
                         .values()
                         .filter_map(|(edge_src, edge_relation, edge_dst)| {
-                            if *edge_relation != relation {
+                            if *edge_relation != step_relation {
                                 return None;
                             }
-                            if *edge_src == source && vertices.contains(edge_dst) {
+                            if *edge_src == anchor && vertices.contains(edge_dst) {
                                 Some(*edge_dst)
-                            } else if *edge_dst == source && vertices.contains(edge_src) {
+                            } else if undirected
+                                && *edge_dst == anchor
+                                && vertices.contains(edge_src)
+                            {
                                 Some(*edge_src)
                             } else {
                                 None
                             }
                         })
-                        .collect());
-                }
-                let vias: Vec<VId> = edges
-                    .values()
-                    .filter_map(|(edge_src, edge_relation, dst)| {
-                        (*edge_src == source
-                            && *edge_relation == relation
-                            && vertices.contains(dst))
-                        .then_some(*dst)
-                    })
-                    .collect();
+                        .collect()
+                };
+                let vias = step(source, relation);
                 let Some(hop2_relation) = plan.hop2_relation else {
                     return Ok(vias);
                 };
-                // Two-hop over the SAME overlay triples (fgdb-gql-two-hop-8pfw),
-                // projection-shaped exactly as gql_exec composes the durable
-                // adjacency: the via projection keeps intermediates that
-                // continue, every other projection expands to the composed
-                // hop-2 destinations.
-                let continues = |via: &VId| {
-                    edges.values().any(|(edge_src, edge_relation, dst)| {
-                        edge_src == via
-                            && *edge_relation == hop2_relation
-                            && vertices.contains(dst)
-                    })
-                };
+                // Two-hop composition, projection-shaped exactly as gql_exec
+                // composes the durable adjacency: the via projection keeps
+                // intermediates that continue, every other projection expands
+                // to the composed hop-2 neighbours.
                 Ok(match plan.projection {
-                    fgdb_gql::ReturnProjection::Destination => {
-                        vias.into_iter().filter(|via| continues(via)).collect()
-                    }
+                    fgdb_gql::ReturnProjection::Destination => vias
+                        .into_iter()
+                        .filter(|via| !step(*via, hop2_relation).is_empty())
+                        .collect(),
                     fgdb_gql::ReturnProjection::Source
                     | fgdb_gql::ReturnProjection::Hop2Destination => vias
                         .into_iter()
-                        .flat_map(|via| {
-                            edges
-                                .values()
-                                .filter_map(|(edge_src, edge_relation, dst)| {
-                                    (*edge_src == via
-                                        && *edge_relation == hop2_relation
-                                        && vertices.contains(dst))
-                                    .then_some(*dst)
-                                })
-                                .collect::<Vec<_>>()
-                        })
+                        .flat_map(|via| step(via, hop2_relation))
                         .collect(),
                 })
             },
