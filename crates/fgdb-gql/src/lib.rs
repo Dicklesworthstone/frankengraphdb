@@ -655,6 +655,9 @@ impl<'a> Parser<'a> {
                     && !(direction == EdgeDirection::Outgoing
                         && hop2_relation.is_some()
                         && left == src_var)
+                    && !(direction == EdgeDirection::Outgoing
+                        && hop2_relation.is_none()
+                        && left == src_var)
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -1801,10 +1804,11 @@ mod tests {
         assert_eq!(plan.skip, Some(1));
         assert_eq!(plan.limit, Some(1));
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"),
-            Err(BindError::Parse(_))
-        ));
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b")
+            .expect("source property bang inequality binds");
+        assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(bang_inequality.src_prop, None);
 
         let equality = binder
             .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
@@ -2017,10 +2021,10 @@ mod tests {
         assert_eq!(source.src_prop_le, Some((PropertyKeyId(7), 1)));
         assert_eq!(source.dst_prop_le, None);
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"),
-            Err(BindError::Parse(_))
-        ));
+        let bang_source = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b")
+            .expect("source bang inequality remains grammar");
+        assert_eq!(bang_source.src_prop_ne, Some((PropertyKeyId(7), 1)));
     }
 
     #[test]
@@ -2076,9 +2080,10 @@ mod tests {
             .expect("source inequality remains grammar");
         assert_eq!(inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
 
-        for statement in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
-            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
-        }
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b")
+            .expect("source bang inequality remains grammar");
+        assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
     }
 
     #[test]
@@ -2150,9 +2155,10 @@ mod tests {
         assert_eq!(less.src_prop_lt, Some((PropertyKeyId(7), 1)));
         assert_eq!(less.src_prop_ge, None);
 
-        for statement in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
-            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
-        }
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b")
+            .expect("source bang inequality remains grammar");
+        assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
     }
 
     #[test]
@@ -2251,9 +2257,10 @@ mod tests {
         assert_eq!(inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
         assert_eq!(inequality.src_prop_le, None);
 
-        for statement in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
-            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
-        }
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b")
+            .expect("source bang inequality remains grammar");
+        assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
     }
 
     #[test]
@@ -2290,10 +2297,10 @@ mod tests {
                 .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m = 9 RETURN b")
                 .is_ok()
         );
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"),
-            Err(BindError::Parse(_))
-        ));
+        let bang_inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b")
+            .expect("source bang inequality remains grammar");
+        assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
     }
 
     #[test]
