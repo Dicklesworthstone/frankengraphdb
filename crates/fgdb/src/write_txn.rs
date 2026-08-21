@@ -369,6 +369,25 @@ impl WriteTxn {
         Ok(destinations)
     }
 
+    /// Execute the pinned overlay MATCH and certify its bound plan against the
+    /// transaction basis rather than the database's potentially newer frontier.
+    pub fn execute_gql_certified<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        src: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<VId>, crate::GqlPlanCertificate), WriteTxnError> {
+        let plan = bind.bind(src).map_err(|error| {
+            WriteTxnError::Gql(match error {
+                fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+                unbound => GqlError::Bind(unbound),
+            })
+        })?;
+        let rows = self.execute_gql(database, src, bind)?;
+        let certificate = crate::gql_cert::certify(&plan, self.basis());
+        Ok((rows, certificate))
+    }
+
     /// Commit the prepared batch exactly as derived, then release the pin.
     pub async fn commit<V: Vfs + Clone>(
         &mut self,
