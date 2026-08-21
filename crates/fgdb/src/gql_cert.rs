@@ -25,6 +25,25 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
     hasher.update(&plan.relation.0.to_be_bytes());
     update_string(&mut hasher, &plan.src_var);
     update_string(&mut hasher, &plan.dst_var);
+    update_string(&mut hasher, &plan.via_var);
+    match plan.hop2_relation {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(relation) => {
+            hasher.update(&[1]);
+            hasher.update(&relation.0.to_be_bytes());
+        }
+    }
+    match &plan.hop2_dst_var {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(dst_var) => {
+            hasher.update(&[1]);
+            update_string(&mut hasher, dst_var);
+        }
+    }
     hasher.update(&[projection_tag(plan.projection)]);
     hasher.update(&snapshot_seq.0.to_be_bytes());
 
@@ -38,6 +57,7 @@ fn projection_tag(projection: ReturnProjection) -> u8 {
     match projection {
         ReturnProjection::Destination => 0,
         ReturnProjection::Source => 1,
+        ReturnProjection::Hop2Destination => 2,
     }
 }
 
@@ -67,6 +87,9 @@ mod tests {
             relation: RelationId(relation),
             src_var: "a".to_owned(),
             dst_var: "b".to_owned(),
+            via_var: String::new(),
+            hop2_relation: None,
+            hop2_dst_var: None,
             projection: ReturnProjection::Destination,
             direction: EdgeDirection::Outgoing,
         }
@@ -116,5 +139,32 @@ mod tests {
     fn return_projection_tags_are_stable() {
         assert_eq!(projection_tag(ReturnProjection::Destination), 0);
         assert_eq!(projection_tag(ReturnProjection::Source), 1);
+        assert_eq!(projection_tag(ReturnProjection::Hop2Destination), 2);
+    }
+
+    #[test]
+    fn second_hop_changes_digest() {
+        let one_hop = plan(7);
+        let mut two_hop = one_hop.clone();
+        two_hop.via_var = "b".to_owned();
+        two_hop.hop2_relation = Some(RelationId(8));
+        two_hop.hop2_dst_var = Some("c".to_owned());
+
+        assert_ne!(
+            certify(&one_hop, CommitSeq(11)).digest,
+            certify(&two_hop, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn second_hop_projection_changes_digest() {
+        let destination = plan(7);
+        let mut hop2_destination = destination.clone();
+        hop2_destination.projection = ReturnProjection::Hop2Destination;
+
+        assert_ne!(
+            certify(&destination, CommitSeq(11)).digest,
+            certify(&hop2_destination, CommitSeq(11)).digest
+        );
     }
 }
