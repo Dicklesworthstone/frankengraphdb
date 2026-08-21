@@ -71,6 +71,7 @@ impl From<ParseError> for BindError {
 pub enum ReturnProjection {
     Source,
     Destination,
+    Hop2Destination,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +86,9 @@ pub struct BoundPlan {
     pub relation: RelationId,
     pub src_var: String,
     pub dst_var: String,
+    pub via_var: String,
+    pub hop2_relation: Option<RelationId>,
+    pub hop2_dst_var: Option<String>,
     pub projection: ReturnProjection,
     pub direction: EdgeDirection,
 }
@@ -141,10 +145,23 @@ impl RelationBind {
                 name: ast.relation.clone(),
             }
         })?;
+        let hop2_relation = ast
+            .hop2_relation
+            .as_ref()
+            .map(|name| {
+                self.relations
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| BindError::UnknownRelation { name: name.clone() })
+            })
+            .transpose()?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
             dst_var: ast.dst_var,
+            via_var: ast.via_var,
+            hop2_relation,
+            hop2_dst_var: ast.hop2_dst_var,
             projection: ast.projection,
             direction: ast.direction,
         })
@@ -156,6 +173,9 @@ struct MatchAst {
     src_var: String,
     relation: String,
     dst_var: String,
+    via_var: String,
+    hop2_relation: Option<String>,
+    hop2_dst_var: Option<String>,
     projection: ReturnProjection,
     direction: EdgeDirection,
 }
@@ -199,9 +219,30 @@ impl<'a> Parser<'a> {
             EdgeDirection::Outgoing => (left_var, right_var),
             EdgeDirection::Incoming => (right_var, left_var),
         };
+        let via_var = dst_var.clone();
+        self.skip_whitespace();
+        let (hop2_relation, hop2_dst_var) = if direction == EdgeDirection::Outgoing
+            && self.source[self.offset..].starts_with('-')
+        {
+            self.token("-")?;
+            self.token("[")?;
+            self.token(":")?;
+            let relation = self.identifier()?;
+            self.token("]")?;
+            self.token("-")?;
+            self.token(">")?;
+            self.token("(")?;
+            let dst = self.identifier()?;
+            self.token(")")?;
+            (Some(relation), Some(dst))
+        } else {
+            (None, None)
+        };
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
-        let projection = if returned == dst_var {
+        let projection = if hop2_dst_var.as_ref() == Some(&returned) {
+            ReturnProjection::Hop2Destination
+        } else if returned == dst_var {
             ReturnProjection::Destination
         } else if returned == src_var {
             ReturnProjection::Source
@@ -225,6 +266,9 @@ impl<'a> Parser<'a> {
             src_var,
             relation,
             dst_var,
+            via_var,
+            hop2_relation,
+            hop2_dst_var,
             projection,
             direction,
         })
@@ -320,6 +364,9 @@ mod tests {
                 relation: RelationId(17),
                 src_var: "a".into(),
                 dst_var: "b".into(),
+                via_var: "b".into(),
+                hop2_relation: None,
+                hop2_dst_var: None,
                 projection: ReturnProjection::Destination,
                 direction: EdgeDirection::Outgoing,
             }
