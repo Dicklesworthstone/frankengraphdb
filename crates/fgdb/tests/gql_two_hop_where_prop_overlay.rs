@@ -30,24 +30,25 @@ fn two_hop_property_inequality_sees_the_staged_origin_without_dirty_reads() {
         .await
         .expect("database creates");
 
+        // WriteTxn accepts one relation per txn. Durable R owns both hop-1
+        // origins; durable S owns the k=1 continuation; the k=9 continuation
+        // is the staged :S batch (same pattern as gql_two_hop_overlay).
         let mut seed_r = WriteBatch::new(r);
         seed_r.create_vertex(VId(1), vec![], vec![(key, CanonicalScalar::Int(1))]);
         seed_r.create_vertex(VId(2), vec![], vec![]);
         seed_r.create_vertex(VId(3), vec![], vec![]);
+        seed_r.create_vertex(VId(4), vec![], vec![(key, CanonicalScalar::Int(9))]);
+        seed_r.create_vertex(VId(5), vec![], vec![]);
         seed_r.add_edge(EId(10), VId(1), VId(2), vec![]);
+        seed_r.add_edge(EId(12), VId(4), VId(5), vec![]);
         db.write(&commit, seed_r).await.expect("R fixture commits");
         let mut seed_s = WriteBatch::new(s);
         seed_s.add_edge(EId(11), VId(2), VId(3), vec![]);
         db.write(&commit, seed_s).await.expect("S fixture commits");
 
         let mut txn = db.begin(&txn_cx).expect("transaction begins");
-        let mut staged_r = WriteBatch::new(r);
-        staged_r.create_vertex(VId(4), vec![], vec![(key, CanonicalScalar::Int(9))]);
-        staged_r.create_vertex(VId(5), vec![], vec![]);
-        staged_r.create_vertex(VId(6), vec![], vec![]);
-        staged_r.add_edge(EId(12), VId(4), VId(5), vec![]);
-        txn.write(&mut db, staged_r).expect("R overlay stages");
         let mut staged_s = WriteBatch::new(s);
+        staged_s.create_vertex(VId(6), vec![], vec![]);
         staged_s.add_edge(EId(13), VId(5), VId(6), vec![]);
         txn.write(&mut db, staged_s).expect("S overlay stages");
 
