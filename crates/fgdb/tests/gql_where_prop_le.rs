@@ -149,10 +149,11 @@ fn dest_le_and_c_style_inequality_are_typed_parse_errors() {
         let dir = scratch("refusals");
         let db = seeded(cx, &dir).await;
 
-        for off_grammar in [
-            "MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a",
-            "MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b",
-        ] {
+        // Narrowed by fgdb-w5-parsers-nje.30: the dest <= spelling
+        // graduated to grammar (its positive suite is
+        // gql_where_dst_prop_le.rs), so the C-style alias carries this
+        // planted negative alone — moved, not weakened.
+        for off_grammar in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
             let err = db.execute_gql(off_grammar, &bind_rk()).expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),

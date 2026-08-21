@@ -95,11 +95,12 @@ fn source_property_less_than_keeps_lesser_sources() {
         );
 
         let le = db
-            // Retargeted by fgdb-w5-parsers-nje.29: the SOURCE <= spelling
-            // graduated to grammar, so this planted negative now guards the
-            // DEST <= spelling — moved to a live boundary, not weakened.
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a", &bind)
-            .expect_err("the dest <= spelling is outside the bounded grammar");
+            // Retargeted by fgdb-w5-parsers-nje.29 (source <= graduated) and
+            // again by nje.30 (dest <= graduated): the planted negative now
+            // guards the C-style != alias, which never was grammar — it
+            // keeps moving to a live boundary, it never weakens.
+            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind)
+            .expect_err("the != alias is outside the bounded grammar");
         assert!(matches!(le, GqlError::Parse(_)));
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");

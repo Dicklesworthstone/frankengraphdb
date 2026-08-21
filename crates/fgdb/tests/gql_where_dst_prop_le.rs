@@ -1,15 +1,16 @@
-//! **`WHERE b.k >= 1` keeps sources of greater-or-equal dests**
-//! (`fgdb-w5-parsers-nje.28`).
+//! **`WHERE b.k <= 1` keeps sources of less-or-equal dests**
+//! (`fgdb-w5-parsers-nje.30`).
 //!
-//! The non-strict comparator reaches the DESTINATION side: `>= 1` answers
-//! the boundary dest's source AND the above-boundary dest's source —
-//! `[1, 3]` beside the strict `[3]` on one fixture, so a renamed `>`
-//! fails; the `k = 0` dest separates `>=` from `<>` (not-equal would
-//! admit 5); and the keyless dest's source 7 stays out of the non-strict
-//! comparator too. The strict-greater, equality, strict-less, and
-//! unfiltered statements are pinned alongside, and the still-unsupported
-//! dest `<=` spelling remains a typed parse error (the source `<=`
-//! graduated under fgdb-w5-parsers-nje.29 into its own suite).
+//! The last comparator/side cell: non-strict less on the DESTINATION,
+//! projecting sources. `<= 1` answers the boundary dest's source AND the
+//! below-boundary dest's source — `[1, 5]` beside the strict `<`'s `[5]`
+//! on one fixture, so a renamed `<` fails; the `k = 9` dest separates
+//! `<=` from `<>` (not-equal would admit 3); and the keyless dest's
+//! source 7 stays out of the non-strict comparator too. The strict-less,
+//! equality, and strict-greater siblings are pinned alongside with the
+//! unfiltered scan, and the C-style `!=` spelling is refused — with the
+//! comparator grid now full, the alias set is the surviving off-grammar
+//! boundary.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -21,10 +22,10 @@ use std::path::PathBuf;
 
 const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(7);
-const GE_A: &str = "MATCH (a)-[:R]->(b) WHERE b.k >= 1 RETURN a";
-const GT_A: &str = "MATCH (a)-[:R]->(b) WHERE b.k > 1 RETURN a";
-const EQ_A: &str = "MATCH (a)-[:R]->(b) WHERE b.k = 1 RETURN a";
+const LE_A: &str = "MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a";
 const LT_A: &str = "MATCH (a)-[:R]->(b) WHERE b.k < 1 RETURN a";
+const EQ_A: &str = "MATCH (a)-[:R]->(b) WHERE b.k = 1 RETURN a";
+const GT_A: &str = "MATCH (a)-[:R]->(b) WHERE b.k > 1 RETURN a";
 const PLAIN_A: &str = "MATCH (a)-[:R]->(b) RETURN a";
 const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
@@ -37,7 +38,7 @@ fn keys() -> DatabaseKeys {
 /// Pid-qualified because concurrent panes share `/tmp`; nothing is removed
 /// (rule 1 carves out no exception for test code).
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("fgdb-dst-ge-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!("fgdb-dst-le-{}-{name}", std::process::id()))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
@@ -83,35 +84,34 @@ async fn seeded(cx: &CommitCx, dir: &PathBuf) -> Database {
     db
 }
 
-/// Five exact answers on one fixture — the non-strict/strict split on the
-/// dest side is the headline.
+/// Five exact answers on one fixture — the non-strict/strict split at the
+/// dest-side lower boundary is the headline.
 #[test]
-fn dest_greater_or_equal_includes_the_boundary_and_strict_does_not() {
-    under_lab(0x28_01, |cx| async move {
+fn dest_less_or_equal_includes_the_boundary_and_strict_does_not() {
+    under_lab(0x30_01, |cx| async move {
         let cx = &cx;
-        let dir = scratch("dst-ge");
+        let dir = scratch("dst-le");
         let db = seeded(cx, &dir).await;
 
-        let ge = db.execute_gql(GE_A, &bind_rk()).expect("WHERE b.k >= 1 executes");
+        let le = db.execute_gql(LE_A, &bind_rk()).expect("WHERE b.k <= 1 executes");
         assert_eq!(
-            ge,
-            vec![VId(1), VId(3)],
-            "boundary and above-boundary dests' SOURCES answer — equal to \
-             the strict answer would mean >= landed as a renamed >"
+            le,
+            vec![VId(1), VId(5)],
+            "boundary and below-boundary dests' SOURCES answer — equal to \
+             the strict answer would mean <= landed as a renamed <"
         );
         assert!(
-            !ge.contains(&VId(5)),
-            "the k=0 dest separates >= from <>: not-equal admits 5, \
-             greater-or-equal does not"
+            !le.contains(&VId(3)),
+            "9 <= 1 is false: the k=9 dest separates <= from <>"
         );
         assert!(
-            !ge.contains(&VId(7)),
-            "missing k is not >= anything: the keyless dest's source is out"
+            !le.contains(&VId(7)),
+            "missing k is not <= anything: the keyless dest's source is out"
         );
 
         assert_eq!(
-            db.execute_gql(GT_A, &bind_rk()).expect("WHERE b.k > 1 executes"),
-            vec![VId(3)],
+            db.execute_gql(LT_A, &bind_rk()).expect("WHERE b.k < 1 executes"),
+            vec![VId(5)],
             "the strict sibling excludes the boundary on the same fixture"
         );
         assert_eq!(
@@ -120,9 +120,9 @@ fn dest_greater_or_equal_includes_the_boundary_and_strict_does_not() {
             "equality answers the boundary carrier's source alone"
         );
         assert_eq!(
-            db.execute_gql(LT_A, &bind_rk()).expect("WHERE b.k < 1 executes"),
-            vec![VId(5)],
-            "strict less is unmoved beside the new spelling"
+            db.execute_gql(GT_A, &bind_rk()).expect("WHERE b.k > 1 executes"),
+            vec![VId(3)],
+            "strict greater is unmoved beside the new spelling"
         );
         assert_eq!(
             db.execute_gql(PLAIN_A, &bind_rk()).expect("unfiltered executes"),
@@ -132,26 +132,22 @@ fn dest_greater_or_equal_includes_the_boundary_and_strict_does_not() {
     });
 }
 
-/// The still-unsupported dest `<=` spelling is a typed parse error — the
-/// dest `>=` graduating does not legalize its mirror. (The source `<=`
-/// graduated under fgdb-w5-parsers-nje.29 and lives in its own suite.)
+/// The C-style `!=` spelling is refused: with the comparator grid full,
+/// the alias set is the surviving off-grammar boundary — `<>` is the
+/// inequality, `!=` never was.
 #[test]
-fn the_dest_le_spelling_is_still_a_typed_parse_error() {
-    under_lab(0x28_02, |cx| async move {
+fn the_c_style_inequality_is_a_typed_parse_error() {
+    under_lab(0x30_02, |cx| async move {
         let cx = &cx;
-        let dir = scratch("le-refused");
+        let dir = scratch("neq-alias-refused");
         let db = seeded(cx, &dir).await;
 
-        // Narrowed by fgdb-w5-parsers-nje.29 (source <= graduated) and
-        // retargeted by nje.30 (dest <= graduated too): the planted
-        // negative now guards the C-style != alias, which never was
-        // grammar — moved to a live boundary, not weakened.
-        for off_grammar in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
-            let err = db.execute_gql(off_grammar, &bind_rk()).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        let err = db
+            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+            .expect_err("!= is not grammar");
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "!= must be the typed parse arm — <> is the inequality: {err:?}"
+        );
     });
 }
