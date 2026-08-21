@@ -13,5 +13,9 @@ asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "c
 fgdb-chronicle = { path = "../fgdb-chronicle" }
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
+# The pinned GQL surface (fgdb-w5-parsers-nje.1): parse + bind live here; the
+# executor consumes the BoundPlan only, so no parse-tree type crosses into
+# the execute path.
+fgdb-gql = { path = "../fgdb-gql" }
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }

@@ -115,6 +115,13 @@
 mod fcw;
 pub use fcw::FirstCommitterWinsValidator;
 
+mod gql_exec;
+/// The pinned-GQL surface types callers need to drive
+/// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
+/// catalog), and the plan is re-exported so tests can state that the executor
+/// accepts a [`BoundPlan`] and nothing parse-shaped.
+pub use fgdb_gql::{BoundPlan, RelationBind};
+
 /// The stable law id [`FirstCommitterWinsValidator`] rejects under, keyed on
 /// by the typed [`WriteError::FirstCommitterWins`] arm. Kept identical to the
 /// private constant in `fcw.rs` the same way `touched_elements` is mirrored
@@ -802,6 +809,44 @@ impl core::error::Error for OpenError {}
 impl core::error::Error for RebuildError {}
 impl core::error::Error for WriteError {}
 impl core::error::Error for ReadError {}
+
+/// Why one pinned GQL statement could not be answered
+/// (fgdb-w5-parsers-nje.1). The three arms are three different remedies, so
+/// they are not collapsed: a parse error means the TEXT is off-grammar, a
+/// bind error means the statement is lawful but the caller's
+/// [`RelationBind`] cannot name its relation, and a read error means the
+/// statement and bind are fine but this handle currently refuses reads
+/// (fenced, beyond-frontier, and so on — the same refusals every Rust-API
+/// read surfaces).
+#[derive(Debug)]
+pub enum GqlError {
+    /// The source text is not the pinned statement grammar.
+    Parse(fgdb_gql::ParseError),
+    /// The parsed statement names a relation the caller's bind map does not.
+    Bind(fgdb_gql::BindError),
+    /// The bound plan was executable but the handle refused the read.
+    Read(ReadError),
+}
+
+impl core::fmt::Display for GqlError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Parse(error) => write!(f, "gql parse: {error}"),
+            Self::Bind(error) => write!(f, "gql bind: {error}"),
+            Self::Read(error) => write!(f, "gql read: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for GqlError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Parse(error) => Some(error),
+            Self::Bind(error) => Some(error),
+            Self::Read(error) => Some(error),
+        }
+    }
+}
 
 /// What a failed CompareAndSet means on a [`WriteBatch`].
 ///
@@ -3390,6 +3435,30 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Vec<VId>, ReadError> {
         self.ensure_readable()?;
         self.snapshot.neighbours_at(src, relation, as_of)
+    }
+
+    /// Execute one pinned GQL statement — `MATCH (a)-[:R]->(b) RETURN b` —
+    /// over this handle's live snapshot (fgdb-w5-parsers-nje.1).
+    ///
+    /// Parse and bind belong to `fgdb-gql`; execution consumes the resulting
+    /// [`BoundPlan`] and ONLY the plan (doctrine 7: no parser-interprets-AST
+    /// engine — no parse-tree type crosses into `gql_exec`). The relation
+    /// name binds through the caller's [`RelationBind`]; there is no invented
+    /// catalog. Rows come back CGSE-deterministic: destination `VId`
+    /// ascending, so the same graph, statement, and bind answer
+    /// byte-identically. An off-grammar text, an unbound relation name, and a
+    /// refusing handle are three typed [`GqlError`] arms because they are
+    /// three different remedies.
+    pub fn execute_gql(&self, src: &str, bind: &RelationBind) -> Result<Vec<VId>, GqlError> {
+        // `RelationBind::bind` is fgdb-gql's whole public entry: the AST never
+        // leaves that crate, so a BoundPlan is the only thing this method CAN
+        // hand the executor. The nested parse failure is re-split here because
+        // off-grammar text and an unbound relation name are different remedies.
+        let plan = bind.bind(src).map_err(|error| match error {
+            fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+            unbound => GqlError::Bind(unbound),
+        })?;
+        gql_exec::execute(&plan, self).map_err(GqlError::Read)
     }
 
     /// The edge `eid` — its endpoints, relation, lifetime, AND properties —
