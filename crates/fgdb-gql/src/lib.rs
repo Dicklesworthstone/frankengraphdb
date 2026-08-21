@@ -649,7 +649,7 @@ impl<'a> Parser<'a> {
                 let is_prop_lt = remaining.starts_with('<') && !is_prop_angle_ne && !is_prop_le;
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
-                if is_incoming_two_hop_near_end && (is_prop_lt || is_prop_ge || is_prop_le) {
+                if is_incoming_two_hop_near_end && (is_prop_ge || is_prop_le) {
                     return Err(ParseError {
                         offset: self.offset,
                         kind: ParseErrorKind::ExpectedToken(
@@ -690,6 +690,7 @@ impl<'a> Parser<'a> {
                     self.token("=")?;
                 } else if is_prop_lt {
                     if !is_hop2_destination
+                        && !is_incoming_two_hop_near_end
                         && (direction != EdgeDirection::Outgoing || hop2_relation.is_some())
                     {
                         return Err(ParseError {
@@ -798,6 +799,23 @@ impl<'a> Parser<'a> {
                             None,
                             Some((property, value)),
                             None,
+                            None,
+                            None,
+                        )
+                    } else if is_prop_lt {
+                        (
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some((property, value)),
                             None,
                             None,
                         )
@@ -1197,6 +1215,7 @@ impl<'a> Parser<'a> {
             && (dst_prop.is_some()
                 || dst_prop_ne.is_some()
                 || dst_prop_gt.is_some()
+                || dst_prop_lt.is_some()
                 || hop2_dst_prop.is_some()
                 || hop2_dst_prop_ne.is_some()
                 || hop2_dst_prop_gt.is_some()
@@ -2468,11 +2487,20 @@ mod tests {
         );
         assert_eq!(incoming_near_end_greater.src_prop_gt, None);
         assert_eq!(incoming_near_end_greater.hop2_dst_prop_gt, None);
+        let incoming_near_end_less = binder
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 9 RETURN c")
+            .expect("incoming two-hop near-end property less-than binds");
+        assert_eq!(
+            incoming_near_end_less.dst_prop_lt,
+            Some((PropertyKeyId(7), 9))
+        );
+        assert_eq!(incoming_near_end_less.src_prop_lt, None);
+        assert_eq!(incoming_near_end_less.hop2_dst_prop_lt, None);
         for statement in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 1 RETURN a",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 9 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
