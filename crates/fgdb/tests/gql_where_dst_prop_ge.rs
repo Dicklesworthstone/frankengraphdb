@@ -131,19 +131,20 @@ fn dest_greater_or_equal_includes_the_boundary_and_strict_does_not() {
     });
 }
 
-/// BOTH still-unsupported `<=` spellings are typed parse errors — the
-/// dest `>=` graduating legalizes neither mirror.
+/// The still-unsupported dest `<=` spelling is a typed parse error — the
+/// dest `>=` graduating does not legalize its mirror. (The source `<=`
+/// graduated under fgdb-w5-parsers-nje.29 and lives in its own suite.)
 #[test]
-fn both_le_spellings_are_still_typed_parse_errors() {
+fn the_dest_le_spelling_is_still_a_typed_parse_error() {
     under_lab(0x28_02, |cx| async move {
         let cx = &cx;
         let dir = scratch("le-refused");
         let db = seeded(cx, &dir).await;
 
-        for off_grammar in [
-            "MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a",
-            "MATCH (a)-[:R]->(b) WHERE a.k <= 1 RETURN b",
-        ] {
+        // Narrowed by fgdb-w5-parsers-nje.29: the SOURCE <= spelling
+        // graduated to grammar (its positive suite is gql_where_prop_le.rs),
+        // so only the dest spelling remains a planted negative here.
+        for off_grammar in ["MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a"] {
             let err = db.execute_gql(off_grammar, &bind_rk()).expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),

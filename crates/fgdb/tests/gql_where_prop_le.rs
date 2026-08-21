@@ -1,16 +1,16 @@
-//! **`WHERE a.k >= 1` keeps dests of greater-or-equal sources**
-//! (`fgdb-w5-parsers-nje.26`).
+//! **`WHERE a.k <= 1` keeps dests of less-or-equal sources**
+//! (`fgdb-w5-parsers-nje.29`).
 //!
-//! The first NON-strict comparator: `>=` graduates from parse error to
-//! grammar, and its whole identity is the boundary row — `>= 1` answers
-//! the `k = 1` carrier's dest AND the `k = 9` carrier's dest, where the
-//! strict `>` answers only the latter. The two-element `[2, 4]` beside
-//! the strict `[4]` on one fixture is the law no single statement can
-//! state: equal answers would mean `>=` landed as a renamed `>`. The
-//! equality, strict-less, and unfiltered statements are pinned alongside,
-//! the keyless source stays out of the non-strict comparator too
-//! (missing `k` is not `>= anything`), and the still-unsupported `<=`
-//! spelling remains a typed parse error.
+//! The non-strict less comparator on the source side: `<= 1` answers the
+//! boundary carrier's dest AND the below-boundary carrier's dest —
+//! `[2, 6]` beside the strict `<`'s `[6]` on one fixture, so a renamed
+//! `<` fails; the `k = 9` carrier separates `<=` from `<>`; and the
+//! keyless source's dest 8 stays out of the non-strict comparator too.
+//! The strict-less, equality, strict-greater, and non-strict-greater
+//! siblings are pinned alongside with the unfiltered scan, the DEST `<=`
+//! spelling remains a typed parse error this slice, and the C-style `!=`
+//! spelling is refused — the grammar's inequality is `<>`, not a lenient
+//! alias set.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -22,10 +22,11 @@ use std::path::PathBuf;
 
 const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(7);
-const GE_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k >= 1 RETURN b";
-const GT_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k > 1 RETURN b";
-const EQ_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b";
+const LE_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k <= 1 RETURN b";
 const LT_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k < 1 RETURN b";
+const EQ_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b";
+const GT_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k > 1 RETURN b";
+const GE_B: &str = "MATCH (a)-[:R]->(b) WHERE a.k >= 1 RETURN b";
 const PLAIN_B: &str = "MATCH (a)-[:R]->(b) RETURN b";
 const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
@@ -38,7 +39,7 @@ fn keys() -> DatabaseKeys {
 /// Pid-qualified because concurrent panes share `/tmp`; nothing is removed
 /// (rule 1 carves out no exception for test code).
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("fgdb-prop-ge-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!("fgdb-prop-le-{}-{name}", std::process::id()))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
@@ -84,47 +85,52 @@ async fn seeded(cx: &CommitCx, dir: &PathBuf) -> Database {
     db
 }
 
-/// Five exact answers on one fixture — the non-strict/strict split at the
-/// boundary is the headline.
+/// Six exact answers on one fixture — the non-strict/strict split at the
+/// lower boundary is the headline.
 #[test]
-fn greater_or_equal_includes_the_boundary_and_strict_does_not() {
-    under_lab(0x26_01, |cx| async move {
+fn less_or_equal_includes_the_boundary_and_strict_does_not() {
+    under_lab(0x29_01, |cx| async move {
         let cx = &cx;
-        let dir = scratch("ge");
+        let dir = scratch("le");
         let db = seeded(cx, &dir).await;
 
-        let ge = db.execute_gql(GE_B, &bind_rk()).expect("WHERE a.k >= 1 executes");
+        let le = db.execute_gql(LE_B, &bind_rk()).expect("WHERE a.k <= 1 executes");
         assert_eq!(
-            ge,
-            vec![VId(2), VId(4)],
-            "the boundary carrier AND the above-boundary carrier answer — \
-             equal to the strict answer would mean >= landed as a renamed >"
+            le,
+            vec![VId(2), VId(6)],
+            "boundary AND below-boundary carriers answer — equal to the \
+             strict answer would mean <= landed as a renamed <"
         );
         assert!(
-            !ge.contains(&VId(8)),
-            "missing k is not >= anything: the keyless source stays out of \
-             the non-strict comparator too"
+            !le.contains(&VId(8)),
+            "missing k is not <= anything: the keyless source's dest is out \
+             of the non-strict comparator too"
         );
         assert!(
-            !ge.contains(&VId(6)),
-            "0 >= 1 is false: below-boundary is out"
+            !le.contains(&VId(4)),
+            "9 <= 1 is false: the k=9 carrier separates <= from <>"
         );
 
         assert_eq!(
-            db.execute_gql(GT_B, &bind_rk()).expect("WHERE a.k > 1 executes"),
-            vec![VId(4)],
+            db.execute_gql(LT_B, &bind_rk()).expect("WHERE a.k < 1 executes"),
+            vec![VId(6)],
             "the strict sibling excludes the boundary on the same fixture"
         );
         assert_eq!(
             db.execute_gql(EQ_B, &bind_rk()).expect("WHERE a.k = 1 executes"),
             vec![VId(2)],
-            "equality answers the boundary carrier alone — and >= is its \
-             union with the strict >"
+            "equality answers the boundary carrier alone — <= is its union \
+             with the strict <"
         );
         assert_eq!(
-            db.execute_gql(LT_B, &bind_rk()).expect("WHERE a.k < 1 executes"),
-            vec![VId(6)],
-            "strict less is unmoved beside the new spelling"
+            db.execute_gql(GT_B, &bind_rk()).expect("WHERE a.k > 1 executes"),
+            vec![VId(4)],
+            "strict greater is unmoved beside the new spelling"
+        );
+        assert_eq!(
+            db.execute_gql(GE_B, &bind_rk()).expect("WHERE a.k >= 1 executes"),
+            vec![VId(2), VId(4)],
+            "non-strict greater is unmoved too — and <= is not its alias"
         );
         assert_eq!(
             db.execute_gql(PLAIN_B, &bind_rk()).expect("unfiltered executes"),
@@ -134,25 +140,24 @@ fn greater_or_equal_includes_the_boundary_and_strict_does_not() {
     });
 }
 
-/// The still-unsupported non-strict less spelling is a typed parse error —
-/// one graduation does not legalize its mirror.
+/// The refusals: the DEST `<=` spelling is still off-grammar this slice,
+/// and the C-style `!=` never was grammar — `<>` is the inequality.
 #[test]
-fn the_non_strict_less_spelling_is_still_a_typed_parse_error() {
-    under_lab(0x26_02, |cx| async move {
+fn dest_le_and_c_style_inequality_are_typed_parse_errors() {
+    under_lab(0x29_02, |cx| async move {
         let cx = &cx;
-        let dir = scratch("le-refused");
+        let dir = scratch("refusals");
         let db = seeded(cx, &dir).await;
 
-        let err = db
-            // Retargeted by fgdb-w5-parsers-nje.29: the SOURCE <= spelling
-            // graduated to grammar, so this planted negative now guards the
-            // DEST <= spelling — moved to a live boundary, not weakened.
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a", &bind_rk())
-            .expect_err("the dest <= spelling is not grammar this slice");
-        assert!(
-            matches!(err, GqlError::Parse(_)),
-            "<= must be the typed parse arm — >= graduating does not \
-             legalize its mirror: {err:?}"
-        );
+        for off_grammar in [
+            "MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a",
+            "MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b",
+        ] {
+            let err = db.execute_gql(off_grammar, &bind_rk()).expect_err(off_grammar);
+            assert!(
+                matches!(err, GqlError::Parse(_)),
+                "{off_grammar:?} must be the typed parse arm: {err:?}"
+            );
+        }
     });
 }
