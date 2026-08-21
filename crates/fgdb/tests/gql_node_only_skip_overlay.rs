@@ -30,28 +30,39 @@ fn node_only_skip_runs_after_the_staged_overlay_is_sorted() {
         .expect("database creates");
 
         let mut seed = WriteBatch::new(relation);
-        seed.create_vertex(VId(1), vec![person], vec![]);
         seed.create_vertex(VId(2), vec![person], vec![]);
+        seed.create_vertex(VId(4), vec![person], vec![]);
         db.write(&commit, seed).await.expect("fixture commits");
 
         let mut txn = db.begin(&txn_cx).expect("transaction begins");
         let mut staged = WriteBatch::new(relation);
-        staged.create_vertex(VId(4), vec![person], vec![]);
+        staged.create_vertex(VId(1), vec![person], vec![]);
         txn.write(&mut db, staged).expect("Person isolate stages");
 
         let bind = RelationBind::new()
             .with_label("Person", person)
             .with_relation("R", relation);
-        let statement = "MATCH (a:Person) RETURN a SKIP 1";
+        let skipped = "MATCH (a:Person) RETURN a SKIP 1";
+        let unskipped = "MATCH (a:Person) RETURN a";
         assert_eq!(
-            txn.execute_gql(&db, statement, &bind)
+            txn.execute_gql(&db, skipped, &bind)
                 .expect("overlay SKIP executes"),
             vec![VId(2), VId(4)]
         );
         assert_eq!(
-            db.execute_gql(statement, &bind)
+            txn.execute_gql(&db, unskipped, &bind)
+                .expect("unskipped overlay executes"),
+            vec![VId(1), VId(2), VId(4)]
+        );
+        assert_eq!(
+            db.execute_gql(skipped, &bind)
                 .expect("base SKIP executes"),
-            vec![VId(2)]
+            vec![VId(4)]
+        );
+        assert_eq!(
+            db.execute_gql(unskipped, &bind)
+                .expect("unskipped base executes"),
+            vec![VId(2), VId(4)]
         );
         txn.abort();
     });
