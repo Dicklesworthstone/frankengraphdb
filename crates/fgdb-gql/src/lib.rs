@@ -224,18 +224,17 @@ impl<'a> Parser<'a> {
         self.token("(")?;
         let right_var = self.identifier()?;
         self.token(")")?;
-        let (src_var, dst_var) = match direction {
-            EdgeDirection::Outgoing | EdgeDirection::Undirected => (left_var, right_var),
-            EdgeDirection::Incoming => (right_var, left_var),
-        };
-        let via_var = dst_var.clone();
         self.skip_whitespace();
-        let (hop2_relation, hop2_dst_var) = if matches!(
-            direction,
-            EdgeDirection::Outgoing | EdgeDirection::Undirected
-        )
-            && self.source[self.offset..].starts_with('-')
-        {
+        let has_hop2 = match direction {
+            EdgeDirection::Incoming => self.source[self.offset..].starts_with('<'),
+            EdgeDirection::Outgoing | EdgeDirection::Undirected => {
+                self.source[self.offset..].starts_with('-')
+            }
+        };
+        let (hop2_relation, hop2_dst_var) = if has_hop2 {
+            if direction == EdgeDirection::Incoming {
+                self.token("<")?;
+            }
             self.token("-")?;
             self.token("[")?;
             self.token(":")?;
@@ -252,6 +251,12 @@ impl<'a> Parser<'a> {
         } else {
             (None, None)
         };
+        let (src_var, dst_var) = match direction {
+            EdgeDirection::Outgoing | EdgeDirection::Undirected => (left_var, right_var),
+            EdgeDirection::Incoming if hop2_relation.is_some() => (left_var, right_var),
+            EdgeDirection::Incoming => (right_var, left_var),
+        };
+        let via_var = dst_var.clone();
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
         let projection = if hop2_dst_var.as_ref() == Some(&returned) {
@@ -404,6 +409,39 @@ mod tests {
                 kind: ParseErrorKind::ExpectedToken("-"),
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn incoming_two_hop_binds_without_the_one_hop_swap() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23));
+        let incoming = binder
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c")
+            .expect("incoming two-hop binds");
+        assert_eq!(incoming.src_var, "a");
+        assert_eq!(incoming.dst_var, "b");
+        assert_eq!(incoming.hop2_dst_var.as_deref(), Some("c"));
+        assert_eq!(incoming.hop2_relation, Some(RelationId(23)));
+        assert_eq!(incoming.direction, EdgeDirection::Incoming);
+        assert_eq!(incoming.projection, ReturnProjection::Hop2Destination);
+
+        let one_hop = binder
+            .bind("MATCH (a)<-[:R]-(b) RETURN a")
+            .expect("incoming one-hop binds");
+        assert_eq!((one_hop.src_var.as_str(), one_hop.dst_var.as_str()), ("b", "a"));
+
+        let outgoing = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN c")
+            .expect("outgoing two-hop remains bound");
+        assert_eq!(outgoing.direction, EdgeDirection::Outgoing);
+        assert_eq!(outgoing.hop2_relation, Some(RelationId(23)));
+        assert_eq!(outgoing.projection, ReturnProjection::Hop2Destination);
+
+        assert!(matches!(
+            binder.bind("MATCH (a)<[:R]->(b) RETURN b"),
+            Err(BindError::Parse(_))
         ));
     }
 
