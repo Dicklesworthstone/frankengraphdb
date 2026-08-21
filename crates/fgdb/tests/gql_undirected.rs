@@ -6,8 +6,8 @@
 //! twice, once per orientation. The isolate 9 stays out (incidence, not
 //! existence), the two directed statements are re-pinned beside the new
 //! shape so it cannot have been implemented by loosening them, and the
-//! grammar stays exactly three shapes: an undirected TWO-hop and the
-//! contradictory arrow are still typed parse errors.
+//! grammar now includes an undirected two-hop: an R-only bind refuses its
+//! missing `S`, while the contradictory arrow remains a typed parse error.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -119,24 +119,29 @@ fn the_directed_statements_are_unmoved() {
     });
 }
 
-/// The grammar is exactly three shapes: an undirected TWO-hop and the
-/// contradictory arrow stay typed parse errors.
+/// Two-hop undirected is grammar now: without `S` it reaches binding and
+/// refuses there. The contradictory arrow remains off-grammar.
 #[test]
-fn undirected_two_hop_and_contradictory_arrows_stay_parse_errors() {
+fn undirected_two_hop_missing_s_is_bind_and_contradictory_arrow_is_parse() {
     under_lab(0x3d_03, |cx| async move {
         let cx = &cx;
         let dir = scratch("still-off-grammar");
         let db = seeded(cx, &dir).await;
 
-        for off_grammar in [
-            "MATCH (a)-[:R]-(b)-[:S]-(c) RETURN c",
-            "MATCH (a)<[:R]->(b) RETURN a",
-        ] {
-            let err = db.execute_gql(off_grammar, &bind_r()).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm, got {err:?}"
-            );
-        }
+        let two_hop = "MATCH (a)-[:R]-(b)-[:S]-(c) RETURN c";
+        let err = db.execute_gql(two_hop, &bind_r()).expect_err(two_hop);
+        assert!(
+            matches!(err, GqlError::Bind(_)),
+            "two-hop is legal grammar; missing S must be the bind arm, got {err:?}"
+        );
+
+        let contradictory = "MATCH (a)<[:R]->(b) RETURN a";
+        let err = db
+            .execute_gql(contradictory, &bind_r())
+            .expect_err(contradictory);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "contradictory arrow must be the parse arm, got {err:?}"
+        );
     });
 }
