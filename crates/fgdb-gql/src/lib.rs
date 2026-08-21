@@ -2497,10 +2497,11 @@ mod tests {
             .expect("outgoing two-hop source bang inequality binds");
         assert_eq!(bang_inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
         assert_eq!(bang_inequality.hop2_dst_prop_ne, None);
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN a"),
-            Err(BindError::Parse(_))
-        ));
+        let projected_source = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN a")
+            .expect("outgoing two-hop source bang inequality projects the source");
+        assert_eq!(projected_source.src_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(projected_source.hop2_dst_prop_ne, None);
 
         assert!(
             binder
