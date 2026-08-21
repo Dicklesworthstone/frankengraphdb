@@ -112,6 +112,9 @@
 
 #![forbid(unsafe_code)]
 
+mod fcw;
+pub use fcw::FirstCommitterWinsValidator;
+
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
