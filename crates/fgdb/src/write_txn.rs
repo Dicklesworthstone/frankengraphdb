@@ -654,7 +654,9 @@ impl WriteTxn {
         // no edge relation means no edge machinery at all. The binder makes
         // an unlabeled node-only plan unrepresentable, so the missing-label
         // arm fails closed to no rows. Result rows are vertex observations,
-        // recorded exactly as the edge face records its own.
+        // recorded exactly as the edge face records its own. `src_prop`
+        // (fgdb-w5-parsers-nje.11) is the same integer-property test as
+        // live `node_scan`; no-WHERE overlay scans still ignore props.
         let Some(edge_relation) = plan.relation else {
             let Some(label) = plan.src_label else {
                 return Ok(Vec::new());
@@ -663,6 +665,15 @@ impl WriteTxn {
                 .vertices(database)?
                 .into_iter()
                 .filter(|row| row.labels.contains(&label))
+                .filter(|row| match plan.src_prop {
+                    None => true,
+                    Some((key, value)) => {
+                        let wanted = CanonicalScalar::Int(value);
+                        row.props
+                            .iter()
+                            .any(|(property, scalar)| *property == key && *scalar == wanted)
+                    }
+                })
                 .map(|row| row.vid)
                 .collect();
             vids.sort_unstable();

@@ -238,8 +238,8 @@ fn filter_hop1_by_labels<V: Vfs + Clone>(
 
 /// Source-property integer equality (fgdb-w5-parsers-nje.8) drops hop-1
 /// SOURCE keys whose vertex props do not carry `(key, Int(n))`. No-WHERE
-/// plans consult no property row. Node-only scans ignore `src_prop` this
-/// slice — they never reach this filter.
+/// plans consult no property row. Node-only labeled WHERE applies the same
+/// `(key, Int(n))` test inside [`node_scan`] (fgdb-w5-parsers-nje.11).
 fn filter_hop1_by_src_prop<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
@@ -312,6 +312,10 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
 /// (ascending, deduplicated). The binder makes an unlabeled node-only plan
 /// unrepresentable (it is a Parse refusal), so the missing-label arm fails
 /// closed to no rows instead of inventing an all-vertices scan.
+///
+/// When `src_prop` is `Some` (fgdb-w5-parsers-nje.11), the same vertex row
+/// must also carry that integer property; no-WHERE node-only plans still
+/// consult no property field.
 fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
     let Some(label) = plan.src_label else {
         return Vec::new();
@@ -319,6 +323,15 @@ fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
     let mut vids: Vec<VId> = rows
         .into_iter()
         .filter(|row| row.labels.contains(&label))
+        .filter(|row| match plan.src_prop {
+            None => true,
+            Some((key, value)) => {
+                let wanted = CanonicalScalar::Int(value);
+                row.props
+                    .iter()
+                    .any(|(property, scalar)| *property == key && *scalar == wanted)
+            }
+        })
         .map(|row| row.vid)
         .collect();
     vids.sort_unstable();
