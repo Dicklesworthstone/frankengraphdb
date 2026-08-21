@@ -8,10 +8,13 @@ pub(crate) fn execute<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
 ) -> Result<Vec<VId>, ReadError> {
-    let mut destinations = Vec::new();
-    for vertex in db.vertices()? {
-        destinations.extend(db.neighbours(vertex.vid, plan.relation)?);
-    }
+    let mut destinations: Vec<VId> = db
+        .edges()?
+        .into_iter()
+        .filter_map(|record| {
+            (record.entry.relation == plan.relation).then_some(record.entry.dst)
+        })
+        .collect();
     destinations.sort_unstable();
     destinations.dedup();
     Ok(destinations)
