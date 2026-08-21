@@ -236,19 +236,42 @@ fn filter_hop1_by_labels<V: Vfs + Clone>(
     Ok(())
 }
 
+/// The node-only scan face (fgdb-w5-parsers-nje.7): a plan with no edge
+/// relation never touches the edge table — its rows are the vids whose
+/// labels carry the pattern's label, under the same CGSE row contract
+/// (ascending, deduplicated). The binder makes an unlabeled node-only plan
+/// unrepresentable (it is a Parse refusal), so the missing-label arm fails
+/// closed to no rows instead of inventing an all-vertices scan.
+fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
+    let Some(label) = plan.src_label else {
+        return Vec::new();
+    };
+    let mut vids: Vec<VId> = rows
+        .into_iter()
+        .filter(|row| row.labels.contains(&label))
+        .map(|row| row.vid)
+        .collect();
+    vids.sort_unstable();
+    vids.dedup();
+    vids
+}
+
 /// Execute the pinned bound MATCH expansion over the database's live Strata
 /// view.
 pub(crate) fn execute<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
 ) -> Result<Vec<VId>, ReadError> {
+    let Some(relation) = plan.relation else {
+        return Ok(node_scan(plan, db.vertices()?));
+    };
     let records = db.edges()?;
     let (mut hop1, hop2) = if plan.direction == EdgeDirection::Undirected {
-        undirected_adjacencies(&records, plan.relation, plan.hop2_relation)
+        undirected_adjacencies(&records, relation, plan.hop2_relation)
     } else if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
-        inverted_adjacencies(&records, plan.relation, plan.hop2_relation)
+        inverted_adjacencies(&records, relation, plan.hop2_relation)
     } else {
-        relation_adjacencies(records, plan.relation, plan.hop2_relation)
+        relation_adjacencies(records, relation, plan.hop2_relation)
     };
     filter_hop1_by_labels(plan, db, None, &mut hop1)?;
     execute_over_adjacencies(plan, hop1, hop2)
@@ -261,13 +284,16 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
     db: &Database<V>,
     as_of: CommitSeq,
 ) -> Result<Vec<VId>, ReadError> {
+    let Some(relation) = plan.relation else {
+        return Ok(node_scan(plan, db.vertices_at(as_of)?));
+    };
     let records = db.edges_at(as_of)?;
     let (mut hop1, hop2) = if plan.direction == EdgeDirection::Undirected {
-        undirected_adjacencies(&records, plan.relation, plan.hop2_relation)
+        undirected_adjacencies(&records, relation, plan.hop2_relation)
     } else if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
-        inverted_adjacencies(&records, plan.relation, plan.hop2_relation)
+        inverted_adjacencies(&records, relation, plan.hop2_relation)
     } else {
-        relation_adjacencies(records, plan.relation, plan.hop2_relation)
+        relation_adjacencies(records, relation, plan.hop2_relation)
     };
     filter_hop1_by_labels(plan, db, Some(as_of), &mut hop1)?;
     execute_over_adjacencies(plan, hop1, hop2)

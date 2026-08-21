@@ -22,7 +22,15 @@ pub struct GqlPlanCertificate {
 pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate {
     let mut hasher = Hasher::new();
     hasher.update(GQL_PLAN_CERTIFICATE_DOMAIN);
-    hasher.update(&plan.relation.0.to_be_bytes());
+    match plan.relation {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(relation) => {
+            hasher.update(&[1]);
+            hasher.update(&relation.0.to_be_bytes());
+        }
+    }
     update_string(&mut hasher, &plan.src_var);
     update_string(&mut hasher, &plan.dst_var);
     update_string(&mut hasher, &plan.via_var);
@@ -112,7 +120,7 @@ mod tests {
 
     fn plan(relation: u64) -> BoundPlan {
         BoundPlan {
-            relation: RelationId(relation),
+            relation: Some(RelationId(relation)),
             src_var: "a".to_owned(),
             dst_var: "b".to_owned(),
             src_label: None,

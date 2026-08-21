@@ -649,6 +649,30 @@ impl WriteTxn {
             })
         })?;
 
+        // The node-only scan face (fgdb-w5-parsers-nje.7), over the OVERLAY
+        // vertex rows so staged labels are visible and staged deletes hide:
+        // no edge relation means no edge machinery at all. The binder makes
+        // an unlabeled node-only plan unrepresentable, so the missing-label
+        // arm fails closed to no rows. Result rows are vertex observations,
+        // recorded exactly as the edge face records its own.
+        let Some(edge_relation) = plan.relation else {
+            let Some(label) = plan.src_label else {
+                return Ok(Vec::new());
+            };
+            let mut vids: Vec<VId> = self
+                .vertices(database)?
+                .into_iter()
+                .filter(|row| row.labels.contains(&label))
+                .map(|row| row.vid)
+                .collect();
+            vids.sort_unstable();
+            vids.dedup();
+            self.read_set
+                .borrow_mut()
+                .extend(vids.iter().copied().map(ElementId::Vertex));
+            return Ok(vids);
+        };
+
         let mut observed = std::collections::BTreeSet::new();
         let mut vertices = std::collections::BTreeSet::new();
         let mut edges: std::collections::BTreeMap<
@@ -833,7 +857,7 @@ impl WriteTxn {
         drop(read_set);
         self.match_expansions
             .borrow_mut()
-            .extend(vertices.iter().copied().map(|src| (src, plan.relation)));
+            .extend(vertices.iter().copied().map(|src| (src, edge_relation)));
         Ok(destinations)
     }
 

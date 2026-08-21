@@ -910,8 +910,14 @@ where
     E: FnMut(VId, RelationId) -> Result<Vec<VId>, ReadError>,
 {
     let mut rows = Vec::new();
+    // Node-only plans never reach the edge kernel — their scan face answers
+    // directly — so a relationless plan here fails closed to no rows rather
+    // than inventing an all-relations expansion.
+    let Some(relation) = plan.relation else {
+        return Ok(rows);
+    };
     for src in sources {
-        let destinations = expand(src, plan.relation)?;
+        let destinations = expand(src, relation)?;
         match plan.projection {
             fgdb_gql::ReturnProjection::Source if !destinations.is_empty() => rows.push(src),
             fgdb_gql::ReturnProjection::Destination => rows.extend(destinations),
