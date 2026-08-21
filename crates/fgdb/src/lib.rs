@@ -128,7 +128,7 @@ pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
 /// catalog), and the plan is re-exported so tests can state that the executor
 /// accepts a [`BoundPlan`] and nothing parse-shaped.
 pub use fgdb_gql::{BoundPlan, RelationBind};
-pub use write_txn::WriteTxn;
+pub use write_txn::{WriteTxn, WriteTxnError};
 
 /// The stable law id [`FirstCommitterWinsValidator`] rejects under, keyed on
 /// by the typed [`WriteError::FirstCommitterWins`] arm. Kept identical to the
