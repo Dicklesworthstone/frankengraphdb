@@ -396,7 +396,10 @@ fn filter_hop2_by_dst_prop<V: Vfs + Clone>(
     as_of: Option<CommitSeq>,
     hop2: &mut BTreeMap<VId, Vec<VId>>,
 ) -> Result<(), ReadError> {
-    if plan.hop2_dst_prop.is_none() && plan.hop2_dst_prop_ne.is_none() {
+    if plan.hop2_dst_prop.is_none()
+        && plan.hop2_dst_prop_ne.is_none()
+        && plan.hop2_dst_prop_gt.is_none()
+    {
         return Ok(());
     }
     let far_ends: std::collections::BTreeSet<VId> = hop2.values().flatten().copied().collect();
@@ -418,7 +421,13 @@ fn filter_hop2_by_dst_prop<V: Vfs + Clone>(
                         && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
                 })
             });
-            equal && not_equal
+            let greater = plan.hop2_dst_prop_gt.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
+                })
+            });
+            equal && not_equal && greater
         }) {
             kept.insert(vid);
         }
