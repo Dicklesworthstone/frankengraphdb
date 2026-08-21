@@ -1,5 +1,7 @@
 use asupersync::lab::run_async_under_lab;
-use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch};
+use fgdb::{
+    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError,
+};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -13,6 +15,7 @@ const GRAPH: GraphId = GraphId(1);
 const BRANCH: BranchId = BranchId(1);
 const RELATION: RelationId = RelationId(1);
 const PROPERTY: PropertyKeyId = PropertyKeyId(7);
+const PROPERTY_B: PropertyKeyId = PropertyKeyId(9);
 const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 const DEK: [u8; 32] = [0x3c; 32];
@@ -168,6 +171,119 @@ fn abort_after_a_write_preserves_the_pre_begin_stream_and_graph() {
             Some(&CanonicalScalar::Int(9))
         );
         assert!(graph.vertex(VId(3)).is_none(), "aborted vertex is not durable");
+    });
+    assert!(
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+    );
+}
+
+#[test]
+fn overlapping_two_write_txns_are_fcw_and_replay_only_the_winner() {
+    let dir = scratch("overlap-two-write");
+    let ((), report) = run_async_under_lab(0x79_03, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txn_cx = contexts.txn();
+        let commit_cx = contexts.commit();
+        let mut database = Database::create(&commit_cx, &dir, engine_keys())
+            .await
+            .expect("create product database");
+
+        let mut seed = WriteBatch::new(RELATION);
+        seed.create_vertex(
+            VId(1),
+            vec![],
+            vec![(PROPERTY, CanonicalScalar::Int(0))],
+        );
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed overlap target");
+
+        let mut winner = database.begin(&txn_cx).expect("begin first transaction");
+        let mut loser = database
+            .begin(&txn_cx)
+            .expect("begin second transaction at the same basis");
+        assert_eq!(winner.basis(), loser.basis());
+
+        let mut winner_first = WriteBatch::new(RELATION);
+        winner_first.set_vertex_property(
+            VId(1),
+            PROPERTY,
+            Some(CanonicalScalar::Int(1)),
+        );
+        winner
+            .write(&mut database, winner_first)
+            .expect("winner stages first property");
+        let mut winner_second = WriteBatch::new(RELATION);
+        winner_second.set_vertex_property(
+            VId(1),
+            PROPERTY_B,
+            Some(CanonicalScalar::Int(10)),
+        );
+        winner
+            .write(&mut database, winner_second)
+            .expect("winner stages second property");
+
+        let mut loser_first = WriteBatch::new(RELATION);
+        loser_first.set_vertex_property(
+            VId(1),
+            PROPERTY,
+            Some(CanonicalScalar::Int(2)),
+        );
+        loser
+            .write(&mut database, loser_first)
+            .expect("loser stages overlapping property");
+        let mut loser_second = WriteBatch::new(RELATION);
+        loser_second.set_vertex_property(
+            VId(1),
+            PROPERTY_B,
+            Some(CanonicalScalar::Int(20)),
+        );
+        loser
+            .write(&mut database, loser_second)
+            .expect("loser stages second property");
+
+        winner
+            .commit(&mut database, &commit_cx)
+            .await
+            .expect("first committer wins whole");
+        let refusal = loser.commit(&mut database, &commit_cx).await;
+        assert!(
+            matches!(
+                refusal,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+            ),
+            "the stale whole transaction must receive FCW, not SnapshotAdvanced: {refusal:?}"
+        );
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+        drop(database);
+
+        let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
+            .await
+            .expect("independent oracle coordinator opens durable stream");
+        let reference = replay(&commit_cx, &coordinator)
+            .await
+            .expect("durable stream replays into ReferenceDatabase")
+            .database;
+        let vertex = reference
+            .graph(GRAPH, BRANCH)
+            .expect("reference coordinate exists")
+            .vertex(VId(1))
+            .expect("overlap target remains durable");
+        assert_eq!(
+            vertex.props.len(),
+            2,
+            "no property from the losing transaction may survive"
+        );
+        assert_eq!(
+            vertex.props.get(&PROPERTY),
+            Some(&CanonicalScalar::Int(1))
+        );
+        assert_eq!(
+            vertex.props.get(&PROPERTY_B),
+            Some(&CanonicalScalar::Int(10))
+        );
     });
     assert!(
         report.lab_test_passed(),
