@@ -663,6 +663,9 @@ impl<'a> Parser<'a> {
                     && !(direction == EdgeDirection::Outgoing
                         && hop2_relation.is_none()
                         && left == src_var)
+                    && !(direction == EdgeDirection::Incoming
+                        && hop2_relation.is_none()
+                        && left == src_var)
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -2444,10 +2447,12 @@ mod tests {
             binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE b.k = 1 RETURN c"),
             Err(BindError::Parse(_))
         ));
-        assert!(matches!(
-            binder.bind("MATCH (a)<-[:R]-(b) WHERE b.k != 1 RETURN a"),
-            Err(BindError::Parse(_))
-        ));
+        let source_bang_ne = binder
+            .bind("MATCH (a)<-[:R]-(b) WHERE b.k != 1 RETURN a")
+            .expect("incoming source bang inequality binds");
+        assert_eq!(source_bang_ne.src_var, "b");
+        assert_eq!(source_bang_ne.dst_var, "a");
+        assert_eq!(source_bang_ne.src_prop_ne, Some((PropertyKeyId(7), 1)));
     }
 
     #[test]
