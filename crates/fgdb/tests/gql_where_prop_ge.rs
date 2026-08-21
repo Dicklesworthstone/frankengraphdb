@@ -13,7 +13,7 @@
 //! spelling remains a typed parse error.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -143,17 +143,14 @@ fn the_non_strict_less_spelling_is_still_a_typed_parse_error() {
         let dir = scratch("neq-alias-refused");
         let db = seeded(cx, &dir).await;
 
-        let err = db
-            // Retargeted by fgdb-w5-parsers-nje.29 (source <= graduated) and
-            // again by nje.30 (dest <= graduated; caught by the same-wave
-            // sweep, not listed in the rework order): the planted negative
-            // now guards the C-style != alias, which never was grammar —
-            // moved to a live boundary, not weakened.
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
-            .expect_err("the != alias is not grammar");
-        assert!(
-            matches!(err, GqlError::Parse(_)),
-            "!= must be the typed parse arm — <> is the inequality: {err:?}"
+        // nje.58 sibling lock: the C-style != is grammar now and aliases
+        // <> — on this four-source spread both the k=9 and k=0 sources
+        // differ from 1, and the keyless source stays OUT.
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+                .expect("nje.58 source != is grammar, not a Parse"),
+            vec![VId(4), VId(6)],
+            "!= aliases <>: k=9 and k=0 both differ from 1"
         );
     });
 }

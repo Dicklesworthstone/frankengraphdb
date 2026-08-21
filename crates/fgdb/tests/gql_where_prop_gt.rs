@@ -10,7 +10,7 @@
 //! `>=` stays off-grammar.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -89,15 +89,15 @@ fn source_property_greater_than_keeps_greater_sources() {
             vec![VId(2), VId(4), VId(6), VId(8)]
         );
 
-        let ge = db
-            // Retargeted by fgdb-w5-parsers-nje.26 (source >= graduated),
-            // nje.28 (dest >= graduated), and nje.30 (dest <= graduated):
-            // the planted negative now guards the C-style != alias, which
-            // never was grammar — the assertion keeps moving to a live
-            // boundary, it never weakens.
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind)
-            .expect_err("the != alias is outside the bounded grammar");
-        assert!(matches!(ge, GqlError::Parse(_)));
+        // nje.58 sibling lock: the C-style != is grammar now and aliases
+        // <> — on this four-source spread both the k=9 and k=0 sources
+        // differ from 1, and the keyless source stays OUT.
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind)
+                .expect("nje.58 source != is grammar, not a Parse"),
+            vec![VId(4), VId(6)],
+            "!= aliases <>: k=9 and k=0 both differ from 1"
+        );
         assert_eq!(
             db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k < 1 RETURN b", &bind)
                 .expect("nje.23 < is grammar, not a Parse"),

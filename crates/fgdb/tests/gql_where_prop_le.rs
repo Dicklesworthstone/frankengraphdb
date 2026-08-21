@@ -13,7 +13,7 @@
 //! alias set.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -149,16 +149,14 @@ fn dest_le_and_c_style_inequality_are_typed_parse_errors() {
         let dir = scratch("refusals");
         let db = seeded(cx, &dir).await;
 
-        // Narrowed by fgdb-w5-parsers-nje.30: the dest <= spelling
-        // graduated to grammar (its positive suite is
-        // gql_where_dst_prop_le.rs), so the C-style alias carries this
-        // planted negative alone — moved, not weakened.
-        for off_grammar in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
-            let err = db.execute_gql(off_grammar, &bind_rk()).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // nje.58 sibling lock: the C-style != is grammar now and aliases
+        // <> — on this four-source spread both the k=9 and k=0 sources
+        // differ from 1, and the keyless source stays OUT.
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+                .expect("nje.58 source != is grammar, not a Parse"),
+            vec![VId(4), VId(6)],
+            "!= aliases <>: k=9 and k=0 both differ from 1"
+        );
     });
 }
