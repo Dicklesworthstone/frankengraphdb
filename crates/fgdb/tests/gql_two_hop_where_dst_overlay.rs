@@ -30,23 +30,26 @@ fn two_hop_far_end_property_equality_sees_the_staged_chain() {
         .await
         .expect("database creates");
 
+        // WriteTxn is one-relation-per-txn (RelationMismatch otherwise —
+        // the exact independent-cargo-test failure this rework fixes), so
+        // BOTH hop-1 chains and every vertex are durable R work, the first
+        // continuation is durable S work, and the overlay stages exactly
+        // ONE batch on ONE relation: the second chain's :S continuation.
         let mut seed_r = WriteBatch::new(r);
         seed_r.create_vertex(VId(1), vec![], vec![]);
         seed_r.create_vertex(VId(2), vec![], vec![]);
         seed_r.create_vertex(VId(3), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        seed_r.create_vertex(VId(4), vec![], vec![]);
+        seed_r.create_vertex(VId(5), vec![], vec![]);
+        seed_r.create_vertex(VId(6), vec![], vec![(key, CanonicalScalar::Int(1))]);
         seed_r.add_edge(EId(10), VId(1), VId(2), vec![]);
+        seed_r.add_edge(EId(12), VId(4), VId(5), vec![]);
         db.write(&commit, seed_r).await.expect("R fixture commits");
         let mut seed_s = WriteBatch::new(s);
         seed_s.add_edge(EId(11), VId(2), VId(3), vec![]);
         db.write(&commit, seed_s).await.expect("S fixture commits");
 
         let mut txn = db.begin(&txn_cx).expect("transaction begins");
-        let mut staged_r = WriteBatch::new(r);
-        staged_r.create_vertex(VId(4), vec![], vec![]);
-        staged_r.create_vertex(VId(5), vec![], vec![]);
-        staged_r.create_vertex(VId(6), vec![], vec![(key, CanonicalScalar::Int(1))]);
-        staged_r.add_edge(EId(12), VId(4), VId(5), vec![]);
-        txn.write(&mut db, staged_r).expect("R overlay stages");
         let mut staged_s = WriteBatch::new(s);
         staged_s.add_edge(EId(13), VId(5), VId(6), vec![]);
         txn.write(&mut db, staged_s).expect("S overlay stages");
