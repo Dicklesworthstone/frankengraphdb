@@ -230,7 +230,10 @@ impl<'a> Parser<'a> {
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
-        let (hop2_relation, hop2_dst_var) = if direction == EdgeDirection::Outgoing
+        let (hop2_relation, hop2_dst_var) = if matches!(
+            direction,
+            EdgeDirection::Outgoing | EdgeDirection::Undirected
+        )
             && self.source[self.offset..].starts_with('-')
         {
             self.token("-")?;
@@ -239,7 +242,9 @@ impl<'a> Parser<'a> {
             let relation = self.identifier()?;
             self.token("]")?;
             self.token("-")?;
-            self.token(">")?;
+            if direction == EdgeDirection::Outgoing {
+                self.token(">")?;
+            }
             self.token("(")?;
             let dst = self.identifier()?;
             self.token(")")?;
