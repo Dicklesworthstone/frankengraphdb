@@ -239,17 +239,21 @@ fn filter_hop1_by_labels<V: Vfs + Clone>(
 /// Source-property integer predicates drop hop-1 SOURCE keys whose vertex
 /// props do not satisfy the bound comparison. Equality requires
 /// `(key, Int(n))`; inequality requires the key to be present as an integer
-/// other than `n` (fgdb-w5-parsers-nje.15); greater-than requires an integer
-/// above `n` (fgdb-w5-parsers-nje.22). No-WHERE plans consult no property row.
-/// Node-only labeled WHERE applies the same tests inside [`node_scan`]
-/// (fgdb-w5-parsers-nje.11).
+/// other than `n` (fgdb-w5-parsers-nje.15); strict comparisons require an
+/// integer above or below `n` (fgdb-w5-parsers-nje.22/23). No-WHERE plans
+/// consult no property row. Node-only labeled WHERE applies the same tests
+/// inside [`node_scan`] (fgdb-w5-parsers-nje.11).
 fn filter_hop1_by_src_prop<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
     as_of: Option<CommitSeq>,
     hop1: &mut BTreeMap<VId, Vec<VId>>,
 ) -> Result<(), ReadError> {
-    if plan.src_prop.is_none() && plan.src_prop_ne.is_none() && plan.src_prop_gt.is_none() {
+    if plan.src_prop.is_none()
+        && plan.src_prop_ne.is_none()
+        && plan.src_prop_gt.is_none()
+        && plan.src_prop_lt.is_none()
+    {
         return Ok(());
     }
     let carries = |vid: VId| -> Result<bool, ReadError> {
@@ -276,7 +280,13 @@ fn filter_hop1_by_src_prop<V: Vfs + Clone>(
                         && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
                 })
             });
-            equal && not_equal && greater
+            let less = plan.src_prop_lt.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
+                })
+            });
+            equal && not_equal && greater && less
         }))
     };
     let keys: Vec<VId> = hop1.keys().copied().collect();
@@ -375,7 +385,14 @@ fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
                         && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
                 }),
             };
-            equal && not_equal && greater
+            let less = match plan.src_prop_lt {
+                None => true,
+                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
+                }),
+            };
+            equal && not_equal && greater && less
         })
         .map(|row| row.vid)
         .collect();

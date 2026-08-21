@@ -103,6 +103,16 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             hasher.update(&value.to_be_bytes());
         }
     }
+    match plan.src_prop_lt {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
     match plan.dst_prop {
         None => {
             hasher.update(&[0]);
@@ -203,6 +213,7 @@ mod tests {
             src_prop: None,
             src_prop_ne: None,
             src_prop_gt: None,
+            src_prop_lt: None,
             dst_prop: None,
             dst_prop_ne: None,
             limit: None,
