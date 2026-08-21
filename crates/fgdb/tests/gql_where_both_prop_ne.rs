@@ -5,8 +5,8 @@
 //! missing-is-OUT law: the four `{k∈{1,0}} × {m∈{9,0}}` edges leave exactly
 //! one survivor, the `9→10` edge with no `k` proves a missing source
 //! property excludes rather than trivially satisfying `<>`, and swapping
-//! the conjunct order changes nothing. Mixed `<>`/`=` conjunctions and the
-//! C-style `!=` stay off-grammar.
+//! the conjunct order changes nothing. Mixed `<>`/`=` conjunctions are
+//! nje.18 grammar (sibling lock `[6]`). The C-style `!=` stays off-grammar.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -88,13 +88,15 @@ fn both_end_inequality_composes_and_missing_k_is_out() {
             vec![VId(2), VId(4), VId(6), VId(8), VId(10)]
         );
 
-        let mixed = db
-            .execute_gql(
+        assert_eq!(
+            db.execute_gql(
                 "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m = 9 RETURN b",
                 &bind,
             )
-            .expect_err("mixed <>/= conjunctions are outside the bounded grammar");
-        assert!(matches!(mixed, GqlError::Parse(_)));
+            .expect("mixed <>/= is nje.18 grammar, not a Parse"),
+            vec![VId(6)],
+            "nje.18 sibling lock: k<>1 AND m=9 keeps dest 6"
+        );
         let c_style = db
             .execute_gql(
                 "MATCH (a)-[:R]->(b) WHERE a.k != 1 AND b.m <> 9 RETURN b",
