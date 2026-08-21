@@ -97,20 +97,25 @@ pub struct GateTable {
     pub unmarked_rows: Vec<String>,
 }
 
-/// A repository path that a scanned artifact may only mention if the path
-/// actually exists on disk. The instrument for an instruction-shaped claim: a
-/// README line that tells the reader to fetch `scripts/install.sh` is not
-/// target-state prose, it is a command that 404s, and no marker pattern or
-/// gate table sees it. Matching is plain substring over every scanned
-/// artifact; existence is `root.join(path)` — the tracked/untracked
-/// distinction belongs to the git-aware gates in `scripts/check.sh`, which
-/// this checker cannot reach (it spawns no processes). A path claim is a
-/// tripwire: it is EXPECTED to match nothing while the prose is honest, so
-/// its liveness is proven by the negative fixture test, not by the corpus.
+/// A repository path that the named scanned artifacts may only mention if the
+/// path actually exists on disk. The instrument for an instruction-shaped
+/// claim: a README line that tells the reader to fetch `scripts/install.sh`
+/// is not target-state prose, it is a command that 404s, and no marker
+/// pattern or gate table sees it. The claim binds only to the artifacts in
+/// `files` — instruction surfaces like README/AGENTS — because other scanned
+/// prose legitimately NAMES the path while describing the defect
+/// (docs/REALITY_CHECK_AND_BRIDGE_PLAN.md does exactly that). Matching is
+/// plain substring over each named artifact; existence is `root.join(path)` —
+/// the tracked/untracked distinction belongs to the git-aware gates in
+/// `scripts/check.sh`, which this checker cannot reach (it spawns no
+/// processes). A path claim is a tripwire: it is EXPECTED to match nothing
+/// while the prose is honest, so its liveness is proven by the negative
+/// fixture test, not by the corpus.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathClaim {
     pub path: String,
     pub reason: String,
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -393,12 +398,39 @@ pub fn load_config(path: &Path) -> Result<LintConfig, LintError> {
                 msg: format!("{ctx}: a path claim without a reason is a schema error"),
             });
         }
+        // The claim binds to named instruction surfaces, never to the whole
+        // scan set: descriptive prose is allowed to name the absent path.
+        let files = get_str_array(t, "files", &ctx)?;
+        if files.is_empty() {
+            return Err(LintError {
+                msg: format!("{ctx}: files is empty — a path claim bound to nothing checks nothing"),
+            });
+        }
+        let mut seen_files = BTreeSet::new();
+        for f in &files {
+            if !scan.contains(f) {
+                return Err(LintError {
+                    msg: format!(
+                        "{ctx}: files names {f:?} which is not in lint.scan, so its text would never be read"
+                    ),
+                });
+            }
+            if !seen_files.insert(f.clone()) {
+                return Err(LintError {
+                    msg: format!("{ctx}.files: {f:?} is listed twice"),
+                });
+            }
+        }
         if path_claims.iter().any(|p: &PathClaim| p.path == path) {
             return Err(LintError {
                 msg: format!("{ctx}: {path:?} is claimed twice"),
             });
         }
-        path_claims.push(PathClaim { path, reason });
+        path_claims.push(PathClaim {
+            path,
+            reason,
+            files,
+        });
     }
 
     Ok(LintConfig {
@@ -655,20 +687,24 @@ pub fn run(
     }
 
     // ---- path claims: a mentioned path must exist ----
-    // Substring over the scanned artifacts, existence on disk. Reported per
-    // mentioning line so the fix (delete the instruction, or land the file)
-    // has a location. When the path exists the claim is satisfied everywhere
-    // at once — no per-mention proof is possible or needed.
+    // Substring over the claim's named artifacts only, existence on disk.
+    // Reported per mentioning line so the fix (delete the instruction, or
+    // land the file) has a location. When the path exists the claim is
+    // satisfied everywhere at once — no per-mention proof is possible or
+    // needed.
     for pc in &config.path_claims {
         if root.join(&pc.path).exists() {
             continue;
         }
-        for (file, text) in &texts {
+        for file in &pc.files {
+            let text = texts.get(file.as_str()).ok_or_else(|| LintError {
+                msg: format!("{file}: named by a path claim but not scanned"),
+            })?;
             for (lineno, line) in text.lines().enumerate() {
                 if line.contains(pc.path.as_str()) {
                     hits.push(LintHit {
                         kind: HitKind::BrokenPathClaim,
-                        file: (*file).to_string(),
+                        file: file.clone(),
                         line: lineno + 1,
                         subject: pc.path.clone(),
                         text: format!(

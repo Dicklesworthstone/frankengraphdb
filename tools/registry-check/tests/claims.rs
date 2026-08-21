@@ -1157,7 +1157,8 @@ fn claims_neg_broken_path_claim() {
     f.write_config(
         &["README.md", "docs/GUIDE.md"],
         "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
-         [[path_claim]]\npath = \"scripts/install.sh\"\nreason = \"fixture installer claim\"\n",
+         [[path_claim]]\npath = \"scripts/install.sh\"\nfiles = [\"README.md\"]\n\
+         reason = \"fixture installer claim\"\n",
         &["Cold bulk load", "Point reads"],
     );
     // Armed but silent: the claim is declared, nothing mentions the path.
@@ -1180,6 +1181,18 @@ fn claims_neg_broken_path_claim() {
         LINT_FIXTURE_README.lines().count() + 1,
         "{hits:?}"
     );
+
+    // The claim binds only to its named files: descriptive prose in another
+    // scanned artifact may NAME the absent path without a hit (the shipped
+    // corpus does exactly this in the reality-check document).
+    std::fs::write(
+        f.root.join("docs/GUIDE.md"),
+        "A scanned guide that cites FG-SLO-01 and describes the scripts/install.sh defect.\n",
+    )
+    .expect("mutate GUIDE");
+    let hits = f.hits_of(lint::HitKind::BrokenPathClaim);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].file, "README.md", "{hits:?}");
 
     // Land the file: the same mention is now an honest instruction and the
     // claim is satisfied everywhere at once.
@@ -1206,9 +1219,21 @@ fn claims_neg_path_claim_without_reason_is_a_schema_error() {
             "non-empty relative path",
         ),
         (
-            "[[path_claim]]\npath = \"a.sh\"\nreason = \"once\"\n\n\
-             [[path_claim]]\npath = \"a.sh\"\nreason = \"twice\"\n",
+            "[[path_claim]]\npath = \"a.sh\"\nfiles = [\"README.md\"]\nreason = \"once\"\n\n\
+             [[path_claim]]\npath = \"a.sh\"\nfiles = [\"README.md\"]\nreason = \"twice\"\n",
             "claimed twice",
+        ),
+        (
+            "[[path_claim]]\npath = \"a.sh\"\nfiles = []\nreason = \"unbound\"\n",
+            "bound to nothing",
+        ),
+        (
+            "[[path_claim]]\npath = \"a.sh\"\nfiles = [\"HISTORY.md\"]\nreason = \"unscanned\"\n",
+            "not in lint.scan",
+        ),
+        (
+            "[[path_claim]]\npath = \"a.sh\"\nfiles = [\"README.md\", \"README.md\"]\nreason = \"dup file\"\n",
+            "listed twice",
         ),
     ] {
         f.write_config(
