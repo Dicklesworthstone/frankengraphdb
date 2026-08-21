@@ -12,7 +12,7 @@
 
 #![forbid(unsafe_code)]
 
-use fgdb_delta_types::{LabelId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use std::collections::BTreeMap;
 
 /// A syntax error in the bounded GQL grammar.
@@ -45,12 +45,13 @@ impl core::fmt::Display for ParseError {
 
 impl core::error::Error for ParseError {}
 
-/// A relation name was not registered, or the source did not parse.
+/// A relation, label, or property name was not registered, or parsing failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindError {
     Parse(ParseError),
     UnknownRelation { name: String },
     UnknownLabel { name: String },
+    UnknownProperty { name: String },
 }
 
 impl core::fmt::Display for BindError {
@@ -61,6 +62,9 @@ impl core::fmt::Display for BindError {
                 write!(formatter, "unknown relation {name:?}")
             }
             BindError::UnknownLabel { name } => write!(formatter, "unknown label {name:?}"),
+            BindError::UnknownProperty { name } => {
+                write!(formatter, "unknown property {name:?}")
+            }
         }
     }
 }
@@ -105,6 +109,8 @@ pub struct BoundPlan {
     /// [`BoundPlan::neq`] (pair sorted); the parser guarantees at most one
     /// of `eq`/`neq` is `Some`.
     pub eq: Option<(String, String)>,
+    /// Source-property integer equality on the outgoing one-hop form.
+    pub src_prop: Option<(PropertyKeyId, i64)>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -112,6 +118,7 @@ pub struct BoundPlan {
 pub struct RelationBind {
     relations: BTreeMap<String, RelationId>,
     labels: BTreeMap<String, LabelId>,
+    properties: BTreeMap<String, PropertyKeyId>,
 }
 
 impl RelationBind {
@@ -133,13 +140,18 @@ impl RelationBind {
         self
     }
 
+    pub fn with_property(mut self, name: impl Into<String>, property: PropertyKeyId) -> Self {
+        self.properties.insert(name.into(), property);
+        self
+    }
+
     /// Canonical certificate input for this relation-name binding.
     ///
     /// The transcript is big-endian and self-delimiting: entry count, then for
     /// each `(name, relation)` sorted by name and relation id, followed by the
-    /// equivalently sorted label bindings. Names are length-prefixed and IDs
-    /// are big-endian. Counts use `u64`, so the encoding never truncates an
-    /// in-memory map or identifier length.
+    /// equivalently sorted label and property bindings. Names are
+    /// length-prefixed and IDs are big-endian. Counts use `u64`, so the
+    /// encoding never truncates an in-memory map or identifier length.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut entries: Vec<_> = self.relations.iter().collect();
         entries.sort_by(|(left_name, left_relation), (right_name, right_relation)| {
@@ -166,6 +178,18 @@ impl RelationBind {
             bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
             bytes.extend_from_slice(name.as_bytes());
             bytes.extend_from_slice(&label.0.to_be_bytes());
+        }
+        let mut properties: Vec<_> = self.properties.iter().collect();
+        properties.sort_by(|(left_name, left_property), (right_name, right_property)| {
+            left_name
+                .cmp(right_name)
+                .then_with(|| left_property.0.cmp(&right_property.0))
+        });
+        bytes.extend_from_slice(&(properties.len() as u64).to_be_bytes());
+        for (name, property) in properties {
+            bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&property.0.to_be_bytes());
         }
         bytes
     }
@@ -195,6 +219,16 @@ impl RelationBind {
             .transpose()?;
         let src_label = bind_label(&self.labels, ast.src_label)?;
         let dst_label = bind_label(&self.labels, ast.dst_label)?;
+        let src_prop = ast
+            .src_prop
+            .map(|(name, value)| {
+                self.properties
+                    .get(&name)
+                    .copied()
+                    .map(|property| (property, value))
+                    .ok_or(BindError::UnknownProperty { name })
+            })
+            .transpose()?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
@@ -208,6 +242,7 @@ impl RelationBind {
             direction: ast.direction,
             neq: ast.neq,
             eq: ast.eq,
+            src_prop,
         })
     }
 }
@@ -239,6 +274,7 @@ struct MatchAst {
     direction: EdgeDirection,
     neq: Option<(String, String)>,
     eq: Option<(String, String)>,
+    src_prop: Option<(String, i64)>,
 }
 
 struct Parser<'a> {
@@ -290,6 +326,7 @@ impl<'a> Parser<'a> {
                 direction: EdgeDirection::Outgoing,
                 neq: None,
                 eq: None,
+                src_prop: None,
             });
         }
         let incoming = if self.source[self.offset..].starts_with('<') {
@@ -365,47 +402,64 @@ impl<'a> Parser<'a> {
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
-        let (neq, eq) = if direction == EdgeDirection::Outgoing
+        let (neq, eq, src_prop) = if direction == EdgeDirection::Outgoing
             && hop2_relation.is_none()
             && self.source[self.offset..].starts_with("WHERE")
         {
             self.keyword("WHERE")?;
             let left = self.identifier()?;
             self.skip_whitespace();
-            // The operator decides which predicate slot fills; the parser
-            // structure makes eq-and-neq-both-Some unrepresentable.
-            let is_neq = self.source[self.offset..].starts_with('<');
-            let operator = if is_neq {
-                self.token("<")?;
-                self.token(">")?;
-                "<>"
-            } else {
+            if self.source[self.offset..].starts_with('.') {
+                if left != src_var {
+                    return Err(ParseError {
+                        offset: self.offset.saturating_sub(left.len()),
+                        kind: ParseErrorKind::ReturnedVariableMismatch {
+                            expected: src_var.clone(),
+                            found: left,
+                        },
+                    });
+                }
+                self.token(".")?;
+                let property = self.identifier()?;
                 self.token("=")?;
-                "="
-            };
-            let right = self.identifier()?;
-            let binds_endpoints = (left == src_var && right == dst_var)
-                || (left == dst_var && right == src_var);
-            if !binds_endpoints {
-                return Err(ParseError {
-                    offset: self.offset.saturating_sub(right.len()),
-                    kind: ParseErrorKind::ReturnedVariableMismatch {
-                        expected: format!("{src_var} {operator} {dst_var}"),
-                        found: format!("{left} {operator} {right}"),
-                    },
-                });
-            }
-            let mut variables = (left, right);
-            if variables.0 > variables.1 {
-                variables = (variables.1, variables.0);
-            }
-            if is_neq {
-                (Some(variables), None)
+                let value = self.integer()?;
+                (None, None, Some((property, value)))
             } else {
-                (None, Some(variables))
+                // The operator decides which predicate slot fills; the parser
+                // structure makes eq-and-neq-both-Some unrepresentable.
+                let is_neq = self.source[self.offset..].starts_with('<');
+                let operator = if is_neq {
+                    self.token("<")?;
+                    self.token(">")?;
+                    "<>"
+                } else {
+                    self.token("=")?;
+                    "="
+                };
+                let right = self.identifier()?;
+                let binds_endpoints = (left == src_var && right == dst_var)
+                    || (left == dst_var && right == src_var);
+                if !binds_endpoints {
+                    return Err(ParseError {
+                        offset: self.offset.saturating_sub(right.len()),
+                        kind: ParseErrorKind::ReturnedVariableMismatch {
+                            expected: format!("{src_var} {operator} {dst_var}"),
+                            found: format!("{left} {operator} {right}"),
+                        },
+                    });
+                }
+                let mut variables = (left, right);
+                if variables.0 > variables.1 {
+                    variables = (variables.1, variables.0);
+                }
+                if is_neq {
+                    (Some(variables), None, None)
+                } else {
+                    (None, Some(variables), None)
+                }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
@@ -444,6 +498,7 @@ impl<'a> Parser<'a> {
             direction,
             neq,
             eq,
+            src_prop,
         })
     }
 
@@ -503,6 +558,34 @@ impl<'a> Parser<'a> {
         Ok(self.source[start..self.offset].to_owned())
     }
 
+    fn integer(&mut self) -> Result<i64, ParseError> {
+        self.skip_whitespace();
+        let start = self.offset;
+        if self.source[self.offset..].starts_with('-') {
+            self.offset += 1;
+        }
+        let digits = self.offset;
+        while self.source[self.offset..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            self.offset += 1;
+        }
+        if self.offset == digits {
+            return Err(ParseError {
+                offset: start,
+                kind: ParseErrorKind::ExpectedToken("integer"),
+            });
+        }
+        self.source[start..self.offset]
+            .parse()
+            .map_err(|_| ParseError {
+                offset: start,
+                kind: ParseErrorKind::ExpectedToken("i64 integer"),
+            })
+    }
+
     fn optional_label(&mut self) -> Result<Option<String>, ParseError> {
         self.skip_whitespace();
         if !self.source[self.offset..].starts_with(':') {
@@ -555,6 +638,7 @@ mod tests {
                 direction: EdgeDirection::Outgoing,
                 neq: None,
                 eq: None,
+                src_prop: None,
             }
         );
     }
@@ -655,6 +739,37 @@ mod tests {
             binder.bind("MATCH (a)-[:R]->(b) WHERE a = c RETURN b"),
             Err(BindError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn source_property_integer_equality_binds() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_property("k", PropertyKeyId(7));
+        let plan = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
+            .expect("source property equality binds");
+        assert_eq!(plan.src_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(plan.eq, None);
+        assert_eq!(plan.neq, None);
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.missing = 1 RETURN b"),
+            Err(BindError::UnknownProperty { name }) if name == "missing"
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k = b RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE b.k = 1 RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+
+        let inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a <> b RETURN b")
+            .expect("endpoint inequality remains grammar");
+        assert_eq!(inequality.neq, Some(("a".into(), "b".into())));
     }
 
     #[test]
