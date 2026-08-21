@@ -2477,10 +2477,15 @@ mod tests {
         assert_eq!(greater.hop2_dst_prop_gt, Some((PropertyKeyId(7), 1)));
         assert_eq!(greater.hop2_dst_prop_lt, None);
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <= 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let less_or_equal = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <= 1 RETURN c")
+            .expect("outgoing two-hop far-end less-or-equal remains bound");
+        assert_eq!(less_or_equal.hop2_dst_prop_le, Some((PropertyKeyId(7), 1)));
+        assert_eq!(less_or_equal.hop2_dst_prop, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_ne, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_gt, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_lt, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_ge, None);
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
             Err(BindError::Parse(_))
@@ -2535,10 +2540,15 @@ mod tests {
         assert_eq!(less.hop2_dst_prop_lt, Some((PropertyKeyId(7), 1)));
         assert_eq!(less.hop2_dst_prop_ge, None);
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <= 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let less_or_equal = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <= 1 RETURN c")
+            .expect("outgoing two-hop far-end less-or-equal remains bound");
+        assert_eq!(less_or_equal.hop2_dst_prop_le, Some((PropertyKeyId(7), 1)));
+        assert_eq!(less_or_equal.hop2_dst_prop, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_ne, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_gt, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_lt, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_ge, None);
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
             Err(BindError::Parse(_))
