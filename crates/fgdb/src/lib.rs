@@ -880,6 +880,34 @@ impl core::error::Error for GqlError {
     }
 }
 
+/// The pinned MATCH kernel over a SUPPLIED expansion
+/// (fgdb-w4-g1-txn-core-qpmg.4): `WriteTxn::execute_gql` runs it with the
+/// staged-overlay-plus-basis view, which `gql_exec::execute`'s live-fold
+/// `&Database` binding cannot express. Still plan-only — a [`BoundPlan`] in,
+/// no parse-shaped input — and still the CGSE row contract: destinations
+/// ascending, deduplicated.
+///
+/// Kept behaviorally identical to `gql_exec::execute`'s expansion loop (that
+/// entry remains the autocommit product path); the pairing is a mirror
+/// contract like `touched_elements` — if one kernel's row discipline
+/// changes, both must.
+pub(crate) fn execute_bound_plan_over<E>(
+    plan: &BoundPlan,
+    sources: impl IntoIterator<Item = VId>,
+    mut expand: E,
+) -> Result<Vec<VId>, ReadError>
+where
+    E: FnMut(VId, RelationId) -> Result<Vec<VId>, ReadError>,
+{
+    let mut destinations = Vec::new();
+    for src in sources {
+        destinations.extend(expand(src, plan.relation)?);
+    }
+    destinations.sort_unstable();
+    destinations.dedup();
+    Ok(destinations)
+}
+
 /// What a failed CompareAndSet means on a [`WriteBatch`].
 ///
 /// WriteBatch is one atomic write, not a multi-statement transaction.
