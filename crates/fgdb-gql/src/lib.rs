@@ -612,8 +612,9 @@ impl<'a> Parser<'a> {
             self.skip_whitespace();
             let is_incoming_two_hop =
                 direction == EdgeDirection::Incoming && hop2_relation.is_some();
+            let is_incoming_two_hop_near_end = is_incoming_two_hop && left == src_var;
             if is_incoming_two_hop
-                && (hop2_dst_var.as_ref() != Some(&left)
+                && ((hop2_dst_var.as_ref() != Some(&left) && !is_incoming_two_hop_near_end)
                     || !self.source[self.offset..].starts_with('.'))
             {
                 return Err(ParseError {
@@ -648,6 +649,16 @@ impl<'a> Parser<'a> {
                 let is_prop_lt = remaining.starts_with('<') && !is_prop_angle_ne && !is_prop_le;
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
+                if is_incoming_two_hop_near_end
+                    && (is_prop_ne || is_prop_gt || is_prop_lt || is_prop_ge || is_prop_le)
+                {
+                    return Err(ParseError {
+                        offset: self.offset,
+                        kind: ParseErrorKind::ExpectedToken(
+                            "incoming two-hop near-end property equality before RETURN",
+                        ),
+                    });
+                }
                 if is_prop_bang_ne
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
@@ -747,6 +758,31 @@ impl<'a> Parser<'a> {
                     (
                         None, None, None, None, None, None, None, None, None, None, None, None,
                         None, None,
+                    )
+                } else if is_incoming_two_hop_near_end {
+                    if self.source[self.offset..].starts_with("AND") {
+                        return Err(ParseError {
+                            offset: self.offset,
+                            kind: ParseErrorKind::ExpectedToken(
+                                "RETURN after incoming two-hop near-end property equality",
+                            ),
+                        });
+                    }
+                    (
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some((property, value)),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                 } else if self.source[self.offset..].starts_with("AND") {
                     if is_prop_gt || is_prop_lt || is_prop_ge || is_prop_le {
@@ -1123,7 +1159,8 @@ impl<'a> Parser<'a> {
         };
         if direction == EdgeDirection::Incoming
             && hop2_relation.is_some()
-            && (hop2_dst_prop.is_some()
+            && (dst_prop.is_some()
+                || hop2_dst_prop.is_some()
                 || hop2_dst_prop_ne.is_some()
                 || hop2_dst_prop_gt.is_some()
                 || hop2_dst_prop_lt.is_some()
@@ -2370,10 +2407,24 @@ mod tests {
                 .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
                 .is_ok()
         );
-        assert!(matches!(
-            binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let incoming_near_end = binder
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN c")
+            .expect("incoming two-hop near-end property equality binds");
+        assert_eq!(incoming_near_end.dst_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(incoming_near_end.src_prop, None);
+        assert_eq!(incoming_near_end.hop2_dst_prop, None);
+        for statement in [
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN a",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <> 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k > 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE b.k = 1 RETURN c",
+        ] {
+            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
+        }
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k = 1 RETURN c"),
             Err(BindError::Parse(_))
