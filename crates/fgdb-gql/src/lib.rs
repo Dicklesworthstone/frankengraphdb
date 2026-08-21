@@ -371,49 +371,62 @@ impl<'a> Parser<'a> {
             && (self.source[self.offset..].starts_with("RETURN")
                 || self.source[self.offset..].starts_with("WHERE"))
         {
-            let (src_prop, src_prop_ne, src_prop_gt, src_prop_lt) = if self.source[self.offset..]
-                .starts_with("WHERE")
-            {
-                self.keyword("WHERE")?;
-                let predicate_var = self.identifier()?;
-                if predicate_var != left_var {
-                    return Err(ParseError {
-                        offset: self.offset.saturating_sub(predicate_var.len()),
-                        kind: ParseErrorKind::ReturnedVariableMismatch {
-                            expected: left_var,
-                            found: predicate_var,
-                        },
-                    });
-                }
-                self.token(".")?;
-                let property = self.identifier()?;
-                let remaining = self.source[self.offset..].trim_start();
-                let is_ne = remaining.starts_with("<>");
-                let is_lt = remaining.starts_with('<') && !is_ne;
-                let is_gt = remaining.starts_with('>');
-                if is_ne {
-                    self.token("<")?;
-                    self.token(">")?;
-                } else if is_lt {
-                    self.token("<")?;
-                } else if is_gt {
-                    self.token(">")?;
+            let (src_prop, src_prop_ne, src_prop_gt, src_prop_lt, src_prop_ge) =
+                if self.source[self.offset..].starts_with("WHERE") {
+                    self.keyword("WHERE")?;
+                    let predicate_var = self.identifier()?;
+                    if predicate_var != left_var {
+                        return Err(ParseError {
+                            offset: self.offset.saturating_sub(predicate_var.len()),
+                            kind: ParseErrorKind::ReturnedVariableMismatch {
+                                expected: left_var,
+                                found: predicate_var,
+                            },
+                        });
+                    }
+                    self.token(".")?;
+                    let property = self.identifier()?;
+                    let remaining = self.source[self.offset..].trim_start();
+                    let is_ne = remaining.starts_with("<>");
+                    let is_le = remaining.starts_with("<=");
+                    let is_lt = remaining.starts_with('<') && !is_ne && !is_le;
+                    let is_ge = remaining.starts_with(">=");
+                    let is_gt = remaining.starts_with('>') && !is_ge;
+                    if is_ne {
+                        self.token("<")?;
+                        self.token(">")?;
+                    } else if is_le {
+                        return Err(ParseError {
+                            offset: self.offset,
+                            kind: ParseErrorKind::ExpectedToken(
+                                "node-only property comparator other than <=",
+                            ),
+                        });
+                    } else if is_lt {
+                        self.token("<")?;
+                    } else if is_ge {
+                        self.token(">")?;
+                        self.token("=")?;
+                    } else if is_gt {
+                        self.token(">")?;
+                    } else {
+                        self.token("=")?;
+                    }
+                    let predicate = Some((property, self.integer()?));
+                    if is_ne {
+                        (None, predicate, None, None, None)
+                    } else if is_lt {
+                        (None, None, None, predicate, None)
+                    } else if is_ge {
+                        (None, None, None, None, predicate)
+                    } else if is_gt {
+                        (None, None, predicate, None, None)
+                    } else {
+                        (predicate, None, None, None, None)
+                    }
                 } else {
-                    self.token("=")?;
-                }
-                let predicate = Some((property, self.integer()?));
-                if is_ne {
-                    (None, predicate, None, None)
-                } else if is_lt {
-                    (None, None, None, predicate)
-                } else if is_gt {
-                    (None, None, predicate, None)
-                } else {
-                    (predicate, None, None, None)
-                }
-            } else {
-                (None, None, None, None)
-            };
+                    (None, None, None, None, None)
+                };
             self.keyword("RETURN")?;
             let returned = self.identifier()?;
             if returned != left_var {
@@ -451,7 +464,7 @@ impl<'a> Parser<'a> {
                 src_prop_ne,
                 src_prop_gt,
                 src_prop_lt,
-                src_prop_ge: None,
+                src_prop_ge,
                 src_prop_le: None,
                 dst_prop: None,
                 dst_prop_ne: None,
@@ -1880,6 +1893,32 @@ mod tests {
 
         for statement in [
             "MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b",
+        ] {
+            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
+        }
+    }
+
+    #[test]
+    fn node_only_property_greater_than_or_equal_binds() {
+        let binder = RelationBind::new()
+            .with_label("Person", LabelId(11))
+            .with_property("k", PropertyKeyId(7));
+        let plan = binder
+            .bind("MATCH (a:Person) WHERE a.k >= 1 RETURN a")
+            .expect("labeled node-only greater-than-or-equal binds");
+        assert_eq!(plan.relation, None);
+        assert_eq!(plan.src_prop_ge, Some((PropertyKeyId(7), 1)));
+        assert_eq!(plan.src_prop_gt, None);
+
+        let greater = binder
+            .bind("MATCH (a:Person) WHERE a.k > 1 RETURN a")
+            .expect("labeled node-only greater-than remains grammar");
+        assert_eq!(greater.src_prop_gt, Some((PropertyKeyId(7), 1)));
+        assert_eq!(greater.src_prop_ge, None);
+
+        for statement in [
+            "MATCH (a:Person) WHERE a.k <= 1 RETURN a",
+            "MATCH (a) WHERE a.k >= 1 RETURN a",
         ] {
             assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
         }
