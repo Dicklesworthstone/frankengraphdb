@@ -1207,7 +1207,7 @@ impl<V: Vfs> BlockStore<V> {
     /// counterpart of [`BlockStore::inspect_root_blocks`], including the
     /// incremental vertex-history admission so a future patch cannot reuse a
     /// VId and still mint a selective-read token.
-    fn inspect_root_patches(
+    async fn inspect_root_patches(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
@@ -1216,7 +1216,7 @@ impl<V: Vfs> BlockStore<V> {
         let mut patches = Vec::new();
         let mut history = crate::root::VertexHistoryValidator::default();
         for (at, reference) in root.vertex_patches.iter().enumerate() {
-            let rows = self.resolve_root_patch(cx, at, reference)?;
+            let rows = self.resolve_root_patch(cx, at, reference).await?;
             history
                 .observe_patch(at, &rows)
                 .map_err(StoreError::MalformedRoot)?;
@@ -1232,7 +1232,7 @@ impl<V: Vfs> BlockStore<V> {
     /// `selected` comes from the shared root skip rule and is walked in lockstep
     /// with publication order. Unlike fresh admission, skipped blocks are not
     /// opened: their range summaries were proved when the token was minted.
-    fn resolve_admitted_root_blocks_at(
+    async fn resolve_admitted_root_blocks_at(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
@@ -1248,7 +1248,8 @@ impl<V: Vfs> BlockStore<V> {
             }
             selected.next();
             blocks.push(
-                self.resolve_root_block(cx, at, root.partition, reference)?
+                self.resolve_root_block(cx, at, root.partition, reference)
+                    .await?
                     .0,
             );
         }
@@ -1259,7 +1260,7 @@ impl<V: Vfs> BlockStore<V> {
     /// Resolve only vertex patches selected by an already-minted admission
     /// token — the patch counterpart of
     /// [`BlockStore::resolve_admitted_root_blocks_at`].
-    fn resolve_admitted_root_patches_at(
+    async fn resolve_admitted_root_patches_at(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
@@ -1274,7 +1275,7 @@ impl<V: Vfs> BlockStore<V> {
                 continue;
             }
             selected.next();
-            patches.push(self.resolve_root_patch(cx, at, reference)?);
+            patches.push(self.resolve_root_patch(cx, at, reference).await?);
         }
         debug_assert!(selected.next().is_none());
         Ok(patches)
@@ -1294,15 +1295,16 @@ impl<V: Vfs> BlockStore<V> {
     /// binds each authenticated range to the actual block bytes, so a future
     /// range-skipping reader cannot inherit a lie minted by a privileged caller.
     /// Publication then delegates to the same immutable-object path as blocks.
-    pub fn put_root(
+    pub async fn put_root(
         &self,
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<PartitionRootVersion, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
-        self.inspect_root_blocks(cx, root, |_, _| false)?;
-        self.inspect_root_patches(cx, root, |_, _| false)?;
+        self.inspect_root_blocks(cx, root, |_, _| false).await?;
+        self.inspect_root_patches(cx, root, |_, _| false).await?;
         self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
+            .await
             .map(PartitionRootVersion)
     }
 
@@ -1310,7 +1312,7 @@ impl<V: Vfs> BlockStore<V> {
     /// counterpart of [`BlockStore::put_verified`], earning the same span and
     /// vertex-history admission the root publication would otherwise re-derive
     /// from disk.
-    pub fn put_patch_verified(
+    pub async fn put_patch_verified(
         &self,
         cx: &CommitCx,
         bytes: &[u8],
@@ -1320,7 +1322,7 @@ impl<V: Vfs> BlockStore<V> {
         if receipts.patch_spans.contains_key(&id) {
             return Ok(VertexPatchVersion(id));
         }
-        let stored = self.put_patch(cx, bytes)?;
+        let stored = self.put_patch(cx, bytes).await?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
         let rows = decode_patch(bytes).map_err(StoreError::MalformedPatch)?;
         receipts
@@ -1348,7 +1350,7 @@ impl<V: Vfs> BlockStore<V> {
     /// An empty decoded block earns no receipt and is deliberately not an
     /// error here: the slow path accepts those bytes too, and the refusal
     /// belongs to root admission, which is where it always lived.
-    pub fn put_verified(
+    pub async fn put_verified(
         &self,
         cx: &CommitCx,
         bytes: &[u8],
@@ -1356,6 +1358,7 @@ impl<V: Vfs> BlockStore<V> {
         receipts: &mut PublishReceipts,
     ) -> Result<DeltaBlockVersion, StoreError> {
         self.put_verified_with_crash(cx, bytes, patch_bytes, receipts, None)
+            .await
     }
 
     /// The exact receipt-earning production path with one optional block-store
@@ -1366,7 +1369,7 @@ impl<V: Vfs> BlockStore<V> {
     /// path. If `receipts` already proves the identity, no filesystem operation
     /// occurs and therefore no filesystem crash instant exists to inject.
     #[doc(hidden)]
-    pub fn put_verified_with_crash(
+    pub async fn put_verified_with_crash(
         &self,
         cx: &CommitCx,
         bytes: &[u8],
@@ -1381,9 +1384,9 @@ impl<V: Vfs> BlockStore<V> {
         // The hosted patch becomes durable BEFORE the block earns a receipt,
         // so a receipted block's patch is never unreachable (fgdb-yqor).
         if let Some(patch_bytes) = patch_bytes {
-            self.put_edge_property_patch(cx, patch_bytes)?;
+            self.put_edge_property_patch(cx, patch_bytes).await?;
         }
-        let stored = self.put_with_crash(cx, bytes, crash_at)?;
+        let stored = self.put_with_crash(cx, bytes, crash_at).await?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
         let (entries, declared_patch) =
             crate::decode_block_with_properties(bytes).map_err(StoreError::Malformed)?;
@@ -1397,6 +1400,7 @@ impl<V: Vfs> BlockStore<V> {
                 None => {
                     owned = self
                         .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                        .await
                         .map_err(|error| StoreError::BlockPatchLoad {
                             at: receipts.spans.len(),
                             error: Box::new(error),
@@ -1469,7 +1473,7 @@ impl<V: Vfs> BlockStore<V> {
     /// nothing the retained state does not already prove. Restated statements
     /// (a tombstone repeating its birth) pass the validator identically on
     /// both paths.
-    pub fn put_root_verified(
+    pub async fn put_root_verified(
         &self,
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
@@ -1489,8 +1493,9 @@ impl<V: Vfs> BlockStore<V> {
                     .get(&reference.block_id)
                     .expect("every span receipt records its chain fields in the same insertion")
             } else {
-                let (entries, _props, predecessor) =
-                    self.resolve_root_block(cx, at, root.partition, reference)?;
+                let (entries, _props, predecessor) = self
+                    .resolve_root_block(cx, at, root.partition, reference)
+                    .await?;
                 receipts
                     .validator
                     .observe_block(at, &entries)
@@ -1528,7 +1533,7 @@ impl<V: Vfs> BlockStore<V> {
             {
                 continue;
             }
-            let rows = self.resolve_root_patch(cx, at, reference)?;
+            let rows = self.resolve_root_patch(cx, at, reference).await?;
             receipts
                 .vertex_validator
                 .observe_patch(at, &rows)
@@ -1540,17 +1545,20 @@ impl<V: Vfs> BlockStore<V> {
             );
         }
         self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
+            .await
             .map(PartitionRootVersion)
     }
 
     /// Load the partition root named by `id`, using the root format's exact byte
     /// ceiling and root-specific identity verifier before structural decoding.
-    pub fn get_root(
+    pub async fn get_root(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
-        let bytes = self.read_object_bytes(cx, id.0, crate::root::MAX_ENCODED_ROOT_BYTES as u64)?;
+        let bytes = self
+            .read_object_bytes(cx, id.0, crate::root::MAX_ENCODED_ROOT_BYTES as u64)
+            .await?;
         crate::root::read_root(self.k_oid.expose(), self.namespace, &bytes, id.0)
             .map_err(StoreError::MalformedRoot)
     }
@@ -1563,7 +1571,7 @@ impl<V: Vfs> BlockStore<V> {
     /// content-addressed store trustworthy — the bytes are the object asked for, and
     /// each block and patch spans what the root claimed about it.
     #[allow(clippy::type_complexity)]
-    pub fn reopen(
+    pub async fn reopen(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
@@ -1576,28 +1584,28 @@ impl<V: Vfs> BlockStore<V> {
         ),
         StoreError,
     > {
-        let root = self.get_root(cx, id)?;
-        let resolved = self.resolve_root_blocks(cx, &root)?;
+        let root = self.get_root(cx, id).await?;
+        let resolved = self.resolve_root_blocks(cx, &root).await?;
         let mut blocks = Vec::with_capacity(resolved.len());
         let mut block_props = Vec::with_capacity(resolved.len());
         for (entries, props) in resolved {
             blocks.push(entries);
             block_props.push(props);
         }
-        let patches = self.inspect_root_patches(cx, &root, |_, _| true)?;
+        let patches = self.inspect_root_patches(cx, &root, |_, _| true).await?;
         Ok((root, blocks, block_props, patches))
     }
 
     /// Admit a stored root against every named block and patch without
     /// retaining the decoded partition.
-    pub fn admit_root(
+    pub async fn admit_root(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
-    ) -> Result<AdmittedPartitionRoot<'_>, StoreError> {
-        let root = self.get_root(cx, id)?;
-        self.inspect_root_blocks(cx, &root, |_, _| false)?;
-        self.inspect_root_patches(cx, &root, |_, _| false)?;
+    ) -> Result<AdmittedPartitionRoot<'_, V>, StoreError> {
+        let root = self.get_root(cx, id).await?;
+        self.inspect_root_blocks(cx, &root, |_, _| false).await?;
+        self.inspect_root_patches(cx, &root, |_, _| false).await?;
         Ok(AdmittedPartitionRoot {
             store: self,
             root_id: id,
@@ -1613,20 +1621,20 @@ impl<V: Vfs> BlockStore<V> {
     /// blocks that can affect `as_of`; the returned token makes later calls to
     /// [`AdmittedPartitionRoot::resolve_blocks_at`] genuinely selective.
     #[allow(clippy::type_complexity)]
-    pub fn reopen_at(
+    pub async fn reopen_at(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
         as_of: CommitSeq,
     ) -> Result<
         (
-            AdmittedPartitionRoot<'_>,
+            AdmittedPartitionRoot<'_, V>,
             Vec<Vec<crate::AdjacencyEntry>>,
             Vec<Vec<VertexRow>>,
         ),
         StoreError,
     > {
-        let root = self.get_root(cx, id)?;
+        let root = self.get_root(cx, id).await?;
         let visible = crate::root::blocks_visible_at(&root, as_of);
         let mut visible = visible.into_iter().peekable();
         let blocks: Vec<Vec<crate::AdjacencyEntry>> = self
@@ -1636,20 +1644,23 @@ impl<V: Vfs> BlockStore<V> {
                 }
                 visible.next();
                 true
-            })?
+            })
+            .await?
             .into_iter()
             .map(|(entries, _)| entries)
             .collect();
         debug_assert!(visible.next().is_none());
         let visible_patches = crate::root::patches_visible_at(&root, as_of);
         let mut visible_patches = visible_patches.into_iter().peekable();
-        let patches = self.inspect_root_patches(cx, &root, |at, _| {
-            if visible_patches.peek() != Some(&at) {
-                return false;
-            }
-            visible_patches.next();
-            true
-        })?;
+        let patches = self
+            .inspect_root_patches(cx, &root, |at, _| {
+                if visible_patches.peek() != Some(&at) {
+                    return false;
+                }
+                visible_patches.next();
+                true
+            })
+            .await?;
         debug_assert!(visible_patches.next().is_none());
         let admitted = AdmittedPartitionRoot {
             store: self,
@@ -1671,8 +1682,8 @@ impl<V: Vfs> BlockStore<V> {
     /// Found by a law about two keys sharing a directory, which failed against the
     /// stat-only version. Reading the file to answer is the cost of the answer
     /// being true, and this crate is never optimized (§15).
-    pub fn contains(&self, cx: &impl StorageReadCx, id: DeltaBlockVersion) -> bool {
-        self.get_bytes(cx, id).is_ok()
+    pub async fn contains(&self, cx: &impl StorageReadCx, id: DeltaBlockVersion) -> bool {
+        self.get_bytes(cx, id).await.is_ok()
     }
 }
 
