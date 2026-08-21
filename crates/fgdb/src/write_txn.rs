@@ -553,6 +553,84 @@ impl WriteTxn {
         Ok(destinations.into_iter().collect())
     }
 
+    /// Read the pinned incoming neighbours of one relation through staged
+    /// edge creates, edge deletes, and vertex-delete cascades.
+    pub fn in_neighbours<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        dst: VId,
+        relation: RelationId,
+    ) -> Result<Vec<VId>, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+
+        let mut sources: std::collections::BTreeSet<VId> = database
+            .in_neighbours_at(dst, relation, self.basis)?
+            .into_iter()
+            .collect();
+        let mut matching_edges: std::collections::BTreeMap<EId, VId> = database
+            .edges_at(self.basis)?
+            .into_iter()
+            .filter_map(|record| {
+                (record.entry.dst == dst && record.entry.relation == relation)
+                    .then_some((record.entry.eid, record.entry.src))
+            })
+            .collect();
+        let mut observed_edges: std::collections::BTreeSet<EId> =
+            matching_edges.keys().copied().collect();
+        let mut deleted_sources = std::collections::BTreeSet::new();
+
+        for batch in &self.staged {
+            for pending in &batch.rows {
+                match pending {
+                    PendingRow::Edge {
+                        eid,
+                        src,
+                        dst: edge_dst,
+                        ensure,
+                        ..
+                    } if *edge_dst == dst && batch.relation == relation => {
+                        if !ensure || !sources.contains(src) {
+                            matching_edges.insert(*eid, *src);
+                            sources.insert(*src);
+                            observed_edges.insert(*eid);
+                        }
+                    }
+                    PendingRow::DeleteEdge { eid, .. } => {
+                        if let Some(src) = matching_edges.remove(eid)
+                            && !matching_edges.values().any(|other| *other == src)
+                        {
+                            sources.remove(&src);
+                        }
+                    }
+                    PendingRow::DeleteVertex { vid, .. } => {
+                        if *vid == dst {
+                            matching_edges.clear();
+                            sources.clear();
+                        } else if matching_edges.values().any(|src| *src == *vid) {
+                            matching_edges.retain(|_, src| *src != *vid);
+                            sources.remove(vid);
+                            deleted_sources.insert(*vid);
+                        }
+                    }
+                    PendingRow::Vertex { .. }
+                    | PendingRow::Edge { .. }
+                    | PendingRow::SetLabel { .. }
+                    | PendingRow::SetEdgeProperty { .. }
+                    | PendingRow::SetProperty { .. }
+                    | PendingRow::CompareAndSet { .. } => {}
+                }
+            }
+        }
+
+        let mut read_set = self.read_set.borrow_mut();
+        read_set.insert(ElementId::Vertex(dst));
+        read_set.extend(observed_edges.into_iter().map(ElementId::Edge));
+        read_set.extend(deleted_sources.into_iter().map(ElementId::Vertex));
+        Ok(sources.into_iter().collect())
+    }
+
     /// Execute the pinned MATCH expansion over the durable basis plus staged
     /// vertex and edge mutations, without publishing the transaction.
     pub fn execute_gql<V: Vfs + Clone>(
