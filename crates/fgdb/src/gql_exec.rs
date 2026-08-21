@@ -17,9 +17,9 @@
 
 use crate::{Database, EdgeRecord, ReadError};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::{LabelId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
-use fgdb_types::{CommitSeq, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, VId};
 use std::collections::BTreeMap;
 
 /// Both-orientation adjacency for the hop-1 relation AND the optional hop-2
@@ -236,6 +236,42 @@ fn filter_hop1_by_labels<V: Vfs + Clone>(
     Ok(())
 }
 
+/// Source-property integer equality (fgdb-w5-parsers-nje.8) drops hop-1
+/// SOURCE keys whose vertex props do not carry `(key, Int(n))`. No-WHERE
+/// plans consult no property row. Node-only scans ignore `src_prop` this
+/// slice — they never reach this filter.
+fn filter_hop1_by_src_prop<V: Vfs + Clone>(
+    plan: &BoundPlan,
+    db: &Database<V>,
+    as_of: Option<CommitSeq>,
+    hop1: &mut BTreeMap<VId, Vec<VId>>,
+) -> Result<(), ReadError> {
+    let Some((key, value)) = plan.src_prop else {
+        return Ok(());
+    };
+    let wanted = CanonicalScalar::Int(value);
+    let carries = |vid: VId, key: PropertyKeyId| -> Result<bool, ReadError> {
+        let row = match as_of {
+            Some(seq) => db.vertex_at(vid, seq)?,
+            None => db.vertex(vid)?,
+        };
+        Ok(row.is_some_and(|row| {
+            row.props
+                .iter()
+                .any(|(property, scalar)| *property == key && *scalar == wanted)
+        }))
+    };
+    let keys: Vec<VId> = hop1.keys().copied().collect();
+    let mut kept = std::collections::BTreeSet::new();
+    for vid in keys {
+        if carries(vid, key)? {
+            kept.insert(vid);
+        }
+    }
+    hop1.retain(|anchor, _| kept.contains(anchor));
+    Ok(())
+}
+
 /// The node-only scan face (fgdb-w5-parsers-nje.7): a plan with no edge
 /// relation never touches the edge table — its rows are the vids whose
 /// labels carry the pattern's label, under the same CGSE row contract
@@ -274,6 +310,7 @@ pub(crate) fn execute<V: Vfs + Clone>(
         relation_adjacencies(records, relation, plan.hop2_relation)
     };
     filter_hop1_by_labels(plan, db, None, &mut hop1)?;
+    filter_hop1_by_src_prop(plan, db, None, &mut hop1)?;
     execute_over_adjacencies(plan, hop1, hop2)
 }
 
@@ -296,5 +333,6 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
         relation_adjacencies(records, relation, plan.hop2_relation)
     };
     filter_hop1_by_labels(plan, db, Some(as_of), &mut hop1)?;
+    filter_hop1_by_src_prop(plan, db, Some(as_of), &mut hop1)?;
     execute_over_adjacencies(plan, hop1, hop2)
 }

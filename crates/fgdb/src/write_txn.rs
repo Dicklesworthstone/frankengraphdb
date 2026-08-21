@@ -6,8 +6,8 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{
-    Acquired, CommitCx, CommitSeq, EId, ObligationAcquireError, ObligationId, PurposeObligation,
-    TxnCx, VId,
+    Acquired, CanonicalScalar, CommitCx, CommitSeq, EId, ObligationAcquireError, ObligationId,
+    PurposeObligation, TxnCx, VId,
 };
 
 /// Failure to prepare or finish the bounded one-batch write transaction.
@@ -766,6 +766,23 @@ impl WriteTxn {
         };
         let src_labeled = plan.src_label.map(&label_holders).transpose()?;
         let dst_labeled = plan.dst_label.map(&label_holders).transpose()?;
+        let src_prop_ok = match plan.src_prop {
+            None => None,
+            Some((key, value)) => {
+                let wanted = CanonicalScalar::Int(value);
+                let mut holders = std::collections::BTreeSet::new();
+                for vid in vertices.iter().copied() {
+                    if self.vertex(database, vid)?.is_some_and(|row| {
+                        row.props
+                            .iter()
+                            .any(|(property, scalar)| *property == key && *scalar == wanted)
+                    }) {
+                        holders.insert(vid);
+                    }
+                }
+                Some(holders)
+            }
+        };
         let anchors: Vec<VId> = vertices
             .iter()
             .copied()
@@ -773,6 +790,9 @@ impl WriteTxn {
                 src_labeled
                     .as_ref()
                     .is_none_or(|labeled| labeled.contains(anchor))
+                    && src_prop_ok
+                        .as_ref()
+                        .is_none_or(|holders| holders.contains(anchor))
             })
             .collect();
         let destinations = crate::execute_bound_plan_over(
