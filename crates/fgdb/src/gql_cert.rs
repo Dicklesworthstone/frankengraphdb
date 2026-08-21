@@ -25,15 +25,19 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
     hasher.update(&plan.relation.0.to_be_bytes());
     update_string(&mut hasher, &plan.src_var);
     update_string(&mut hasher, &plan.dst_var);
-    hasher.update(&[match plan.projection {
-        ReturnProjection::Destination => 0,
-        ReturnProjection::Source => 1,
-    }]);
+    hasher.update(&[projection_tag(plan.projection)]);
     hasher.update(&snapshot_seq.0.to_be_bytes());
 
     GqlPlanCertificate {
         digest: hasher.finalize(),
         snapshot_seq,
+    }
+}
+
+fn projection_tag(projection: ReturnProjection) -> u8 {
+    match projection {
+        ReturnProjection::Destination => 0,
+        ReturnProjection::Source => 1,
     }
 }
 
@@ -53,9 +57,9 @@ pub fn digest_bind(bind: &RelationBind) -> Digest {
 
 #[cfg(test)]
 mod tests {
-    use super::{certify, GqlPlanCertificate};
+    use super::{certify, projection_tag, GqlPlanCertificate};
     use fgdb_delta_types::RelationId;
-    use fgdb_gql::{BoundPlan, ReturnProjection};
+    use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
     use fgdb_types::CommitSeq;
 
     fn plan(relation: u64) -> BoundPlan {
@@ -64,6 +68,7 @@ mod tests {
             src_var: "a".to_owned(),
             dst_var: "b".to_owned(),
             projection: ReturnProjection::Destination,
+            direction: EdgeDirection::Outgoing,
         }
     }
 
@@ -105,5 +110,11 @@ mod tests {
             certify(&destination, CommitSeq(11)).digest,
             certify(&source, CommitSeq(11)).digest
         );
+    }
+
+    #[test]
+    fn return_projection_tags_are_stable() {
+        assert_eq!(projection_tag(ReturnProjection::Destination), 0);
+        assert_eq!(projection_tag(ReturnProjection::Source), 1);
     }
 }
