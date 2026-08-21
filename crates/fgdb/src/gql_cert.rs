@@ -233,6 +233,16 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             hasher.update(&value.to_be_bytes());
         }
     }
+    match plan.hop2_dst_prop_ge {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
     match plan.limit {
         None => {
             hasher.update(&[0]);
@@ -328,6 +338,7 @@ mod tests {
             hop2_dst_prop_ne: None,
             hop2_dst_prop_gt: None,
             hop2_dst_prop_lt: None,
+            hop2_dst_prop_ge: None,
         }
     }
 
@@ -443,6 +454,18 @@ mod tests {
         let unfiltered = plan(7);
         let mut filtered = unfiltered.clone();
         filtered.hop2_dst_prop_gt = Some((PropertyKeyId(9), 1));
+
+        assert_ne!(
+            certify(&unfiltered, CommitSeq(11)).digest,
+            certify(&filtered, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn hop2_destination_property_ge_changes_digest() {
+        let unfiltered = plan(7);
+        let mut filtered = unfiltered.clone();
+        filtered.hop2_dst_prop_ge = Some((PropertyKeyId(9), 1));
 
         assert_ne!(
             certify(&unfiltered, CommitSeq(11)).digest,
