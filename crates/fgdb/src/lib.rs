@@ -136,6 +136,16 @@ pub use write_txn::{WriteTxn, WriteTxnError};
 /// there: one product write-set contract, two named sites.
 const FCW_LAW_ID: &str = "FG-LAW-FCW-01";
 
+/// The read-set sibling law (fgdb-w4-g1-txn-core-qpmg.5): a validator
+/// rejection carrying this id means a `WriteTxn`'s OBSERVED elements — an
+/// overlay `vertex` or MATCH read — were written past the pinned basis by a
+/// first committer. It routes into the same typed
+/// [`WriteError::FirstCommitterWins`] arm, whose `law` field is exactly how
+/// a caller tells a lost write-set from a stale read-set; the remedy for
+/// both is the same rebuild-against-the-advanced-snapshot, which is why they
+/// share the arm and not the generic [`WriteError::Commit`] wrap.
+const FCW_READ_LAW_ID: &str = "FG-LAW-FCW-READ-01";
+
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CAPSULE_DIR, CommitCoordinator, CommitError};
@@ -3151,7 +3161,9 @@ impl<V: Vfs + Clone> Database<V> {
                 // than any transport or protocol failure in `Commit`.
                 self.state = DatabaseState::Healthy { published_frontier };
                 return Err(match source {
-                    CommitError::Rejected(rejection) if rejection.law == FCW_LAW_ID => {
+                    CommitError::Rejected(rejection)
+                        if rejection.law == FCW_LAW_ID || rejection.law == FCW_READ_LAW_ID =>
+                    {
                         WriteError::FirstCommitterWins {
                             law: rejection.law,
                             detail: rejection.detail,
