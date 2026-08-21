@@ -390,6 +390,8 @@ impl WriteTxn {
         let mut read_set = self.read_set.borrow_mut();
         read_set.insert(ElementId::Vertex(src));
         read_set.extend(observed_edges.into_iter().map(ElementId::Edge));
+        drop(read_set);
+        self.match_expansions.borrow_mut().insert((src, relation));
         Ok(destinations.into_iter().collect())
     }
 
