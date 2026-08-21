@@ -4113,6 +4113,34 @@ fn statement_successor(previous: Option<ObjectId>, transcript: &[u8]) -> ObjectI
 
 /// The elements one row touches for the version chain — deletes touch to
 /// REMOVE, everything else to advance; the cascade names its members.
+/// The endpoint vertices whose ADJACENCY a row changes, in the same
+/// [`ElementId`] vocabulary as [`touched_elements`] — the phantom side of the
+/// read-set intersection (fgdb-w4-g1-txn-core-qpmg.7).
+///
+/// Deliberately a SIBLING of `touched_elements`, never merged into it: that
+/// walk is the write-set law's conflict vocabulary (FG-LAW-FCW-01, mirrored
+/// in `fcw.rs`) and must keep meaning "this element's own row changed". A
+/// `CreateEdge` touches only its fresh `EId` there — an id no reader can
+/// have observed — yet it changes what a MATCH expansion from `src` (and
+/// toward `dst`) answers, which is exactly the phantom a read-set of
+/// observed elements would otherwise miss. Only `CreateEdge` emits here:
+/// every other row kind already intersects through `touched_elements`
+/// (deletes touch the traversed edge ids and cascade vids readers recorded).
+///
+/// No-claim: a commit that creates a NEW vertex and an edge from it in one
+/// batch is a scan-level phantom no `ElementId` read-set can express;
+/// catching it needs predicate/range reads and is deliberately out of this
+/// bounded slice.
+pub(crate) fn adjacency_endpoints(
+    row: &DeltaRow,
+    endpoints: &mut std::collections::BTreeSet<ElementId>,
+) {
+    if let DeltaRow::CreateEdge { src, dst, .. } = row {
+        endpoints.insert(ElementId::Vertex(*src));
+        endpoints.insert(ElementId::Vertex(*dst));
+    }
+}
+
 fn touched_elements(row: &DeltaRow, touched: &mut std::collections::BTreeSet<ElementId>) {
     match row {
         DeltaRow::CreateVertex { vid, .. } => {
