@@ -649,15 +649,8 @@ impl WriteTxn {
             })
         })?;
 
-        let basis_vertices = database.vertices_at(self.basis)?;
         let mut observed = std::collections::BTreeSet::new();
-        let mut vertices: std::collections::BTreeSet<VId> = basis_vertices
-            .into_iter()
-            .map(|row| {
-                observed.insert(ElementId::Vertex(row.vid));
-                row.vid
-            })
-            .collect();
+        let mut vertices = std::collections::BTreeSet::new();
         let mut edges: std::collections::BTreeMap<
             fgdb_types::EId,
             (VId, RelationId, VId),
@@ -666,6 +659,10 @@ impl WriteTxn {
             .into_iter()
             .map(|row| {
                 observed.insert(ElementId::Edge(row.entry.eid));
+                observed.insert(ElementId::Vertex(row.entry.src));
+                observed.insert(ElementId::Vertex(row.entry.dst));
+                vertices.insert(row.entry.src);
+                vertices.insert(row.entry.dst);
                 (
                     row.entry.eid,
                     (row.entry.src, row.entry.relation, row.entry.dst),
@@ -688,6 +685,10 @@ impl WriteTxn {
                         ..
                     } => {
                         observed.insert(ElementId::Edge(*eid));
+                        observed.insert(ElementId::Vertex(*src));
+                        observed.insert(ElementId::Vertex(*dst));
+                        vertices.insert(*src);
+                        vertices.insert(*dst);
                         let triple = (*src, batch.relation, *dst);
                         if !ensure || !edges.values().any(|existing| *existing == triple) {
                             edges.insert(*eid, triple);
@@ -710,21 +711,14 @@ impl WriteTxn {
             }
         }
 
-        let destinations = crate::execute_bound_plan_over(
-            &plan,
-            vertices.iter().copied(),
-            |src, relation| {
-                Ok(edges
-                    .values()
-                    .filter_map(|(edge_src, edge_relation, dst)| {
-                        (*edge_src == src
-                            && *edge_relation == relation
-                            && vertices.contains(dst))
-                        .then_some(*dst)
-                    })
-                    .collect())
-            },
-        )?;
+        let mut destinations: Vec<VId> = edges
+            .values()
+            .filter_map(|(_, relation, dst)| {
+                (*relation == plan.relation && vertices.contains(dst)).then_some(*dst)
+            })
+            .collect();
+        destinations.sort_unstable();
+        destinations.dedup();
         let mut read_set = self.read_set.borrow_mut();
         read_set.extend(observed);
         // MATCH result materialization is itself a vertex observation. Keep
