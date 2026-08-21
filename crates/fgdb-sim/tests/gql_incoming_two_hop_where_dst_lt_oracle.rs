@@ -2,16 +2,18 @@
 //! (`fgdb-w5-parsers-nje.43`).
 //!
 //! The less-than twin of `gql_incoming_two_hop_where_dst_gt_oracle.rs`,
-//! with a `k = 0` survivor: in `MATCH (a)<-[:R]-(b)<-[:S]-(c)` the stored
-//! edges run `b -R-> a` and `c -S-> b`, so `RETURN c` answers far ends
-//! that are edge SOURCES in storage. The derivation composes exactly that
-//! in plain code — for every `:R` edge, every `:S` edge arriving at its
-//! source contributes that `:S` edge's own source, kept when it carries
-//! `k` as an Int strictly less than the literal, missing-`k` excluded
-//! inside the derivation. Every chain is stored reversed, so a kernel
-//! that walks the pattern as OUTGOING composes no path at all and answers
-//! the empty set; the `k = 1` far end is the boundary that convicts a
-//! `<=` in disguise, and the keyless far end pins the exclusion.
+//! on four reversed chains with a `k = 0` survivor: in
+//! `MATCH (a)<-[:R]-(b)<-[:S]-(c)` the stored edges run `b -R-> a` and
+//! `c -S-> b`, so `RETURN c` answers far ends that are edge SOURCES in
+//! storage. The derivation composes exactly that in plain code — for
+//! every `:R` edge, every `:S` edge arriving at its source contributes
+//! that `:S` edge's own source, kept when it carries `k` as an Int
+//! strictly less than the literal, missing-`k` excluded inside the
+//! derivation. Every chain is stored reversed, so a kernel that walks
+//! the pattern as OUTGOING composes no path at all and answers the empty
+//! set; the `k = 1` far end is the boundary that convicts a `<=` in
+//! disguise, the `k = 9` far end convicts a flipped comparator, and the
+//! keyless far end pins the exclusion.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, RelationBind, WriteBatch};
@@ -77,22 +79,29 @@ fn incoming_two_hop_far_end_less_than_equals_its_reference() {
             r_batch.create_vertex(VId(1), vec![], vec![]);
             r_batch.create_vertex(VId(2), vec![], vec![]);
             r_batch.create_vertex(VId(3), vec![], vec![(K, CanonicalScalar::Int(1))]);
-            // The kept chain: k=0 far end 6 -S-> 5 -R-> 4.
+            // A k=9 far end: 6 -S-> 5 -R-> 4 — convicts a flipped
+            // comparator.
             r_batch.create_vertex(VId(4), vec![], vec![]);
             r_batch.create_vertex(VId(5), vec![], vec![]);
-            r_batch.create_vertex(VId(6), vec![], vec![(K, CanonicalScalar::Int(0))]);
+            r_batch.create_vertex(VId(6), vec![], vec![(K, CanonicalScalar::Int(9))]);
             // A keyless far end: pins the missing-k exclusion.
             r_batch.create_vertex(VId(7), vec![], vec![]);
             r_batch.create_vertex(VId(8), vec![], vec![]);
             r_batch.create_vertex(VId(9), vec![], vec![]);
+            // The kept chain: k=0 far end 12 -S-> 11 -R-> 10.
+            r_batch.create_vertex(VId(10), vec![], vec![]);
+            r_batch.create_vertex(VId(11), vec![], vec![]);
+            r_batch.create_vertex(VId(12), vec![], vec![(K, CanonicalScalar::Int(0))]);
             r_batch.add_edge(EId(10), VId(2), VId(1), vec![]);
             r_batch.add_edge(EId(11), VId(5), VId(4), vec![]);
             r_batch.add_edge(EId(12), VId(8), VId(7), vec![]);
+            r_batch.add_edge(EId(13), VId(11), VId(10), vec![]);
             db.write(&commit, r_batch).await.expect("R edges commit");
             let mut s_batch = WriteBatch::new(S);
             s_batch.add_edge(EId(20), VId(3), VId(2), vec![]);
             s_batch.add_edge(EId(21), VId(6), VId(5), vec![]);
             s_batch.add_edge(EId(22), VId(9), VId(8), vec![]);
+            s_batch.add_edge(EId(23), VId(12), VId(11), vec![]);
             db.write(&commit, s_batch).await.expect("S edges commit");
 
             let bind = RelationBind::new()
@@ -129,7 +138,7 @@ fn incoming_two_hop_far_end_less_than_equals_its_reference() {
         );
         assert_eq!(
             rows,
-            vec![VId(6)],
+            vec![VId(12)],
             "only the k=0 far end — every chain is stored reversed, so a \
              kernel walking the pattern as outgoing composes nothing and \
              answers []"
@@ -137,7 +146,11 @@ fn incoming_two_hop_far_end_less_than_equals_its_reference() {
         assert!(
             !rows.contains(&VId(3)),
             "the k=1 far end fails strict less-than — a <= in disguise \
-             answers [3, 6] and fails"
+             answers [3, 12] and fails"
+        );
+        assert!(
+            !rows.contains(&VId(6)),
+            "the k=9 far end fails < — a flipped comparator answers [6]"
         );
         assert!(
             !rows.contains(&VId(9)),
