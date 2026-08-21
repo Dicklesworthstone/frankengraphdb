@@ -475,8 +475,10 @@ impl<'a> Parser<'a> {
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
-        let (neq, eq, src_prop, src_prop_ne, dst_prop, dst_prop_ne) = if direction
-            == EdgeDirection::Outgoing
+        let (neq, eq, src_prop, src_prop_ne, dst_prop, dst_prop_ne) = if matches!(
+            direction,
+            EdgeDirection::Outgoing | EdgeDirection::Incoming
+        )
             && hop2_relation.is_none()
             && self.source[self.offset..].starts_with("WHERE")
         {
@@ -1358,6 +1360,43 @@ mod tests {
 
         assert!(matches!(
             binder.bind("MATCH (a)<[:R]->(b) RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn incoming_one_hop_where_binds_after_source_destination_swap() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23))
+            .with_property("k", PropertyKeyId(7));
+
+        let source_eq = binder
+            .bind("MATCH (a)<-[:R]-(b) WHERE b.k = 1 RETURN a")
+            .expect("incoming source property equality binds");
+        assert_eq!(source_eq.src_var, "b");
+        assert_eq!(source_eq.dst_var, "a");
+        assert_eq!(source_eq.src_prop, Some((PropertyKeyId(7), 1)));
+
+        let source_ne = binder
+            .bind("MATCH (a)<-[:R]-(b) WHERE b.k <> 1 RETURN a")
+            .expect("incoming source property inequality binds");
+        assert_eq!(source_ne.src_prop_ne, Some((PropertyKeyId(7), 1)));
+
+        let destination_eq = binder
+            .bind("MATCH (a)<-[:R]-(b) WHERE a.k = 1 RETURN a")
+            .expect("incoming destination property equality binds");
+        assert_eq!(destination_eq.dst_prop, Some((PropertyKeyId(7), 1)));
+
+        assert!(binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
+            .is_ok());
+        assert!(matches!(
+            binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE b.k = 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)<-[:R]-(b) WHERE b.k != 1 RETURN a"),
             Err(BindError::Parse(_))
         ));
     }
