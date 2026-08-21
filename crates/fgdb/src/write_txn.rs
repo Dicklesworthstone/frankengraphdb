@@ -723,7 +723,7 @@ impl WriteTxn {
             &plan,
             vertices.iter().copied(),
             |source, relation| {
-                Ok(edges
+                let vias: Vec<VId> = edges
                     .values()
                     .filter_map(|(edge_src, edge_relation, dst)| {
                         (*edge_src == source
@@ -731,7 +731,42 @@ impl WriteTxn {
                             && vertices.contains(dst))
                         .then_some(*dst)
                     })
-                    .collect())
+                    .collect();
+                let Some(hop2_relation) = plan.hop2_relation else {
+                    return Ok(vias);
+                };
+                // Two-hop over the SAME overlay triples (fgdb-gql-two-hop-8pfw),
+                // projection-shaped exactly as gql_exec composes the durable
+                // adjacency: the via projection keeps intermediates that
+                // continue, every other projection expands to the composed
+                // hop-2 destinations.
+                let continues = |via: &VId| {
+                    edges.values().any(|(edge_src, edge_relation, dst)| {
+                        edge_src == via
+                            && *edge_relation == hop2_relation
+                            && vertices.contains(dst)
+                    })
+                };
+                Ok(match plan.projection {
+                    fgdb_gql::ReturnProjection::Destination => {
+                        vias.into_iter().filter(|via| continues(via)).collect()
+                    }
+                    fgdb_gql::ReturnProjection::Source
+                    | fgdb_gql::ReturnProjection::Hop2Destination => vias
+                        .into_iter()
+                        .flat_map(|via| {
+                            edges
+                                .values()
+                                .filter_map(|(edge_src, edge_relation, dst)| {
+                                    (*edge_src == via
+                                        && *edge_relation == hop2_relation
+                                        && vertices.contains(dst))
+                                    .then_some(*dst)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect(),
+                })
             },
         )?;
         let mut read_set = self.read_set.borrow_mut();
