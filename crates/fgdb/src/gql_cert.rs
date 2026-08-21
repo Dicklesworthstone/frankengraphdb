@@ -1,5 +1,5 @@
 use fgdb_crypto::{Digest, Hasher, hash};
-use fgdb_gql::{BoundPlan, RelationBind};
+use fgdb_gql::{BoundPlan, RelationBind, ReturnProjection};
 use fgdb_types::CommitSeq;
 
 const GQL_PLAN_CERTIFICATE_DOMAIN: &[u8] = b"fgdb:gql-bound-plan-certificate:v1";
@@ -25,6 +25,10 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
     hasher.update(&plan.relation.0.to_be_bytes());
     update_string(&mut hasher, &plan.src_var);
     update_string(&mut hasher, &plan.dst_var);
+    hasher.update(&[match plan.projection {
+        ReturnProjection::Destination => 0,
+        ReturnProjection::Source => 1,
+    }]);
     hasher.update(&snapshot_seq.0.to_be_bytes());
 
     GqlPlanCertificate {
@@ -51,7 +55,7 @@ pub fn digest_bind(bind: &RelationBind) -> Digest {
 mod tests {
     use super::{certify, GqlPlanCertificate};
     use fgdb_delta_types::RelationId;
-    use fgdb_gql::BoundPlan;
+    use fgdb_gql::{BoundPlan, ReturnProjection};
     use fgdb_types::CommitSeq;
 
     fn plan(relation: u64) -> BoundPlan {
@@ -59,6 +63,7 @@ mod tests {
             relation: RelationId(relation),
             src_var: "a".to_owned(),
             dst_var: "b".to_owned(),
+            projection: ReturnProjection::Destination,
         }
     }
 
@@ -87,6 +92,18 @@ mod tests {
         assert_ne!(
             certify(&plan(7), CommitSeq(11)).digest,
             certify(&plan(8), CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn return_projection_changes_digest() {
+        let destination = plan(7);
+        let mut source = destination.clone();
+        source.projection = ReturnProjection::Source;
+
+        assert_ne!(
+            certify(&destination, CommitSeq(11)).digest,
+            certify(&source, CommitSeq(11)).digest
         );
     }
 }
