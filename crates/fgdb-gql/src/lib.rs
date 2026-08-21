@@ -672,6 +672,9 @@ impl<'a> Parser<'a> {
                     && !(direction == EdgeDirection::Undirected
                         && hop2_relation.is_none()
                         && left == src_var)
+                    && !(direction == EdgeDirection::Undirected
+                        && hop2_relation.is_none()
+                        && left == dst_var)
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -2503,6 +2506,17 @@ mod tests {
             .bind("MATCH (a)-[:R]-(b) WHERE b.k = 1 RETURN b")
             .expect("undirected destination property equality binds");
         assert_eq!(destination_eq.dst_prop, Some((PropertyKeyId(7), 1)));
+
+        let destination_ne = binder
+            .bind("MATCH (a)-[:R]-(b) WHERE b.k <> 1 RETURN b")
+            .expect("undirected destination property inequality binds");
+        assert_eq!(destination_ne.dst_prop_ne, Some((PropertyKeyId(7), 1)));
+
+        let destination_bang_ne = binder
+            .bind("MATCH (a)-[:R]-(b) WHERE b.k != 1 RETURN b")
+            .expect("undirected destination bang inequality binds");
+        assert_eq!(destination_bang_ne.direction, EdgeDirection::Undirected);
+        assert_eq!(destination_bang_ne.dst_prop_ne, Some((PropertyKeyId(7), 1)));
 
         assert!(
             binder
