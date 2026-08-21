@@ -894,8 +894,8 @@ impl core::error::Error for GqlError {
 /// (fgdb-w4-g1-txn-core-qpmg.4): `WriteTxn::execute_gql` runs it with the
 /// staged-overlay-plus-basis view, which `gql_exec::execute`'s live-fold
 /// `&Database` binding cannot express. Still plan-only — a [`BoundPlan`] in,
-/// no parse-shaped input — and still the CGSE row contract: destinations
-/// ascending, deduplicated.
+/// no parse-shaped input — and still the CGSE row contract: projected vertex
+/// identifiers ascending, deduplicated.
 ///
 /// Kept behaviorally identical to `gql_exec::execute`'s expansion loop (that
 /// entry remains the autocommit product path); the pairing is a mirror
@@ -909,13 +909,18 @@ pub(crate) fn execute_bound_plan_over<E>(
 where
     E: FnMut(VId, RelationId) -> Result<Vec<VId>, ReadError>,
 {
-    let mut destinations = Vec::new();
+    let mut rows = Vec::new();
     for src in sources {
-        destinations.extend(expand(src, plan.relation)?);
+        let destinations = expand(src, plan.relation)?;
+        match plan.projection {
+            fgdb_gql::ReturnProjection::Source if !destinations.is_empty() => rows.push(src),
+            fgdb_gql::ReturnProjection::Destination => rows.extend(destinations),
+            fgdb_gql::ReturnProjection::Source => {}
+        }
     }
-    destinations.sort_unstable();
-    destinations.dedup();
-    Ok(destinations)
+    rows.sort_unstable();
+    rows.dedup();
+    Ok(rows)
 }
 
 /// What a failed CompareAndSet means on a [`WriteBatch`].
