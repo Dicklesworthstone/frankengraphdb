@@ -1,5 +1,5 @@
 use asupersync::lab::run_async_under_lab;
-use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch};
+use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteTxnError};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::RelationId;
@@ -154,6 +154,79 @@ fn committed_edge_overlay_is_present_in_reference_replay() {
             .expect("reference coordinate exists");
         assert_eq!(graph.neighbours(VId(1), R), vec![VId(2)]);
         assert!(graph.edge(EId(10)).is_some(), "committed staged edge is durable");
+    });
+    assert!(
+        report.lab_test_passed(),
+        "lab run failed (quiescence, oracle, or invariant channel): {report:?}"
+    );
+}
+
+#[test]
+fn concurrent_edge_from_observed_source_aborts_read_01_and_replays_only_writer() {
+    let dir = scratch("adjacency-read-conflict");
+    let ((), report) = run_async_under_lab(0x81_03, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txn_cx = contexts.txn();
+        let commit_cx = contexts.commit();
+        let mut database = Database::create(&commit_cx, &dir, engine_keys())
+            .await
+            .expect("create product database");
+        database
+            .write(&commit_cx, seed_vertices())
+            .await
+            .expect("seed durable endpoints");
+
+        let mut reader = database.begin(&txn_cx).expect("begin adjacency reader");
+        let mut writer = database.begin(&txn_cx).expect("begin edge writer");
+        assert!(
+            reader
+                .neighbours(&database, VId(1), R)
+                .expect("transactional neighbours read succeeds")
+                .is_empty()
+        );
+        let mut disjoint = WriteBatch::new(R);
+        disjoint.create_vertex(VId(3), vec![], vec![]);
+        reader
+            .write(&mut database, disjoint)
+            .expect("reader stages disjoint vertex");
+        writer
+            .write(&mut database, staged_edge())
+            .expect("writer stages edge from observed source");
+        writer
+            .commit(&mut database, &commit_cx)
+            .await
+            .expect("edge writer commits first");
+
+        let refusal = reader.commit(&mut database, &commit_cx).await;
+        assert!(
+            matches!(&refusal, Err(WriteTxnError::Write(_))),
+            "adjacency conflict must be a typed Write abort: {refusal:?}"
+        );
+        let rendered = format!("{refusal:?}");
+        assert!(
+            rendered.contains("FG-LAW-FCW-READ-01"),
+            "adjacency abort must name READ-01: {rendered}"
+        );
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+        drop(database);
+
+        let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
+            .await
+            .expect("independent oracle coordinator opens durable stream");
+        assert_eq!(coordinator.chain().len(), 2, "seed and edge writer only");
+        let reference = replay(&commit_cx, &coordinator)
+            .await
+            .expect("durable stream replays into ReferenceDatabase")
+            .database;
+        let graph = reference
+            .graph(GRAPH, BRANCH)
+            .expect("reference coordinate exists");
+        assert_eq!(graph.neighbours(VId(1), R), vec![VId(2)]);
+        assert!(graph.edge(EId(10)).is_some(), "B's edge is durable");
+        assert!(
+            graph.vertex(VId(3)).is_none(),
+            "READ-01 abort leaves none of A's disjoint write"
+        );
     });
     assert!(
         report.lab_test_passed(),
