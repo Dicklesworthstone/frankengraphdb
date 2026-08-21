@@ -121,8 +121,10 @@ fn outbound_return_b_is_unmoved() {
     });
 }
 
-/// Malformed arrows are typed parse errors: undirected `-[:R]-` and the
-/// contradictory `<[:R]->` are neither of the two legal shapes.
+/// Malformed arrows are typed parse errors. The undirected `-[:R]-` shape
+/// graduated to legal grammar (fgdb-w5-parsers-nje.2 — see
+/// `gql_undirected.rs`), so the contradictory `<[:R]->` carries this test
+/// alone now: it is none of the three legal shapes.
 #[test]
 fn malformed_arrows_are_typed_parse_errors() {
     under_lab(0x1e_04, |cx| async move {
@@ -130,10 +132,7 @@ fn malformed_arrows_are_typed_parse_errors() {
         let dir = scratch("bad-arrows");
         let db = seeded(cx, &dir).await;
 
-        for off_grammar in [
-            "MATCH (a)-[:R]-(b) RETURN a",
-            "MATCH (a)<[:R]->(b) RETURN a",
-        ] {
+        for off_grammar in ["MATCH (a)<[:R]->(b) RETURN a"] {
             let err = db.execute_gql(off_grammar, &bind_r()).expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
