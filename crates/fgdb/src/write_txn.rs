@@ -275,6 +275,7 @@ impl WriteTxn {
 
         let mut overlay = database.edge_at(eid, self.basis)?;
         let mut observed_sources = std::collections::BTreeSet::new();
+        let mut deleted_vertices = std::collections::BTreeSet::new();
         if let Some(record) = &overlay {
             observed_sources.insert(record.entry.src);
         }
@@ -316,10 +317,17 @@ impl WriteTxn {
                             Self::overlay_property(&mut record.props, *key, value.as_ref());
                         }
                     }
+                    PendingRow::DeleteVertex { vid, .. } => {
+                        if overlay.as_ref().is_some_and(|record| {
+                            record.entry.src == *vid || record.entry.dst == *vid
+                        }) {
+                            deleted_vertices.insert(*vid);
+                            overlay = None;
+                        }
+                    }
                     PendingRow::Vertex { .. }
                     | PendingRow::Edge { .. }
                     | PendingRow::DeleteEdge { .. }
-                    | PendingRow::DeleteVertex { .. }
                     | PendingRow::SetLabel { .. }
                     | PendingRow::SetEdgeProperty { .. }
                     | PendingRow::SetProperty { .. }
@@ -331,6 +339,7 @@ impl WriteTxn {
         let mut read_set = self.read_set.borrow_mut();
         read_set.insert(ElementId::Edge(eid));
         read_set.extend(observed_sources.into_iter().map(ElementId::Vertex));
+        read_set.extend(deleted_vertices.into_iter().map(ElementId::Vertex));
         Ok(overlay)
     }
 
@@ -361,6 +370,7 @@ impl WriteTxn {
             .collect();
         let mut observed_edges: std::collections::BTreeSet<EId> =
             matching_edges.keys().copied().collect();
+        let mut deleted_vertices = std::collections::BTreeSet::new();
 
         for batch in &self.staged {
             for pending in &batch.rows {
@@ -385,9 +395,24 @@ impl WriteTxn {
                             destinations.remove(&dst);
                         }
                     }
+                    PendingRow::DeleteVertex { vid, .. } => {
+                        let affected = if *vid == src {
+                            matching_edges.clear();
+                            destinations.clear();
+                            true
+                        } else if matching_edges.values().any(|dst| *dst == *vid) {
+                            matching_edges.retain(|_, dst| *dst != *vid);
+                            destinations.remove(vid);
+                            true
+                        } else {
+                            false
+                        };
+                        if affected {
+                            deleted_vertices.insert(*vid);
+                        }
+                    }
                     PendingRow::Vertex { .. }
                     | PendingRow::Edge { .. }
-                    | PendingRow::DeleteVertex { .. }
                     | PendingRow::SetLabel { .. }
                     | PendingRow::SetEdgeProperty { .. }
                     | PendingRow::SetProperty { .. }
@@ -399,6 +424,7 @@ impl WriteTxn {
         let mut read_set = self.read_set.borrow_mut();
         read_set.insert(ElementId::Vertex(src));
         read_set.extend(observed_edges.into_iter().map(ElementId::Edge));
+        read_set.extend(deleted_vertices.into_iter().map(ElementId::Vertex));
         drop(read_set);
         self.match_expansions.borrow_mut().insert((src, relation));
         Ok(destinations.into_iter().collect())
