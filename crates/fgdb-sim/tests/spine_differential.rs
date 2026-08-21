@@ -33,20 +33,26 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{
     BlockStoreCrashPoint, CAPSULE_OBJECT_KIND, Database, DatabaseCreateCrashPoint, DatabaseKeys,
     DatabaseState, DerivedPublicationStage, OpenError, ReadError, RebuildError, WriteBatch,
-    WriteError, WriteMismatchPolicy,
+    WriteError, WriteMismatchPolicy, marker_for_capsule, prepare_capsule,
 };
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
-use fgdb_chronicle::commit::{CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CrashPoint};
+use fgdb_chronicle::commit::{
+    CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint,
+};
 use fgdb_chronicle::identity::{VerificationOperation, VerificationOutcome};
 use fgdb_chronicle::store::{ROOT_FILE_NAME, StoreError as SlotStoreError};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_chronicle::validate::{CommitDraft, CommitValidator, ValidationRejection};
+use fgdb_delta_types::{
+    CoordinateEntry, DeltaRow, ElementId, LabelId, LogicalDeltaTemplate, PropertyKeyId, RelationId,
+    SchemaEpoch,
+};
 use fgdb_sim::{
     replay,
     vfs::{FaultKind, FaultPlan, FaultVfs, Trigger},
 };
 use fgdb_strata::store::StoreError as BlockStoreError;
 use fgdb_types::context::{CommitCx, PurposeContexts};
-use fgdb_types::ids::DatabaseSecurityNamespaceId;
+use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 use std::future::{Future, poll_fn};
 use std::io::{self, SeekFrom};
@@ -3923,6 +3929,250 @@ fn delete_if_present_agrees_independently_with_the_reference() {
         assert!(
             !engine_e10 && graph.edge(EId(10)).is_none(),
             "eid=10 must be gone on both sides"
+        );
+    });
+}
+
+/// First-committer-wins at the commit seam, scoped to one law: a draft is
+/// admissible only at the immediate successor of the basis its batch was
+/// prepared against. Any other allocated sequence means an intervening
+/// committer advanced the head after the batch's snapshot — the batch is
+/// stale, and §5.2 step 2 forbids blessing it (a rebase produces new effects;
+/// it never re-licenses an old capsule).
+///
+/// Deliberately test-local: the product FCW validator (per-element
+/// `touched_elements` overlap) is another pane's slice. This one carries only
+/// what the law below needs — the coarsest correct form, where every
+/// intervening commit conflicts — and captures its basis at construction,
+/// exactly as `crate::validate` prescribes for basis-dependent validators.
+#[derive(Debug)]
+struct StaleBasisFirstCommitterWins {
+    basis: CommitSeq,
+}
+
+impl CommitValidator for StaleBasisFirstCommitterWins {
+    fn validate(&mut self, draft: &CommitDraft<'_>) -> Result<(), ValidationRejection> {
+        if draft.commit_seq.0 != self.basis.0 + 1 {
+            return Err(ValidationRejection {
+                law: "FG-LAW-FCW-01",
+                detail: format!(
+                    "prepared against basis {} but would commit at {}: an intervening committer won",
+                    self.basis.0, draft.commit_seq.0
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The number of durable capsules under the engine's directory. A rejected
+/// draft must not move this: "no durable trace" is a byte-level claim, not a
+/// chain-level one.
+fn capsule_count(dir: &Path) -> usize {
+    match std::fs::read_dir(dir.join(CAPSULE_DIR)) {
+        Ok(entries) => entries.count(),
+        Err(_) => 0,
+    }
+}
+
+/// **The law** (`fgdb-w4-g1-txn-core-qpmg`): a WriteBatch folded against a
+/// stale snapshot cannot become durable, and its rejection leaves the durable
+/// stream exactly as if the attempt had never happened — no capsule, no
+/// consumed sequence, no hole in the chain, and a cold reopen plus the
+/// independent reference replay agree with the committed prefix only.
+///
+/// The engine's coordinator is single-writer, so "a second writer racing the
+/// first" is expressed as the plan's validators express it: the stale batch's
+/// capsule is submitted at the commit seam with a validator that captured the
+/// batch's basis, after another commit has advanced the head past that basis.
+/// The submitted plaintext is a REAL product-shaped template (same
+/// `intent_semantics_oid`, same `prepare_capsule` / `marker_for_capsule`
+/// path the product write uses), whose before-image is the value the stale
+/// snapshot saw — so if the refusal is ever deleted, the stale bytes land,
+/// replay applies them, and the differential below goes red on the value.
+///
+/// **WHAT WOULD MAKE THIS VACUOUS.** A validator that rejects everything
+/// passes the rejection half trivially. The control is the fresh-basis
+/// commit through the SAME validator type after the refusal: it must be
+/// accepted at the exact sequence the stale attempt failed to consume, and
+/// the reopened engine and the oracle must both serve its effect.
+#[test]
+fn a_stale_snapshot_write_batch_cannot_become_durable() {
+    under_lab(0x57_a1_e0, |cx| async move {
+        let cx = &cx;
+        let dir = scratch("stale-snapshot-cannot-become-durable");
+        let prop = PropertyKeyId(7);
+
+        // Seed VId(1) through the product surface, then capture the basis a
+        // session would hold, then let batch A advance the head past it.
+        let mut db = Database::create(cx, &dir, engine_keys())
+            .await
+            .expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(
+            VId(1),
+            vec![LabelId(3)],
+            vec![(prop, CanonicalScalar::Int(0))],
+        );
+        db.write(cx, seed).await.expect("seed commits");
+        let stale_basis = db.frontier().expect("healthy frontier");
+        assert_eq!(stale_basis.0, 1, "the stale session's snapshot is the seed");
+        let mut batch_a = WriteBatch::new(KNOWS);
+        batch_a.set_vertex_property(VId(1), prop, Some(CanonicalScalar::Int(1)));
+        db.write(cx, batch_a).await.expect("A commits");
+        assert_eq!(db.frontier().expect("healthy frontier").0, 2);
+        drop(db); // single-writer: the seam coordinator below takes the lease
+
+        // The stale batch B, exactly as the product would have prepared it at
+        // the pre-A snapshot: its before-image is the value A overwrote.
+        let stale_template = LogicalDeltaTemplate::build(
+            // The product's intent_semantics_oid (crates/fgdb/src/lib.rs);
+            // private there, so restated — recovery decodes this template, and
+            // a mismatched semantics oid would fail for the wrong reason.
+            ObjectId([0x11; 32]),
+            [0u8; 32],
+            vec![CoordinateEntry {
+                graph: GRAPH,
+                branch: BRANCH,
+                relation: KNOWS,
+                schema_epoch: SchemaEpoch(0),
+                schema_transition: None,
+                rows: vec![DeltaRow::Property {
+                    elem: ElementId::Vertex(VId(1)),
+                    property: prop,
+                    before: Some(CanonicalScalar::Int(0)),
+                    after: Some(CanonicalScalar::Int(2)),
+                }],
+            }],
+        )
+        .expect("canonical stale template");
+        let stale_capsule =
+            prepare_capsule(&K_OID, NAMESPACE, &stale_template).expect("prepared stale capsule");
+
+        let mut coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("the seam opens the engine's durable stream");
+        assert_eq!(coordinator.next_commit_seq().expect("chain readable").0, 3);
+        let capsules_before = capsule_count(&dir);
+        let log_len_before = std::fs::metadata(dir.join(COMMIT_LOG_NAME))
+            .expect("committed log exists")
+            .len();
+
+        coordinator.set_validator(Box::new(StaleBasisFirstCommitterWins {
+            basis: stale_basis,
+        }));
+        let outcome = coordinator
+            .commit(cx, &stale_capsule.bytes, |seq, oid| {
+                marker_for_capsule(seq, oid, &stale_capsule, Vec::new())
+            })
+            .await;
+        match outcome {
+            Err(CommitError::Rejected(rejection)) => assert_eq!(
+                rejection.law, "FG-LAW-FCW-01",
+                "the refusal must name the first-committer-wins law: {rejection:?}"
+            ),
+            other => panic!("a stale-basis batch must be Rejected, got {other:?}"),
+        }
+        assert!(
+            !coordinator.is_poisoned(),
+            "a rejection is a verdict, not an interrupted commit"
+        );
+        assert_eq!(
+            coordinator.next_commit_seq().expect("chain readable").0,
+            3,
+            "the rejected attempt did not consume its sequence"
+        );
+        assert_eq!(
+            capsule_count(&dir),
+            capsules_before,
+            "no capsule was written"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.join(COMMIT_LOG_NAME))
+                .expect("log still exists")
+                .len(),
+            log_len_before,
+            "no marker entry was appended"
+        );
+
+        // THE CONTROL: the same batch re-prepared at the CURRENT basis passes
+        // the same validator type and lands at the exact sequence the stale
+        // attempt failed to take. Rejection above cannot be RejectAll in
+        // disguise, and the freed sequence is provably not a hole.
+        let fresh_template = LogicalDeltaTemplate::build(
+            ObjectId([0x11; 32]),
+            [0u8; 32],
+            vec![CoordinateEntry {
+                graph: GRAPH,
+                branch: BRANCH,
+                relation: KNOWS,
+                schema_epoch: SchemaEpoch(0),
+                schema_transition: None,
+                rows: vec![DeltaRow::Property {
+                    elem: ElementId::Vertex(VId(1)),
+                    property: prop,
+                    before: Some(CanonicalScalar::Int(1)),
+                    after: Some(CanonicalScalar::Int(2)),
+                }],
+            }],
+        )
+        .expect("canonical fresh template");
+        let fresh_capsule =
+            prepare_capsule(&K_OID, NAMESPACE, &fresh_template).expect("prepared fresh capsule");
+        coordinator.set_validator(Box::new(StaleBasisFirstCommitterWins {
+            basis: CommitSeq(2),
+        }));
+        coordinator
+            .commit(cx, &fresh_capsule.bytes, |seq, oid| {
+                assert_eq!(seq, 3, "the freed sequence is allocated, not skipped");
+                marker_for_capsule(seq, oid, &fresh_capsule, Vec::new())
+            })
+            .await
+            .expect("the fresh-basis rebase of the same update commits");
+        drop(coordinator);
+
+        // Cold reopen through the product surface: the committed prefix is
+        // seed, A, and the rebased update — the stale batch is nowhere, and
+        // the product path keeps writing over the seam's commit.
+        let mut db = Database::open(cx, &dir, engine_keys())
+            .await
+            .expect("reopens");
+        assert_eq!(db.frontier().expect("healthy frontier").0, 3);
+        let row = db.vertex(VId(1)).expect("reads").expect("durable row");
+        assert_eq!(row.props, vec![(prop, CanonicalScalar::Int(2))]);
+        let mut after = WriteBatch::new(KNOWS);
+        after.set_vertex_property(VId(1), prop, Some(CanonicalScalar::Int(7)));
+        let seq = db
+            .write(cx, after)
+            .await
+            .expect("the product path writes over the seam's commit");
+        assert_eq!(seq.0, 4);
+        drop(db);
+
+        // The independent replay agrees with the committed prefix only.
+        let coordinator = CommitCoordinator::open(cx, &dir, oracle_keys())
+            .await
+            .expect("oracle opens the durable stream");
+        assert_eq!(
+            coordinator.chain().len(),
+            4,
+            "seed, A, the rebase, the product write — and no trace of the stale batch"
+        );
+        assert_eq!(coordinator.chain().verify(), Ok(()));
+        let replayed = replay(cx, &coordinator).await.expect("stream replays");
+        let graph = replayed
+            .database
+            .graph(GRAPH, BRANCH)
+            .expect("oracle materialized the coordinate");
+        let oracle_vertex = graph.vertex(VId(1)).expect("durable vertex exists");
+        assert_eq!(
+            oracle_vertex
+                .props
+                .iter()
+                .map(|(key, value)| (*key, value.clone()))
+                .collect::<Vec<_>>(),
+            vec![(prop, CanonicalScalar::Int(7))],
+            "the oracle serves the committed prefix, not the rejected batch"
         );
     });
 }
