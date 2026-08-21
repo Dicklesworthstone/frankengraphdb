@@ -8,9 +8,10 @@
 //! neither spelling), the equality sibling and the unfiltered statement
 //! are re-pinned, and the direction control executes the INCOMING far-end
 //! `<>` (grammar since nje.41), which composes nothing on this outgoing
-//! fixture. Two refusals hold the grammar's edges this slice: the
-//! `RETURN a` projection under the outgoing `!=`, and the outgoing
-//! near-end `a.k != 1`.
+//! fixture. The `RETURN a` projection under the outgoing `!=` is grammar
+//! and answers the surviving chain's hop-1 origin `[4]`, while one
+//! refusal holds the grammar's edge this slice: the outgoing near-end
+//! `a.k != 1`.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -117,12 +118,21 @@ fn two_hop_far_end_bang_ne_aliases_the_diamond_spelling() {
             "no :S edge arrives at an :R source on the outgoing fixture"
         );
 
-        // The refusals this slice: the RETURN a projection under the
-        // outgoing !=, and the outgoing near-end a.k !=.
-        for off_grammar in [
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN a",
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN c",
-        ] {
+        // The RETURN a projection under the outgoing != is grammar: it
+        // answers the hop-1 origin of the surviving chain (moved, not
+        // weakened).
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN a",
+                &bind
+            )
+            .expect("the RETURN a projection under the outgoing != executes"),
+            vec![VId(4)],
+            "the k=9 chain 4-R->5-S->6 answers by its hop-1 origin"
+        );
+
+        // The refusal this slice: the outgoing near-end a.k !=.
+        for off_grammar in ["MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN c"] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
