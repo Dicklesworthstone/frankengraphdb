@@ -115,6 +115,8 @@ pub struct BoundPlan {
     pub src_prop: Option<(PropertyKeyId, i64)>,
     /// Destination-property integer equality on the outgoing one-hop form.
     pub dst_prop: Option<(PropertyKeyId, i64)>,
+    /// Positive result-row bound applied after projection.
+    pub limit: Option<u64>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -240,6 +242,7 @@ impl RelationBind {
             eq: ast.eq,
             src_prop,
             dst_prop,
+            limit: ast.limit,
         })
     }
 }
@@ -288,6 +291,7 @@ struct MatchAst {
     eq: Option<(String, String)>,
     src_prop: Option<(String, i64)>,
     dst_prop: Option<(String, i64)>,
+    limit: Option<u64>,
 }
 
 struct Parser<'a> {
@@ -341,6 +345,7 @@ impl<'a> Parser<'a> {
                     },
                 });
             }
+            let limit = self.optional_limit()?;
             self.skip_whitespace();
             if self.offset != self.source.len() {
                 return Err(ParseError {
@@ -363,6 +368,7 @@ impl<'a> Parser<'a> {
                 eq: None,
                 src_prop,
                 dst_prop: None,
+                limit,
             });
         }
         let incoming = if self.source[self.offset..].starts_with('<') {
@@ -552,6 +558,7 @@ impl<'a> Parser<'a> {
                 },
             });
         };
+        let limit = self.optional_limit()?;
         self.skip_whitespace();
         if self.offset != self.source.len() {
             return Err(ParseError {
@@ -574,6 +581,7 @@ impl<'a> Parser<'a> {
             eq,
             src_prop,
             dst_prop,
+            limit,
         })
     }
 
@@ -661,6 +669,36 @@ impl<'a> Parser<'a> {
             })
     }
 
+    fn optional_limit(&mut self) -> Result<Option<u64>, ParseError> {
+        self.skip_whitespace();
+        if !self.source[self.offset..].starts_with("LIMIT") {
+            return Ok(None);
+        }
+        self.keyword("LIMIT")?;
+        self.skip_whitespace();
+        let start = self.offset;
+        while self.source[self.offset..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            self.offset += 1;
+        }
+        let value = self.source[start..self.offset]
+            .parse::<u64>()
+            .map_err(|_| ParseError {
+                offset: start,
+                kind: ParseErrorKind::ExpectedToken("unsigned LIMIT"),
+            })?;
+        if value == 0 {
+            return Err(ParseError {
+                offset: start,
+                kind: ParseErrorKind::ExpectedToken("positive LIMIT"),
+            });
+        }
+        Ok(Some(value))
+    }
+
     fn optional_label(&mut self) -> Result<Option<String>, ParseError> {
         self.skip_whitespace();
         if !self.source[self.offset..].starts_with(':') {
@@ -715,8 +753,28 @@ mod tests {
                 eq: None,
                 src_prop: None,
                 dst_prop: None,
+                limit: None,
             }
         );
+    }
+
+    #[test]
+    fn positive_limit_binds_and_zero_is_parse() {
+        let binder = RelationBind::new().with_relation("R", RelationId(17));
+        let limited = binder
+            .bind("MATCH (a)-[:R]->(b) RETURN b LIMIT 1")
+            .expect("positive LIMIT binds");
+        assert_eq!(limited.limit, Some(1));
+
+        let unlimited = binder
+            .bind("MATCH (a)-[:R]->(b) RETURN b")
+            .expect("MATCH without LIMIT remains grammar");
+        assert_eq!(unlimited.limit, None);
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) RETURN b LIMIT 0"),
+            Err(BindError::Parse(_))
+        ));
     }
 
     #[test]
