@@ -64,6 +64,25 @@ fn incoming_two_hop_plan_certificate_is_shape_distinct() {
         );
         assert_ne!(incoming_two_hop.digest, incoming_one_hop.digest);
         assert_ne!(incoming_two_hop.digest, outgoing_two_hop.digest);
+
+        // Determinism: the same statement at the same sequence re-mints
+        // byte-identically.
+        assert_eq!(
+            db.gql_plan_certificate(IN_TWO_HOP_C, &bind)
+                .expect("incoming two-hop re-certifies"),
+            incoming_two_hop,
+            "same plan + same seq mint the same certificate"
+        );
+
+        // The scan cross-check: a colliding certificate cannot hide behind a
+        // working scan — the incoming chain composes to exactly the durable
+        // far source, matching the product overlay suite's durable answer.
+        assert_eq!(
+            db.execute_gql(IN_TWO_HOP_C, &bind)
+                .expect("incoming two-hop executes"),
+            vec![VId(4)],
+            "the incoming chain composes to the far :S source"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }
