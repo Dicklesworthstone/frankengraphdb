@@ -678,6 +678,7 @@ impl WriteTxn {
                 .collect();
             vids.sort_unstable();
             vids.dedup();
+            let vids = crate::apply_limit(&plan, vids);
             self.read_set
                 .borrow_mut()
                 .extend(vids.iter().copied().map(ElementId::Vertex));

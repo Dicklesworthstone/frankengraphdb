@@ -927,7 +927,18 @@ where
     }
     rows.sort_unstable();
     rows.dedup();
-    Ok(rows)
+    Ok(apply_limit(plan, rows))
+}
+
+/// LIMIT n (fgdb-w5-parsers-nje.12) truncates AFTER CGSE sort+dedup, so
+/// LIMIT 1 is the smallest projected VId among matches — never a different
+/// match set. Parser refuses LIMIT 0, so Some always means a positive cap.
+pub(crate) fn apply_limit(plan: &BoundPlan, mut rows: Vec<VId>) -> Vec<VId> {
+    if let Some(limit) = plan.limit {
+        let n = limit.min(usize::MAX as u64) as usize;
+        rows.truncate(n);
+    }
+    rows
 }
 
 /// What a failed CompareAndSet means on a [`WriteBatch`].

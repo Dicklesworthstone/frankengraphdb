@@ -336,7 +336,7 @@ fn node_scan(plan: &BoundPlan, rows: Vec<crate::VertexRow>) -> Vec<VId> {
         .collect();
     vids.sort_unstable();
     vids.dedup();
-    vids
+    crate::apply_limit(plan, vids)
 }
 
 /// Execute the pinned bound MATCH expansion over the database's live Strata
