@@ -14,7 +14,10 @@
 </div>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/frankengraphdb/main/scripts/install.sh | bash
+# What runs today, from a source checkout (there are no releases or installer yet — see Installation):
+git clone https://github.com/Dicklesworthstone/frankengraphdb
+cd frankengraphdb
+cargo run -p fgdb --example open_a_database
 ```
 
 > **A note on tense (read this first).** This README is written in the **present tense, as if the entire design in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md) is fully realized**: the 1.0 target state where every performance gate is green and every subsystem is live. This is a deliberate choice. It lets the document describe the *finished* system so it gets **trued-up in place as milestones land** (§19's gates G1→G4) rather than rewritten from scratch later. Where the plan itself stages something as genuinely future work (horizontal sharding, covered under [Limitations](#limitations)), the README says so plainly. Everything else below is the spec of the system this repository builds.
@@ -195,6 +198,8 @@ Honest framing. `frankengraphdb` is the only one of these that composes durabili
 ## The `fgdb` CLI
 
 > The CLI mirrors the server and embedded surfaces. Robot mode emits line-oriented, versioned NDJSON so an agent can pipe and validate the stream against a frozen contract (`fgdb robot schema`).
+>
+> **Target state.** The `fgdb` and `fgdbd` binaries are not built yet (`registries/workspace_topology.toml` defers `fgdb-cli` and `fgdb-server` to W10 composition), so no command in this section runs today.
 
 ```bash
 # Open a database and run a query (human output, or --json / --robot)
@@ -233,19 +238,18 @@ fgdb analyze  mydb.fgdbdir          # refresh statistics segments
 
 ## Installation
 
-**1. Install script (recommended).** Detects your platform, fetches the signed release binary, and installs `fgdb` + `fgdbd`:
+**1. Install script — not yet available.** There are no git tags, no GitHub Releases, no signed binaries, and no fgdb installer script in this repository today; `fgdb-epic-w10-mhq.1` owns shipping them. The curl one-liner returns here when the artifact it fetches exists (a claims-lint tripwire fails the gate if that instruction reappears before the script is a tracked file).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/frankengraphdb/main/scripts/install.sh | bash
-```
-
-**2. From source** (requires the pinned nightly toolchain, which `rust-toolchain.toml` auto-selects):
+**2. From source** (requires the pinned nightly toolchain, which `rust-toolchain.toml` auto-selects). This is the path that runs today:
 
 ```bash
 git clone https://github.com/Dicklesworthstone/frankengraphdb
 cd frankengraphdb
-cargo build --release          # produces target/release/fgdb and target/release/fgdbd
+cargo build --release                        # builds the library workspace
+cargo run -p fgdb --example open_a_database  # a real main(): create, commit, reopen, verify
 ```
+
+The `fgdb` CLI and `fgdbd` server binaries are **not** produced yet: `registries/workspace_topology.toml` defers the `fgdb-cli` and `fgdb-server` entry crates to W10 composition.
 
 **3. Embedded, as a Rust library:**
 
@@ -254,6 +258,8 @@ cargo build --release          # produces target/release/fgdb and target/release
 [dependencies]
 fgdb = { git = "https://github.com/Dicklesworthstone/frankengraphdb" }
 ```
+
+> **Target state.** The snippet below is the 1.0 embedded surface. Today's crate root exposes the spine subset — `Database::open`/`open_with_vfs`, `WriteBatch` commits through the real two-fsync path, and typed/temporal reads (see `crates/fgdb/src/lib.rs` and the `open_a_database` example); GQL sessions and prepared statements are not implemented yet.
 
 ```rust
 use fgdb::Database;
@@ -273,7 +279,7 @@ fn main() -> fgdb::Result<()> {
 }
 ```
 
-**4. Python bindings** (ABI3 wheels, with a zero-friction `to_fnx()` / `from_fnx()` bridge and NumPy views over `Embedding` columns):
+**4. Python bindings** (ABI3 wheels, with a zero-friction `to_fnx()` / `from_fnx()` bridge and NumPy views over `Embedding` columns). **Target state:** no wheels are published — `pip install frankengraphdb` installs nothing of ours today. When releases exist:
 
 ```bash
 pip install frankengraphdb
@@ -287,6 +293,8 @@ for row in db.query("MATCH (p:Person) RETURN p.name LIMIT 5"):
 ```
 
 ## Quick start
+
+> **Target state.** Every command below invokes the `fgdb`/`fgdbd` binaries, which `registries/workspace_topology.toml` defers to W10 composition — none of them runs today. The runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
 
 ```bash
 # 1. Create a database directory and bulk-load a graph

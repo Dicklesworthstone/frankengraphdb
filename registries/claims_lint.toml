@@ -172,3 +172,16 @@ reason = "Historical plan variant retained for provenance; the merged master pla
 [[exclude]]
 path = "docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__SOL.md"
 reason = "Historical plan variant retained for provenance; the merged master plan is the normative artifact."
+
+# ---------------------------------------------------------------------------
+# Path claims. A scanned artifact may mention these paths only while the path
+# exists on disk: an instruction pointing at a file that is not there is a
+# broken command, not target-state prose, and no marker or gate-table law can
+# see it. A path claim is a tripwire — it matches nothing while the prose is
+# honest, and its liveness is proven by the negative fixture test
+# (claims_neg_broken_path_claim), not by the corpus.
+# ---------------------------------------------------------------------------
+
+[[path_claim]]
+path = "scripts/install.sh"
+reason = "fgdb-g0-doc-sync-usq.1: README advertised `curl .../install.sh | bash` against this path while no such file existed — a 404 for every reader. The instruction may return only after fgdb-epic-w10-mhq.1 lands the real installer as a tracked file."

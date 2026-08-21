@@ -97,6 +97,22 @@ pub struct GateTable {
     pub unmarked_rows: Vec<String>,
 }
 
+/// A repository path that a scanned artifact may only mention if the path
+/// actually exists on disk. The instrument for an instruction-shaped claim: a
+/// README line that tells the reader to fetch `scripts/install.sh` is not
+/// target-state prose, it is a command that 404s, and no marker pattern or
+/// gate table sees it. Matching is plain substring over every scanned
+/// artifact; existence is `root.join(path)` — the tracked/untracked
+/// distinction belongs to the git-aware gates in `scripts/check.sh`, which
+/// this checker cannot reach (it spawns no processes). A path claim is a
+/// tripwire: it is EXPECTED to match nothing while the prose is honest, so
+/// its liveness is proven by the negative fixture test, not by the corpus.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathClaim {
+    pub path: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LintConfig {
     pub scan: Vec<String>,
@@ -104,6 +120,7 @@ pub struct LintConfig {
     pub closure_dirs: Vec<String>,
     pub closure_prunes: Vec<Prune>,
     pub gate_tables: Vec<GateTable>,
+    pub path_claims: Vec<PathClaim>,
 }
 
 /// What a hit accuses. Every variant is a distinct law; the code string is
@@ -131,6 +148,9 @@ pub enum HitKind {
     /// excuses. The walk cannot see it, so no other law in this file can
     /// either: `unclaimed_prose` only accuses files the walk FOUND.
     UncoveredClosureRoot,
+    /// A scanned artifact mentions a `[[path_claim]]` path that does not
+    /// exist: an instruction pointing at a file that is not there.
+    BrokenPathClaim,
 }
 
 impl HitKind {
@@ -144,6 +164,7 @@ impl HitKind {
             HitKind::UnreachableExclude => "unreachable_exclude",
             HitKind::DeadPrune => "dead_closure_prune",
             HitKind::UncoveredClosureRoot => "uncovered_closure_root",
+            HitKind::BrokenPathClaim => "broken_path_claim",
         }
     }
 }
@@ -354,12 +375,39 @@ pub fn load_config(path: &Path) -> Result<LintConfig, LintError> {
         });
     }
 
+    let mut path_claims = Vec::new();
+    for (i, t) in get_table_array(&root, "path_claim", "claims_lint.toml")?
+        .iter()
+        .enumerate()
+    {
+        let ctx = format!("claims_lint.toml.path_claim[{i}]");
+        let path = get_str(t, "path", &ctx)?;
+        if path.trim().is_empty() || path.contains("..") {
+            return Err(LintError {
+                msg: format!("{ctx}: path {path:?} must be a non-empty relative path"),
+            });
+        }
+        let reason = get_str(t, "reason", &ctx)?;
+        if reason.trim().is_empty() {
+            return Err(LintError {
+                msg: format!("{ctx}: a path claim without a reason is a schema error"),
+            });
+        }
+        if path_claims.iter().any(|p: &PathClaim| p.path == path) {
+            return Err(LintError {
+                msg: format!("{ctx}: {path:?} is claimed twice"),
+            });
+        }
+        path_claims.push(PathClaim { path, reason });
+    }
+
     Ok(LintConfig {
         scan,
         excludes,
         closure_dirs,
         closure_prunes,
         gate_tables,
+        path_claims,
     })
 }
 
@@ -602,6 +650,33 @@ pub fn run(
                     ),
                 }),
                 Some(_) => {}
+            }
+        }
+    }
+
+    // ---- path claims: a mentioned path must exist ----
+    // Substring over the scanned artifacts, existence on disk. Reported per
+    // mentioning line so the fix (delete the instruction, or land the file)
+    // has a location. When the path exists the claim is satisfied everywhere
+    // at once — no per-mention proof is possible or needed.
+    for pc in &config.path_claims {
+        if root.join(&pc.path).exists() {
+            continue;
+        }
+        for (file, text) in &texts {
+            for (lineno, line) in text.lines().enumerate() {
+                if line.contains(pc.path.as_str()) {
+                    hits.push(LintHit {
+                        kind: HitKind::BrokenPathClaim,
+                        file: (*file).to_string(),
+                        line: lineno + 1,
+                        subject: pc.path.clone(),
+                        text: format!(
+                            "mentions {:?} but no such path exists ({})",
+                            pc.path, pc.reason
+                        ),
+                    });
+                }
             }
         }
     }

@@ -1149,6 +1149,81 @@ fn claims_neg_unregistered_marker_survives_the_second_direction() {
 }
 
 #[test]
+fn claims_neg_broken_path_claim() {
+    // The path-claim tripwire (fgdb-g0-doc-sync-usq.1). In the real corpus it
+    // is EXPECTED to match nothing — README no longer mentions the absent
+    // installer — so this fixture is the only witness that the law fires.
+    let f = LintFixture::build("pathclaim");
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[path_claim]]\npath = \"scripts/install.sh\"\nreason = \"fixture installer claim\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    // Armed but silent: the claim is declared, nothing mentions the path.
+    assert!(f.hits_of(lint::HitKind::BrokenPathClaim).is_empty());
+
+    // The exact shipped defect: an install instruction naming a path that
+    // does not exist. One mention, one hit, located at its line.
+    // LINT_FIXTURE_README ends with a newline, so the appended instruction is
+    // exactly one line past its last.
+    let mutated = format!(
+        "{LINT_FIXTURE_README}curl -fsSL https://example.invalid/scripts/install.sh | bash\n"
+    );
+    std::fs::write(f.root.join("README.md"), &mutated).expect("mutate README");
+    let hits = f.hits_of(lint::HitKind::BrokenPathClaim);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].file, "README.md");
+    assert_eq!(hits[0].subject, "scripts/install.sh");
+    assert_eq!(
+        hits[0].line,
+        LINT_FIXTURE_README.lines().count() + 1,
+        "{hits:?}"
+    );
+
+    // Land the file: the same mention is now an honest instruction and the
+    // claim is satisfied everywhere at once.
+    std::fs::create_dir_all(f.root.join("scripts")).expect("scripts dir");
+    std::fs::write(f.root.join("scripts/install.sh"), "#!/usr/bin/env bash\n")
+        .expect("fixture installer");
+    assert!(f.hits_of(lint::HitKind::BrokenPathClaim).is_empty());
+}
+
+#[test]
+fn claims_neg_path_claim_without_reason_is_a_schema_error() {
+    let f = LintFixture::build("pathclaim-schema");
+    for (fragment, expect) in [
+        (
+            "[[path_claim]]\npath = \"scripts/install.sh\"\n",
+            "path_claim[0]",
+        ),
+        (
+            "[[path_claim]]\npath = \"scripts/install.sh\"\nreason = \"  \"\n",
+            "without a reason",
+        ),
+        (
+            "[[path_claim]]\npath = \"../outside\"\nreason = \"escapes the root\"\n",
+            "non-empty relative path",
+        ),
+        (
+            "[[path_claim]]\npath = \"a.sh\"\nreason = \"once\"\n\n\
+             [[path_claim]]\npath = \"a.sh\"\nreason = \"twice\"\n",
+            "claimed twice",
+        ),
+    ] {
+        f.write_config(
+            &["README.md", "docs/GUIDE.md"],
+            &format!(
+                "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n{fragment}"
+            ),
+            &["Cold bulk load", "Point reads"],
+        );
+        let err = f.config().expect_err(fragment);
+        assert!(err.msg.contains(expect), "{fragment:?} -> {err:?}");
+    }
+}
+
+#[test]
 fn claims_neg_lint_config_cannot_declare_a_vacuous_scope() {
     // A config that disarms the lint must be rejected at load, not obeyed. Each
     // mutation below is a different way to make the check examine nothing.
