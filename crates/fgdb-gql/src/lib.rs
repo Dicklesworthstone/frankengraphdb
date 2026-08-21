@@ -1241,6 +1241,12 @@ mod tests {
         ));
         assert!(matches!(
             binder.bind(
+                "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m <> 9 RETURN b"
+            ),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind(
                 "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND a.m <> 9 RETURN b"
             ),
             Err(BindError::Parse(_))
