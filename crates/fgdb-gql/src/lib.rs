@@ -1114,6 +1114,16 @@ impl<'a> Parser<'a> {
                 },
             });
         };
+        if direction == EdgeDirection::Incoming
+            && hop2_relation.is_some()
+            && hop2_dst_prop.is_some()
+            && projection != ReturnProjection::Hop2Destination
+        {
+            return Err(ParseError {
+                offset: self.offset.saturating_sub(returned.len()),
+                kind: ParseErrorKind::ExpectedToken("incoming hop-2 destination after WHERE"),
+            });
+        }
         let skip = self.optional_skip()?;
         let limit = self.optional_limit()?;
         self.skip_whitespace();
@@ -2413,6 +2423,13 @@ mod tests {
         assert_eq!(plan.hop2_dst_prop_lt, None);
         assert_eq!(plan.hop2_dst_prop_ge, None);
         assert_eq!(plan.hop2_dst_prop_le, None);
+
+        for statement in [
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN b",
+        ] {
+            assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
+        }
 
         for statement in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN c",
