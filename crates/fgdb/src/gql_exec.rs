@@ -64,6 +64,38 @@ fn undirected_adjacencies(
     (hop1_adjacency, hop2_adjacency)
 }
 
+/// dst → srcs adjacency for the hop-1 relation AND the optional hop-2
+/// relation, filled by ONE loop over the fetched edge table
+/// (fgdb-w5-parsers-nje.4) — the inverted twin of [`relation_adjacencies`]
+/// for the incoming TWO-hop chain `(a)<-[:R]-(b)<-[:S]-(c)`: walking from
+/// the anchor means walking every edge against its flow, so both hops
+/// invert and the existing composition then IS the reverse composition.
+/// Incoming ONE-hop never comes here — the parser normalizes its variable
+/// roles, so it executes on the uninverted maps.
+fn inverted_adjacencies(
+    records: &[EdgeRecord],
+    hop1: RelationId,
+    hop2: Option<RelationId>,
+) -> (BTreeMap<VId, Vec<VId>>, BTreeMap<VId, Vec<VId>>) {
+    let mut hop1_adjacency = BTreeMap::<VId, Vec<VId>>::new();
+    let mut hop2_adjacency = BTreeMap::<VId, Vec<VId>>::new();
+    for record in records {
+        if record.entry.relation == hop1 {
+            hop1_adjacency
+                .entry(record.entry.dst)
+                .or_default()
+                .push(record.entry.src);
+        }
+        if hop2 == Some(record.entry.relation) {
+            hop2_adjacency
+                .entry(record.entry.dst)
+                .or_default()
+                .push(record.entry.src);
+        }
+    }
+    (hop1_adjacency, hop2_adjacency)
+}
+
 /// src → dsts adjacency for one relation, and the same for the optional
 /// hop-2 relation, filled by ONE scan of the fetched edge table.
 fn relation_adjacencies(
@@ -136,6 +168,10 @@ pub(crate) fn execute<V: Vfs + Clone>(
         let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
         return execute_over_adjacencies(plan, hop1, hop2);
     }
+    if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
+        let (hop1, hop2) = inverted_adjacencies(&records, plan.relation, plan.hop2_relation);
+        return execute_over_adjacencies(plan, hop1, hop2);
+    }
     let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);
     execute_over_adjacencies(plan, hop1, hop2)
 }
@@ -150,6 +186,10 @@ pub(crate) fn execute_at<V: Vfs + Clone>(
     let records = db.edges_at(as_of)?;
     if plan.direction == EdgeDirection::Undirected {
         let (hop1, hop2) = undirected_adjacencies(&records, plan.relation, plan.hop2_relation);
+        return execute_over_adjacencies(plan, hop1, hop2);
+    }
+    if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
+        let (hop1, hop2) = inverted_adjacencies(&records, plan.relation, plan.hop2_relation);
         return execute_over_adjacencies(plan, hop1, hop2);
     }
     let (hop1, hop2) = relation_adjacencies(records, plan.relation, plan.hop2_relation);

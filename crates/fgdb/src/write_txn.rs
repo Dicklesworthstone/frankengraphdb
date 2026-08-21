@@ -730,6 +730,12 @@ impl WriteTxn {
                 // orientations — the overlay twin of gql_exec's
                 // per-direction adjacency builders.
                 let undirected = plan.direction == fgdb_gql::EdgeDirection::Undirected;
+                // The incoming TWO-hop chain reverse-composes: every step
+                // walks against edge flow (fgdb-w5-parsers-nje.4). Incoming
+                // ONE-hop stays forward — the parser normalized its variable
+                // roles, exactly as on the durable faces.
+                let reverse = plan.direction == fgdb_gql::EdgeDirection::Incoming
+                    && plan.hop2_relation.is_some();
                 let step = |anchor: VId, step_relation: fgdb_delta_types::RelationId| -> Vec<VId> {
                     edges
                         .values()
@@ -737,9 +743,9 @@ impl WriteTxn {
                             if *edge_relation != step_relation {
                                 return None;
                             }
-                            if *edge_src == anchor && vertices.contains(edge_dst) {
+                            if !reverse && *edge_src == anchor && vertices.contains(edge_dst) {
                                 Some(*edge_dst)
-                            } else if undirected
+                            } else if (reverse || undirected)
                                 && *edge_dst == anchor
                                 && vertices.contains(edge_src)
                             {
