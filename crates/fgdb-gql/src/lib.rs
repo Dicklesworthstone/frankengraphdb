@@ -5,10 +5,11 @@
 //! `MATCH (dst)<-[:Relation]-(src) RETURN var` or
 //! `MATCH (left)-[:Relation]-(right) RETURN var`, plus the bounded node scan
 //! `MATCH (node:Label) RETURN node`. Whitespace is optional between tokens.
-//! The outgoing one-hop form may include `WHERE src <> dst` or
-//! `WHERE src = dst` before `RETURN`. Unlabeled node-only scans and everything
-//! else fail closed with a [`ParseError`]; this crate does not interpret a
-//! partial AST or silently widen the supported language.
+//! The outgoing one-hop form may include endpoint equality/inequality or
+//! integer property equality, including one source and one destination
+//! property predicate joined by `AND`, before `RETURN`. Unlabeled node-only
+//! scans and everything else fail closed with a [`ParseError`]; this crate does
+//! not interpret a partial AST or silently widen the supported language.
 
 #![forbid(unsafe_code)]
 
@@ -435,7 +436,41 @@ impl<'a> Parser<'a> {
                 let property = self.identifier()?;
                 self.token("=")?;
                 let value = self.integer()?;
-                if left == src_var {
+                let first_is_source = left == src_var;
+                self.skip_whitespace();
+                if self.source[self.offset..].starts_with("AND") {
+                    self.keyword("AND")?;
+                    let second_var = self.identifier()?;
+                    if second_var != src_var && second_var != dst_var {
+                        return Err(ParseError {
+                            offset: self.offset.saturating_sub(second_var.len()),
+                            kind: ParseErrorKind::ReturnedVariableMismatch {
+                                expected: format!("{src_var} or {dst_var}"),
+                                found: second_var,
+                            },
+                        });
+                    }
+                    let second_is_source = second_var == src_var;
+                    if first_is_source == second_is_source {
+                        return Err(ParseError {
+                            offset: self.offset.saturating_sub(second_var.len()),
+                            kind: ParseErrorKind::ExpectedToken(
+                                "one source and one destination property predicate",
+                            ),
+                        });
+                    }
+                    self.token(".")?;
+                    let second_property = self.identifier()?;
+                    self.token("=")?;
+                    let second_value = self.integer()?;
+                    let first = (property, value);
+                    let second = (second_property, second_value);
+                    if first_is_source {
+                        (None, None, Some(first), Some(second))
+                    } else {
+                        (None, None, Some(second), Some(first))
+                    }
+                } else if first_is_source {
                     (None, None, Some((property, value)), None)
                 } else {
                     (None, None, None, Some((property, value)))
@@ -805,18 +840,32 @@ mod tests {
             binder.bind("MATCH (a)-[:R]->(b) WHERE b.k = a RETURN a"),
             Err(BindError::Parse(_))
         ));
-        assert!(matches!(
-            binder.bind(
-                "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.k = 1 RETURN b"
-            ),
-            Err(BindError::Parse(_))
-        ));
-
         let source = binder
             .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
             .expect("source property equality remains grammar");
         assert_eq!(source.src_prop, Some((PropertyKeyId(7), 1)));
         assert_eq!(source.dst_prop, None);
+    }
+
+    #[test]
+    fn source_and_destination_property_equalities_bind_in_either_order() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_property("k", PropertyKeyId(7))
+            .with_property("m", PropertyKeyId(9));
+        for statement in [
+            "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m = 9 RETURN b",
+            "MATCH (a)-[:R]->(b) WHERE b.m = 9 AND a.k = 1 RETURN b",
+        ] {
+            let plan = binder.bind(statement).expect("both property predicates bind");
+            assert_eq!(plan.src_prop, Some((PropertyKeyId(7), 1)));
+            assert_eq!(plan.dst_prop, Some((PropertyKeyId(9), 9)));
+        }
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND a.m = 9 RETURN b"),
+            Err(BindError::Parse(_))
+        ));
     }
 
     #[test]
