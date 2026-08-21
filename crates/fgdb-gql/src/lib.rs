@@ -535,26 +535,42 @@ impl<'a> Parser<'a> {
                     } else {
                         self.token("=")?;
                     }
-                    if second_is_ne != is_prop_ne {
-                        return Err(ParseError {
-                            offset: self.offset,
-                            kind: ParseErrorKind::ExpectedToken(
-                                "matching property predicate operators",
-                            ),
-                        });
-                    }
                     let second_value = self.integer()?;
                     let first = (property, value);
                     let second = (second_property, second_value);
-                    if is_prop_ne && first_is_source {
-                        (None, None, None, Some(first), None, Some(second))
-                    } else if is_prop_ne {
-                        (None, None, None, Some(second), None, Some(first))
-                    } else if first_is_source {
-                        (None, None, Some(first), None, Some(second), None)
+                    let (mut src_prop, mut src_prop_ne, mut dst_prop, mut dst_prop_ne) =
+                        (None, None, None, None);
+                    if first_is_source {
+                        if is_prop_ne {
+                            src_prop_ne = Some(first);
+                        } else {
+                            src_prop = Some(first);
+                        }
+                        if second_is_ne {
+                            dst_prop_ne = Some(second);
+                        } else {
+                            dst_prop = Some(second);
+                        }
                     } else {
-                        (None, None, Some(second), None, Some(first), None)
+                        if is_prop_ne {
+                            dst_prop_ne = Some(first);
+                        } else {
+                            dst_prop = Some(first);
+                        }
+                        if second_is_ne {
+                            src_prop_ne = Some(second);
+                        } else {
+                            src_prop = Some(second);
+                        }
                     }
+                    (
+                        None,
+                        None,
+                        src_prop,
+                        src_prop_ne,
+                        dst_prop,
+                        dst_prop_ne,
+                    )
                 } else if is_prop_ne && first_is_source {
                     (None, None, None, Some((property, value)), None, None)
                 } else if is_prop_ne {
@@ -1235,18 +1251,6 @@ mod tests {
 
         assert!(matches!(
             binder.bind(
-                "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m = 9 RETURN b"
-            ),
-            Err(BindError::Parse(_))
-        ));
-        assert!(matches!(
-            binder.bind(
-                "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m <> 9 RETURN b"
-            ),
-            Err(BindError::Parse(_))
-        ));
-        assert!(matches!(
-            binder.bind(
                 "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND a.m <> 9 RETURN b"
             ),
             Err(BindError::Parse(_))
@@ -1260,6 +1264,47 @@ mod tests {
             .is_ok());
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn mixed_property_equality_and_inequality_bind_in_either_order() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_property("k", PropertyKeyId(7))
+            .with_property("m", PropertyKeyId(9));
+        for statement in [
+            "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m <> 9 RETURN b",
+            "MATCH (a)-[:R]->(b) WHERE b.m <> 9 AND a.k = 1 RETURN b",
+        ] {
+            let plan = binder
+                .bind(statement)
+                .expect("source equality and destination inequality bind");
+            assert_eq!(plan.src_prop, Some((PropertyKeyId(7), 1)));
+            assert_eq!(plan.dst_prop_ne, Some((PropertyKeyId(9), 9)));
+            assert_eq!(plan.src_prop_ne, None);
+            assert_eq!(plan.dst_prop, None);
+        }
+        for statement in [
+            "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m = 9 RETURN b",
+            "MATCH (a)-[:R]->(b) WHERE b.m = 9 AND a.k <> 1 RETURN b",
+        ] {
+            let plan = binder
+                .bind(statement)
+                .expect("source inequality and destination equality bind");
+            assert_eq!(plan.src_prop_ne, Some((PropertyKeyId(7), 1)));
+            assert_eq!(plan.dst_prop, Some((PropertyKeyId(9), 9)));
+            assert_eq!(plan.src_prop, None);
+            assert_eq!(plan.dst_prop_ne, None);
+        }
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND a.m <> 9 RETURN b"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 AND b.m = 9 RETURN b"),
             Err(BindError::Parse(_))
         ));
     }
