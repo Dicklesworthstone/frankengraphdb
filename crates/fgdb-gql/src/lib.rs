@@ -1,10 +1,12 @@
 //! The first bounded GQL parser and binder slice.
 //!
-//! The only accepted grammar is a single directed, typed edge pattern:
+//! The only accepted grammar is a typed edge pattern:
 //! `MATCH (src)-[:Relation]->(dst) RETURN var` or
-//! `MATCH (dst)<-[:Relation]-(src) RETURN var`. Whitespace is optional between
-//! tokens. Everything else fails closed with a [`ParseError`]; this crate does
-//! not interpret a partial AST or silently widen the supported language.
+//! `MATCH (dst)<-[:Relation]-(src) RETURN var` or
+//! `MATCH (left)-[:Relation]-(right) RETURN var`. Whitespace is optional
+//! between tokens. Everything else fails closed with a [`ParseError`]; this
+//! crate does not interpret a partial AST or silently widen the supported
+//! language.
 
 #![forbid(unsafe_code)]
 
@@ -78,6 +80,7 @@ pub enum ReturnProjection {
 pub enum EdgeDirection {
     Outgoing,
     Incoming,
+    Undirected,
 }
 
 /// The executor-ready result of binding the pinned pattern.
@@ -196,27 +199,33 @@ impl<'a> Parser<'a> {
         let left_var = self.identifier()?;
         self.token(")")?;
         self.skip_whitespace();
-        let direction = if self.source[self.offset..].starts_with('<') {
+        let incoming = if self.source[self.offset..].starts_with('<') {
             self.token("<")?;
             self.token("-")?;
-            EdgeDirection::Incoming
+            true
         } else {
             self.token("-")?;
-            EdgeDirection::Outgoing
+            false
         };
         self.token("[")?;
         self.token(":")?;
         let relation = self.identifier()?;
         self.token("]")?;
         self.token("-")?;
-        if direction == EdgeDirection::Outgoing {
+        self.skip_whitespace();
+        let direction = if incoming {
+            EdgeDirection::Incoming
+        } else if self.source[self.offset..].starts_with('>') {
             self.token(">")?;
-        }
+            EdgeDirection::Outgoing
+        } else {
+            EdgeDirection::Undirected
+        };
         self.token("(")?;
         let right_var = self.identifier()?;
         self.token(")")?;
         let (src_var, dst_var) = match direction {
-            EdgeDirection::Outgoing => (left_var, right_var),
+            EdgeDirection::Outgoing | EdgeDirection::Undirected => (left_var, right_var),
             EdgeDirection::Incoming => (right_var, left_var),
         };
         let via_var = dst_var.clone();
@@ -376,13 +385,18 @@ mod tests {
     #[test]
     fn one_token_arrow_mutation_is_a_parse_error() {
         let binder = RelationBind::new().with_relation("R", RelationId(17));
-        let error = binder
+        let plan = binder
             .bind("MATCH (a)-[:R]-(b) RETURN b")
-            .expect_err("missing directed-arrow token must fail parsing");
+            .expect("arrowless typed edge binds as undirected");
+        assert_eq!(plan.direction, EdgeDirection::Undirected);
+
+        let error = binder
+            .bind("MATCH (a)<[:R]->(b) RETURN b")
+            .expect_err("mixed arrow mutation must fail parsing");
         assert!(matches!(
             error,
             BindError::Parse(ParseError {
-                kind: ParseErrorKind::ExpectedToken(">"),
+                kind: ParseErrorKind::ExpectedToken("-"),
                 ..
             })
         ));

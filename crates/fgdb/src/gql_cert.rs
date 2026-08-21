@@ -1,5 +1,5 @@
 use fgdb_crypto::{Digest, Hasher, hash};
-use fgdb_gql::{BoundPlan, RelationBind, ReturnProjection};
+use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
 use fgdb_types::CommitSeq;
 
 const GQL_PLAN_CERTIFICATE_DOMAIN: &[u8] = b"fgdb:gql-bound-plan-certificate:v1";
@@ -45,11 +45,20 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
         }
     }
     hasher.update(&[projection_tag(plan.projection)]);
+    hasher.update(&[direction_tag(plan.direction)]);
     hasher.update(&snapshot_seq.0.to_be_bytes());
 
     GqlPlanCertificate {
         digest: hasher.finalize(),
         snapshot_seq,
+    }
+}
+
+fn direction_tag(direction: EdgeDirection) -> u8 {
+    match direction {
+        EdgeDirection::Outgoing => 0,
+        EdgeDirection::Incoming => 1,
+        EdgeDirection::Undirected => 2,
     }
 }
 
@@ -77,7 +86,7 @@ pub fn digest_bind(bind: &RelationBind) -> Digest {
 
 #[cfg(test)]
 mod tests {
-    use super::{certify, projection_tag, GqlPlanCertificate};
+    use super::{certify, direction_tag, projection_tag, GqlPlanCertificate};
     use fgdb_delta_types::RelationId;
     use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
     use fgdb_types::CommitSeq;
@@ -140,6 +149,28 @@ mod tests {
         assert_eq!(projection_tag(ReturnProjection::Destination), 0);
         assert_eq!(projection_tag(ReturnProjection::Source), 1);
         assert_eq!(projection_tag(ReturnProjection::Hop2Destination), 2);
+    }
+
+    #[test]
+    fn direction_tags_are_stable_and_change_the_digest() {
+        assert_eq!(direction_tag(EdgeDirection::Outgoing), 0);
+        assert_eq!(direction_tag(EdgeDirection::Incoming), 1);
+        assert_eq!(direction_tag(EdgeDirection::Undirected), 2);
+
+        let outgoing = plan(7);
+        let mut incoming = outgoing.clone();
+        incoming.direction = EdgeDirection::Incoming;
+        let mut undirected = outgoing.clone();
+        undirected.direction = EdgeDirection::Undirected;
+
+        assert_ne!(
+            certify(&outgoing, CommitSeq(11)).digest,
+            certify(&incoming, CommitSeq(11)).digest
+        );
+        assert_ne!(
+            certify(&outgoing, CommitSeq(11)).digest,
+            certify(&undirected, CommitSeq(11)).digest
+        );
     }
 
     #[test]
