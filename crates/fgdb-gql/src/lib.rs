@@ -861,6 +861,47 @@ mod tests {
     }
 
     #[test]
+    fn node_only_skip_and_limit_bind_in_the_pinned_order() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_label("Person", LabelId(7));
+
+        let skipped = binder
+            .bind("MATCH (a:Person) RETURN a SKIP 1")
+            .expect("node-only SKIP binds");
+        assert_eq!(skipped.skip, Some(1));
+        assert_eq!(skipped.limit, None);
+        assert_eq!(skipped.relation, None, "node-only stays relationless");
+        assert_eq!(skipped.src_label, Some(LabelId(7)));
+
+        let paged = binder
+            .bind("MATCH (a:Person) RETURN a SKIP 1 LIMIT 1")
+            .expect("node-only SKIP then LIMIT binds");
+        assert_eq!(paged.skip, Some(1));
+        assert_eq!(paged.limit, Some(1));
+
+        let limited = binder
+            .bind("MATCH (a:Person) RETURN a LIMIT 1")
+            .expect("node-only LIMIT alone binds");
+        assert_eq!(limited.skip, None);
+        assert_eq!(limited.limit, Some(1));
+
+        // Pagination does not legalize the bare vertex scan: the pattern is
+        // refused before SKIP is ever reached.
+        assert!(matches!(
+            binder.bind("MATCH (a) RETURN a SKIP 1"),
+            Err(BindError::Parse(_))
+        ));
+
+        // The edge statement beside it is unmoved by the node-only path.
+        let edge = binder
+            .bind("MATCH (a)-[:R]->(b) RETURN b SKIP 1")
+            .expect("edge SKIP still binds");
+        assert_eq!(edge.skip, Some(1));
+        assert_eq!(edge.relation, Some(RelationId(17)));
+    }
+
+    #[test]
     fn labeled_node_only_match_binds_without_a_relation() {
         let binder = RelationBind::new().with_label("Person", LabelId(7));
         let plan = binder
