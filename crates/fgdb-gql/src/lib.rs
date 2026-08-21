@@ -2361,8 +2361,27 @@ mod tests {
             binder.bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 AND a.m <> 9 RETURN b"),
             Err(BindError::Parse(_))
         ));
+
+        let bang_with_equality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 AND b.m = 9 RETURN b")
+            .expect("source bang inequality and destination equality bind");
+        assert_eq!(bang_with_equality.src_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(bang_with_equality.dst_prop, Some((PropertyKeyId(9), 9)));
+
+        let bang_with_inequality = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 AND b.m <> 9 RETURN b")
+            .expect("source bang inequality and destination inequality bind");
+        assert_eq!(
+            bang_with_inequality.src_prop_ne,
+            Some((PropertyKeyId(7), 1))
+        );
+        assert_eq!(
+            bang_with_inequality.dst_prop_ne,
+            Some((PropertyKeyId(9), 9))
+        );
+
         assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 AND b.m = 9 RETURN b"),
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a.k != 1 AND a.m <> 9 RETURN b"),
             Err(BindError::Parse(_))
         ));
     }
