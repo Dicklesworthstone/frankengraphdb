@@ -1,23 +1,31 @@
-//! fgdb-chronicle — the content-addressed durability substrate (bet B1).
+//! fgdb-chronicle — the landed content-addressed durability substrate (bet B1).
 //!
-//! Chronicle is the "One Version Universe": MVCC versions, time-travel
-//! history, replication, change subscriptions, and git-style branches are all
-//! the same append-only, content-addressed, RaptorQ-coded commit stream. This
-//! crate lands that substrate in dependency order, and the first thing every
-//! later layer needs is object identity.
+//! Chronicle currently provides an append-only commit stream whose durable
+//! objects are authenticated, content-addressed, and RaptorQ-coded. The landed
+//! implementation includes:
 //!
-//! LANDED SO FAR:
-//! - [`identity`] — plan §5.1's noncircular identity pipeline: keyed
-//!   `ObjectId` → object AEAD → `CiphertextId` → `EncodingId` →
-//!   `PlacementId`, as four types where each can only be built from the
-//!   previous one.
-//! - [`symbol`] — the durable `SymbolRecord` wire format and its total
-//!   authentication transcript, verifiable only against an authenticated
-//!   encoding.
+//! - [`identity`] and [`symbol`]: the noncircular object-identity pipeline and
+//!   authenticated durable `SymbolRecord` framing;
+//! - [`symbolize`] and [`capsule`]: asupersync-backed RaptorQ symbolization,
+//!   capsule sealing/container framing, erasure recovery, and fail-closed
+//!   recomputation of the requested `ObjectId`;
+//! - [`marker`]: canonical `CommitMarker` encoding, hash-chained history, and
+//!   compare-and-swap head updates for the landed local effect source;
+//! - [`commit`] and [`store`]: [`CommitCoordinator`], its sole-writer lock,
+//!   validation seam, the capsule-D1/marker-D2 two-fsync protocol, bounded
+//!   capsule reads, torn-tail recovery, orphan discovery, and directory
+//!   durability barriers;
+//! - [`root`]: the two-slot `manifest.root` format, authenticated bootstrap,
+//!   selection/recovery rules, and durable root publication support;
+//! - [`scrub`]: authenticated symbol inspection and repair-budget-aware scrub
+//!   verdicts for encoded objects;
+//! - [`pack`]: deterministic packing metadata for protected object groups.
 //!
-//! Later increments add the RaptorQ symbolization itself (consuming
-//! asupersync's RFC 6330 implementation), the `CommitCapsule`/`CommitMarker`
-//! two-fsync protocol, the `WriteCoordinator`, retention tiers, and branches.
+//! DELIBERATELY ABSENT: retention cooling; `BranchManifest` and product-level
+//! database branches; replication; a real SSI validator (the landed
+//! [`PassThroughValidator`] is only the coordinator's validation seam); and
+//! capsule sealing of Strata objects. The marker/head primitives above do not
+//! by themselves claim those product capabilities.
 #![forbid(unsafe_code)]
 
 pub mod capsule;
