@@ -847,6 +847,53 @@ pub struct WriteBatch {
     rows: Vec<PendingRow>,
 }
 
+/// The smallest inhabitable Local semantic-command union in the embedded
+/// spine.  More lifecycle arms remain reserved in `command_contracts.toml`.
+#[derive(Clone, Debug)]
+pub enum LocalSemanticCommand {
+    WriteBatch(LocalWriteBatchCommandBody),
+}
+
+/// Canonical input body for the live Local `WriteBatch` command arm.
+#[derive(Clone, Debug)]
+pub struct LocalWriteBatchCommandBody {
+    pub batch: WriteBatch,
+}
+
+/// Client-facing result of applying one Local write batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalWriteBatchCommandResult {
+    pub commit_seq: CommitSeq,
+}
+
+/// Durable applied-record projection produced by the Local write-batch arm.
+///
+/// The full batch bytes live in the `LocalDeltaBatchIndex`; this compact value
+/// is the typed proof returned by the handler that the indexed batch and its
+/// Chronicle marker reached this exact commit sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalWriteBatchAppliedRecord {
+    pub commit_seq: CommitSeq,
+}
+
+/// Exhaustive result union for [`Database::apply_local_semantic_command`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalSemanticApplyResult {
+    WriteBatch {
+        result: LocalWriteBatchCommandResult,
+        applied_record: LocalWriteBatchAppliedRecord,
+    },
+}
+
+/// Machine-readable inventory consumed by the G0 command-contract checker.
+/// Adding or removing a handler without the matching live registry row is red.
+pub const LIVE_LOCAL_SEMANTIC_HANDLER_INVENTORY: &[(&str, &str)] = &[
+    (
+        "cc:local:local-autocommit-write-spec",
+        "fgdb::Database::apply_local_write_batch",
+    ),
+];
+
 impl core::fmt::Debug for WriteBatch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WriteBatch")
@@ -2150,7 +2197,40 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &CommitCx,
         batch: WriteBatch,
     ) -> Result<CommitSeq, WriteError> {
-        self.write_with_faults(cx, batch, None, None, None).await
+        let applied = self
+            .apply_local_semantic_command(cx, LocalSemanticCommand::WriteBatch(
+                LocalWriteBatchCommandBody { batch },
+            ))
+            .await?;
+        let LocalSemanticApplyResult::WriteBatch { result, .. } = applied;
+        Ok(result.commit_seq)
+    }
+
+    /// Exhaustively apply one inhabitable Local semantic command.
+    pub async fn apply_local_semantic_command(
+        &mut self,
+        cx: &CommitCx,
+        command: LocalSemanticCommand,
+    ) -> Result<LocalSemanticApplyResult, WriteError> {
+        match command {
+            LocalSemanticCommand::WriteBatch(body) => self.apply_local_write_batch(cx, body).await,
+        }
+    }
+
+    /// Apply the live Local write-batch arm through Chronicle D2 and the
+    /// existing derived-state publication path.
+    pub async fn apply_local_write_batch(
+        &mut self,
+        cx: &CommitCx,
+        body: LocalWriteBatchCommandBody,
+    ) -> Result<LocalSemanticApplyResult, WriteError> {
+        let commit_seq = self
+            .write_with_faults(cx, body.batch, None, None, None)
+            .await?;
+        Ok(LocalSemanticApplyResult::WriteBatch {
+            result: LocalWriteBatchCommandResult { commit_seq },
+            applied_record: LocalWriteBatchAppliedRecord { commit_seq },
+        })
     }
 
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
