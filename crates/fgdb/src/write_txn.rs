@@ -756,7 +756,13 @@ impl WriteTxn {
                         })
                         .collect()
                 };
-                let vias = step(source, relation);
+                // WHERE a <> b filters exactly the hop-1 step, mirroring
+                // gql_exec (fgdb-gql-where-neq-v476): a staged or durable
+                // self-loop stops matching before projection or composition.
+                let mut vias = step(source, relation);
+                if plan.neq.is_some() {
+                    vias.retain(|via| *via != source);
+                }
                 let Some(hop2_relation) = plan.hop2_relation else {
                     return Ok(vias);
                 };

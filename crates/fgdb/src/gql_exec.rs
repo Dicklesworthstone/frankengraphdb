@@ -130,13 +130,30 @@ fn execute_over_adjacencies(
     hop2: BTreeMap<VId, Vec<VId>>,
 ) -> Result<Vec<VId>, ReadError> {
     let sources: Vec<_> = hop1.keys().copied().collect();
+    // WHERE a <> b (fgdb-gql-where-neq-v476): the predicate binds the two
+    // hop-1 pattern variables, so it filters exactly the hop-1 step — a
+    // self-loop edge stops matching, in every direction mode, before any
+    // projection or hop-2 composition sees it. Filtering the KERNEL's
+    // composed expansion instead would express a <> c on a two-hop plan,
+    // which is a different (unrequested) predicate.
+    let hop1_kept = |src: VId, via: &VId| plan.neq.is_none() || *via != src;
     if plan.hop2_relation.is_none() {
         return crate::execute_bound_plan_over(plan, sources, |src, _| {
-            Ok(hop1.get(&src).cloned().unwrap_or_default())
+            let mut dests = hop1.get(&src).cloned().unwrap_or_default();
+            dests.retain(|dst| hop1_kept(src, dst));
+            Ok(dests)
         });
     }
     crate::execute_bound_plan_over(plan, sources, |src, _| {
-        let vias = hop1.get(&src).map(Vec::as_slice).unwrap_or_default();
+        let vias: Vec<VId> = hop1
+            .get(&src)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter(|via| hop1_kept(src, via))
+            .copied()
+            .collect();
+        let vias = vias.as_slice();
         Ok(match plan.projection {
             // RETURN of the via variable: the intermediates that actually
             // continue — a hop-1 destination with no hop-2 edge is not on
