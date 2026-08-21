@@ -915,6 +915,7 @@ where
         match plan.projection {
             fgdb_gql::ReturnProjection::Source if !destinations.is_empty() => rows.push(src),
             fgdb_gql::ReturnProjection::Destination => rows.extend(destinations),
+            fgdb_gql::ReturnProjection::Hop2Destination => rows.extend(destinations),
             fgdb_gql::ReturnProjection::Source => {}
         }
     }
