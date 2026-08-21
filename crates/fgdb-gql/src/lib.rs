@@ -371,7 +371,7 @@ impl<'a> Parser<'a> {
             && (self.source[self.offset..].starts_with("RETURN")
                 || self.source[self.offset..].starts_with("WHERE"))
         {
-            let (src_prop, src_prop_ne, src_prop_gt, src_prop_lt, src_prop_ge) =
+            let (src_prop, src_prop_ne, src_prop_gt, src_prop_lt, src_prop_ge, src_prop_le) =
                 if self.source[self.offset..].starts_with("WHERE") {
                     self.keyword("WHERE")?;
                     let predicate_var = self.identifier()?;
@@ -396,12 +396,8 @@ impl<'a> Parser<'a> {
                         self.token("<")?;
                         self.token(">")?;
                     } else if is_le {
-                        return Err(ParseError {
-                            offset: self.offset,
-                            kind: ParseErrorKind::ExpectedToken(
-                                "node-only property comparator other than <=",
-                            ),
-                        });
+                        self.token("<")?;
+                        self.token("=")?;
                     } else if is_lt {
                         self.token("<")?;
                     } else if is_ge {
@@ -414,18 +410,20 @@ impl<'a> Parser<'a> {
                     }
                     let predicate = Some((property, self.integer()?));
                     if is_ne {
-                        (None, predicate, None, None, None)
+                        (None, predicate, None, None, None, None)
+                    } else if is_le {
+                        (None, None, None, None, None, predicate)
                     } else if is_lt {
-                        (None, None, None, predicate, None)
+                        (None, None, None, predicate, None, None)
                     } else if is_ge {
-                        (None, None, None, None, predicate)
+                        (None, None, None, None, predicate, None)
                     } else if is_gt {
-                        (None, None, predicate, None, None)
+                        (None, None, predicate, None, None, None)
                     } else {
-                        (predicate, None, None, None, None)
+                        (predicate, None, None, None, None, None)
                     }
                 } else {
-                    (None, None, None, None, None)
+                    (None, None, None, None, None, None)
                 };
             self.keyword("RETURN")?;
             let returned = self.identifier()?;
@@ -465,7 +463,7 @@ impl<'a> Parser<'a> {
                 src_prop_gt,
                 src_prop_lt,
                 src_prop_ge,
-                src_prop_le: None,
+                src_prop_le,
                 dst_prop: None,
                 dst_prop_ne: None,
                 dst_prop_gt: None,
@@ -1917,11 +1915,40 @@ mod tests {
         assert_eq!(greater.src_prop_ge, None);
 
         for statement in [
-            "MATCH (a:Person) WHERE a.k <= 1 RETURN a",
+            "MATCH (a:Person) WHERE a.k != 1 RETURN a",
             "MATCH (a) WHERE a.k >= 1 RETURN a",
         ] {
             assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
         }
+    }
+
+    #[test]
+    fn node_only_property_less_than_or_equal_binds() {
+        let binder = RelationBind::new()
+            .with_label("Person", LabelId(11))
+            .with_property("k", PropertyKeyId(7));
+        let plan = binder
+            .bind("MATCH (a:Person) WHERE a.k <= 1 RETURN a")
+            .expect("labeled node-only less-than-or-equal binds");
+        assert_eq!(plan.relation, None);
+        assert_eq!(plan.src_prop_le, Some((PropertyKeyId(7), 1)));
+        assert_eq!(plan.src_prop, None);
+        assert_eq!(plan.src_prop_ne, None);
+        assert_eq!(plan.src_prop_gt, None);
+        assert_eq!(plan.src_prop_lt, None);
+        assert_eq!(plan.src_prop_ge, None);
+
+        let less = binder
+            .bind("MATCH (a:Person) WHERE a.k < 1 RETURN a")
+            .expect("labeled node-only less-than remains grammar");
+        assert_eq!(less.src_prop_lt, Some((PropertyKeyId(7), 1)));
+        assert_eq!(less.src_prop_le, None);
+
+        let greater_equal = binder
+            .bind("MATCH (a:Person) WHERE a.k >= 1 RETURN a")
+            .expect("labeled node-only greater-than-or-equal remains grammar");
+        assert_eq!(greater_equal.src_prop_ge, Some((PropertyKeyId(7), 1)));
+        assert_eq!(greater_equal.src_prop_le, None);
     }
 
     #[test]
