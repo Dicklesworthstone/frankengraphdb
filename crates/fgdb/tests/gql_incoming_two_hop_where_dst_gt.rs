@@ -10,7 +10,8 @@
 //! discrimination between them lives in the outgoing four-chain suites,
 //! while here the point is that the incoming spelling composes through
 //! the reversed chains at all — the OUTGOING `>` composes nothing on this
-//! fixture (the direction control). The remaining refusals hold: `<`,
+//! fixture (the direction control). Incoming `<` is grammar since nje.43
+//! and composes nothing on this fixture; the remaining refusals hold:
 //! `>=`, `<=`, the C-style alias, and the `RETURN a` projection on the
 //! incoming chain all stay typed Parse.
 
@@ -120,10 +121,23 @@ fn incoming_two_hop_far_end_greater_than_keeps_the_greater_origin() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
+        // nje.43 sibling lock: incoming < is grammar now. On THIS fixture
+        // (k spread {1, 9, missing}) it composes nothing — the assertion
+        // moved to a live boundary, it never weakened; the k=0 survivor
+        // lives in gql_incoming_two_hop_where_dst_lt.rs.
+        assert!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
+                &bind
+            )
+            .expect("nje.43 incoming < is grammar, not a Parse")
+            .is_empty(),
+            "no far end carries k < 1 on this fixture"
+        );
+
         // The remaining refusals: the other ordered comparators, the
         // C-style alias, and the RETURN a projection on the incoming chain.
         for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c",
