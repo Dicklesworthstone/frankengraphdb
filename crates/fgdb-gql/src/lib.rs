@@ -151,6 +151,8 @@ pub struct BoundPlan {
     pub hop2_dst_prop_lt: Option<(PropertyKeyId, i64)>,
     /// Hop-2 far-end inclusive greater-than on the outgoing two-hop form.
     pub hop2_dst_prop_ge: Option<(PropertyKeyId, i64)>,
+    /// Hop-2 far-end inclusive less-than on the outgoing two-hop form.
+    pub hop2_dst_prop_le: Option<(PropertyKeyId, i64)>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -276,6 +278,7 @@ impl RelationBind {
         let hop2_dst_prop_gt = bind_property(&self.properties, ast.hop2_dst_prop_gt)?;
         let hop2_dst_prop_lt = bind_property(&self.properties, ast.hop2_dst_prop_lt)?;
         let hop2_dst_prop_ge = bind_property(&self.properties, ast.hop2_dst_prop_ge)?;
+        let hop2_dst_prop_le = bind_property(&self.properties, ast.hop2_dst_prop_le)?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
@@ -308,6 +311,7 @@ impl RelationBind {
             hop2_dst_prop_gt,
             hop2_dst_prop_lt,
             hop2_dst_prop_ge,
+            hop2_dst_prop_le,
         })
     }
 }
@@ -373,6 +377,7 @@ struct MatchAst {
     hop2_dst_prop_gt: Option<(String, i64)>,
     hop2_dst_prop_lt: Option<(String, i64)>,
     hop2_dst_prop_ge: Option<(String, i64)>,
+    hop2_dst_prop_le: Option<(String, i64)>,
 }
 
 struct Parser<'a> {
@@ -502,6 +507,7 @@ impl<'a> Parser<'a> {
                 hop2_dst_prop_gt: None,
                 hop2_dst_prop_lt: None,
                 hop2_dst_prop_ge: None,
+                hop2_dst_prop_le: None,
             });
         }
         let incoming = if self.source[self.offset..].starts_with('<') {
@@ -582,6 +588,7 @@ impl<'a> Parser<'a> {
         let mut hop2_dst_prop_gt = None;
         let mut hop2_dst_prop_lt = None;
         let mut hop2_dst_prop_ge = None;
+        let mut hop2_dst_prop_le = None;
         let (
             neq,
             eq,
@@ -627,19 +634,13 @@ impl<'a> Parser<'a> {
                 let is_prop_lt = remaining.starts_with('<') && !is_prop_ne && !is_prop_le;
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
-                if is_hop2_destination && is_prop_le {
-                    return Err(ParseError {
-                        offset: self.offset,
-                        kind: ParseErrorKind::ExpectedToken(
-                            "hop-2 destination property comparison before RETURN",
-                        ),
-                    });
-                }
                 if is_prop_ne {
                     self.token("<")?;
                     self.token(">")?;
                 } else if is_prop_le {
-                    if direction != EdgeDirection::Outgoing || hop2_relation.is_some() {
+                    if !is_hop2_destination
+                        && (direction != EdgeDirection::Outgoing || hop2_relation.is_some())
+                    {
                         return Err(ParseError {
                             offset: self.offset,
                             kind: ParseErrorKind::ExpectedToken(
@@ -701,6 +702,8 @@ impl<'a> Parser<'a> {
                         hop2_dst_prop_lt = Some((property, value));
                     } else if is_prop_ge {
                         hop2_dst_prop_ge = Some((property, value));
+                    } else if is_prop_le {
+                        hop2_dst_prop_le = Some((property, value));
                     } else {
                         hop2_dst_prop = Some((property, value));
                     }
@@ -1130,6 +1133,7 @@ impl<'a> Parser<'a> {
             hop2_dst_prop_gt,
             hop2_dst_prop_lt,
             hop2_dst_prop_ge,
+            hop2_dst_prop_le,
         })
     }
 
@@ -1346,6 +1350,7 @@ mod tests {
                 hop2_dst_prop_gt: None,
                 hop2_dst_prop_lt: None,
                 hop2_dst_prop_ge: None,
+                hop2_dst_prop_le: None,
             }
         );
     }
@@ -2540,6 +2545,67 @@ mod tests {
         ));
         assert!(matches!(
             binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn two_hop_destination_property_le_binds() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23))
+            .with_property("k", PropertyKeyId(7));
+
+        let less_or_equal = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <= 1 RETURN c")
+            .expect("outgoing two-hop far-end less-or-equal binds");
+        assert_eq!(less_or_equal.hop2_dst_prop_le, Some((PropertyKeyId(7), 1)));
+        assert_eq!(less_or_equal.hop2_dst_prop, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_ne, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_gt, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_lt, None);
+        assert_eq!(less_or_equal.hop2_dst_prop_ge, None);
+        assert_eq!(less_or_equal.dst_prop_le, None);
+
+        let equality = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k = 1 RETURN c")
+            .expect("outgoing two-hop far-end equality remains bound");
+        assert_eq!(equality.hop2_dst_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(equality.hop2_dst_prop_le, None);
+
+        let inequality = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <> 1 RETURN c")
+            .expect("outgoing two-hop far-end inequality remains bound");
+        assert_eq!(inequality.hop2_dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(inequality.hop2_dst_prop_le, None);
+
+        let greater = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k > 1 RETURN c")
+            .expect("outgoing two-hop far-end greater-than remains bound");
+        assert_eq!(greater.hop2_dst_prop_gt, Some((PropertyKeyId(7), 1)));
+        assert_eq!(greater.hop2_dst_prop_le, None);
+
+        let less = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k < 1 RETURN c")
+            .expect("outgoing two-hop far-end less-than remains bound");
+        assert_eq!(less.hop2_dst_prop_lt, Some((PropertyKeyId(7), 1)));
+        assert_eq!(less.hop2_dst_prop_le, None);
+
+        let greater_or_equal = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k >= 1 RETURN c")
+            .expect("outgoing two-hop far-end greater-or-equal remains bound");
+        assert_eq!(
+            greater_or_equal.hop2_dst_prop_ge,
+            Some((PropertyKeyId(7), 1))
+        );
+        assert_eq!(greater_or_equal.hop2_dst_prop_le, None);
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c"),
             Err(BindError::Parse(_))
         ));
     }

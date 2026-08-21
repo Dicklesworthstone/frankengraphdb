@@ -1126,6 +1126,26 @@ impl WriteTxn {
                 Some(holders)
             }
         };
+        let hop2_dst_prop_le_ok = match plan.hop2_dst_prop_le {
+            None => None,
+            Some((key, value)) => {
+                let mut holders = std::collections::BTreeSet::new();
+                for vid in vertices.iter().copied() {
+                    if self.vertex(database, vid)?.is_some_and(|row| {
+                        row.props.iter().any(|(property, scalar)| {
+                            *property == key
+                                && matches!(
+                                    scalar,
+                                    CanonicalScalar::Int(actual) if *actual <= value
+                                )
+                        })
+                    }) {
+                        holders.insert(vid);
+                    }
+                }
+                Some(holders)
+            }
+        };
         let anchors: Vec<VId> = vertices
             .iter()
             .copied()
@@ -1238,6 +1258,9 @@ impl WriteTxn {
                     far_ends.retain(|far_end| holders.contains(far_end));
                 }
                 if let Some(holders) = hop2_dst_prop_ge_ok.as_ref() {
+                    far_ends.retain(|far_end| holders.contains(far_end));
+                }
+                if let Some(holders) = hop2_dst_prop_le_ok.as_ref() {
                     far_ends.retain(|far_end| holders.contains(far_end));
                 }
                 far_ends
