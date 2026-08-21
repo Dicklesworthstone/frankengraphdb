@@ -1,12 +1,13 @@
 use crate::{
-    Database, GqlError, PendingRow, PreparedWrite, ReadError, RelationBind, VertexRow, WriteBatch,
-    WriteError,
+    Database, EdgeRecord, GqlError, PendingRow, PreparedWrite, ReadError, RelationBind, VertexRow,
+    WriteBatch, WriteError,
 };
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, RelationId};
+use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{
-    Acquired, CommitCx, CommitSeq, ObligationAcquireError, ObligationId, PurposeObligation, TxnCx,
-    VId,
+    Acquired, CommitCx, CommitSeq, EId, ObligationAcquireError, ObligationId, PurposeObligation,
+    TxnCx, VId,
 };
 
 /// Failure to prepare or finish the bounded one-batch write transaction.
@@ -259,6 +260,137 @@ impl WriteTxn {
             .borrow_mut()
             .insert(ElementId::Vertex(vid));
         Ok(overlay)
+    }
+
+    /// Read one edge from the pinned durable basis plus this transaction's
+    /// staged create/delete overlay, without publishing the transaction.
+    pub fn edge<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        eid: EId,
+    ) -> Result<Option<EdgeRecord>, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+
+        let mut overlay = database.edge_at(eid, self.basis)?;
+        let mut observed_sources = std::collections::BTreeSet::new();
+        if let Some(record) = &overlay {
+            observed_sources.insert(record.entry.src);
+        }
+
+        for batch in &self.staged {
+            for pending in &batch.rows {
+                match pending {
+                    PendingRow::Edge {
+                        eid: row_eid,
+                        src,
+                        dst,
+                        props,
+                        ensure: _,
+                    } if *row_eid == eid => {
+                        let mut props = props.clone();
+                        crate::sort_write_props(&mut props);
+                        observed_sources.insert(*src);
+                        overlay = Some(EdgeRecord {
+                            entry: AdjacencyEntry {
+                                src: *src,
+                                relation: batch.relation,
+                                dst: *dst,
+                                eid,
+                                created_at: self.basis,
+                                retired_at: None,
+                            },
+                            props,
+                        });
+                    }
+                    PendingRow::DeleteEdge { eid: row_eid, .. } if *row_eid == eid => {
+                        overlay = None;
+                    }
+                    PendingRow::Vertex { .. }
+                    | PendingRow::Edge { .. }
+                    | PendingRow::DeleteEdge { .. }
+                    | PendingRow::DeleteVertex { .. }
+                    | PendingRow::SetLabel { .. }
+                    | PendingRow::SetEdgeProperty { .. }
+                    | PendingRow::SetProperty { .. }
+                    | PendingRow::CompareAndSet { .. } => {}
+                }
+            }
+        }
+
+        let mut read_set = self.read_set.borrow_mut();
+        read_set.insert(ElementId::Edge(eid));
+        read_set.extend(observed_sources.into_iter().map(ElementId::Vertex));
+        Ok(overlay)
+    }
+
+    /// Read the pinned neighbours of one relation through staged edge
+    /// creates and deletes. Destinations retain the database API's sorted,
+    /// deduplicated result shape even when parallel edges exist.
+    pub fn neighbours<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        src: VId,
+        relation: RelationId,
+    ) -> Result<Vec<VId>, WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+
+        let mut destinations: std::collections::BTreeSet<VId> = database
+            .neighbours_at(src, relation, self.basis)?
+            .into_iter()
+            .collect();
+        let mut matching_edges: std::collections::BTreeMap<EId, VId> = database
+            .edges_at(self.basis)?
+            .into_iter()
+            .filter_map(|record| {
+                (record.entry.src == src && record.entry.relation == relation)
+                    .then_some((record.entry.eid, record.entry.dst))
+            })
+            .collect();
+        let mut observed_edges: std::collections::BTreeSet<EId> =
+            matching_edges.keys().copied().collect();
+
+        for batch in &self.staged {
+            for pending in &batch.rows {
+                match pending {
+                    PendingRow::Edge {
+                        eid,
+                        src: edge_src,
+                        dst,
+                        ensure,
+                        ..
+                    } if *edge_src == src && batch.relation == relation => {
+                        if !ensure || !destinations.contains(dst) {
+                            matching_edges.insert(*eid, *dst);
+                            destinations.insert(*dst);
+                            observed_edges.insert(*eid);
+                        }
+                    }
+                    PendingRow::DeleteEdge { eid, .. } => {
+                        if let Some(dst) = matching_edges.remove(eid)
+                            && !matching_edges.values().any(|other| *other == dst)
+                        {
+                            destinations.remove(&dst);
+                        }
+                    }
+                    PendingRow::Vertex { .. }
+                    | PendingRow::Edge { .. }
+                    | PendingRow::DeleteVertex { .. }
+                    | PendingRow::SetLabel { .. }
+                    | PendingRow::SetEdgeProperty { .. }
+                    | PendingRow::SetProperty { .. }
+                    | PendingRow::CompareAndSet { .. } => {}
+                }
+            }
+        }
+
+        let mut read_set = self.read_set.borrow_mut();
+        read_set.insert(ElementId::Vertex(src));
+        read_set.extend(observed_edges.into_iter().map(ElementId::Edge));
+        Ok(destinations.into_iter().collect())
     }
 
     /// Execute the pinned MATCH expansion over the durable basis plus staged
