@@ -475,11 +475,8 @@ impl<'a> Parser<'a> {
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
-        let (neq, eq, src_prop, src_prop_ne, dst_prop, dst_prop_ne) = if matches!(
-            direction,
-            EdgeDirection::Outgoing | EdgeDirection::Incoming | EdgeDirection::Undirected
-        )
-            && hop2_relation.is_none()
+        let (neq, eq, src_prop, src_prop_ne, dst_prop, dst_prop_ne) = if (hop2_relation.is_none()
+            || direction == EdgeDirection::Outgoing)
             && self.source[self.offset..].starts_with("WHERE")
         {
             self.keyword("WHERE")?;
@@ -1434,6 +1431,45 @@ mod tests {
             .is_ok());
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k = 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn outgoing_two_hop_where_binds_the_hop_one_source() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23))
+            .with_property("k", PropertyKeyId(7))
+            .with_label("Person", LabelId(11));
+
+        let equality = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c")
+            .expect("outgoing two-hop source property equality binds");
+        assert_eq!(equality.src_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(equality.hop2_relation, Some(RelationId(23)));
+        assert_eq!(equality.projection, ReturnProjection::Hop2Destination);
+
+        let inequality = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k <> 1 RETURN c")
+            .expect("outgoing two-hop source property inequality binds");
+        assert_eq!(inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
+
+        assert!(binder
+            .bind("MATCH (a)-[:R]->(b) WHERE a.k = 1 RETURN b")
+            .is_ok());
+        assert!(matches!(
+            binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k = 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind(
+                "MATCH (a:Person)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c"
+            ),
             Err(BindError::Parse(_))
         ));
     }
