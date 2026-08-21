@@ -11,12 +11,12 @@
 //! unfiltered statement answers all three. The direction control runs on
 //! the INCOMING `a.k != 1` (grammar since nje.54), which composes nothing
 //! on this outgoing fixture. The `RETURN a` projection under the source
-//! `!=` is grammar and answers the surviving anchor `[4]`, while one
-//! refusal holds the grammar's edge: the hop-1 `WHERE a.k != 1` stays
-//! typed Parse.
+//! `!=` is grammar and answers the surviving anchor `[4]`, and with
+//! nje.58 the hop-1 `WHERE a.k != 1 RETURN a` is grammar too, answering
+//! the same anchor.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -130,14 +130,15 @@ fn two_hop_source_bang_inequality_aliases_the_angle_spelling() {
             "the k=9 anchor answers by itself"
         );
 
-        // The refusal: the hop-1 spelling stays typed Parse.
-        for off_grammar in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN a"] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // nje.58 opened the hop-1 source !=: RETURN a under that spelling
+        // is grammar and answers the same surviving anchor (moved, not
+        // weakened).
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN a", &bind)
+                .expect("the hop-1 source != spelling executes (nje.58)"),
+            vec![VId(4)],
+            "the k=9 anchor answers by itself at hop 1 too"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }
