@@ -13,8 +13,8 @@
 //! `> 9` answers nothing (nothing exceeds the top key). The keyless
 //! dest's chain satisfies no ordered comparator, the equality and
 //! inequality siblings stay unmoved, the far-end `>` is EMPTY (no origin
-//! carries `k`), and the OUTGOING spelling composes nothing on this
-//! reversed fixture (the direction control). The refusals hold: the
+//! carries `k`), and the OUTGOING hop-2 source `>` spelling stays typed
+//! Parse (the direction control). The refusals hold: the
 //! still-unlanded ordered comparators on `a.k`, the C-style alias, and
 //! the `RETURN a` projection stay typed Parse.
 
@@ -143,13 +143,14 @@ fn incoming_two_hop_near_end_greater_than_keeps_the_greater_chain() {
             "without WHERE all three reversed chains answer"
         );
 
-        // The direction control: the OUTGOING spelling composes nothing on
-        // this reversed fixture.
+        // The direction control: outgoing hop-2 source `>` is a separate
+        // grammar slice and stays a typed Parse refusal.
+        let outgoing_err = db
+            .execute_gql(OUT_A_GT, &bind)
+            .expect_err("outgoing hop-2 source greater-than stays off grammar");
         assert!(
-            db.execute_gql(OUT_A_GT, &bind)
-                .expect("the outgoing spelling still executes")
-                .is_empty(),
-            "no :S edge leaves an :R destination on the reversed fixture"
+            matches!(outgoing_err, GqlError::Parse(_)),
+            "OUT_A_GT must be the typed parse arm: {outgoing_err:?}"
         );
 
         // The refusals: the still-unlanded ordered comparators on the near
