@@ -1,7 +1,8 @@
 //! The first bounded GQL parser and binder slice.
 //!
 //! The only accepted grammar is a single directed, typed edge pattern:
-//! `MATCH (src)-[:Relation]->(dst) RETURN dst`. Whitespace is optional between
+//! `MATCH (src)-[:Relation]->(dst) RETURN var` or
+//! `MATCH (dst)<-[:Relation]-(src) RETURN var`. Whitespace is optional between
 //! tokens. Everything else fails closed with a [`ParseError`]; this crate does
 //! not interpret a partial AST or silently widen the supported language.
 
@@ -72,6 +73,12 @@ pub enum ReturnProjection {
     Destination,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeDirection {
+    Outgoing,
+    Incoming,
+}
+
 /// The executor-ready result of binding the pinned pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundPlan {
@@ -79,6 +86,7 @@ pub struct BoundPlan {
     pub src_var: String,
     pub dst_var: String,
     pub projection: ReturnProjection,
+    pub direction: EdgeDirection,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -138,6 +146,7 @@ impl RelationBind {
             src_var: ast.src_var,
             dst_var: ast.dst_var,
             projection: ast.projection,
+            direction: ast.direction,
         })
     }
 }
@@ -148,6 +157,7 @@ struct MatchAst {
     relation: String,
     dst_var: String,
     projection: ReturnProjection,
+    direction: EdgeDirection,
 }
 
 struct Parser<'a> {
@@ -163,18 +173,32 @@ impl<'a> Parser<'a> {
     fn parse(mut self) -> Result<MatchAst, ParseError> {
         self.keyword("MATCH")?;
         self.token("(")?;
-        let src_var = self.identifier()?;
+        let left_var = self.identifier()?;
         self.token(")")?;
-        self.token("-")?;
+        self.skip_whitespace();
+        let direction = if self.source[self.offset..].starts_with('<') {
+            self.token("<")?;
+            self.token("-")?;
+            EdgeDirection::Incoming
+        } else {
+            self.token("-")?;
+            EdgeDirection::Outgoing
+        };
         self.token("[")?;
         self.token(":")?;
         let relation = self.identifier()?;
         self.token("]")?;
         self.token("-")?;
-        self.token(">")?;
+        if direction == EdgeDirection::Outgoing {
+            self.token(">")?;
+        }
         self.token("(")?;
-        let dst_var = self.identifier()?;
+        let right_var = self.identifier()?;
         self.token(")")?;
+        let (src_var, dst_var) = match direction {
+            EdgeDirection::Outgoing => (left_var, right_var),
+            EdgeDirection::Incoming => (right_var, left_var),
+        };
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
         let projection = if returned == dst_var {
@@ -202,6 +226,7 @@ impl<'a> Parser<'a> {
             relation,
             dst_var,
             projection,
+            direction,
         })
     }
 
@@ -296,6 +321,7 @@ mod tests {
                 src_var: "a".into(),
                 dst_var: "b".into(),
                 projection: ReturnProjection::Destination,
+                direction: EdgeDirection::Outgoing,
             }
         );
     }
