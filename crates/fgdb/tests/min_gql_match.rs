@@ -11,9 +11,8 @@
 //! - `Database::execute_gql(&self, src: &str, bind: &RelationBind)
 //!    -> Result<Vec<VId>, GqlError>` — one method, sync like every other
 //!   product read; rows ARE destination vids.
-//! - `RelationBind`: the caller-supplied `"R" -> RelationId` map (collected
-//!   here via `FromIterator`, so an alias or a newtype both fit), re-exported
-//!   from `fgdb-gql`.
+//! - `RelationBind`: the caller-supplied `"R" -> RelationId` map, built via
+//!   `RelationBind::new().with_relation(...)`, re-exported from `fgdb-gql`.
 //! - `GqlError::Parse(_)` is the typed off-grammar arm (`Bind` and `Read` are
 //!   its siblings, three arms because three remedies).
 //! Until `fgdb-gql` lands this file fails to compile — deliberately. It is
@@ -72,10 +71,10 @@ where
 }
 
 /// The one bind every test uses: the statement's `R` resolves to
-/// `RelationId(1)` exactly as the spine example does. Collected, not
-/// constructed, so an alias map and a newtype wrapper both satisfy it.
+/// `RelationId(1)` exactly as the spine example does, through the landed
+/// builder API (`crates/fgdb-gql`).
 fn bind_r() -> RelationBind {
-    [("R".to_string(), R)].into_iter().collect()
+    RelationBind::new().with_relation("R", R)
 }
 
 /// One `:R` edge: the pinned statement returns exactly the destination vid,
