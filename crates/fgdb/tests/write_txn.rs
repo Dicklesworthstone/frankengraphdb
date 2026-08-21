@@ -8,12 +8,14 @@
 //! with nothing durable. Not Graph-SSI, not the merge ladder, not
 //! WriteCoordinator.
 //!
-//! **API CONTRACT THIS FILE COMPILES AGAINST** (the bead's names):
-//! - `Database::begin(&mut self, txn: &TxnCx) -> Result<WriteTxn, _>`
-//! - `WriteTxn::write(batch)` (one batch per txn is acceptable this slice)
-//! - `WriteTxn::commit(&CommitCx)` (async) / `WriteTxn::abort()`
-//! Until that lands this file fails to compile — deliberately; it is the
-//! executable acceptance criteria. Do not weaken it to make it compile.
+//! **API CONTRACT THIS FILE COMPILES AGAINST** (landed at 9048fc5):
+//! - `Database::begin(&mut self, txn: &TxnCx) -> Result<WriteTxn, WriteError>`
+//! - `WriteTxn::write(&mut self, &mut Database<V>, WriteBatch)` (one batch
+//!   per txn this slice)
+//! - `WriteTxn::commit(&mut self, &mut Database<V>, &CommitCx)` (async),
+//!   returning `WriteTxnError`; the FCW loser surfaces as
+//!   `WriteTxnError::Write(WriteError::FirstCommitterWins { .. })`
+//! - `WriteTxn::abort(self)`
 //!
 //! **THE PLANTED NEGATIVE (test 3).** The cheap counterfeit is a `begin`
 //! that stores a basis number and never touches `TxnCx::pin_snapshot`: every
@@ -26,7 +28,7 @@
 //! never released cannot lower it back.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, WriteBatch, WriteError, WriteTxn};
+use fgdb::{Database, DatabaseKeys, WriteBatch, WriteError, WriteTxn, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -106,18 +108,28 @@ fn overlapping_txns_first_commit_wins_second_aborts_typed() {
 
             let mut winner = WriteBatch::new(KNOWS);
             winner.set_vertex_property(VId(1), PROP, Some(int(1)));
-            txn_first.write(winner).expect("winner stages its batch");
+            txn_first
+                .write(&mut db, winner)
+                .expect("winner stages its batch");
             let mut loser = WriteBatch::new(KNOWS);
             loser.set_vertex_property(VId(1), PROP, Some(int(2)));
-            txn_second.write(loser).expect("loser stages its batch");
+            txn_second
+                .write(&mut db, loser)
+                .expect("loser stages its batch");
 
-            txn_first.commit(&commit).await.expect("first committer wins");
+            txn_first
+                .commit(&mut db, &commit)
+                .await
+                .expect("first committer wins");
             let err = txn_second
-                .commit(&commit)
+                .commit(&mut db, &commit)
                 .await
                 .expect_err("the overlapping second txn must lose");
             assert!(
-                matches!(err, WriteError::FirstCommitterWins { .. }),
+                matches!(
+                    err,
+                    WriteTxnError::Write(WriteError::FirstCommitterWins { .. })
+                ),
                 "the loser must be the typed FCW arm, got {err:?}"
             );
             let rendered = format!("{err:?}");
@@ -160,7 +172,7 @@ fn abort_releases_the_pin_and_leaves_nothing_durable() {
             let mut txn = db.begin(&txn_cx).expect("txn begins");
             let mut batch = WriteBatch::new(KNOWS);
             batch.set_vertex_property(VId(1), PROP, Some(int(99)));
-            txn.write(batch).expect("stages its batch");
+            txn.write(&mut db, batch).expect("stages its batch");
             txn.abort();
 
             assert_eq!(
