@@ -15,9 +15,20 @@
 //! **A WRITE IS NOT DONE UNTIL BOTH THE INODE AND ITS NAME ARE DURABLE.** The
 //! block file is synced first, then the `strata-blocks` directory; opening the
 //! store likewise syncs that directory before its entry in the database
-//! directory. Every step runs through `&CommitCx` as doctrine 3 requires — the
-//! capability context is what a lab runtime swaps to inject fsync lies and torn
-//! writes at exactly these boundaries.
+//! directory. Every step runs through `&CommitCx` as doctrine 3 requires, and
+//! every durable byte moves through the [`Vfs`] the store was opened with —
+//! the SAME trait Chronicle's coordinator uses, so one injected filesystem
+//! faults the commit log and the derived objects alike (fgdb-tvg8.1).
+//! Production is [`UnixVfs`]; the lab hands in a faulting one and injects
+//! fsync lies and torn writes at exactly these boundaries.
+//!
+//! Two deliberate `std::fs` exceptions remain, for Chronicle's own reason: the
+//! publication lock's `flock` is process-liveness authority, not durable state
+//! (`Vfs` has no lock surface — a filesystem that could "lie" about lock
+//! ownership would model nothing real), and the staging-inode link-count probe
+//! reads a field asupersync's `Metadata` does not carry. Both are probes of
+//! the live host, never durability I/O, and every lab `Vfs` writes back
+//! through the real filesystem, so both stay truthful under fault injection.
 //!
 //! **AN EXISTING BLOCK IS NOT REWRITTEN.** Blocks are immutable and
 //! content-addressed, so a second write of the same identity is either the same
@@ -54,13 +65,15 @@ use crate::edge_props::{
 };
 use crate::vertex::{VertexPatchVersion, VertexRow, decode_patch, vertex_patch_id};
 use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
+use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
+use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use fgdb_crypto::zeroize::SharedSecret;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{CommitSeq, StorageReadCx};
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 /// Directory holding a database's Strata blocks.
@@ -104,17 +117,29 @@ pub enum BlockStoreCrashPoint {
     AfterStagingFileSyncBeforePublication,
 }
 
-/// Make every directory entry currently visible in `directory` durable.
-fn sync_directory(cx: &CommitCx, directory: &Path) -> std::io::Result<()> {
-    let directory = cx.with_restriction(|| File::open(directory))?;
-    cx.with_restriction(|| directory.sync_all())
+/// Make every directory entry currently visible in `directory` durable,
+/// through the same [`Vfs`] every other durable operation uses.
+async fn sync_directory<V: Vfs>(cx: &CommitCx, vfs: &V, directory: &Path) -> std::io::Result<()> {
+    cx.with_restriction_async(async {
+        let directory = vfs.open(directory, &OpenOptions::new().read(true)).await?;
+        directory.sync_all().await
+    })
+    .await
 }
 
 /// Whether an existing noncanonical staging name is the inode's only link.
 /// Rewriting a multiply linked staging inode could silently rewrite a canonical
-/// block reached through another name, violating immutability. Platforms that
-/// cannot report the link count fail closed instead of guessing.
-fn staging_inode_is_exclusive(metadata: &std::fs::Metadata) -> bool {
+/// block reached through another name, violating immutability.
+///
+/// This is the second deliberate `std::fs` probe (module doc): asupersync's
+/// `Metadata` carries no link count, and every lab [`Vfs`] writes back through
+/// the real filesystem, so the real inode is the truthful witness. Platforms
+/// that cannot report the link count — and a probe that cannot reach the
+/// inode at all — fail closed instead of guessing.
+fn staging_inode_is_exclusive(cx: &CommitCx, staging_path: &Path) -> bool {
+    let Ok(metadata) = cx.with_restriction(|| std::fs::symlink_metadata(staging_path)) else {
+        return false;
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -135,27 +160,33 @@ fn staging_inode_is_exclusive(metadata: &std::fs::Metadata) -> bool {
 /// Run the ordered durability work for a new or previously uncertain file
 /// entry. The hook lets crash tests stop between inode and namespace durability
 /// without maintaining a second, weaker write path.
-fn sync_file_and_directory(
+async fn sync_file_and_directory<V: Vfs>(
     cx: &CommitCx,
-    file: &File,
+    vfs: &V,
+    file: &V::File,
     parent_directory: &Path,
     after_file_sync: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     run_ordered_creation_barrier(
-        || cx.with_restriction(|| file.sync_all()),
+        || cx.with_restriction_async(file.sync_all()),
         after_file_sync,
-        || sync_directory(cx, parent_directory),
+        || sync_directory(cx, vfs, parent_directory),
     )
+    .await
 }
 
-fn run_ordered_creation_barrier(
-    sync_created_inode: impl FnOnce() -> std::io::Result<()>,
+async fn run_ordered_creation_barrier<InodeFut, ParentFut>(
+    sync_created_inode: impl FnOnce() -> InodeFut,
     after_inode_sync: impl FnOnce() -> std::io::Result<()>,
-    sync_parent_directory: impl FnOnce() -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    sync_created_inode()?;
+    sync_parent_directory: impl FnOnce() -> ParentFut,
+) -> std::io::Result<()>
+where
+    InodeFut: Future<Output = std::io::Result<()>>,
+    ParentFut: Future<Output = std::io::Result<()>>,
+{
+    sync_created_inode().await?;
     after_inode_sync()?;
-    sync_parent_directory()
+    sync_parent_directory().await
 }
 
 /// Exclusive authority to publish one complete staging inode.
@@ -370,13 +401,13 @@ fn ensure_size_within_limit(observed: u64, limit: u64) -> Result<(), StoreError>
     Ok(())
 }
 
-fn read_bounded(
+async fn read_bounded<F: VfsFile>(
     cx: &impl StorageReadCx,
-    file: &mut File,
+    file: F,
     limit: u64,
 ) -> Result<Vec<u8>, StoreError> {
-    cx.with_restriction(|| {
-        ensure_size_within_limit(file.metadata()?.len(), limit)?;
+    cx.with_restriction_async(async move {
+        ensure_size_within_limit(file.metadata().await?.len(), limit)?;
 
         let mut bytes = Vec::new();
         {
@@ -384,12 +415,13 @@ fn read_bounded(
             // after it was read. One extra byte distinguishes the exact ceiling from
             // an over-limit stream without ever materializing the unbounded tail.
             let mut bounded = file.take(limit.saturating_add(1));
-            bounded.read_to_end(&mut bytes)?;
+            bounded.read_to_end(&mut bytes).await?;
         }
         let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         ensure_size_within_limit(observed, limit)?;
         Ok(bytes)
     })
+    .await
 }
 
 /// A directory of content-addressed Strata blocks.
@@ -399,14 +431,15 @@ fn read_bounded(
 /// formatter here would bypass the redaction on that handle's explicit key
 /// holder and disclose `K_oid` through an ordinary diagnostic.
 #[derive(Clone)]
-pub struct BlockStore {
+pub struct BlockStore<V: Vfs = UnixVfs> {
+    vfs: V,
     dir: PathBuf,
     publication_lock_path: PathBuf,
     k_oid: SharedSecret<32>,
     namespace: DatabaseSecurityNamespaceId,
 }
 
-impl core::fmt::Debug for BlockStore {
+impl<V: Vfs> core::fmt::Debug for BlockStore<V> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BlockStore([REDACTED])")
     }
@@ -420,13 +453,13 @@ impl core::fmt::Debug for BlockStore {
 /// pay the full admission read once; later snapshots may act on the proven range
 /// summaries without materializing blocks that begin after the snapshot.
 #[derive(Debug)]
-pub struct AdmittedPartitionRoot<'store> {
-    store: &'store BlockStore,
+pub struct AdmittedPartitionRoot<'store, V: Vfs = UnixVfs> {
+    store: &'store BlockStore<V>,
     root_id: PartitionRootVersion,
     root: crate::root::PartitionRoot,
 }
 
-impl AdmittedPartitionRoot<'_> {
+impl<V: Vfs> AdmittedPartitionRoot<'_, V> {
     /// The content identity of the admitted root.
     pub const fn root_id(&self) -> PartitionRootVersion {
         self.root_id
@@ -438,27 +471,54 @@ impl AdmittedPartitionRoot<'_> {
     }
 
     /// Load the blocks that can contribute to `as_of`.
-    pub fn resolve_blocks_at(
+    pub async fn resolve_blocks_at(
         &self,
         cx: &impl StorageReadCx,
         as_of: CommitSeq,
     ) -> Result<Vec<Vec<crate::AdjacencyEntry>>, StoreError> {
         self.store
             .resolve_admitted_root_blocks_at(cx, &self.root, as_of)
+            .await
     }
 
     /// Load the vertex patches that can contribute to `as_of`.
-    pub fn resolve_patches_at(
+    pub async fn resolve_patches_at(
         &self,
         cx: &impl StorageReadCx,
         as_of: CommitSeq,
     ) -> Result<Vec<Vec<VertexRow>>, StoreError> {
         self.store
             .resolve_admitted_root_patches_at(cx, &self.root, as_of)
+            .await
     }
 }
 
-impl BlockStore {
+impl BlockStore<UnixVfs> {
+    /// Open the block store on the real filesystem — the production shape.
+    pub async fn open(
+        cx: &CommitCx,
+        database_dir: impl AsRef<Path>,
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_vfs(cx, UnixVfs::new(), database_dir, k_oid, namespace).await
+    }
+
+    /// [`BlockStore::open`], stopping at the named creation crash instant.
+    #[doc(hidden)]
+    pub async fn open_with_crash(
+        cx: &CommitCx,
+        database_dir: impl AsRef<Path>,
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+        crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_vfs_at_crash(cx, UnixVfs::new(), database_dir, k_oid, namespace, crash_at)
+            .await
+    }
+}
+
+impl<V: Vfs> BlockStore<V> {
     /// Borrow the retained identity authority for ownership-law tests.
     ///
     /// This never returns an owned key and is not a general data API.
@@ -467,13 +527,18 @@ impl BlockStore {
         self.k_oid.expose()
     }
 
-    pub fn open(
+    /// Open the block store through an explicit [`Vfs`] — the constructor the
+    /// lab uses to interpose a faulting filesystem on Strata's derived
+    /// objects, exactly as `CommitCoordinator::open_with_vfs` interposes one
+    /// on the commit log (fgdb-tvg8.1).
+    pub async fn open_with_vfs(
         cx: &CommitCx,
+        vfs: V,
         database_dir: impl AsRef<Path>,
         k_oid: impl Into<SharedSecret<32>>,
         namespace: DatabaseSecurityNamespaceId,
     ) -> Result<Self, StoreError> {
-        Self::open_with_crash(cx, database_dir, k_oid, namespace, None)
+        Self::open_with_vfs_at_crash(cx, vfs, database_dir, k_oid, namespace, None).await
     }
 
     /// Open the block store, optionally stopping between durability of the
@@ -481,8 +546,9 @@ impl BlockStore {
     /// The normal path delegates here so the crash matrix exercises the exact
     /// production ordering.
     #[doc(hidden)]
-    pub fn open_with_crash(
+    pub async fn open_with_vfs_at_crash(
         cx: &CommitCx,
+        vfs: V,
         database_dir: impl AsRef<Path>,
         k_oid: impl Into<SharedSecret<32>>,
         namespace: DatabaseSecurityNamespaceId,
@@ -491,11 +557,12 @@ impl BlockStore {
         let k_oid = k_oid.into();
         let database_dir = database_dir.as_ref().to_path_buf();
         let dir = database_dir.join(BLOCK_DIR);
-        match std::fs::create_dir(&dir) {
+        match cx.with_restriction_async(vfs.create_dir(&dir)).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if !cx
-                    .with_restriction(|| std::fs::symlink_metadata(&dir))?
+                    .with_restriction_async(vfs.symlink_metadata(&dir))
+                    .await?
                     .file_type()
                     .is_dir()
                 {
@@ -510,17 +577,16 @@ impl BlockStore {
         }
 
         let publication_lock_path = dir.join(PUBLICATION_LOCK_FILE);
-        let publication_lock = match cx.with_restriction(|| {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&publication_lock_path)
-        }) {
+        let create_lock = OpenOptions::new().read(true).write(true).create_new(true);
+        let publication_lock = match cx
+            .with_restriction_async(vfs.open(&publication_lock_path, &create_lock))
+            .await
+        {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if !cx
-                    .with_restriction(|| std::fs::symlink_metadata(&publication_lock_path))?
+                    .with_restriction_async(vfs.symlink_metadata(&publication_lock_path))
+                    .await?
                     .file_type()
                     .is_file()
                 {
@@ -530,12 +596,9 @@ impl BlockStore {
                     )
                     .into());
                 }
-                cx.with_restriction(|| {
-                    OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(&publication_lock_path)
-                })?
+                let reopen_lock = OpenOptions::new().read(true).write(true);
+                cx.with_restriction_async(vfs.open(&publication_lock_path, &reopen_lock))
+                    .await?
             }
             Err(error) => return Err(error.into()),
         };
@@ -544,13 +607,14 @@ impl BlockStore {
         // it before the child directory, then the child before its name in the
         // database parent. A successful open therefore never relies on a
         // volatile lock-file dirent for writer exclusion after restart.
-        cx.with_restriction(|| publication_lock.sync_all())?;
+        cx.with_restriction_async(publication_lock.sync_all())
+            .await?;
 
         // Re-sync on every open. Besides closing a newly created directory,
         // this repairs the uncertainty left by an earlier process that failed
         // between the child-directory and database-directory barriers.
         run_ordered_creation_barrier(
-            || sync_directory(cx, &dir),
+            || sync_directory(cx, &vfs, &dir),
             || {
                 if crash_at
                     == Some(
@@ -563,10 +627,12 @@ impl BlockStore {
                 }
                 Ok(())
             },
-            || sync_directory(cx, &database_dir),
-        )?;
+            || sync_directory(cx, &vfs, &database_dir),
+        )
+        .await?;
 
         Ok(Self {
+            vfs,
             dir,
             publication_lock_path,
             k_oid,
@@ -594,20 +660,27 @@ impl BlockStore {
     /// name one block and store another. An existing file holding the same bytes
     /// is not rewritten, but its durability is re-established before success;
     /// one holding different bytes is a refusal.
-    pub fn put(&self, cx: &CommitCx, bytes: &[u8]) -> Result<DeltaBlockVersion, StoreError> {
-        self.put_with_crash(cx, bytes, None)
+    pub async fn put(&self, cx: &CommitCx, bytes: &[u8]) -> Result<DeltaBlockVersion, StoreError> {
+        self.put_with_crash(cx, bytes, None).await
     }
 
     /// Acquire the sole block-publication authority through the capability
     /// context. Opening a fresh descriptor per acquisition matters: whole-file
     /// locks on duplicated descriptors may be re-entrant within one process,
     /// whereas two independent opens contend just like two processes do.
+    ///
+    /// This is the one deliberate `std::fs` exception on the write path
+    /// (module doc): the whole-file lock is process-liveness authority, not
+    /// durable state — it is released by process death and never read back,
+    /// and [`Vfs`] has no lock surface. The lock inode's own durability was
+    /// established through the [`Vfs`] at open time; only the `flock` lives
+    /// on `std::fs`, exactly as Chronicle's writer lease does.
     fn acquire_publication_permit(
         &self,
         cx: &CommitCx,
     ) -> Result<ObjectPublicationPermit, StoreError> {
         let locked_file = cx.with_restriction(|| {
-            OpenOptions::new()
+            std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&self.publication_lock_path)
@@ -622,19 +695,19 @@ impl BlockStore {
     /// durability. The normal path delegates here so crash tests cannot drift
     /// from production ordering.
     #[doc(hidden)]
-    pub fn put_with_crash(
+    pub async fn put_with_crash(
         &self,
         cx: &CommitCx,
         bytes: &[u8],
         crash_at: Option<BlockStoreCrashPoint>,
     ) -> Result<DeltaBlockVersion, StoreError> {
-        self.put_with_steps(cx, bytes, crash_at, || {}, || {})
+        self.put_with_steps(cx, bytes, crash_at, || {}, || {}).await
     }
 
     /// The exact production path with two deterministic observation points.
     /// Unit tests use them to order a loser before the winner publishes without
     /// sleeps; ordinary and crash-test callers both supply no-op hooks.
-    fn put_with_steps(
+    async fn put_with_steps(
         &self,
         cx: &CommitCx,
         bytes: &[u8],
@@ -650,10 +723,11 @@ impl BlockStore {
             before_lock,
             after_staging_sync,
         )
+        .await
         .map(DeltaBlockVersion)
     }
 
-    fn put_object_with_steps(
+    async fn put_object_with_steps(
         &self,
         kind: StoredObjectKind,
         cx: &CommitCx,
@@ -675,7 +749,7 @@ impl BlockStore {
         // held, so a conforming writer can see either no winner or one complete
         // winner. Equal bytes are never rewritten, but they are re-synced after
         // reopen because visibility alone is not a durability receipt.
-        match cx.with_restriction(|| std::fs::symlink_metadata(&path)) {
+        match cx.with_restriction_async(self.vfs.symlink_metadata(&path)).await {
             Ok(metadata) => {
                 if !metadata.file_type().is_file() {
                     return Err(std::io::Error::new(
@@ -684,9 +758,17 @@ impl BlockStore {
                     )
                     .into());
                 }
-                let mut file =
-                    cx.with_restriction(|| OpenOptions::new().read(true).write(true).open(&path))?;
-                let existing = read_bounded(cx, &mut file, MAX_STORED_OBJECT_BYTES)?;
+                let existing_opts = OpenOptions::new().read(true).write(true);
+                let file = cx
+                    .with_restriction_async(self.vfs.open(&path, &existing_opts))
+                    .await?;
+                // Re-read through a second descriptor: `read_bounded` consumes
+                // the handle it reads, while the durability re-establishment
+                // below needs one whose cursor never moved.
+                let reread = cx
+                    .with_restriction_async(self.vfs.open(&path, &existing_opts))
+                    .await?;
+                let existing = read_bounded(cx, reread, MAX_STORED_OBJECT_BYTES).await?;
                 let actual = kind.identity(self.k_oid.expose(), self.namespace, &existing);
                 if actual != id {
                     return Err(StoreError::DamagedExisting {
@@ -697,7 +779,7 @@ impl BlockStore {
                 if existing != bytes {
                     return Err(StoreError::Collision { object_id: id });
                 }
-                sync_file_and_directory(cx, &file, &self.dir, || {
+                sync_file_and_directory(cx, &self.vfs, &file, &self.dir, || {
                     if crash_at
                         == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
                     {
@@ -706,7 +788,8 @@ impl BlockStore {
                         ));
                     }
                     Ok(())
-                })?;
+                })
+                .await?;
                 return Ok(id);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -718,36 +801,34 @@ impl BlockStore {
         // here and the next owner may safely rewrite them. The canonical name
         // remains absent until this inode is complete and synced.
         let staging_path = self.dir.join(PUBLICATION_STAGING_FILE);
-        let mut staging = match cx.with_restriction(|| {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&staging_path)
-        }) {
+        let create_staging = OpenOptions::new().read(true).write(true).create_new(true);
+        let mut staging = match cx
+            .with_restriction_async(self.vfs.open(&staging_path, &create_staging))
+            .await
+        {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = cx.with_restriction(|| std::fs::symlink_metadata(&staging_path))?;
-                if !metadata.file_type().is_file() || !staging_inode_is_exclusive(&metadata) {
+                let metadata = cx
+                    .with_restriction_async(self.vfs.symlink_metadata(&staging_path))
+                    .await?;
+                if !metadata.file_type().is_file()
+                    || !staging_inode_is_exclusive(cx, &staging_path)
+                {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "object staging path is not an exclusive regular-file inode",
                     )
                     .into());
                 }
-                cx.with_restriction(|| {
-                    OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(&staging_path)
-                })?
+                let rewrite_staging = OpenOptions::new().read(true).write(true).truncate(true);
+                cx.with_restriction_async(self.vfs.open(&staging_path, &rewrite_staging))
+                    .await?
             }
             Err(error) => return Err(error.into()),
         };
 
-        staging.write_all(bytes)?;
-        cx.with_restriction(|| staging.sync_all())?;
+        staging.write_all(bytes).await?;
+        cx.with_restriction_async(staging.sync_all()).await?;
         after_staging_sync();
         if crash_at == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication) {
             return Err(StoreError::Io(std::io::Error::other(
@@ -759,18 +840,21 @@ impl BlockStore {
         // Publication is atomic for conforming writers because the non-clone
         // permit spans the absence check, staging write, and move.
         drop(staging);
-        std::fs::rename(&staging_path, &path)?;
+        self.vfs.rename(&staging_path, &path).await?;
 
-        let published =
-            cx.with_restriction(|| OpenOptions::new().read(true).write(true).open(&path))?;
-        sync_file_and_directory(cx, &published, &self.dir, || {
+        let published_opts = OpenOptions::new().read(true).write(true);
+        let published = cx
+            .with_restriction_async(self.vfs.open(&path, &published_opts))
+            .await?;
+        sync_file_and_directory(cx, &self.vfs, &published, &self.dir, || {
             if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
                 return Err(std::io::Error::other(
                     "crash: strata block inode durable before directory entry",
                 ));
             }
             Ok(())
-        })?;
+        })
+        .await?;
         Ok(id)
     }
 
@@ -780,35 +864,39 @@ impl BlockStore {
     /// store that trusted its own layout would return whatever happened to sit at
     /// the expected path — the exact failure content-addressing exists to prevent,
     /// and the one that is silent.
-    pub fn get(
+    pub async fn get(
         &self,
         cx: &impl StorageReadCx,
         id: DeltaBlockVersion,
     ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
-        let bytes = self.get_bytes(cx, id)?;
+        let bytes = self.get_bytes(cx, id).await?;
         decode_block(&bytes).map_err(StoreError::Malformed)
     }
 
-    fn read_object_bytes(
+    async fn read_object_bytes(
         &self,
         cx: &impl StorageReadCx,
         id: ObjectId,
         limit: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        let mut file = cx.with_restriction(|| File::open(self.path(id)))?;
-        read_bounded(cx, &mut file, limit)
+        let file = cx
+            .with_restriction_async(self.vfs.open_read(&self.path(id)))
+            .await?;
+        read_bounded(cx, file, limit).await
     }
 
     /// Load the raw bytes of a block, verifying identity but not decoding.
     ///
     /// For a caller that needs the bytes themselves — sealing into a capsule,
     /// copying to a replica — and must not pay to decode them.
-    pub fn get_bytes(
+    pub async fn get_bytes(
         &self,
         cx: &impl StorageReadCx,
         id: DeltaBlockVersion,
     ) -> Result<Vec<u8>, StoreError> {
-        let bytes = self.read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)?;
+        let bytes = self
+            .read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)
+            .await?;
         let actual = block_id(self.k_oid.expose(), self.namespace, &bytes);
         if actual != id.0 {
             return Err(StoreError::IdentityMismatch {
@@ -821,8 +909,13 @@ impl BlockStore {
 
     /// Store a vertex patch's bytes — the same derived-identity discipline and
     /// durable path as [`BlockStore::put`], under the patch object kind.
-    pub fn put_patch(&self, cx: &CommitCx, bytes: &[u8]) -> Result<VertexPatchVersion, StoreError> {
+    pub async fn put_patch(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+    ) -> Result<VertexPatchVersion, StoreError> {
         self.put_object_with_steps(StoredObjectKind::VertexPatch, cx, bytes, None, || {}, || {})
+            .await
             .map(VertexPatchVersion)
     }
 
@@ -830,7 +923,7 @@ impl BlockStore {
     /// same derived-identity discipline, under the FGSP object kind. The
     /// caller stores the patch BEFORE the block's root is published, or
     /// admission fails closed on the unreachable patch.
-    pub fn put_edge_property_patch(
+    pub async fn put_edge_property_patch(
         &self,
         cx: &CommitCx,
         bytes: &[u8],
@@ -843,6 +936,7 @@ impl BlockStore {
             || {},
             || {},
         )
+        .await
         .map(EdgePropertyPatchVersion)
     }
 
@@ -850,7 +944,7 @@ impl BlockStore {
     /// a database's `root_manifest_oid` resolves to. The caller stores every
     /// root the manifest names FIRST, or [`BlockStore::resolve_manifest`]
     /// fails closed on the unreachable partition.
-    pub fn put_manifest(
+    pub async fn put_manifest(
         &self,
         cx: &CommitCx,
         records: &[crate::manifest::ManifestRecord],
@@ -858,32 +952,33 @@ impl BlockStore {
         let bytes =
             crate::manifest::encode_manifest(records).map_err(StoreError::MalformedManifest)?;
         self.put_object_with_steps(StoredObjectKind::Manifest, cx, &bytes, None, || {}, || {})
+            .await
             .map(crate::manifest::ManifestVersion)
     }
 
     /// Resolve a manifest to every partition root it names, failing closed —
     /// with the missing identity in the error — rather than ever answering a
     /// silently smaller graph (fgdb-63w2, the ge6a law).
-    pub fn resolve_manifest(
+    pub async fn resolve_manifest(
         &self,
         cx: &impl StorageReadCx,
         id: crate::manifest::ManifestVersion,
     ) -> Result<Vec<(crate::manifest::ManifestRecord, crate::root::PartitionRoot)>, StoreError>
     {
         let limit = MANIFEST_HEADER_AND_RECORDS_CEILING;
-        let bytes = self.read_object_bytes(cx, id.0, limit)?;
+        let bytes = self.read_object_bytes(cx, id.0, limit).await?;
         let records =
             crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
                 .map_err(StoreError::MalformedManifest)?;
         let mut resolved = Vec::with_capacity(records.len());
         for (at, record) in records.into_iter().enumerate() {
-            let root =
-                self.get_root(cx, record.root)
-                    .map_err(|error| StoreError::ManifestRootLoad {
-                        at,
-                        root: record.root.0,
-                        error: Box::new(error),
-                    })?;
+            let root = self.get_root(cx, record.root).await.map_err(|error| {
+                StoreError::ManifestRootLoad {
+                    at,
+                    root: record.root.0,
+                    error: Box::new(error),
+                }
+            })?;
             resolved.push((record, root));
         }
         Ok(resolved)
@@ -893,12 +988,14 @@ impl BlockStore {
     /// identity but not decoding — the FGSP counterpart of
     /// [`BlockStore::get_bytes`] (fgdb-ge6a fast open reads sealed patches
     /// back beside their blocks).
-    pub fn get_edge_property_patch_bytes(
+    pub async fn get_edge_property_patch_bytes(
         &self,
         cx: &impl StorageReadCx,
         id: ObjectId,
     ) -> Result<Vec<u8>, StoreError> {
-        let bytes = self.read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)?;
+        let bytes = self
+            .read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)
+            .await?;
         let actual =
             crate::edge_props::property_patch_id(self.k_oid.expose(), self.namespace, &bytes);
         if actual != id {
@@ -912,12 +1009,14 @@ impl BlockStore {
 
     /// Load the raw bytes of a vertex patch, verifying identity but not
     /// decoding — the patch counterpart of [`BlockStore::get_bytes`].
-    pub fn get_patch_bytes(
+    pub async fn get_patch_bytes(
         &self,
         cx: &impl StorageReadCx,
         id: VertexPatchVersion,
     ) -> Result<Vec<u8>, StoreError> {
-        let bytes = self.read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)?;
+        let bytes = self
+            .read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)
+            .await?;
         let actual = vertex_patch_id(self.k_oid.expose(), self.namespace, &bytes);
         if actual != id.0 {
             return Err(StoreError::IdentityMismatch {
@@ -930,16 +1029,16 @@ impl BlockStore {
 
     /// Load and decode the vertex patch named by `id`, re-deriving the
     /// identity from the bytes exactly as [`BlockStore::get`] does for blocks.
-    pub fn get_patch(
+    pub async fn get_patch(
         &self,
         cx: &impl StorageReadCx,
         id: VertexPatchVersion,
     ) -> Result<Vec<VertexRow>, StoreError> {
-        let bytes = self.get_patch_bytes(cx, id)?;
+        let bytes = self.get_patch_bytes(cx, id).await?;
         decode_patch(&bytes).map_err(StoreError::MalformedPatch)
     }
 
-    fn resolve_root_block(
+    async fn resolve_root_block(
         &self,
         cx: &impl StorageReadCx,
         at: usize,
@@ -948,6 +1047,7 @@ impl BlockStore {
     ) -> Result<ResolvedBlock, StoreError> {
         let bytes = self
             .get_bytes(cx, DeltaBlockVersion(reference.block_id))
+            .await
             .map_err(|error| StoreError::RootBlockLoad {
                 at,
                 error: Box::new(error),
@@ -984,6 +1084,7 @@ impl BlockStore {
         let props = if let Some((patch_id, locators)) = patch {
             let patch_bytes = self
                 .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                .await
                 .map_err(|error| StoreError::BlockPatchLoad {
                     at,
                     error: Box::new(error),
@@ -1028,7 +1129,7 @@ impl BlockStore {
     /// checked, because neither an unproved range nor an unproved identity is
     /// permission to skip that block.
     #[allow(clippy::type_complexity)]
-    fn inspect_root_blocks(
+    async fn inspect_root_blocks(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
@@ -1043,8 +1144,9 @@ impl BlockStore {
             ObjectId,
         > = std::collections::BTreeMap::new();
         for (at, reference) in root.blocks.iter().enumerate() {
-            let (entries, props, predecessor) =
-                self.resolve_root_block(cx, at, root.partition, reference)?;
+            let (entries, props, predecessor) = self
+                .resolve_root_block(cx, at, root.partition, reference)
+                .await?;
             // THE CHAIN LAW (V6, fgdb-4391): a family's blocks link in exactly
             // this root's publication order — finite, acyclic, newer-first by
             // construction. Checked here so every full read of a root walks a
@@ -1075,15 +1177,15 @@ impl BlockStore {
 
     /// Load and validate every block named by an already-structural root.
     #[allow(clippy::type_complexity)]
-    fn resolve_root_blocks(
+    async fn resolve_root_blocks(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>, StoreError> {
-        self.inspect_root_blocks(cx, root, |_, _| true)
+        self.inspect_root_blocks(cx, root, |_, _| true).await
     }
 
-    fn resolve_root_patch(
+    async fn resolve_root_patch(
         &self,
         cx: &impl StorageReadCx,
         at: usize,
@@ -1091,6 +1193,7 @@ impl BlockStore {
     ) -> Result<Vec<VertexRow>, StoreError> {
         let bytes = self
             .get_patch_bytes(cx, VertexPatchVersion(reference.patch_id))
+            .await
             .map_err(|error| StoreError::RootPatchLoad {
                 at,
                 error: Box::new(error),
