@@ -31,6 +31,7 @@ use fgdb_types::{CanonicalScalar, VId};
 use std::path::PathBuf;
 
 const KNOWS: RelationId = RelationId(1);
+const OTHER: RelationId = RelationId(2);
 const PROP: PropertyKeyId = PropertyKeyId(7);
 const PROP_B: PropertyKeyId = PropertyKeyId(9);
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -230,6 +231,67 @@ fn overlapping_two_write_txns_lose_whole_not_per_batch() {
             vec![(PROP, int(1)), (PROP_B, int(10))],
             "the winner's TWO writes survive; nothing of the loser's does — \
              not even its second batch"
+        );
+    });
+}
+
+/// A second `write` whose batch names a DIFFERENT relation is the typed
+/// `RelationMismatch` refusal — a transaction stages one coordinate, and a
+/// silent cross-relation merge would commit rows into a coordinate the
+/// caller never named. The refusal costs nothing: the txn still commits its
+/// first batch at exactly one sequence, and the refused batch's effect is
+/// nowhere across reopen.
+#[test]
+fn a_mixed_relation_second_write_refuses_typed_and_consumes_nothing() {
+    under_lab(0xb2_04, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let dir = scratch("mixed-relation");
+        {
+            let mut db = seeded(&commit, &dir).await;
+            let before = db.frontier().expect("healthy frontier");
+
+            let mut txn = db.begin(&txn_cx).expect("txn begins");
+            let mut first = WriteBatch::new(KNOWS);
+            first.set_vertex_property(VId(1), PROP, Some(int(1)));
+            txn.write(&mut db, first).expect("first batch stages");
+
+            let mut mixed = WriteBatch::new(OTHER);
+            mixed.set_vertex_property(VId(1), PROP_B, Some(int(66)));
+            let err = txn
+                .write(&mut db, mixed)
+                .expect_err("a second batch in another relation must refuse");
+            assert!(
+                matches!(
+                    err,
+                    WriteTxnError::RelationMismatch {
+                        expected: KNOWS,
+                        found: OTHER,
+                    }
+                ),
+                "the refusal must be the typed RelationMismatch naming both \
+                 relations, got {err:?}"
+            );
+
+            let seq = txn
+                .commit(&mut db, &commit)
+                .await
+                .expect("the txn still commits its accepted batch");
+            assert_eq!(
+                seq.0,
+                before.0 + 1,
+                "the refused batch consumed nothing: one commit, one sequence"
+            );
+        }
+
+        // NOTHING crosses this line except the path and the keys.
+        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let row = db.vertex(VId(1)).expect("reads").expect("row");
+        assert_eq!(
+            row.props,
+            vec![(PROP, int(1))],
+            "the accepted batch is durable; the refused cross-relation \
+             property is nowhere"
         );
     });
 }
