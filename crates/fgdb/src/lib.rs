@@ -117,6 +117,7 @@ pub use fcw::FirstCommitterWinsValidator;
 
 mod gql_cert;
 mod gql_exec;
+mod write_txn;
 /// The replayable certificate [`Database::execute_gql_certified`] returns
 /// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
 /// bind digests, so the same graph state, text, and bind are auditable as
@@ -127,6 +128,7 @@ pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
 /// catalog), and the plan is re-exported so tests can state that the executor
 /// accepts a [`BoundPlan`] and nothing parse-shaped.
 pub use fgdb_gql::{BoundPlan, RelationBind};
+pub use write_txn::WriteTxn;
 
 /// The stable law id [`FirstCommitterWinsValidator`] rejects under, keyed on
 /// by the typed [`WriteError::FirstCommitterWins`] arm. Kept identical to the
@@ -161,9 +163,12 @@ use fgdb_strata::{AdjacencyEntry, DeltaBlockVersion, PartitionRootVersion};
 
 pub use fgdb_strata::edge_props::EdgePropertyRow;
 pub use fgdb_strata::vertex::VertexRow;
-use fgdb_types::context::CommitCx;
+use fgdb_types::context::{CommitCx, TxnCx};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, ObligationAcquireError,
+    ObligationId, VId,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -508,6 +513,11 @@ pub enum WriteError {
     /// [`WriteMismatchPolicy::AbortWrite`]. Nothing durable happened.
     CompareAndSetMismatch(Box<CompareAndSetMismatch>),
     Canonical(CanonicalError),
+    /// The [`TxnCx`] refused to acquire the snapshot-pin obligation
+    /// [`Database::begin`] asked for (fgdb-writetxn-pin-l8wb). Nothing was
+    /// pinned and no transaction exists; the context's obligation ledger is
+    /// the authority on why.
+    SnapshotPin(ObligationAcquireError),
     /// The installed commit validator refused this draft under
     /// first-committer-wins (fgdb-fcw-writebatch-6cxf): an element in the
     /// batch's write-set was already committed by a writer this batch's basis
@@ -743,6 +753,9 @@ impl core::fmt::Display for WriteError {
                 mismatch.elem, mismatch.name
             ),
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
+            Self::SnapshotPin(error) => {
+                write!(f, "could not pin the transaction snapshot: {error}")
+            }
             Self::FirstCommitterWins { law, detail } => write!(
                 f,
                 "write lost first-committer-wins under {law}: {detail}; rebuild the \
@@ -1749,6 +1762,11 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// forward them to the eventual observatory without a silent/no-op sink.
     /// They are diagnostic evidence only, never recovery authority.
     crypto_verification_events: Vec<CryptoVerificationEvent>,
+    /// Monotone source of fresh [`ObligationId`]s for [`Database::begin`]'s
+    /// snapshot pins (fgdb-writetxn-pin-l8wb). Handle-scoped like the writer:
+    /// obligation identity is per-context liveness bookkeeping, never durable
+    /// state, so a fresh process restarting from 1 is correct by design.
+    next_txn_obligation: u64,
 }
 
 impl<V: Vfs> core::fmt::Debug for Database<V> {
@@ -2192,6 +2210,7 @@ impl<V: Vfs + Clone> Database<V> {
             receipts: PublishReceipts::new(),
             vfs,
             crypto_verification_events,
+            next_txn_obligation: 0,
         })
     }
 
@@ -2347,6 +2366,25 @@ impl<V: Vfs + Clone> Database<V> {
             result: LocalWriteBatchCommandResult { commit_seq },
             applied_record: LocalWriteBatchAppliedRecord { commit_seq },
         })
+    }
+
+    /// Begin the bounded one-batch write transaction
+    /// (fgdb-writetxn-pin-l8wb): pin this handle's published frontier under a
+    /// fresh [`TxnCx`] obligation and hand back the [`WriteTxn`] that
+    /// prepares and commits against exactly that basis. The pin is
+    /// context-visible liveness — the lab's obligation-leak oracle sees an
+    /// abandoned transaction — not durable state. A fenced handle refuses
+    /// here with the same typed errors as [`Database::write`], before any
+    /// obligation is acquired. The ordinary `write` path is untouched.
+    pub fn begin(&mut self, txn: &TxnCx) -> Result<WriteTxn, WriteError> {
+        self.ensure_writable()?;
+        self.next_txn_obligation = self
+            .next_txn_obligation
+            .checked_add(1)
+            .expect("a handle cannot begin 2^64 transactions");
+        let id = ObligationId::new(self.next_txn_obligation)
+            .expect("the pin counter starts above zero and only increments");
+        WriteTxn::begin(self.snapshot.frontier, txn, id).map_err(WriteError::SnapshotPin)
     }
 
     /// Build a batch's canonical template against the CURRENT live snapshot
