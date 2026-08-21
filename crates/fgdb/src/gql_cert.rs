@@ -46,6 +46,15 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
     }
     hasher.update(&[projection_tag(plan.projection)]);
     hasher.update(&[direction_tag(plan.direction)]);
+    match plan.src_label {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(label) => {
+            hasher.update(&[1]);
+            hasher.update(&label.0.to_be_bytes());
+        }
+    }
     hasher.update(&snapshot_seq.0.to_be_bytes());
 
     GqlPlanCertificate {
@@ -96,11 +105,14 @@ mod tests {
             relation: RelationId(relation),
             src_var: "a".to_owned(),
             dst_var: "b".to_owned(),
+            src_label: None,
+            dst_label: None,
             via_var: String::new(),
             hop2_relation: None,
             hop2_dst_var: None,
             projection: ReturnProjection::Destination,
             direction: EdgeDirection::Outgoing,
+            neq: None,
         }
     }
 
