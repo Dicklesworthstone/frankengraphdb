@@ -122,6 +122,17 @@ impl WriteTxn {
         database: &mut Database<V>,
         cx: &CommitCx,
     ) -> Result<CommitSeq, WriteTxnError> {
+        self.commit_with_crash(database, cx, None).await
+    }
+
+    /// Commit through the production crash-point path, then release the pin
+    /// regardless of whether the prepared write committed or was refused.
+    pub async fn commit_with_crash<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
+    ) -> Result<CommitSeq, WriteTxnError> {
         if self.pin.is_none() {
             return Err(WriteTxnError::Finished);
         }
@@ -131,7 +142,7 @@ impl WriteTxn {
         };
 
         let result = database
-            .commit_prepared(cx, prepared)
+            .commit_prepared_with_crash(cx, prepared, crash_at)
             .await
             .map_err(WriteTxnError::Write);
         self.release_pin();
