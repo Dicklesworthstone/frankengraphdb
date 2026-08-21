@@ -140,19 +140,20 @@ fn greater_or_equal_includes_the_boundary_and_strict_does_not() {
 fn the_non_strict_less_spelling_is_still_a_typed_parse_error() {
     under_lab(0x26_02, |cx| async move {
         let cx = &cx;
-        let dir = scratch("le-refused");
+        let dir = scratch("neq-alias-refused");
         let db = seeded(cx, &dir).await;
 
         let err = db
-            // Retargeted by fgdb-w5-parsers-nje.29: the SOURCE <= spelling
-            // graduated to grammar, so this planted negative now guards the
-            // DEST <= spelling — moved to a live boundary, not weakened.
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a", &bind_rk())
-            .expect_err("the dest <= spelling is not grammar this slice");
+            // Retargeted by fgdb-w5-parsers-nje.29 (source <= graduated) and
+            // again by nje.30 (dest <= graduated; caught by the same-wave
+            // sweep, not listed in the rework order): the planted negative
+            // now guards the C-style != alias, which never was grammar —
+            // moved to a live boundary, not weakened.
+            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+            .expect_err("the != alias is not grammar");
         assert!(
             matches!(err, GqlError::Parse(_)),
-            "<= must be the typed parse arm — >= graduating does not \
-             legalize its mirror: {err:?}"
+            "!= must be the typed parse arm — <> is the inequality: {err:?}"
         );
     });
 }

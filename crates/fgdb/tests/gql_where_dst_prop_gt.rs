@@ -120,18 +120,19 @@ fn greater_than_keeps_only_the_above_boundary_dests_source() {
 fn the_non_strict_spelling_is_a_typed_parse_error() {
     under_lab(0x24_02, |cx| async move {
         let cx = &cx;
-        let dir = scratch("le-refused");
+        let dir = scratch("neq-alias-refused");
         let db = seeded(cx, &dir).await;
 
-        // Retargeted by fgdb-w5-parsers-nje.28: dest >= graduated to
-        // grammar, so this planted negative moves to the dest <= spelling,
-        // still outside the bounded grammar — moved, not weakened.
+        // Retargeted by fgdb-w5-parsers-nje.28 (dest >= graduated) and
+        // again by nje.30 (dest <= graduated): the planted negative now
+        // guards the C-style != alias, which never was grammar — it keeps
+        // moving to a live boundary, it never weakens.
         let err = db
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a", &bind_rk())
-            .expect_err("<= is not grammar this slice");
+            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+            .expect_err("!= is not grammar");
         assert!(
             matches!(err, GqlError::Parse(_)),
-            "<= must be the typed parse arm, not a weakened strict bound: {err:?}"
+            "!= must be the typed parse arm — <> is the inequality: {err:?}"
         );
     });
 }

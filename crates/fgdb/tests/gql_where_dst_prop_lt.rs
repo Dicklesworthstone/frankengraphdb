@@ -121,21 +121,25 @@ fn less_than_keeps_only_the_below_boundary_dests_source() {
     });
 }
 
-/// The unsupported non-strict spelling is a typed parse error — never a
-/// silently-weakened strict bound.
+/// The surviving off-grammar spelling is a typed parse error — never a
+/// silently-weakened bound.
 #[test]
 fn the_non_strict_spelling_is_a_typed_parse_error() {
     under_lab(0x25_02, |cx| async move {
         let cx = &cx;
-        let dir = scratch("le-refused");
+        let dir = scratch("neq-alias-refused");
         let db = seeded(cx, &dir).await;
 
+        // Retargeted by fgdb-w5-parsers-nje.30: dest <= graduated to
+        // grammar (this exact assertion failed independent cargo test as
+        // [1, 5]-not-Parse), so the planted negative now guards the C-style
+        // != alias, which never was grammar — moved, not weakened.
         let err = db
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a", &bind_rk())
-            .expect_err("<= is not grammar this slice");
+            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+            .expect_err("!= is not grammar");
         assert!(
             matches!(err, GqlError::Parse(_)),
-            "<= must be the typed parse arm, not a weakened <: {err:?}"
+            "!= must be the typed parse arm — <> is the inequality: {err:?}"
         );
     });
 }
