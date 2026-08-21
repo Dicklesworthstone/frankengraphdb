@@ -711,14 +711,29 @@ impl WriteTxn {
             }
         }
 
-        let mut destinations: Vec<VId> = edges
-            .values()
-            .filter_map(|(_, relation, dst)| {
-                (*relation == plan.relation && vertices.contains(dst)).then_some(*dst)
-            })
-            .collect();
-        destinations.sort_unstable();
-        destinations.dedup();
+        // One kernel (fgdb-gql-one-kernel-7y17): the same
+        // `execute_bound_plan_over` expansion the autocommit path uses, fed
+        // the OVERLAY edge view instead of the live fold. Every edge left in
+        // `edges` has both endpoints in `vertices` (deletes retire the edge
+        // with the vertex above), so expanding each overlay-live source over
+        // its overlay out-edges in the plan's relation is exactly the old
+        // whole-map filter — but through the shared row discipline, so a
+        // CGSE change cannot drift the two surfaces apart.
+        let destinations = crate::execute_bound_plan_over(
+            &plan,
+            vertices.iter().copied(),
+            |source, relation| {
+                Ok(edges
+                    .values()
+                    .filter_map(|(edge_src, edge_relation, dst)| {
+                        (*edge_src == source
+                            && *edge_relation == relation
+                            && vertices.contains(dst))
+                        .then_some(*dst)
+                    })
+                    .collect())
+            },
+        )?;
         let mut read_set = self.read_set.borrow_mut();
         read_set.extend(observed);
         // MATCH result materialization is itself a vertex observation. Keep
