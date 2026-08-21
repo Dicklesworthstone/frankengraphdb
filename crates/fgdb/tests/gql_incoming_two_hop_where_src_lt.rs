@@ -13,10 +13,11 @@
 //! stay unmoved (`= 1` answers `[6]`, `<> 1` and `> 1` answer `[3]`), the
 //! far-end `<` is EMPTY (no origin carries `k`), and the direction
 //! control runs on the OUTGOING equality (already grammar), which
-//! composes nothing on the reversed fixture. The refusals hold: the
-//! still-unlanded near-end comparators, the C-style alias, the `RETURN a`
-//! projection, and the OUTGOING hop-2 source `<` (a separate grammar
-//! slice) stay typed Parse.
+//! composes nothing on the reversed fixture. The near-end `>=` is
+//! grammar since parser 2ef32998 and answers `[3, 6]`; the refusals
+//! hold: the still-unlanded near-end comparators, the C-style alias,
+//! the `RETURN a` projection, and the OUTGOING hop-2 source `<` (a
+//! separate grammar slice) stay typed Parse.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -143,12 +144,24 @@ fn incoming_two_hop_near_end_less_than_keeps_the_lesser_chain() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
+        // nje.51 retarget: parser 2ef32998 consumes the near-end >= into
+        // dst_prop_ge, so the spelling executes — both keyed dests meet
+        // >= 1 and answer by their origins. Moved, not weakened.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
+                &bind
+            )
+            .expect("near-end >= is grammar, not a Parse"),
+            vec![VId(3), VId(6)],
+            "k=9 and k=1 dests both meet >= 1; the keyless dest stays OUT"
+        );
+
         // The refusals: the still-unlanded near-end comparators, the
         // C-style alias, the RETURN a projection, and the OUTGOING hop-2
         // source < (a separate grammar slice) stay typed Parse.
         for off_grammar in [
             "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k < 9 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k != 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k < 9 RETURN a",
