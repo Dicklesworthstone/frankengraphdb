@@ -90,12 +90,13 @@ fn source_property_greater_than_keeps_greater_sources() {
         );
 
         let ge = db
-            // Retargeted by fgdb-w5-parsers-nje.26: the SOURCE >= spelling
-            // graduated to grammar, so this planted negative now guards the
-            // DEST spelling, which is still outside the bounded grammar
-            // this slice — the assertion moved, it did not weaken.
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k >= 1 RETURN a", &bind)
-            .expect_err("the dest >= spelling is outside the bounded grammar");
+            // Retargeted by fgdb-w5-parsers-nje.26 (source >= graduated) and
+            // again by nje.28 (dest >= graduated): the planted negative now
+            // guards the dest <= spelling, still outside the bounded
+            // grammar — the assertion keeps moving to a live boundary, it
+            // never weakens.
+            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k <= 1 RETURN a", &bind)
+            .expect_err("the dest <= spelling is outside the bounded grammar");
         assert!(matches!(ge, GqlError::Parse(_)));
         assert_eq!(
             db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k < 1 RETURN b", &bind)
