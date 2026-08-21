@@ -788,12 +788,17 @@ impl WriteTxn {
                         })
                         .collect()
                 };
-                // WHERE a <> b filters exactly the hop-1 step, mirroring
-                // gql_exec (fgdb-gql-where-neq-v476): a staged or durable
-                // self-loop stops matching before projection or composition.
+                // WHERE a <> b and WHERE a = b filter exactly the hop-1
+                // step, mirroring gql_exec (fgdb-gql-where-neq-v476,
+                // fgdb-w5-parsers-nje.6): inequality drops staged or durable
+                // self-loops before projection or composition; equality
+                // keeps only them.
                 let mut vias = step(source, relation);
                 if plan.neq.is_some() {
                     vias.retain(|via| *via != source);
+                }
+                if plan.eq.is_some() {
+                    vias.retain(|via| *via == source);
                 }
                 if let Some(labeled) = dst_labeled.as_ref() {
                     vias.retain(|via| labeled.contains(via));

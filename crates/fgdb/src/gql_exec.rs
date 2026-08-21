@@ -130,13 +130,22 @@ fn execute_over_adjacencies(
     hop2: BTreeMap<VId, Vec<VId>>,
 ) -> Result<Vec<VId>, ReadError> {
     let sources: Vec<_> = hop1.keys().copied().collect();
-    // WHERE a <> b (fgdb-gql-where-neq-v476): the predicate binds the two
-    // hop-1 pattern variables, so it filters exactly the hop-1 step — a
-    // self-loop edge stops matching, in every direction mode, before any
-    // projection or hop-2 composition sees it. Filtering the KERNEL's
-    // composed expansion instead would express a <> c on a two-hop plan,
-    // which is a different (unrequested) predicate.
-    let hop1_kept = |src: VId, via: &VId| plan.neq.is_none() || *via != src;
+    // WHERE a <> b (fgdb-gql-where-neq-v476) and WHERE a = b
+    // (fgdb-w5-parsers-nje.6): both predicates bind the two hop-1 pattern
+    // variables, so both filter exactly the hop-1 step — before any
+    // projection or hop-2 composition. Inequality drops the self-loop
+    // edges; equality keeps ONLY them (src == dst). Filtering the KERNEL's
+    // composed expansion instead would express a-vs-c predicates on a
+    // two-hop plan, which are different (unrequested) predicates.
+    let hop1_kept = |src: VId, via: &VId| {
+        if plan.neq.is_some() && *via == src {
+            return false;
+        }
+        if plan.eq.is_some() && *via != src {
+            return false;
+        }
+        true
+    };
     if plan.hop2_relation.is_none() {
         return crate::execute_bound_plan_over(plan, sources, |src, _| {
             let mut dests = hop1.get(&src).cloned().unwrap_or_default();
