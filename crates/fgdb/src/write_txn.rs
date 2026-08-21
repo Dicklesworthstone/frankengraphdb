@@ -307,6 +307,15 @@ impl WriteTxn {
                     PendingRow::DeleteEdge { eid: row_eid, .. } if *row_eid == eid => {
                         overlay = None;
                     }
+                    PendingRow::SetEdgeProperty {
+                        eid: row_eid,
+                        key,
+                        value,
+                    } if *row_eid == eid => {
+                        if let Some(record) = overlay.as_mut() {
+                            Self::overlay_property(&mut record.props, *key, value.as_ref());
+                        }
+                    }
                     PendingRow::Vertex { .. }
                     | PendingRow::Edge { .. }
                     | PendingRow::DeleteEdge { .. }
