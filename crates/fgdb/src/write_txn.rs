@@ -836,6 +836,26 @@ impl WriteTxn {
             None => None,
             Some((key, value)) => Some(prop_holders(key, value)?),
         };
+        let dst_prop_ne_ok = match plan.dst_prop_ne {
+            None => None,
+            Some((key, value)) => {
+                let mut holders = std::collections::BTreeSet::new();
+                for vid in vertices.iter().copied() {
+                    if self.vertex(database, vid)?.is_some_and(|row| {
+                        row.props.iter().any(|(property, scalar)| {
+                            *property == key
+                                && matches!(
+                                    scalar,
+                                    CanonicalScalar::Int(actual) if *actual != value
+                                )
+                        })
+                    }) {
+                        holders.insert(vid);
+                    }
+                }
+                Some(holders)
+            }
+        };
         let anchors: Vec<VId> = vertices
             .iter()
             .copied()
@@ -904,6 +924,9 @@ impl WriteTxn {
                     vias.retain(|via| labeled.contains(via));
                 }
                 if let Some(holders) = dst_prop_ok.as_ref() {
+                    vias.retain(|via| holders.contains(via));
+                }
+                if let Some(holders) = dst_prop_ne_ok.as_ref() {
                     vias.retain(|via| holders.contains(via));
                 }
                 let Some(hop2_relation) = plan.hop2_relation else {

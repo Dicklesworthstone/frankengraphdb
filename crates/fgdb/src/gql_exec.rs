@@ -283,19 +283,20 @@ fn filter_hop1_by_src_prop<V: Vfs + Clone>(
     Ok(())
 }
 
-/// Dest-property integer equality (fgdb-w5-parsers-nje.9) drops hop-1
-/// DESTINATIONS whose vertex props do not carry `(key, Int(n))`. No-WHERE
-/// plans consult no property row.
+/// Dest-property integer predicates drop hop-1 DESTINATIONS whose vertex
+/// props do not satisfy the bound comparison. Equality requires
+/// `(key, Int(n))`; inequality requires the key to be present as an integer
+/// other than `n` (fgdb-w5-parsers-nje.16). No-WHERE plans consult no
+/// property row.
 fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
     plan: &BoundPlan,
     db: &Database<V>,
     as_of: Option<CommitSeq>,
     hop1: &mut BTreeMap<VId, Vec<VId>>,
 ) -> Result<(), ReadError> {
-    let Some((key, value)) = plan.dst_prop else {
+    if plan.dst_prop.is_none() && plan.dst_prop_ne.is_none() {
         return Ok(());
-    };
-    let wanted = CanonicalScalar::Int(value);
+    }
     let dests: std::collections::BTreeSet<VId> = hop1.values().flatten().copied().collect();
     let mut kept = std::collections::BTreeSet::new();
     for vid in dests {
@@ -304,9 +305,19 @@ fn filter_hop1_by_dst_prop<V: Vfs + Clone>(
             None => db.vertex(vid)?,
         };
         if row.is_some_and(|row| {
-            row.props
-                .iter()
-                .any(|(property, scalar)| *property == key && *scalar == wanted)
+            let equal = plan.dst_prop.is_none_or(|(key, value)| {
+                let wanted = CanonicalScalar::Int(value);
+                row.props
+                    .iter()
+                    .any(|(property, scalar)| *property == key && *scalar == wanted)
+            });
+            let not_equal = plan.dst_prop_ne.is_none_or(|(key, value)| {
+                row.props.iter().any(|(property, scalar)| {
+                    *property == key
+                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
+                })
+            });
+            equal && not_equal
         }) {
             kept.insert(vid);
         }
