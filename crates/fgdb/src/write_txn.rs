@@ -90,6 +90,7 @@ pub struct WriteTxn {
     staged: Vec<WriteBatch>,
     prepared: Option<PreparedWrite>,
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
+    match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
     pin: Option<PurposeObligation<Acquired>>,
 }
 
@@ -105,6 +106,7 @@ impl WriteTxn {
             staged: Vec::new(),
             prepared: None,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            match_expansions: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             pin: Some(pin),
         })
     }
@@ -360,6 +362,10 @@ impl WriteTxn {
         // future narrower expansion kernels must not silently lose result-row
         // read dependencies.
         read_set.extend(destinations.iter().copied().map(ElementId::Vertex));
+        drop(read_set);
+        self.match_expansions
+            .borrow_mut()
+            .extend(vertices.iter().copied().map(|src| (src, plan.relation)));
         Ok(destinations)
     }
 
@@ -460,13 +466,24 @@ impl WriteTxn {
         database: &Database<V>,
     ) -> Result<Option<(ElementId, CommitSeq)>, ReadError> {
         let read_set = self.read_set.borrow();
-        if read_set.is_empty() {
+        let match_expansions = self.match_expansions.borrow();
+        if read_set.is_empty() && match_expansions.is_empty() {
             return Ok(None);
         }
         for batch in database.delta_since(self.basis)? {
             let mut touched = std::collections::BTreeSet::new();
             for coordinate in batch.coordinate_entries() {
                 for row in &coordinate.rows {
+                    if let fgdb_delta_types::DeltaRow::CreateEdge {
+                        eid,
+                        src,
+                        relation,
+                        ..
+                    } = row
+                        && match_expansions.contains(&(*src, *relation))
+                    {
+                        return Ok(Some((ElementId::Edge(*eid), batch.commit_seq())));
+                    }
                     crate::touched_elements(row, &mut touched);
                 }
             }
@@ -492,6 +509,10 @@ impl core::fmt::Debug for WriteTxn {
             .field("staged_batches", &self.staged.len())
             .field("has_prepared_write", &self.prepared.is_some())
             .field("read_set_len", &self.read_set.borrow().len())
+            .field(
+                "match_expansion_count",
+                &self.match_expansions.borrow().len(),
+            )
             .field("pin_obligation", &self.pin.as_ref().map(PurposeObligation::id))
             .finish()
     }
