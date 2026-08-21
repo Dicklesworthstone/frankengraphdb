@@ -666,6 +666,9 @@ impl<'a> Parser<'a> {
                     && !(direction == EdgeDirection::Incoming
                         && hop2_relation.is_none()
                         && left == src_var)
+                    && !(direction == EdgeDirection::Undirected
+                        && hop2_relation.is_none()
+                        && left == src_var)
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -2475,6 +2478,12 @@ mod tests {
             .expect("undirected source property inequality binds");
         assert_eq!(source_ne.src_prop_ne, Some((PropertyKeyId(7), 1)));
 
+        let source_bang_ne = binder
+            .bind("MATCH (a)-[:R]-(b) WHERE a.k != 1 RETURN b")
+            .expect("undirected source bang inequality binds");
+        assert_eq!(source_bang_ne.direction, EdgeDirection::Undirected);
+        assert_eq!(source_bang_ne.src_prop_ne, Some((PropertyKeyId(7), 1)));
+
         let destination_eq = binder
             .bind("MATCH (a)-[:R]-(b) WHERE b.k = 1 RETURN b")
             .expect("undirected destination property equality binds");
@@ -2492,6 +2501,10 @@ mod tests {
         );
         assert!(matches!(
             binder.bind("MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k = 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k != 1 RETURN c"),
             Err(BindError::Parse(_))
         ));
     }
