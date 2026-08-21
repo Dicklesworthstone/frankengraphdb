@@ -89,8 +89,12 @@ fn undirected_as_of_equals_reference_incident_prefix() {
             .database
             .graph(GraphId(1), BranchId(1))
             .expect("full graph exists");
-        assert_eq!(as_of, incident_endpoints(prefix_graph, relation));
-        assert_eq!(live, incident_endpoints(full_graph, relation));
+        let prefix_incidents = incident_endpoints(prefix_graph, relation);
+        let full_incidents = incident_endpoints(full_graph, relation);
+        assert_eq!(prefix_incidents, vec![VId(1), VId(2)]);
+        assert_eq!(full_incidents, vec![VId(1), VId(2), VId(3)]);
+        assert_eq!(as_of, prefix_incidents);
+        assert_eq!(live, full_incidents);
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }
