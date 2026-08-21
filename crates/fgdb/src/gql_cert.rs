@@ -193,6 +193,16 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             hasher.update(&value.to_be_bytes());
         }
     }
+    match plan.hop2_dst_prop {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
     match plan.limit {
         None => {
             hasher.update(&[0]);
@@ -251,8 +261,8 @@ pub fn digest_bind(bind: &RelationBind) -> Digest {
 
 #[cfg(test)]
 mod tests {
-    use super::{certify, direction_tag, projection_tag, GqlPlanCertificate};
-    use fgdb_delta_types::RelationId;
+    use super::{GqlPlanCertificate, certify, direction_tag, projection_tag};
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
     use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
     use fgdb_types::CommitSeq;
 
@@ -284,6 +294,7 @@ mod tests {
             dst_prop_le: None,
             limit: None,
             skip: None,
+            hop2_dst_prop: None,
         }
     }
 
@@ -367,6 +378,18 @@ mod tests {
         assert_ne!(
             certify(&one_hop, CommitSeq(11)).digest,
             certify(&two_hop, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn hop2_destination_property_changes_digest() {
+        let unfiltered = plan(7);
+        let mut filtered = unfiltered.clone();
+        filtered.hop2_dst_prop = Some((PropertyKeyId(9), 1));
+
+        assert_ne!(
+            certify(&unfiltered, CommitSeq(11)).digest,
+            certify(&filtered, CommitSeq(11)).digest
         );
     }
 

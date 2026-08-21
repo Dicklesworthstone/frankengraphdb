@@ -141,6 +141,8 @@ pub struct BoundPlan {
     /// `SKIP 0` is legal and binds `Some(0)` — the identity, the kernel
     /// drops nothing — unlike `LIMIT`, whose zero is a parse error.
     pub skip: Option<u64>,
+    /// Hop-2 far-end property equality on the outgoing two-hop form.
+    pub hop2_dst_prop: Option<(PropertyKeyId, i64)>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -261,6 +263,7 @@ impl RelationBind {
         let dst_prop_lt = bind_property(&self.properties, ast.dst_prop_lt)?;
         let dst_prop_ge = bind_property(&self.properties, ast.dst_prop_ge)?;
         let dst_prop_le = bind_property(&self.properties, ast.dst_prop_le)?;
+        let hop2_dst_prop = bind_property(&self.properties, ast.hop2_dst_prop)?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
@@ -288,6 +291,7 @@ impl RelationBind {
             dst_prop_le,
             limit: ast.limit,
             skip: ast.skip,
+            hop2_dst_prop,
         })
     }
 }
@@ -348,6 +352,7 @@ struct MatchAst {
     dst_prop_le: Option<(String, i64)>,
     limit: Option<u64>,
     skip: Option<u64>,
+    hop2_dst_prop: Option<(String, i64)>,
 }
 
 struct Parser<'a> {
@@ -472,6 +477,7 @@ impl<'a> Parser<'a> {
                 dst_prop_le: None,
                 limit,
                 skip,
+                hop2_dst_prop: None,
             });
         }
         let incoming = if self.source[self.offset..].starts_with('<') {
@@ -547,6 +553,7 @@ impl<'a> Parser<'a> {
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
+        let mut hop2_dst_prop = None;
         let (
             neq,
             eq,
@@ -571,11 +578,17 @@ impl<'a> Parser<'a> {
             let left = self.identifier()?;
             self.skip_whitespace();
             if self.source[self.offset..].starts_with('.') {
-                if left != src_var && left != dst_var {
+                let is_hop2_destination = direction == EdgeDirection::Outgoing
+                    && hop2_relation.is_some()
+                    && hop2_dst_var.as_ref() == Some(&left);
+                if left != src_var && left != dst_var && !is_hop2_destination {
                     return Err(ParseError {
                         offset: self.offset.saturating_sub(left.len()),
                         kind: ParseErrorKind::ReturnedVariableMismatch {
-                            expected: format!("{src_var} or {dst_var}"),
+                            expected: hop2_dst_var.as_ref().map_or_else(
+                                || format!("{src_var} or {dst_var}"),
+                                |hop2_dst| format!("{src_var}, {dst_var}, or {hop2_dst}"),
+                            ),
                             found: left,
                         },
                     });
@@ -588,6 +601,16 @@ impl<'a> Parser<'a> {
                 let is_prop_lt = remaining.starts_with('<') && !is_prop_ne && !is_prop_le;
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
+                if is_hop2_destination
+                    && (is_prop_ne || is_prop_le || is_prop_lt || is_prop_ge || is_prop_gt)
+                {
+                    return Err(ParseError {
+                        offset: self.offset,
+                        kind: ParseErrorKind::ExpectedToken(
+                            "hop-2 destination property equality before RETURN",
+                        ),
+                    });
+                }
                 if is_prop_ne {
                     self.token("<")?;
                     self.token(">")?;
@@ -639,7 +662,21 @@ impl<'a> Parser<'a> {
                 let value = self.integer()?;
                 let first_is_source = left == src_var;
                 self.skip_whitespace();
-                if self.source[self.offset..].starts_with("AND") {
+                if is_hop2_destination {
+                    hop2_dst_prop = Some((property, value));
+                    if self.source[self.offset..].starts_with("AND") {
+                        return Err(ParseError {
+                            offset: self.offset,
+                            kind: ParseErrorKind::ExpectedToken(
+                                "RETURN after hop-2 destination property equality",
+                            ),
+                        });
+                    }
+                    (
+                        None, None, None, None, None, None, None, None, None, None, None, None,
+                        None, None,
+                    )
+                } else if self.source[self.offset..].starts_with("AND") {
                     if is_prop_gt || is_prop_lt || is_prop_ge || is_prop_le {
                         return Err(ParseError {
                             offset: self.offset,
@@ -1049,6 +1086,7 @@ impl<'a> Parser<'a> {
             dst_prop_le,
             limit,
             skip,
+            hop2_dst_prop,
         })
     }
 
@@ -1260,6 +1298,7 @@ mod tests {
                 dst_prop_le: None,
                 limit: None,
                 skip: None,
+                hop2_dst_prop: None,
             }
         );
     }
@@ -2240,6 +2279,37 @@ mod tests {
             binder.bind(
                 "MATCH (a:Person)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c"
             ),
+            Err(BindError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn two_hop_destination_property_equality_binds() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23))
+            .with_property("k", PropertyKeyId(7));
+
+        let destination = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k = 1 RETURN c")
+            .expect("outgoing two-hop far-end property equality binds");
+        assert_eq!(destination.hop2_dst_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(destination.src_prop, None);
+        assert_eq!(destination.dst_prop, None);
+
+        let source = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN c")
+            .expect("outgoing two-hop source property equality remains bound");
+        assert_eq!(source.src_prop, Some((PropertyKeyId(7), 1)));
+        assert_eq!(source.dst_prop, None);
+        assert_eq!(source.hop2_dst_prop, None);
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c"),
             Err(BindError::Parse(_))
         ));
     }

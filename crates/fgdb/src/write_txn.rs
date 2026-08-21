@@ -1050,6 +1050,10 @@ impl WriteTxn {
                 Some(holders)
             }
         };
+        let hop2_dst_prop_ok = match plan.hop2_dst_prop {
+            None => None,
+            Some((key, value)) => Some(prop_holders(key, value)?),
+        };
         let anchors: Vec<VId> = vertices
             .iter()
             .copied()
@@ -1150,6 +1154,13 @@ impl WriteTxn {
                 let Some(hop2_relation) = plan.hop2_relation else {
                     return Ok(vias);
                 };
+                let hop2_step = |via: VId| {
+                    let mut far_ends = step(via, hop2_relation);
+                    if let Some(holders) = hop2_dst_prop_ok.as_ref() {
+                        far_ends.retain(|far_end| holders.contains(far_end));
+                    }
+                    far_ends
+                };
                 // Two-hop composition, projection-shaped exactly as gql_exec
                 // composes the durable adjacency: the via projection keeps
                 // intermediates that continue, every other projection expands
@@ -1157,12 +1168,12 @@ impl WriteTxn {
                 Ok(match plan.projection {
                     fgdb_gql::ReturnProjection::Destination => vias
                         .into_iter()
-                        .filter(|via| !step(*via, hop2_relation).is_empty())
+                        .filter(|via| !hop2_step(*via).is_empty())
                         .collect(),
                     fgdb_gql::ReturnProjection::Source
                     | fgdb_gql::ReturnProjection::Hop2Destination => vias
                         .into_iter()
-                        .flat_map(|via| step(via, hop2_relation))
+                        .flat_map(hop2_step)
                         .collect(),
                 })
             },
