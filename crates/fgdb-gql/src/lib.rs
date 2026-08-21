@@ -4,7 +4,8 @@
 //! `MATCH (src)-[:Relation]->(dst) RETURN var` or
 //! `MATCH (dst)<-[:Relation]-(src) RETURN var` or
 //! `MATCH (left)-[:Relation]-(right) RETURN var`. Whitespace is optional
-//! between tokens. Everything else fails closed with a [`ParseError`]; this
+//! between tokens. The outgoing one-hop form may include `WHERE src <> dst`
+//! before `RETURN`. Everything else fails closed with a [`ParseError`]; this
 //! crate does not interpret a partial AST or silently widen the supported
 //! language.
 
@@ -94,6 +95,7 @@ pub struct BoundPlan {
     pub hop2_dst_var: Option<String>,
     pub projection: ReturnProjection,
     pub direction: EdgeDirection,
+    pub neq: Option<(String, String)>,
 }
 
 /// Deterministic relation-name binder for the supported GQL slice.
@@ -167,6 +169,7 @@ impl RelationBind {
             hop2_dst_var: ast.hop2_dst_var,
             projection: ast.projection,
             direction: ast.direction,
+            neq: ast.neq,
         })
     }
 }
@@ -181,6 +184,7 @@ struct MatchAst {
     hop2_dst_var: Option<String>,
     projection: ReturnProjection,
     direction: EdgeDirection,
+    neq: Option<(String, String)>,
 }
 
 struct Parser<'a> {
@@ -257,6 +261,35 @@ impl<'a> Parser<'a> {
             EdgeDirection::Incoming => (right_var, left_var),
         };
         let via_var = dst_var.clone();
+        self.skip_whitespace();
+        let neq = if direction == EdgeDirection::Outgoing
+            && hop2_relation.is_none()
+            && self.source[self.offset..].starts_with("WHERE")
+        {
+            self.keyword("WHERE")?;
+            let left = self.identifier()?;
+            self.token("<")?;
+            self.token(">")?;
+            let right = self.identifier()?;
+            let binds_endpoints = (left == src_var && right == dst_var)
+                || (left == dst_var && right == src_var);
+            if !binds_endpoints {
+                return Err(ParseError {
+                    offset: self.offset.saturating_sub(right.len()),
+                    kind: ParseErrorKind::ReturnedVariableMismatch {
+                        expected: format!("{src_var} <> {dst_var}"),
+                        found: format!("{left} <> {right}"),
+                    },
+                });
+            }
+            let mut variables = (left, right);
+            if variables.0 > variables.1 {
+                variables = (variables.1, variables.0);
+            }
+            Some(variables)
+        } else {
+            None
+        };
         self.keyword("RETURN")?;
         let returned = self.identifier()?;
         let projection = if hop2_dst_var.as_ref() == Some(&returned) {
@@ -290,6 +323,7 @@ impl<'a> Parser<'a> {
             hop2_dst_var,
             projection,
             direction,
+            neq,
         })
     }
 
@@ -388,8 +422,23 @@ mod tests {
                 hop2_dst_var: None,
                 projection: ReturnProjection::Destination,
                 direction: EdgeDirection::Outgoing,
+                neq: None,
             }
         );
+    }
+
+    #[test]
+    fn outgoing_one_hop_not_equal_predicate_binds_canonically() {
+        let binder = RelationBind::new().with_relation("R", RelationId(17));
+        let plan = binder
+            .bind("MATCH (a)-[:R]->(b) WHERE b <> a RETURN b")
+            .expect("reversed endpoint inequality binds");
+        assert_eq!(plan.neq, Some(("a".to_owned(), "b".to_owned())));
+
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b) WHERE a <> c RETURN b"),
+            Err(BindError::Parse(_))
+        ));
     }
 
     #[test]
