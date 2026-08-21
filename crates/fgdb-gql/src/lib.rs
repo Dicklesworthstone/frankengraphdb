@@ -145,7 +145,7 @@ pub struct BoundPlan {
     pub hop2_dst_prop: Option<(PropertyKeyId, i64)>,
     /// Hop-2 far-end property inequality on a two-hop form.
     pub hop2_dst_prop_ne: Option<(PropertyKeyId, i64)>,
-    /// Hop-2 far-end strict greater-than on a two-hop form.
+    /// Hop-2 far-end strict greater-than on the outgoing two-hop form.
     pub hop2_dst_prop_gt: Option<(PropertyKeyId, i64)>,
     /// Hop-2 far-end strict less-than on the outgoing two-hop form.
     pub hop2_dst_prop_lt: Option<(PropertyKeyId, i64)>,
@@ -646,7 +646,9 @@ impl<'a> Parser<'a> {
                 let is_prop_lt = remaining.starts_with('<') && !is_prop_ne && !is_prop_le;
                 let is_prop_ge = remaining.starts_with(">=");
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
-                if is_incoming_two_hop && (is_prop_le || is_prop_lt || is_prop_ge) {
+                if is_incoming_two_hop
+                    && (is_prop_gt || is_prop_le || is_prop_lt || is_prop_ge)
+                {
                     return Err(ParseError {
                         offset: self.offset,
                         kind: ParseErrorKind::ExpectedToken(
@@ -1114,7 +1116,7 @@ impl<'a> Parser<'a> {
         };
         if direction == EdgeDirection::Incoming
             && hop2_relation.is_some()
-            && (hop2_dst_prop.is_some() || hop2_dst_prop_ne.is_some() || hop2_dst_prop_gt.is_some())
+            && (hop2_dst_prop.is_some() || hop2_dst_prop_ne.is_some())
             && projection != ReturnProjection::Hop2Destination
         {
             return Err(ParseError {
@@ -2432,28 +2434,17 @@ mod tests {
         assert_eq!(inequality.hop2_dst_prop_ge, None);
         assert_eq!(inequality.hop2_dst_prop_le, None);
 
-        let greater = binder
-            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c")
-            .expect("incoming two-hop far-end property greater-than binds");
-        assert_eq!(greater.hop2_dst_prop_gt, Some((PropertyKeyId(7), 1)));
-        assert_eq!(greater.hop2_dst_prop, None);
-        assert_eq!(greater.hop2_dst_prop_ne, None);
-        assert_eq!(greater.hop2_dst_prop_lt, None);
-        assert_eq!(greater.hop2_dst_prop_ge, None);
-        assert_eq!(greater.hop2_dst_prop_le, None);
-
         for statement in [
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN b",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN b",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN a",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN b",
         ] {
             assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
         }
 
         for statement in [
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
@@ -2531,13 +2522,10 @@ mod tests {
             binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
             Err(BindError::Parse(_))
         ));
-        let incoming = binder
-            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c")
-            .expect("incoming two-hop far-end greater-than binds");
-        assert_eq!(incoming.hop2_dst_prop_gt, Some((PropertyKeyId(7), 1)));
-        assert_eq!(incoming.hop2_dst_prop, None);
-        assert_eq!(incoming.hop2_dst_prop_ne, None);
-        assert_eq!(incoming.dst_prop_gt, None);
+        assert!(matches!(
+            binder.bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
     }
 
     #[test]
