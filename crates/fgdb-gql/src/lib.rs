@@ -11,7 +11,7 @@
 
 #![forbid(unsafe_code)]
 
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, RelationId};
 use std::collections::BTreeMap;
 
 /// A syntax error in the bounded GQL grammar.
@@ -49,6 +49,7 @@ impl core::error::Error for ParseError {}
 pub enum BindError {
     Parse(ParseError),
     UnknownRelation { name: String },
+    UnknownLabel { name: String },
 }
 
 impl core::fmt::Display for BindError {
@@ -58,6 +59,7 @@ impl core::fmt::Display for BindError {
             BindError::UnknownRelation { name } => {
                 write!(formatter, "unknown relation {name:?}")
             }
+            BindError::UnknownLabel { name } => write!(formatter, "unknown label {name:?}"),
         }
     }
 }
@@ -90,6 +92,8 @@ pub struct BoundPlan {
     pub relation: RelationId,
     pub src_var: String,
     pub dst_var: String,
+    pub src_label: Option<LabelId>,
+    pub dst_label: Option<LabelId>,
     pub via_var: String,
     pub hop2_relation: Option<RelationId>,
     pub hop2_dst_var: Option<String>,
@@ -102,6 +106,7 @@ pub struct BoundPlan {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelationBind {
     relations: BTreeMap<String, RelationId>,
+    labels: BTreeMap<String, LabelId>,
 }
 
 impl RelationBind {
@@ -118,12 +123,18 @@ impl RelationBind {
         self
     }
 
+    pub fn with_label(mut self, name: impl Into<String>, label: LabelId) -> Self {
+        self.labels.insert(name.into(), label);
+        self
+    }
+
     /// Canonical certificate input for this relation-name binding.
     ///
     /// The transcript is big-endian and self-delimiting: entry count, then for
-    /// each `(name, relation)` sorted by name and relation id, the UTF-8 name
-    /// length, name bytes, and the `RelationId` value. Counts use `u64`, so the
-    /// encoding never truncates an in-memory map or identifier length.
+    /// each `(name, relation)` sorted by name and relation id, followed by the
+    /// equivalently sorted label bindings. Names are length-prefixed and IDs
+    /// are big-endian. Counts use `u64`, so the encoding never truncates an
+    /// in-memory map or identifier length.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut entries: Vec<_> = self.relations.iter().collect();
         entries.sort_by(|(left_name, left_relation), (right_name, right_relation)| {
@@ -138,6 +149,18 @@ impl RelationBind {
             bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
             bytes.extend_from_slice(name.as_bytes());
             bytes.extend_from_slice(&relation.0.to_be_bytes());
+        }
+        let mut labels: Vec<_> = self.labels.iter().collect();
+        labels.sort_by(|(left_name, left_label), (right_name, right_label)| {
+            left_name
+                .cmp(right_name)
+                .then_with(|| left_label.0.cmp(&right_label.0))
+        });
+        bytes.extend_from_slice(&(labels.len() as u64).to_be_bytes());
+        for (name, label) in labels {
+            bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&label.0.to_be_bytes());
         }
         bytes
     }
@@ -160,10 +183,14 @@ impl RelationBind {
                     .ok_or_else(|| BindError::UnknownRelation { name: name.clone() })
             })
             .transpose()?;
+        let src_label = bind_label(&self.labels, ast.src_label)?;
+        let dst_label = bind_label(&self.labels, ast.dst_label)?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
             dst_var: ast.dst_var,
+            src_label,
+            dst_label,
             via_var: ast.via_var,
             hop2_relation,
             hop2_dst_var: ast.hop2_dst_var,
@@ -174,11 +201,26 @@ impl RelationBind {
     }
 }
 
+fn bind_label(
+    labels: &BTreeMap<String, LabelId>,
+    name: Option<String>,
+) -> Result<Option<LabelId>, BindError> {
+    name.map(|name| {
+        labels
+            .get(&name)
+            .copied()
+            .ok_or(BindError::UnknownLabel { name })
+    })
+    .transpose()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MatchAst {
     src_var: String,
     relation: String,
     dst_var: String,
+    src_label: Option<String>,
+    dst_label: Option<String>,
     via_var: String,
     hop2_relation: Option<String>,
     hop2_dst_var: Option<String>,
@@ -201,6 +243,7 @@ impl<'a> Parser<'a> {
         self.keyword("MATCH")?;
         self.token("(")?;
         let left_var = self.identifier()?;
+        let left_label = self.optional_label()?;
         self.token(")")?;
         self.skip_whitespace();
         let incoming = if self.source[self.offset..].starts_with('<') {
@@ -227,6 +270,7 @@ impl<'a> Parser<'a> {
         };
         self.token("(")?;
         let right_var = self.identifier()?;
+        let right_label = self.optional_label()?;
         self.token(")")?;
         self.skip_whitespace();
         let has_hop2 = match direction {
@@ -235,7 +279,7 @@ impl<'a> Parser<'a> {
                 self.source[self.offset..].starts_with('-')
             }
         };
-        let (hop2_relation, hop2_dst_var) = if has_hop2 {
+        let (hop2_relation, hop2_dst_var, hop2_label) = if has_hop2 {
             if direction == EdgeDirection::Incoming {
                 self.token("<")?;
             }
@@ -250,15 +294,28 @@ impl<'a> Parser<'a> {
             }
             self.token("(")?;
             let dst = self.identifier()?;
+            let label = self.optional_label()?;
             self.token(")")?;
-            (Some(relation), Some(dst))
+            (Some(relation), Some(dst), label)
         } else {
-            (None, None)
+            (None, None, None)
         };
-        let (src_var, dst_var) = match direction {
-            EdgeDirection::Outgoing | EdgeDirection::Undirected => (left_var, right_var),
-            EdgeDirection::Incoming if hop2_relation.is_some() => (left_var, right_var),
-            EdgeDirection::Incoming => (right_var, left_var),
+        if hop2_relation.is_some()
+            && (left_label.is_some() || right_label.is_some() || hop2_label.is_some())
+        {
+            return Err(ParseError {
+                offset: self.offset,
+                kind: ParseErrorKind::ExpectedToken("unlabeled two-hop MATCH"),
+            });
+        }
+        let (src_var, dst_var, src_label, dst_label) = match direction {
+            EdgeDirection::Outgoing | EdgeDirection::Undirected => {
+                (left_var, right_var, left_label, right_label)
+            }
+            EdgeDirection::Incoming if hop2_relation.is_some() => {
+                (left_var, right_var, left_label, right_label)
+            }
+            EdgeDirection::Incoming => (right_var, left_var, right_label, left_label),
         };
         let via_var = dst_var.clone();
         self.skip_whitespace();
@@ -318,6 +375,8 @@ impl<'a> Parser<'a> {
             src_var,
             relation,
             dst_var,
+            src_label,
+            dst_label,
             via_var,
             hop2_relation,
             hop2_dst_var,
@@ -383,6 +442,15 @@ impl<'a> Parser<'a> {
         Ok(self.source[start..self.offset].to_owned())
     }
 
+    fn optional_label(&mut self) -> Result<Option<String>, ParseError> {
+        self.skip_whitespace();
+        if !self.source[self.offset..].starts_with(':') {
+            return Ok(None);
+        }
+        self.token(":")?;
+        self.identifier().map(Some)
+    }
+
     fn skip_whitespace(&mut self) {
         while let Some(character) = self.source[self.offset..].chars().next() {
             if !character.is_whitespace() {
@@ -417,6 +485,8 @@ mod tests {
                 relation: RelationId(17),
                 src_var: "a".into(),
                 dst_var: "b".into(),
+                src_label: None,
+                dst_label: None,
                 via_var: "b".into(),
                 hop2_relation: None,
                 hop2_dst_var: None,
@@ -425,6 +495,36 @@ mod tests {
                 neq: None,
             }
         );
+    }
+
+    #[test]
+    fn one_hop_node_labels_bind_and_incoming_swaps_them() {
+        let binder = RelationBind::new()
+            .with_relation("R", RelationId(17))
+            .with_relation("S", RelationId(23))
+            .with_label("Person", LabelId(7));
+        let outgoing = binder
+            .bind("MATCH (a:Person)-[:R]->(b) RETURN b")
+            .expect("labeled outgoing one-hop binds");
+        assert_eq!(outgoing.src_label, Some(LabelId(7)));
+        assert_eq!(outgoing.dst_label, None);
+
+        let incoming = binder
+            .bind("MATCH (a:Person)<-[:R]-(b) RETURN a")
+            .expect("labeled incoming one-hop binds");
+        assert_eq!(incoming.src_var, "b");
+        assert_eq!(incoming.dst_var, "a");
+        assert_eq!(incoming.src_label, None);
+        assert_eq!(incoming.dst_label, Some(LabelId(7)));
+
+        assert!(matches!(
+            binder.bind("MATCH (a:Missing)-[:R]->(b) RETURN b"),
+            Err(BindError::UnknownLabel { name }) if name == "Missing"
+        ));
+        assert!(matches!(
+            binder.bind("MATCH (a:Person)-[:R]->(b)-[:S]->(c) RETURN c"),
+            Err(BindError::Parse(_))
+        ));
     }
 
     #[test]
@@ -498,10 +598,14 @@ mod tests {
     fn relation_bind_bytes_ignore_insertion_order() {
         let left = RelationBind::new()
             .with_relation("R", RelationId(17))
-            .with_relation("S", RelationId(23));
-        let right = RelationBind::new()
             .with_relation("S", RelationId(23))
-            .with_relation("R", RelationId(17));
+            .with_label("Person", LabelId(7))
+            .with_label("Agent", LabelId(8));
+        let right = RelationBind::new()
+            .with_label("Agent", LabelId(8))
+            .with_relation("S", RelationId(23))
+            .with_relation("R", RelationId(17))
+            .with_label("Person", LabelId(7));
 
         assert_eq!(left.canonical_bytes(), right.canonical_bytes());
     }
