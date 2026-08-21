@@ -651,6 +651,7 @@ impl<'a> Parser<'a> {
                 let is_prop_gt = remaining.starts_with('>') && !is_prop_ge;
                 if is_prop_bang_ne
                     && !is_incoming_two_hop_near_end
+                    && !is_hop2_destination
                     && (direction != EdgeDirection::Outgoing
                         || hop2_relation.is_some()
                         || left != dst_var)
@@ -2488,6 +2489,10 @@ mod tests {
             .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k <> 1 RETURN c")
             .expect("outgoing two-hop source property inequality binds");
         assert_eq!(inequality.src_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert!(matches!(
+            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN c"),
+            Err(BindError::Parse(_))
+        ));
 
         assert!(
             binder
@@ -2641,6 +2646,15 @@ mod tests {
         assert_eq!(inequality.hop2_dst_prop_ge, None);
         assert_eq!(inequality.hop2_dst_prop_le, None);
 
+        let bang_inequality = binder
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN c")
+            .expect("incoming two-hop far-end bang inequality binds");
+        assert_eq!(
+            bang_inequality.hop2_dst_prop_ne,
+            Some((PropertyKeyId(7), 1))
+        );
+        assert_eq!(bang_inequality.hop2_dst_prop, None);
+
         let greater = binder
             .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c")
             .expect("incoming two-hop far-end property greater-than binds");
@@ -2697,6 +2711,8 @@ mod tests {
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN b",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN b",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN a",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE b.k != 1 RETURN c",
         ] {
             assert!(matches!(binder.bind(statement), Err(BindError::Parse(_))));
         }
