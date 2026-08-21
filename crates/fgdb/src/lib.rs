@@ -121,7 +121,7 @@ mod gql_exec;
 /// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
 /// bind digests, so the same graph state, text, and bind are auditable as
 /// byte-identical.
-pub use gql_cert::GqlCertificate;
+pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
 /// catalog), and the plan is re-exported so tests can state that the executor
@@ -3498,6 +3498,29 @@ impl<V: Vfs + Clone> Database<V> {
             bind_digest: gql_cert::digest_bind(bind),
         };
         Ok((rows, certificate))
+    }
+
+    /// The plan-level certificate for one pinned statement WITHOUT executing
+    /// it (fgdb-gql-oracle-cert-jjn0): parse and bind exactly as
+    /// [`Database::execute_gql`] does, then certify the [`BoundPlan`] against
+    /// this handle's published frontier via `gql_cert::certify`.
+    ///
+    /// A fenced handle refuses with the same typed [`GqlError::Read`]
+    /// recovery error every other read surfaces — the frontier accessor runs
+    /// the ordinary readability check before any certificate exists. An
+    /// off-grammar text is [`GqlError::Parse`]; an unbound relation name is
+    /// [`GqlError::Bind`].
+    pub fn gql_plan_certificate(
+        &self,
+        src: &str,
+        bind: &RelationBind,
+    ) -> Result<GqlPlanCertificate, GqlError> {
+        let snapshot_seq = self.frontier().map_err(GqlError::Read)?;
+        let plan = bind.bind(src).map_err(|error| match error {
+            fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+            unbound => GqlError::Bind(unbound),
+        })?;
+        Ok(gql_cert::certify(&plan, snapshot_seq))
     }
 
     /// The edge `eid` — its endpoints, relation, lifetime, AND properties —
