@@ -6,8 +6,8 @@
 //! may drop. Both projections are pinned with and without the predicate,
 //! the flipped spelling `WHERE b <> a` must filter identically (inequality
 //! is symmetric; a filter keyed to "left operand is the source" is not an
-//! inequality), and everything beyond the one predicate — equality, an
-//! unbound operand, a property path — stays a typed parse error.
+//! inequality). Equality is covered by its sibling bead; an unbound operand
+//! and a property path stay typed parse errors.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
@@ -106,18 +106,16 @@ fn the_inequality_drops_exactly_the_self_loop_rows() {
     });
 }
 
-/// One predicate, exactly: equality, an unbound operand, and a property
-/// path are all off-grammar — typed parse errors, never silently-true
-/// filters.
+/// The equality sibling is grammar now; an unbound operand and a property
+/// path remain typed parse errors, never silently-true filters.
 #[test]
-fn anything_beyond_the_one_predicate_is_a_typed_parse_error() {
+fn the_remaining_off_grammar_is_a_typed_parse_error() {
     under_lab(0x4e_02, |cx| async move {
         let cx = &cx;
         let dir = scratch("off-grammar");
         let db = seeded(cx, &dir).await;
 
         for off_grammar in [
-            "MATCH (a)-[:R]->(b) WHERE a = b RETURN b",
             "MATCH (a)-[:R]->(b) WHERE a <> c RETURN b",
             "MATCH (a)-[:R]->(b) WHERE a.x <> b RETURN b",
         ] {
