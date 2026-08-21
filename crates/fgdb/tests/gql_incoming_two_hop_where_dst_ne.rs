@@ -9,7 +9,9 @@
 //! `[6, 9]` fails), and the `k = 1` origin fails the inequality. The
 //! equality sibling and the unfiltered statement are re-pinned, the
 //! OUTGOING inequality composes nothing on this reversed fixture (the
-//! direction control), and the remaining refusals hold: the ordered
+//! direction control). With `fgdb-w5-parsers-nje.42` landed the strict
+//! greater-than is grammar too and answers the same `[6]` singleton here,
+//! while the remaining refusals hold: the still-unlanded ordered
 //! comparators, the C-style alias, and the `RETURN a` projection on the
 //! incoming chain all stay typed Parse.
 
@@ -25,6 +27,7 @@ const S: RelationId = RelationId(2);
 const K: PropertyKeyId = PropertyKeyId(7);
 const IN_NE: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN c";
 const IN_EQ: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN c";
+const IN_GT: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c";
 const IN_UNFILTERED: &str = "MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c";
 const OUT_NE: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k <> 1 RETURN c";
 
@@ -97,6 +100,12 @@ fn incoming_two_hop_far_end_inequality_keeps_the_unequal_origin() {
             "nje.40 unmoved beside the new spelling"
         );
         assert_eq!(
+            db.execute_gql(IN_GT, &bind)
+                .expect("the strict-greater sibling now executes"),
+            vec![VId(6)],
+            "nje.42 landed — > and <> coincide on the k=9 origin"
+        );
+        assert_eq!(
             db.execute_gql(IN_UNFILTERED, &bind)
                 .expect("unfiltered incoming two-hop executes"),
             vec![VId(3), VId(6), VId(9)],
@@ -112,10 +121,10 @@ fn incoming_two_hop_far_end_inequality_keeps_the_unequal_origin() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
-        // The remaining refusals: ordered comparators, the C-style alias,
-        // and the RETURN a projection on the incoming chain.
+        // The remaining refusals: the still-unlanded ordered comparators,
+        // the C-style alias, and the RETURN a projection on the incoming
+        // chain.
         for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
