@@ -136,15 +136,15 @@ fn the_non_strict_spelling_is_a_typed_parse_error() {
         let db = seeded(cx, &dir).await;
 
         // Retargeted by fgdb-w5-parsers-nje.30: dest <= graduated to
-        // grammar (this exact assertion failed independent cargo test as
-        // [1, 5]-not-Parse), so the planted negative now guards the C-style
-        // != alias, which never was grammar — moved, not weakened.
-        let err = db
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
-            .expect_err("!= is not grammar");
-        assert!(
-            matches!(err, GqlError::Parse(_)),
-            "!= must be the typed parse arm — <> is the inequality: {err:?}"
+        // grammar. The nje.57+ tranche then landed the C-style != alias
+        // for hop-1 filters. Every ORIGIN on this fixture is keyless, and
+        // missing-is-OUT holds for the source property exactly as for the
+        // destination: no edge survives the source-side !=.
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+                .expect("the landed source-side != executes"),
+            Vec::<VId>::new(),
+            "every origin lacks k, and missing-is-OUT"
         );
     });
 }

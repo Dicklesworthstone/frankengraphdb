@@ -2949,10 +2949,11 @@ mod tests {
             Some((PropertyKeyId(7), 1))
         );
         assert_eq!(greater_or_equal.hop2_dst_prop_gt, None);
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let bang = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c")
+            .expect("outgoing two-hop far-end != alias remains bound");
+        assert_eq!(bang.hop2_dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(bang.hop2_dst_prop_ge, None);
         let incoming = binder
             .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c")
             .expect("incoming two-hop far-end greater-than binds");
@@ -3005,10 +3006,11 @@ mod tests {
         assert_eq!(less_or_equal.hop2_dst_prop_gt, None);
         assert_eq!(less_or_equal.hop2_dst_prop_lt, None);
         assert_eq!(less_or_equal.hop2_dst_prop_ge, None);
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let bang = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c")
+            .expect("outgoing two-hop far-end != alias remains bound");
+        assert_eq!(bang.hop2_dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(bang.hop2_dst_prop_le, None);
         let incoming = binder
             .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c")
             .expect("incoming two-hop far-end less-than binds");
@@ -3072,10 +3074,11 @@ mod tests {
         assert_eq!(less_or_equal.hop2_dst_prop_gt, None);
         assert_eq!(less_or_equal.hop2_dst_prop_lt, None);
         assert_eq!(less_or_equal.hop2_dst_prop_ge, None);
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let bang = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c")
+            .expect("outgoing two-hop far-end != alias remains bound");
+        assert_eq!(bang.hop2_dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(bang.hop2_dst_prop_le, None);
         let incoming = binder
             .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c")
             .expect("incoming two-hop far-end greater-than-or-equal binds");
@@ -3138,10 +3141,11 @@ mod tests {
         );
         assert_eq!(greater_or_equal.hop2_dst_prop_le, None);
 
-        assert!(matches!(
-            binder.bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c"),
-            Err(BindError::Parse(_))
-        ));
+        let bang = binder
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c")
+            .expect("outgoing two-hop far-end != alias remains bound");
+        assert_eq!(bang.hop2_dst_prop_ne, Some((PropertyKeyId(7), 1)));
+        assert_eq!(bang.hop2_dst_prop_lt, None);
         let incoming = binder
             .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c")
             .expect("incoming two-hop far-end less-than-or-equal binds");

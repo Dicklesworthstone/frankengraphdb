@@ -18,6 +18,7 @@
 //! - The FCW refusal is a TYPED `WriteError` arm, not a generic
 //!   `WriteError::Commit(_)` wrap, and its `Debug` carries the law ID
 //!   `FG-LAW-FCW-01` (`crates/fgdb/src/fcw.rs::FCW_LAW`).
+//!
 //! Until that wiring lands, this file fails to compile — deliberately. Per the
 //! code-first wave it is committed anyway as the executable acceptance
 //! criteria; do not weaken it to make it compile.
@@ -82,7 +83,7 @@ where
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// Seed two live vertices so every conflicting batch below is a pure
@@ -311,6 +312,7 @@ fn product_open_installs_fcw_not_pass_through() {
 ///   no arm for it, so the expected abort never arrives (`expect_err` panics);
 /// - even if some other component manufactured an error, it could not render
 ///   `FG-LAW-FCW-01`, which only `fcw.rs` emits (`assert_typed_fcw_abort`).
+///
 /// A validator-swap hook would make this a direct experiment (install
 /// pass-through, watch this test fail); `Database` has no such hook and this
 /// file does not add one — the law-string is the substitute the wave

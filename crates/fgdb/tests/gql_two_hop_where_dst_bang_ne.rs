@@ -130,15 +130,19 @@ fn two_hop_far_end_bang_ne_aliases_the_diamond_spelling() {
             vec![VId(4)],
             "the k=9 chain 4-R->5-S->6 answers by its hop-1 origin"
         );
-
-        // The refusal this slice: the outgoing near-end a.k !=.
-        for off_grammar in ["MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN c"] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // The near-end a.k != filter landed after this suite froze. Every
+        // near end on this fixture is keyless, and missing-is-OUT holds for
+        // the near end exactly as it does for the far end: no chain
+        // survives.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed near-end != executes"),
+            Vec::<VId>::new(),
+            "every near end lacks k, and missing-is-OUT"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

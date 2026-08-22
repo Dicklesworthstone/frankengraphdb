@@ -86,15 +86,19 @@ fn two_hop_anchor_predicate_gates_the_composed_path() {
             vec![VId(3), VId(6), VId(9)]
         );
 
+        // WHERE on the incoming two-hop chain landed after this suite
+        // froze. It is grammar now, and on this OUTGOING fixture the
+        // incoming spelling composes nothing (no :S edge arrives at an :R
+        // source), so it answers empty.
         let incoming = db
             .execute_gql(
                 "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.k = 1 RETURN c",
                 &bind,
             )
-            .expect_err("WHERE on the incoming two-hop chain is off-grammar");
+            .expect("WHERE on the incoming two-hop chain executes");
         assert!(
-            matches!(incoming, GqlError::Parse(_)),
-            "expected the typed Parse refusal, got {incoming:?}"
+            incoming.is_empty(),
+            "the incoming spelling composes nothing here: {incoming:?}"
         );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");

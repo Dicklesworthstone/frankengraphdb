@@ -79,12 +79,14 @@ fn destination_property_inequality_keeps_non_matching_sources() {
             vec![VId(1), VId(3), VId(5)]
         );
 
-        let c_style = db
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE b.k != 1 RETURN a", &bind)
-            .expect_err("the C-style != spelling is outside the grammar");
-        assert!(
-            matches!(c_style, GqlError::Parse(_)),
-            "expected the typed Parse refusal, got {c_style:?}"
+        // The nje.57+ tranche landed the C-style != alias, so the spelling
+        // now answers like <>: only the k=9 destination survives (k=1 fails
+        // the filter, keyless is OUT), and RETURN a answers its origin.
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE b.k != 1 RETURN a", &bind)
+                .expect("the landed C-style != executes"),
+            vec![VId(3)],
+            "the k=9 chain's origin is the sole survivor"
         );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");

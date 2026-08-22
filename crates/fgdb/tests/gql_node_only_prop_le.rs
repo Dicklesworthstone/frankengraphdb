@@ -153,17 +153,22 @@ fn the_neq_alias_and_the_bare_scan_are_typed_parse_errors() {
         let dir = scratch("refusals");
         let db = seeded(cx, &dir).await;
 
-        for off_grammar in [
-            "MATCH (a:Person) WHERE a.k != 1 RETURN a",
-            "MATCH (a) WHERE a.k <= 1 RETURN a",
-        ] {
-            let err = db
-                .execute_gql(off_grammar, &bind_all())
-                .expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // The nje.57+ tranche landed the != alias for labeled node-only
+        // filters: the k=9 and k=0 Persons survive, the k=1 Person fails.
+        // The bare-scan plant stays typed-Parse.
+        assert_eq!(
+            db.execute_gql("MATCH (a:Person) WHERE a.k != 1 RETURN a", &bind_all())
+                .expect("the landed node-only != alias executes"),
+            vec![VId(2), VId(6)],
+            "only the Persons whose k differs from 1 survive"
+        );
+        let off_grammar = "MATCH (a) WHERE a.k <= 1 RETURN a";
+        let err = db
+            .execute_gql(off_grammar, &bind_all())
+            .expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm: {err:?}"
+        );
     });
 }

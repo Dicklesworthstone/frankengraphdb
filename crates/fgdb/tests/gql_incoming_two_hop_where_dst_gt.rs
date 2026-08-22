@@ -145,19 +145,34 @@ fn incoming_two_hop_far_end_greater_than_keeps_the_greater_origin() {
             "only the far end with k=2 differs from 1"
         );
 
-        // The remaining refusals: the other ordered comparators and the
-        // RETURN a projection on the incoming chain.
-        for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN a",
-        ] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // The >= and <= comparators landed after this suite froze (the
+        // dst_ge/dst_le suites pin their kernels); both execute and keep
+        // missing-k OUT. The RETURN a projection on the incoming chain
+        // stays typed-Parse.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed ge comparator executes"),
+            vec![VId(3), VId(6)],
+            "both keyed far ends are at or above 1"
+        );
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed le comparator executes"),
+            vec![VId(3)],
+            "only the k=1 far end is at or below 1"
+        );
+        let off_grammar = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN a";
+        let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm: {err:?}"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

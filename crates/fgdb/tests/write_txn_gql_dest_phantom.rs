@@ -60,7 +60,7 @@ fn bind_r() -> RelationBind {
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// One committed `:R` edge `VId(1) -> VId(2)`: the observation whose

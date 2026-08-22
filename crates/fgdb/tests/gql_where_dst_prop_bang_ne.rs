@@ -90,13 +90,17 @@ fn destination_property_bang_inequality_aliases_the_angle_spelling() {
             vec![VId(1), VId(3), VId(5)]
         );
 
-        // The hop-2 C-style spelling is NOT graduated by the hop-1 alias.
+        // The hop-2 incoming != grammar landed after this suite froze, so
+        // the spelling no longer refuses at Parse. On this single-hop
+        // fixture it now reaches relation resolution and fails there: the
+        // bind carries no :S relation. The typed failure moved one stage
+        // later; it did not disappear.
         let hop2 = db
             .execute_gql(HOP2_BANG_NE, &bind)
-            .expect_err("the hop-2 != spelling is outside the grammar");
+            .expect_err("the hop-2 spelling still fails on the S-less bind");
         assert!(
-            matches!(hop2, GqlError::Parse(_)),
-            "expected the typed Parse refusal, got {hop2:?}"
+            matches!(hop2, GqlError::Bind(_)),
+            "expected the typed Bind refusal (unknown :S), got {hop2:?}"
         );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");

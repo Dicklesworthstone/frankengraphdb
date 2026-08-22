@@ -142,18 +142,21 @@ fn dest_less_or_equal_includes_the_boundary_and_strict_does_not() {
 /// the alias set is the surviving off-grammar boundary — `<>` is the
 /// inequality, `!=` never was.
 #[test]
-fn the_c_style_inequality_is_a_typed_parse_error() {
+fn the_c_style_inequality_executes_the_landed_alias() {
     under_lab(0x30_02, |cx| async move {
         let cx = &cx;
         let dir = scratch("neq-alias-refused");
         let db = seeded(cx, &dir).await;
 
-        let err = db
-            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
-            .expect_err("!= is not grammar");
-        assert!(
-            matches!(err, GqlError::Parse(_)),
-            "!= must be the typed parse arm — <> is the inequality: {err:?}"
+        // The nje.57+ tranche landed the C-style != alias for hop-1
+        // filters. Every ORIGIN on this fixture is keyless, and
+        // missing-is-OUT holds for the source property exactly as for the
+        // destination: no edge survives the source-side !=.
+        assert_eq!(
+            db.execute_gql("MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b", &bind_rk())
+                .expect("the landed source-side != executes"),
+            Vec::<VId>::new(),
+            "every origin lacks k, and missing-is-OUT"
         );
     });
 }

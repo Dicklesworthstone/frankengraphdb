@@ -66,7 +66,7 @@ where
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// One live vertex `VId(1)` carrying `PROP = 0`: the element txn A reads

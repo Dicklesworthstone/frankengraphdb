@@ -134,16 +134,28 @@ fn two_hop_far_end_greater_than_keeps_only_the_greater_chain() {
             "!= aliases <>: k=9 and k=0 both differ from 1; no-k stays OUT"
         );
 
-        for off_grammar in [
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k >= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN a",
-        ] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // The >= comparator landed after this suite froze (the dst_ge suite
+        // pins its kernel): k=1 and k=9 are at or above 1, k=0 and no-k are
+        // OUT. The incoming spelling is grammar too, but composes nothing
+        // on this outgoing fixture.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k >= 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed ge comparator executes"),
+            vec![VId(3), VId(6)],
+            "both chains with far-end k at or above 1 survive"
+        );
+        // The incoming far-end > spelling with RETURN a stays typed-Parse:
+        // ordered far-end filters answer the far end, and the RETURN a
+        // projection under them is not grammar.
+        let off_grammar = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN a";
+        let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm: {err:?}"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

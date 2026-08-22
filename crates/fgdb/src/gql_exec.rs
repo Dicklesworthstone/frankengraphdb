@@ -9,7 +9,7 @@
 //!
 //! A two-hop pattern (fgdb-gql-two-hop-8pfw) composes TWO per-relation
 //! adjacency maps, both filled by the same single scan of the admitted edge
-//! table — never `neighbours()`, never a second table read. The expansion
+//! table — never a neighbours scan, never a second table read. The expansion
 //! handed to the kernel is projection-shaped: hop-2 destinations for the
 //! path's far end, the intermediates that continue for the via variable, and
 //! either serves the source projection since the kernel only asks "did this

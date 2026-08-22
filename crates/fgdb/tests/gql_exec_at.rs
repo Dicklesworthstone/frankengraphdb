@@ -13,6 +13,7 @@
 //! `as_of` like `vertex_at`/`edge_at`):
 //! - `Database::execute_gql_at(&self, src, &RelationBind, CommitSeq)
 //!    -> Result<Vec<VId>, GqlError>`
+//!
 //! Until it lands this file fails to compile — deliberately; do not weaken
 //! it to make it compile.
 

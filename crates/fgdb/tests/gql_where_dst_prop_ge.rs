@@ -149,17 +149,16 @@ fn the_dest_le_spelling_is_still_a_typed_parse_error() {
         let db = seeded(cx, &dir).await;
 
         // Narrowed by fgdb-w5-parsers-nje.29 (source <= graduated) and
-        // retargeted by nje.30 (dest <= graduated too): the planted
-        // negative now guards the C-style != alias, which never was
-        // grammar — moved to a live boundary, not weakened.
-        for off_grammar in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
-            let err = db
-                .execute_gql(off_grammar, &bind_rk())
-                .expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // retargeted by nje.30 (dest <= graduated too). The nje.57+ tranche
+        // then landed the C-style != alias for hop-1 filters. Every ORIGIN
+        // on this fixture is keyless, and missing-is-OUT holds for the
+        // source property exactly as for the destination: no edge survives.
+        let off_grammar = "MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b";
+        assert_eq!(
+            db.execute_gql(off_grammar, &bind_rk())
+                .expect("the landed source-side != executes"),
+            Vec::<VId>::new(),
+            "every origin lacks k, and missing-is-OUT"
+        );
     });
 }

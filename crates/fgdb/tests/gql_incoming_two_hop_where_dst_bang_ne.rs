@@ -122,18 +122,25 @@ fn incoming_two_hop_far_end_bang_ne_aliases_the_diamond_spelling() {
             "no :S edge leaves an :R destination on the reversed fixture"
         );
 
-        // The refusals: the outgoing != is a separate grammar slice, and
-        // the RETURN a projection on the incoming != stays refused.
-        for off_grammar in [
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN a",
-        ] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // The outgoing != grammar slice landed after this suite froze; it
+        // executes and composes nothing on this reversed fixture (no :S
+        // edge leaves an :R destination). The RETURN a projection on the
+        // incoming != stays typed-Parse.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k != 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed outgoing far-end != executes"),
+            Vec::<VId>::new(),
+            "the outgoing spelling composes nothing on the reversed fixture"
+        );
+        let off_grammar = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k != 1 RETURN a";
+        let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm: {err:?}"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

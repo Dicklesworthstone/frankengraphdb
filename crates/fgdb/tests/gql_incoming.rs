@@ -138,14 +138,13 @@ fn malformed_arrows_are_typed_parse_errors() {
         let dir = scratch("bad-arrows");
         let db = seeded(cx, &dir).await;
 
-        for off_grammar in ["MATCH (a)<[:R]->(b) RETURN a"] {
-            let err = db
-                .execute_gql(off_grammar, &bind_r())
-                .expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm, got {err:?}"
-            );
-        }
+        let off_grammar = "MATCH (a)<[:R]->(b) RETURN a";
+        let err = db
+            .execute_gql(off_grammar, &bind_r())
+            .expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm, got {err:?}"
+        );
     });
 }

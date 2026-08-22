@@ -63,6 +63,15 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             hasher.update(&label.0.to_be_bytes());
         }
     }
+    match plan.dst_label {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(label) => {
+            hasher.update(&[1]);
+            hasher.update(&label.0.to_be_bytes());
+        }
+    }
     match &plan.eq {
         None => {
             hasher.update(&[0]);
@@ -390,6 +399,20 @@ mod tests {
         assert_ne!(
             certify(&destination, CommitSeq(11)).digest,
             certify(&source, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn destination_label_changes_digest() {
+        let unlabeled = plan(7);
+        let mut labeled = unlabeled.clone();
+        labeled.dst_label = Some(fgdb_delta_types::LabelId(3));
+
+        assert_ne!(
+            certify(&labeled, CommitSeq(11)).digest,
+            certify(&unlabeled, CommitSeq(11)).digest,
+            "a destination label filter changes which rows are returned, \
+             so the certificate must not collide with the unlabeled plan"
         );
     }
 

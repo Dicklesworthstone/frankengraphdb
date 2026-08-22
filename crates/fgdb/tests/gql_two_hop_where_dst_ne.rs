@@ -111,13 +111,12 @@ fn two_hop_far_end_inequality_keeps_the_unequal_chain() {
             "!= aliases <>: the k=1 chain fails and the no-k far end stays OUT"
         );
 
-        for off_grammar in ["MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a"] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        let off_grammar = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a";
+        let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm: {err:?}"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

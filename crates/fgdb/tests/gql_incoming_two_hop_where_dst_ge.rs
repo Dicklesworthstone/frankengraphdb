@@ -137,18 +137,24 @@ fn incoming_two_hop_far_end_greater_equal_keeps_boundary_and_greater_origins() {
             "only the far end with k=2 differs from 1"
         );
 
-        // The remaining refusals: the unlanded comparator and the RETURN a
-        // projection on the incoming chain.
-        for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN a",
-        ] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // The <= comparator landed after this suite froze (see the dst_le
+        // suite); it executes and keeps missing-k OUT. The RETURN a
+        // projection on the incoming chain stays typed-Parse.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed le comparator executes"),
+            vec![VId(3)],
+            "only the k=1 far end is at or below 1"
+        );
+        let off_grammar = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN a";
+        let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm: {err:?}"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

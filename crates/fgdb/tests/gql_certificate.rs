@@ -15,6 +15,7 @@
 //!    -> Result<GqlPlanCertificate, GqlError>`
 //! - `GqlPlanCertificate { snapshot_seq: CommitSeq, digest: Digest }`,
 //!   comparable with `==`.
+//!
 //! Until that lands this file fails to compile — deliberately. It is the
 //! executable acceptance criteria; do not weaken it to make it compile.
 //!

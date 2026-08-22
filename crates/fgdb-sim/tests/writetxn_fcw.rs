@@ -103,7 +103,7 @@ fn overlapping_write_txns_are_fcw_and_abort_is_trace_free() {
             .write(&mut database, property_update(33))
             .expect("prepare update that will be aborted");
         assert_eq!(txn_cx.outstanding_obligations(), 1);
-        let _ = aborted.abort();
+        aborted.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
         assert_eq!(
             database.frontier().expect("abort leaves handle readable"),

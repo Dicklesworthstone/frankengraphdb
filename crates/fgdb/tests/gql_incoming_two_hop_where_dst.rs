@@ -120,13 +120,48 @@ fn incoming_two_hop_far_end_equality_keeps_the_matching_origin() {
             "only the far end with k=2 differs from 1"
         );
 
-        // Equality and inequality with RETURN c graduate. Every ordered
-        // incoming comparator and the RETURN a projections stay Parse.
+        // Equality and inequality with RETURN c graduate, and so do the
+        // ordered far-end comparators once they landed (the dedicated
+        // dst_lt/le/ge suites pin their kernels); missing-k stays OUT under
+        // every ordered comparator. What stays typed-Parse is the RETURN a
+        // projection on the incoming chain.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c",
+                &bind,
+            )
+            .expect("ordered far-end gt executes"),
+            vec![VId(6)],
+            "only the k=9 far end exceeds 1"
+        );
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
+                &bind,
+            )
+            .expect("ordered far-end lt executes"),
+            Vec::<VId>::new(),
+            "no far end sorts below 1"
+        );
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
+                &bind,
+            )
+            .expect("ordered far-end ge executes"),
+            vec![VId(3), VId(6)],
+            "both keyed far ends are at or above 1; missing-k is OUT"
+        );
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
+                &bind,
+            )
+            .expect("ordered far-end le executes"),
+            vec![VId(3)],
+            "only the k=1 far end is at or below 1"
+        );
         for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k > 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a",
             "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a",
         ] {

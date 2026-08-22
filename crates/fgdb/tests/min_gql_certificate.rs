@@ -15,6 +15,7 @@
 //! - `GqlCertificate { snapshot_seq: CommitSeq, statement_digest, bind_digest }`,
 //!   comparable with `==` (a certificate that cannot be compared cannot be
 //!   audited).
+//!
 //! Until that lands this file fails to compile — deliberately. It is the
 //! executable acceptance criteria; do not weaken it to make it compile.
 //!

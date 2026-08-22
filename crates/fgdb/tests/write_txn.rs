@@ -72,7 +72,7 @@ where
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// Seed one live vertex carrying `PROP = 0`, so every conflict below is a

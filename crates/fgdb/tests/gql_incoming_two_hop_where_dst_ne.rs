@@ -131,20 +131,43 @@ fn incoming_two_hop_far_end_inequality_keeps_the_unequal_origin() {
             "only the far end with k=2 differs from 1"
         );
 
-        // The remaining refusals: the still-unlanded ordered comparators
-        // and the RETURN a projection on the incoming chain.
-        for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a",
-        ] {
-            let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
-            assert!(
-                matches!(err, GqlError::Parse(_)),
-                "{off_grammar:?} must be the typed parse arm: {err:?}"
-            );
-        }
+        // The ordered comparators landed after this suite froze (the
+        // dst_lt/le/ge suites pin their kernels). On this fixture (k=1,
+        // k=9, keyless) they execute with missing-k OUT under each; the
+        // RETURN a projection stays typed-Parse.
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k < 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed lt comparator executes"),
+            Vec::<VId>::new(),
+            "no far end sorts below 1"
+        );
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k >= 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed ge comparator executes"),
+            vec![VId(3), VId(6)],
+            "both keyed far ends are at or above 1"
+        );
+        assert_eq!(
+            db.execute_gql(
+                "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN c",
+                &bind,
+            )
+            .expect("the landed le comparator executes"),
+            vec![VId(3)],
+            "only the k=1 far end is at or below 1"
+        );
+        let off_grammar = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <> 1 RETURN a";
+        let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "{off_grammar:?} must be the typed parse arm: {err:?}"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

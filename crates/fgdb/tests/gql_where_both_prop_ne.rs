@@ -97,13 +97,19 @@ fn both_end_inequality_composes_and_missing_k_is_out() {
             vec![VId(6)],
             "nje.18 sibling lock: k<>1 AND m=9 keeps dest 6"
         );
-        let c_style = db
-            .execute_gql(
+        // The nje.57+ tranche landed the C-style != alias in AND
+        // conjunctions, so the spelling now answers like its <> sibling:
+        // chains 1 and 2 fail a.k != 1, chain 3 fails b.m <> 9, and only
+        // chain 4 (k=0 -> m=0) survives.
+        assert_eq!(
+            db.execute_gql(
                 "MATCH (a)-[:R]->(b) WHERE a.k != 1 AND b.m <> 9 RETURN b",
                 &bind,
             )
-            .expect_err("the C-style != spelling is outside the grammar");
-        assert!(matches!(c_style, GqlError::Parse(_)));
+            .expect("the landed C-style != conjunction executes"),
+            vec![VId(8)],
+            "the k=0 to m=0 chain is the sole survivor"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }
