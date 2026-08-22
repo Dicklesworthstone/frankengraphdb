@@ -1484,11 +1484,14 @@ fn root_slot_fsync_lie_is_detected_fenced_and_recovered_from_chronicle() {
         let cx = &cx;
         create_genesis(cx, &dir).await;
 
-        // A database write performs D1, D2, then the root-slot barrier. The
-        // event-path assertion below pins that arithmetic and fails loudly if
-        // another eligible sync is introduced ahead of the slot.
+        // A database write performs D1, D2, the BlockStore creation
+        // barriers (publication-lock inode, staging file, blocks directory
+        // - fgdb-tvg8.1), then the root-slot barrier: six eligible syncs.
+        // At(6) lies exactly once, on the root slot, so the event-path
+        // assertions below pin that arithmetic and fail loudly if another
+        // eligible sync is introduced anywhere ahead of the slot.
         let vfs = FaultVfs::unix(FaultPlan {
-            fsync_lie: Trigger::Nth(3),
+            fsync_lie: Trigger::At(6),
             ..FaultPlan::faultless()
         });
         let mut db = Database::open_with_vfs(cx, vfs.clone(), &dir, engine_keys())
@@ -1806,14 +1809,17 @@ fn root_slot_cancellation_leaves_the_borrowed_handle_fenced_and_recoverable() {
         let cx = &cx;
         create_genesis(cx, &dir).await;
 
-        // Four Chronicle durability boundaries precede derived publication
-        // for this reopened database; the root-slot barrier is fifth. The
-        // pending-path observation below independently pins that ordinal to
-        // manifest.root before the write future is dropped, so protocol drift
-        // cannot silently cancel a different operation.
+        // Ten durability boundaries precede derived publication for this
+        // reopened database: capsule D1, capsules directory, commit-log D2,
+        // database directory, then three BlockStore publication barriers
+        // (staging file plus blocks directory, fgdb-tvg8.1); the root-slot
+        // barrier is eleventh. The pending-path observation below
+        // independently pins that ordinal to manifest.root before the write
+        // future is dropped, so protocol drift cannot silently cancel a
+        // different operation.
         let vfs = FaultVfs::unix_with_clock(
             FaultPlan {
-                latency: Trigger::Nth(5),
+                latency: Trigger::At(11),
                 latency_micros: 60_000_000,
                 ..FaultPlan::faultless()
             },
@@ -2164,8 +2170,11 @@ fn a_lied_commit_rolls_back_strata_and_chronicle_together() {
                 .expect("durable baseline commit");
         }
 
-        // SESSION 2 — every sync lies. The engine believes this second commit
-        // is durable end to end; not one byte of it is.
+        // SESSION 2 — every sync lies. Since the BlockStore moved onto the
+        // Vfs seam (fgdb-tvg8.1) the root-slot evidence reread catches the
+        // unobservable generation during the write itself: the writer no
+        // longer stays blind, it returns CommittedNeedsRecovery naming the
+        // exact stage. Not one byte of the commit is durable either way.
         let vfs = FaultVfs::unix(FaultPlan {
             fsync_lie: Trigger::Always,
             ..FaultPlan::faultless()
@@ -2177,24 +2186,41 @@ fn a_lied_commit_rolls_back_strata_and_chronicle_together() {
             let mut batch = WriteBatch::new(KNOWS);
             batch.create_vertex(VId(3), vec![], vec![]);
             batch.add_edge(EId(2), VId(1), VId(3), vec![]);
-            db.write(cx, batch)
+            let error = db
+                .write(cx, batch)
                 .await
-                .expect("a lied-to writer cannot observe its own loss");
+                .expect_err("the root-slot evidence reread must expose the lies");
+            let WriteError::CommittedNeedsRecovery { recovery, .. } = &error else {
+                panic!(
+                    "a fully lying plane must fence as recovery-required, \
+                        not {error:?}"
+                );
+            };
+            assert_eq!(recovery.durable_frontier.0, 2);
+            assert_eq!(recovery.published_frontier.0, 1);
+            assert_eq!(
+                recovery.failed_stage,
+                DerivedPublicationStage::PublishRootSlot
+            );
         }
-
-        // THE WITNESS THIS SEAM EXISTS FOR: the lie landed on a Strata block
-        // file's own content sync — a boundary no injected filesystem could
-        // reach while the store wrote through `std::fs` — and on Chronicle's
-        // side of the same plan.
+        // THE WITNESS THIS SEAM EXISTS FOR: the plan bit BOTH planes. The
+        // Strata side is bitten at the BlockStore publication boundary (the
+        // staged block content sync inside the blocks directory - reached
+        // before root publication, which is where detection now fires), and
+        // Chronicle's files are bitten by the same plan.
         let lies: Vec<_> = vfs
             .events()
             .into_iter()
             .filter(|event| matches!(event.kind, FaultKind::FsyncLie { .. }))
             .collect();
         assert!(
-            lies.iter()
-                .any(|event| event.path.extension().is_some_and(|ext| ext == "block")),
-            "no fsync lie reached a Strata block content sync: {lies:?}"
+            lies.iter().any(|event| {
+                event
+                    .path
+                    .components()
+                    .any(|part| part.as_os_str() == fgdb_strata::store::BLOCK_DIR)
+            }),
+            "no fsync lie reached a Strata publication sync: {lies:?}"
         );
         assert!(
             lies.iter().any(|event| {
