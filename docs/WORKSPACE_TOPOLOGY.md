@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 70 (19 active, 50 planned, 1 reserved)
+* **Crates:** 70 (20 active, 49 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -101,7 +101,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
-| 1 | `fgdb-gql` | planned | `forbid` | all | W5 | fgdb-w5-parsers-nje | syntax only |
+| 1 | `fgdb-gql` | active | `forbid` | all | W5 | fgdb-w5-parsers-nje | syntax only |
 | 2 | `fgdb-cypher` | planned | `forbid` | all | W5 | fgdb-w5-parsers-nje | syntax only |
 | 3 | `fgdb-bind` | planned | `forbid` | all | W5 | fgdb-w5-binder-bt5 | Name resolution, typing, and parameter binding for both surfaces. |
 | 4 | `fgdb-algebra` | planned | `forbid` | all | W5 | fgdb-w5-gla-algebra-lj2 | The complete graph logical algebra and its answer contracts. |
@@ -383,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:9b99cb9e4eb0f215` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:e365cf08c82c2750` — every normative decision, prose excluded.
