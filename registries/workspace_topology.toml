@@ -108,8 +108,8 @@ embedded_source_blocks = [
 # without moving these is schema drift, not an edit.
 layer_count = 14
 crate_count = 70
-active_crate_count = 20
-planned_crate_count = 49
+active_crate_count = 21
+planned_crate_count = 48
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -129,7 +129,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:e365cf08c82c2750"
+semantic_contract_hash = "fnv1a64:f8c73256905a48d7"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1665,12 +1665,12 @@ layer_position = 4
 role = "The §17 bench harness: one binary per gate with committed baselines."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "test_only"
 posture_basis = "verification_layer"
 owner = "verification_ladder"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-p95p"
+manifest_dir = "crates/fgdb-bench"
 
 [[crate]]
 name = "fgdb-conformance"

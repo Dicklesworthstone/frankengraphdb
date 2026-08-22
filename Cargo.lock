@@ -491,6 +491,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgdb-bench"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fgdb",
+ "fgdb-delta-types",
+ "fgdb-types",
+]
+
+[[package]]
 name = "fgdb-bigint"
 version = "0.0.1"
 

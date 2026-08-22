@@ -1,0 +1,17 @@
+[package]
+name = "fgdb-bench"
+version = "0.0.1"
+edition = "2024"
+description = "The §17 bench harness (plan §17): adversarial shapes against the real durable spine path, publishing honest machine-local baselines. Every shape asserts the answers it measures against, and no number published here is an activated EmpiricalGate until §17's benchmark manifest pins host, filesystem, and workload. Bead fgdb-p95p."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The production runtime authority, pinned at the same revision the spine pins:
+# the harness measures the shipping configuration, not a lab-scheduler proxy.
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "c17e51931f3223d55bd4961ff13eb3c5c4022fdf", default-features = false }
+fgdb = { path = "../fgdb" }
+fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-types = { path = "../fgdb-types" }

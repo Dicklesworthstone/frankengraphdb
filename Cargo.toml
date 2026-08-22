@@ -33,6 +33,7 @@ members = [
     "crates/fgdb-unsafe-arena",
     "crates/fgdb-unsafe-simd",
     "crates/fgdb-unsafe-vfs",
+    "crates/fgdb-bench",
     "tools/registry-check",
 ]
 
