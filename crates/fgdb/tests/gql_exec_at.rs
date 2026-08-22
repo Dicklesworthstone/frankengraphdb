@@ -81,10 +81,13 @@ fn the_pinned_seq_answer_is_unmoved_by_later_commits() {
         widen.create_vertex(VId(3), vec![], vec![]);
         widen.create_vertex(VId(5), vec![], vec![]);
         widen.add_edge(EId(11), VId(3), VId(5), vec![]);
-        db.write(cx, widen).await.expect("the widening commit lands");
+        db.write(cx, widen)
+            .await
+            .expect("the widening commit lands");
 
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("live MATCH executes"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("live MATCH executes"),
             vec![VId(2), VId(5)],
             "the live answer holds both destinations, CGSE-sorted"
         );
@@ -95,7 +98,8 @@ fn the_pinned_seq_answer_is_unmoved_by_later_commits() {
             "as of the captured frontier the second edge does not exist yet"
         );
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("live MATCH re-executes"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("live MATCH re-executes"),
             vec![VId(2), VId(5)],
             "the pinned query did not disturb the live answer"
         );
@@ -116,7 +120,11 @@ fn off_grammar_at_a_pinned_seq_is_a_typed_parse_error() {
         seed.create_vertex(VId(1), vec![], vec![]);
         db.write(cx, seed).await.expect("seed commits");
 
-        for off_grammar in ["MATCH (a) RETURN a", "MATCH (a)-[:R]->(b) RETURN b EXTRA", ""] {
+        for off_grammar in [
+            "MATCH (a) RETURN a",
+            "MATCH (a)-[:R]->(b) RETURN b EXTRA",
+            "",
+        ] {
             let err = db
                 .execute_gql_at(off_grammar, &bind_r(), genesis)
                 .expect_err(off_grammar);

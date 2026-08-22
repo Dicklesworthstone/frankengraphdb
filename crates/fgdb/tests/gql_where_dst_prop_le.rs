@@ -93,7 +93,9 @@ fn dest_less_or_equal_includes_the_boundary_and_strict_does_not() {
         let dir = scratch("dst-le");
         let db = seeded(cx, &dir).await;
 
-        let le = db.execute_gql(LE_A, &bind_rk()).expect("WHERE b.k <= 1 executes");
+        let le = db
+            .execute_gql(LE_A, &bind_rk())
+            .expect("WHERE b.k <= 1 executes");
         assert_eq!(
             le,
             vec![VId(1), VId(5)],
@@ -110,22 +112,26 @@ fn dest_less_or_equal_includes_the_boundary_and_strict_does_not() {
         );
 
         assert_eq!(
-            db.execute_gql(LT_A, &bind_rk()).expect("WHERE b.k < 1 executes"),
+            db.execute_gql(LT_A, &bind_rk())
+                .expect("WHERE b.k < 1 executes"),
             vec![VId(5)],
             "the strict sibling excludes the boundary on the same fixture"
         );
         assert_eq!(
-            db.execute_gql(EQ_A, &bind_rk()).expect("WHERE b.k = 1 executes"),
+            db.execute_gql(EQ_A, &bind_rk())
+                .expect("WHERE b.k = 1 executes"),
             vec![VId(1)],
             "equality answers the boundary carrier's source alone"
         );
         assert_eq!(
-            db.execute_gql(GT_A, &bind_rk()).expect("WHERE b.k > 1 executes"),
+            db.execute_gql(GT_A, &bind_rk())
+                .expect("WHERE b.k > 1 executes"),
             vec![VId(3)],
             "strict greater is unmoved beside the new spelling"
         );
         assert_eq!(
-            db.execute_gql(PLAIN_A, &bind_rk()).expect("unfiltered executes"),
+            db.execute_gql(PLAIN_A, &bind_rk())
+                .expect("unfiltered executes"),
             vec![VId(1), VId(3), VId(5), VId(7)],
             "without WHERE every source answers"
         );

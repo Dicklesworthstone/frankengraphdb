@@ -35,7 +35,10 @@ fn keys() -> DatabaseKeys {
 /// Pid-qualified because concurrent panes share `/tmp`; nothing is removed
 /// (rule 1 carves out no exception for test code).
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("fgdb-node-label-cert-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "fgdb-node-label-cert-{}-{name}",
+        std::process::id()
+    ))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T

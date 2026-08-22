@@ -15,6 +15,7 @@
 //! `as_of` like `execute_gql_at`):
 //! - `Database::execute_gql_certified_at(&self, src, &RelationBind,
 //!    CommitSeq) -> Result<(Vec<VId>, GqlCertificate), GqlError>`
+//!
 //! Until it lands this file fails to compile — deliberately; do not weaken
 //! it to make it compile.
 
@@ -83,9 +84,14 @@ fn the_certified_at_certificate_names_the_as_of_seq_not_the_frontier() {
         widen.create_vertex(VId(3), vec![], vec![]);
         widen.create_vertex(VId(5), vec![], vec![]);
         widen.add_edge(EId(11), VId(3), VId(5), vec![]);
-        db.write(cx, widen).await.expect("the widening commit lands");
+        db.write(cx, widen)
+            .await
+            .expect("the widening commit lands");
         let live_frontier = db.frontier().expect("healthy frontier");
-        assert_ne!(s1, live_frontier, "the widening commit advanced the frontier");
+        assert_ne!(
+            s1, live_frontier,
+            "the widening commit advanced the frontier"
+        );
 
         let (pinned_rows, pinned_cert) = db
             .execute_gql_certified_at(PINNED, &bind_r(), s1)
@@ -104,7 +110,11 @@ fn the_certified_at_certificate_names_the_as_of_seq_not_the_frontier() {
         let (live_rows, live_cert) = db
             .execute_gql_certified(PINNED, &bind_r())
             .expect("the live certified MATCH executes");
-        assert_eq!(live_rows, vec![VId(2), VId(5)], "the live answer is widened");
+        assert_eq!(
+            live_rows,
+            vec![VId(2), VId(5)],
+            "the live answer is widened"
+        );
         assert_eq!(
             live_cert.snapshot_seq, live_frontier,
             "the live certificate names the live frontier"
@@ -134,7 +144,11 @@ fn off_grammar_certified_at_is_a_typed_parse_error_with_no_certificate() {
         seed.create_vertex(VId(1), vec![], vec![]);
         db.write(cx, seed).await.expect("seed commits");
 
-        for off_grammar in ["MATCH (a) RETURN a", "MATCH (a)-[:R]->(b) RETURN b EXTRA", ""] {
+        for off_grammar in [
+            "MATCH (a) RETURN a",
+            "MATCH (a)-[:R]->(b) RETURN b EXTRA",
+            "",
+        ] {
             let err = db
                 .execute_gql_certified_at(off_grammar, &bind_r(), genesis)
                 .expect_err(off_grammar);

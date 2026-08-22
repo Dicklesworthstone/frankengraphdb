@@ -147,9 +147,7 @@ fn two_hop_far_end_less_or_equal_includes_the_boundary_chain() {
             "!= aliases <>: k=9 and k=0 both differ from 1; no-k stays OUT"
         );
 
-        for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN a",
-        ] {
+        for off_grammar in ["MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k <= 1 RETURN a"] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),

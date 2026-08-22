@@ -33,9 +33,9 @@ const UN_DST_BANG_NE: &str = "MATCH (a)-[:R]-(b) WHERE b.k != 1 RETURN b";
 /// derivation: the `<>` law verbatim, because `!=` is an alias.
 fn reference_unequal_incident_endpoints(graph: &ReferenceGraph) -> Vec<VId> {
     let carrier = |vid: VId| {
-        graph.vertex(vid).is_some_and(|vertex| {
-            matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1)
-        })
+        graph.vertex(vid).is_some_and(
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+        )
     };
     let mut rows = Vec::new();
     for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {
@@ -128,10 +128,7 @@ fn undirected_dest_bang_inequality_equals_its_reference() {
              k=9 carrier answers as the flipped binding's b — a dst-only \
              kernel misses 7"
         );
-        assert!(
-            rows.contains(&VId(4)),
-            "the unequal incident carrier is IN"
-        );
+        assert!(rows.contains(&VId(4)), "the unequal incident carrier is IN");
         assert!(
             !rows.contains(&VId(6)),
             "the keyless edge contributes nothing — missing k is not \

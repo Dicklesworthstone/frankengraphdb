@@ -11,10 +11,8 @@ fn source_property_less_or_equal_includes_boundary_without_dirty_reads() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-where-prop-le-overlay-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-where-prop-le-overlay-{}", std::process::id()));
         let relation = RelationId(1);
         let key = PropertyKeyId(7);
         let mut db = Database::create(

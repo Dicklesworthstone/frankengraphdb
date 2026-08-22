@@ -403,7 +403,9 @@ pub fn load_config(path: &Path) -> Result<LintConfig, LintError> {
         let files = get_str_array(t, "files", &ctx)?;
         if files.is_empty() {
             return Err(LintError {
-                msg: format!("{ctx}: files is empty — a path claim bound to nothing checks nothing"),
+                msg: format!(
+                    "{ctx}: files is empty — a path claim bound to nothing checks nothing"
+                ),
             });
         }
         let mut seen_files = BTreeSet::new();

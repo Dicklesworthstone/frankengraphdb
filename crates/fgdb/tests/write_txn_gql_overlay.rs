@@ -14,6 +14,7 @@
 //! - `WriteTxn::execute_gql(&self, &Database<V>, src, &RelationBind)` → the
 //!   same `Result<Vec<VId>, GqlError>` shape `Database::execute_gql` has,
 //!   answered from pinned basis + this txn's staged batches, CGSE-sorted.
+//!
 //! Until it lands this file fails to compile — deliberately; do not weaken
 //! it to make it compile.
 
@@ -63,7 +64,7 @@ fn bind_r() -> RelationBind {
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// One committed `:R` edge `VId(1) -> VId(2)`, so the base MATCH already has
@@ -100,7 +101,8 @@ fn staged_edge_is_matched_by_the_txn_and_not_by_the_base() {
         let mut db = seeded(&commit, &dir).await;
 
         let mut txn = db.begin(&txn_cx).expect("txn begins");
-        txn.write(&mut db, staged_edge_batch()).expect("stages the edge");
+        txn.write(&mut db, staged_edge_batch())
+            .expect("stages the edge");
 
         let overlay = txn
             .execute_gql(&db, PINNED, &bind_r())
@@ -111,7 +113,9 @@ fn staged_edge_is_matched_by_the_txn_and_not_by_the_base() {
             "the overlay MATCH sees the committed destination AND the staged \
              one, CGSE-sorted"
         );
-        let base = db.execute_gql(PINNED, &bind_r()).expect("the base MATCH executes");
+        let base = db
+            .execute_gql(PINNED, &bind_r())
+            .expect("the base MATCH executes");
         assert_eq!(
             base,
             vec![VId(2)],
@@ -134,7 +138,8 @@ fn aborted_staged_edge_never_reaches_the_base_match() {
             let mut db = seeded(&commit, &dir).await;
 
             let mut txn = db.begin(&txn_cx).expect("txn begins");
-            txn.write(&mut db, staged_edge_batch()).expect("stages the edge");
+            txn.write(&mut db, staged_edge_batch())
+                .expect("stages the edge");
             assert!(
                 txn.execute_gql(&db, PINNED, &bind_r())
                     .expect("the txn's MATCH executes")
@@ -144,16 +149,20 @@ fn aborted_staged_edge_never_reaches_the_base_match() {
             txn.abort();
 
             assert_eq!(
-                db.execute_gql(PINNED, &bind_r()).expect("base MATCH executes"),
+                db.execute_gql(PINNED, &bind_r())
+                    .expect("base MATCH executes"),
                 vec![VId(2)],
                 "the aborted edge is not in the shared answer"
             );
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("executes after reopen"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("executes after reopen"),
             vec![VId(2)],
             "the aborted edge left no durable trace for MATCH to find"
         );
@@ -173,7 +182,8 @@ fn committed_staged_edge_joins_the_base_match_at_one_sequence() {
             let before = db.frontier().expect("healthy frontier");
 
             let mut txn = db.begin(&txn_cx).expect("txn begins");
-            txn.write(&mut db, staged_edge_batch()).expect("stages the edge");
+            txn.write(&mut db, staged_edge_batch())
+                .expect("stages the edge");
             let seq = txn
                 .commit(&mut db, &commit)
                 .await
@@ -185,15 +195,19 @@ fn committed_staged_edge_joins_the_base_match_at_one_sequence() {
             );
 
             assert_eq!(
-                db.execute_gql(PINNED, &bind_r()).expect("base MATCH executes"),
+                db.execute_gql(PINNED, &bind_r())
+                    .expect("base MATCH executes"),
                 vec![VId(2), VId(9)],
                 "after commit the shared MATCH serves the new destination"
             );
         }
 
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("executes after reopen"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("executes after reopen"),
             vec![VId(2), VId(9)],
             "the committed edge is durable for the language surface too"
         );

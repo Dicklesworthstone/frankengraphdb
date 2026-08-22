@@ -78,7 +78,9 @@ fn the_labeled_certified_at_pins_the_s1_answer_and_names_s1() {
         widen.create_vertex(VId(5), vec![PERSON], vec![]);
         widen.create_vertex(VId(6), vec![], vec![]);
         widen.add_edge(EId(12), VId(5), VId(6), vec![]);
-        db.write(cx, widen).await.expect("the post-S1 :Person source lands");
+        db.write(cx, widen)
+            .await
+            .expect("the post-S1 :Person source lands");
 
         let (pinned_rows, pinned_cert) = db
             .execute_gql_certified_at(LABELED_B, &bind_r_person(), s1)

@@ -33,9 +33,9 @@ const UN_BANG_NE: &str = "MATCH (a)-[:R]-(b) WHERE a.k != 1 RETURN b";
 /// key out, inside the derivation.
 fn reference_other_endpoints_of_unequal_carriers(graph: &ReferenceGraph) -> Vec<VId> {
     let carrier = |vid: VId| {
-        graph.vertex(vid).is_some_and(|vertex| {
-            matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1)
-        })
+        graph.vertex(vid).is_some_and(
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+        )
     };
     let mut rows = Vec::new();
     for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {

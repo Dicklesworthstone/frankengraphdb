@@ -43,7 +43,10 @@ async fn seeded_vertices(cx: &fgdb_types::context::CommitCx, dir: &PathBuf) -> D
     let mut seed = WriteBatch::new(R);
     seed.create_vertex(VId(1), vec![], vec![]);
     seed.create_vertex(VId(2), vec![], vec![]);
-    database.write(cx, seed).await.expect("seed vertices commit");
+    database
+        .write(cx, seed)
+        .await
+        .expect("seed vertices commit");
     database
 }
 
@@ -89,11 +92,21 @@ fn staged_edge_appears_only_in_transaction_in_neighbours_and_abort_discards_it()
 
             transaction.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
-            assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+            assert_eq!(
+                database.frontier().expect("abort leaves handle healthy"),
+                frontier_before
+            );
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert!(reopened.in_neighbours(VId(2), R).expect("reopen incoming").is_empty());
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert!(
+            reopened
+                .in_neighbours(VId(2), R)
+                .expect("reopen incoming")
+                .is_empty()
+        );
         assert!(reopened.edge(EDGE).expect("reopen staged edge").is_none());
     });
 }
@@ -129,13 +142,27 @@ fn staged_edge_deletion_empties_in_neighbours_and_commits_once() {
                 .commit(&mut database, &commit_cx)
                 .await
                 .expect("commit staged deletion");
-            assert_eq!(committed.0, before.0 + 1, "one transaction consumes one sequence");
+            assert_eq!(
+                committed.0,
+                before.0 + 1,
+                "one transaction consumes one sequence"
+            );
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(reopened.frontier().expect("healthy reopened frontier"), committed);
-        assert!(reopened.in_neighbours(VId(2), R).expect("reopen incoming").is_empty());
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            reopened.frontier().expect("healthy reopened frontier"),
+            committed
+        );
+        assert!(
+            reopened
+                .in_neighbours(VId(2), R)
+                .expect("reopen incoming")
+                .is_empty()
+        );
         assert!(reopened.edge(EDGE).expect("reopen deleted edge").is_none());
     });
 }
@@ -184,8 +211,15 @@ fn concurrent_deletion_of_observed_incoming_edge_aborts_reader_with_read_01() {
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert!(reopened.in_neighbours(VId(2), R).expect("reopen incoming").is_empty());
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert!(
+            reopened
+                .in_neighbours(VId(2), R)
+                .expect("reopen incoming")
+                .is_empty()
+        );
         assert!(reopened.edge(EDGE).expect("reopen deleted edge").is_none());
         assert!(
             reopened.vertex(VId(3)).expect("reopen vertex").is_none(),

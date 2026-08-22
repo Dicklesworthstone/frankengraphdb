@@ -1,9 +1,9 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, RelationId};
+use fgdb_types::VId;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::VId;
 
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(3);
@@ -21,10 +21,7 @@ fn keys() -> DatabaseKeys {
 fn node_only_as_of_excludes_later_labeled_vertex() {
     let ((), report) = run_async_under_lab(0x40_03, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-node-only-as-of-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fgdb-node-only-as-of-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

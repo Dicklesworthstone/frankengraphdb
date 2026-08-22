@@ -21,10 +21,8 @@ fn keys() -> DatabaseKeys {
 fn undirected_as_of_pins_incident_vertices() {
     let ((), report) = run_async_under_lab(0x34_02, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-undirected-as-of-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-undirected-as-of-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

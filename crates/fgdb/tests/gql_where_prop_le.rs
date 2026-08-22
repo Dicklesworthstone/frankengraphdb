@@ -94,7 +94,9 @@ fn less_or_equal_includes_the_boundary_and_strict_does_not() {
         let dir = scratch("le");
         let db = seeded(cx, &dir).await;
 
-        let le = db.execute_gql(LE_B, &bind_rk()).expect("WHERE a.k <= 1 executes");
+        let le = db
+            .execute_gql(LE_B, &bind_rk())
+            .expect("WHERE a.k <= 1 executes");
         assert_eq!(
             le,
             vec![VId(2), VId(6)],
@@ -112,28 +114,33 @@ fn less_or_equal_includes_the_boundary_and_strict_does_not() {
         );
 
         assert_eq!(
-            db.execute_gql(LT_B, &bind_rk()).expect("WHERE a.k < 1 executes"),
+            db.execute_gql(LT_B, &bind_rk())
+                .expect("WHERE a.k < 1 executes"),
             vec![VId(6)],
             "the strict sibling excludes the boundary on the same fixture"
         );
         assert_eq!(
-            db.execute_gql(EQ_B, &bind_rk()).expect("WHERE a.k = 1 executes"),
+            db.execute_gql(EQ_B, &bind_rk())
+                .expect("WHERE a.k = 1 executes"),
             vec![VId(2)],
             "equality answers the boundary carrier alone — <= is its union \
              with the strict <"
         );
         assert_eq!(
-            db.execute_gql(GT_B, &bind_rk()).expect("WHERE a.k > 1 executes"),
+            db.execute_gql(GT_B, &bind_rk())
+                .expect("WHERE a.k > 1 executes"),
             vec![VId(4)],
             "strict greater is unmoved beside the new spelling"
         );
         assert_eq!(
-            db.execute_gql(GE_B, &bind_rk()).expect("WHERE a.k >= 1 executes"),
+            db.execute_gql(GE_B, &bind_rk())
+                .expect("WHERE a.k >= 1 executes"),
             vec![VId(2), VId(4)],
             "non-strict greater is unmoved too — and <= is not its alias"
         );
         assert_eq!(
-            db.execute_gql(PLAIN_B, &bind_rk()).expect("unfiltered executes"),
+            db.execute_gql(PLAIN_B, &bind_rk())
+                .expect("unfiltered executes"),
             vec![VId(2), VId(4), VId(6), VId(8)],
             "without WHERE every dest answers"
         );

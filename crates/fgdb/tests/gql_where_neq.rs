@@ -82,23 +82,27 @@ fn the_inequality_drops_exactly_the_self_loop_rows() {
         let db = seeded(cx, &dir).await;
 
         assert_eq!(
-            db.execute_gql(PLAIN_B, &bind_r()).expect("unfiltered RETURN b executes"),
+            db.execute_gql(PLAIN_B, &bind_r())
+                .expect("unfiltered RETURN b executes"),
             vec![VId(2), VId(5)],
             "the self-loop's destination is a real row until a predicate \
              says otherwise"
         );
         assert_eq!(
-            db.execute_gql(NEQ_B, &bind_r()).expect("filtered RETURN b executes"),
+            db.execute_gql(NEQ_B, &bind_r())
+                .expect("filtered RETURN b executes"),
             vec![VId(2)],
             "a <> b drops the row whose bindings coincide — and only it"
         );
         assert_eq!(
-            db.execute_gql(NEQ_A, &bind_r()).expect("filtered RETURN a executes"),
+            db.execute_gql(NEQ_A, &bind_r())
+                .expect("filtered RETURN a executes"),
             vec![VId(1), VId(3)],
             "the loop's source vanishes from the other projection too"
         );
         assert_eq!(
-            db.execute_gql(NEQ_FLIPPED_B, &bind_r()).expect("flipped spelling executes"),
+            db.execute_gql(NEQ_FLIPPED_B, &bind_r())
+                .expect("flipped spelling executes"),
             vec![VId(2)],
             "b <> a filters identically: inequality is symmetric, not a \
              claim about which operand is the source"
@@ -119,7 +123,9 @@ fn the_remaining_off_grammar_is_a_typed_parse_error() {
             "MATCH (a)-[:R]->(b) WHERE a <> c RETURN b",
             "MATCH (a)-[:R]->(b) WHERE a.x <> b RETURN b",
         ] {
-            let err = db.execute_gql(off_grammar, &bind_r()).expect_err(off_grammar);
+            let err = db
+                .execute_gql(off_grammar, &bind_r())
+                .expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
                 "{off_grammar:?} must be the typed parse arm, got {err:?}"

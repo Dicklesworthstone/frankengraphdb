@@ -21,12 +21,13 @@ pub struct FirstCommitterWinsValidator {
 
 impl CommitValidator for FirstCommitterWinsValidator {
     fn validate(&mut self, draft: &CommitDraft<'_>) -> Result<(), ValidationRejection> {
-        let template = LogicalDeltaTemplate::decode_canonical(draft.capsule_plaintext).map_err(
-            |error| ValidationRejection {
-                law: FCW_LAW,
-                detail: format!("malformed logical delta template: {error:?}"),
-            },
-        )?;
+        let template =
+            LogicalDeltaTemplate::decode_canonical(draft.capsule_plaintext).map_err(|error| {
+                ValidationRejection {
+                    law: FCW_LAW,
+                    detail: format!("malformed logical delta template: {error:?}"),
+                }
+            })?;
 
         let mut touched = BTreeSet::new();
         for coordinate in template.coordinate_entries() {

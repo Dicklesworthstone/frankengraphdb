@@ -235,10 +235,8 @@ fn return_a_at_the_first_sequence_ignores_the_later_source() {
 fn return_a_sources_and_return_b_destinations_equal_reference() {
     let ((), report) = run_async_under_lab(0x96_01, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-return-src-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-return-src-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let mut database = Database::create(
             &commit_cx,
@@ -256,7 +254,10 @@ fn return_a_sources_and_return_b_destinations_equal_reference() {
         seed.add_edge(EId(1), VId(3), VId(10), vec![]);
         seed.add_edge(EId(2), VId(1), VId(20), vec![]);
         seed.add_edge(EId(3), VId(3), VId(20), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed R edges");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed R edges");
         let mut off = WriteBatch::new(off_relation);
         off.add_edge(EId(4), VId(2), VId(99), vec![]);
         database

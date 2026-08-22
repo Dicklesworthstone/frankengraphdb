@@ -83,7 +83,10 @@ fn aborted_edge_property_overlay_is_absent_from_reference_replay() {
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
-        assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+        assert_eq!(
+            database.frontier().expect("abort leaves handle healthy"),
+            frontier_before
+        );
         drop(database);
 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
@@ -99,7 +102,10 @@ fn aborted_edge_property_overlay_is_absent_from_reference_replay() {
             .expect("reference coordinate exists")
             .edge(EDGE)
             .expect("durable edge remains");
-        assert!(edge.props.get(&PROPERTY).is_none(), "aborted property is not durable");
+        assert!(
+            !edge.props.contains_key(&PROPERTY),
+            "aborted property is not durable"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -214,7 +220,11 @@ fn concurrent_property_change_of_observed_edge_aborts_and_replays_only_writer() 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
             .await
             .expect("independent oracle coordinator opens durable stream");
-        assert_eq!(coordinator.chain().len(), 2, "seed and property writer only");
+        assert_eq!(
+            coordinator.chain().len(),
+            2,
+            "seed and property writer only"
+        );
         let reference = replay(&commit_cx, &coordinator)
             .await
             .expect("durable stream replays into ReferenceDatabase")
@@ -223,7 +233,11 @@ fn concurrent_property_change_of_observed_edge_aborts_and_replays_only_writer() 
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(
-            graph.edge(EDGE).expect("edge remains durable").props.get(&PROPERTY),
+            graph
+                .edge(EDGE)
+                .expect("edge remains durable")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(33)),
             "B's edge property is durable"
         );

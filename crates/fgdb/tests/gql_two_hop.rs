@@ -94,7 +94,9 @@ fn return_c_answers_only_the_composed_destinations() {
         let dir = scratch("composed");
         let db = seeded(cx, &dir).await;
 
-        let rows = db.execute_gql(TWO_HOP_C, &bind_rs()).expect("two-hop RETURN c executes");
+        let rows = db
+            .execute_gql(TWO_HOP_C, &bind_rs())
+            .expect("two-hop RETURN c executes");
         assert_eq!(
             rows,
             vec![VId(4), VId(5)],
@@ -114,13 +116,15 @@ fn return_a_and_b_project_the_composed_endpoints() {
         let db = seeded(cx, &dir).await;
 
         assert_eq!(
-            db.execute_gql(TWO_HOP_A, &bind_rs()).expect("two-hop RETURN a executes"),
+            db.execute_gql(TWO_HOP_A, &bind_rs())
+                .expect("two-hop RETURN a executes"),
             vec![VId(1), VId(3)],
             "sources whose :R hop continues over :S — 1 qualifies through 2, \
              not through its dangling edge to 7"
         );
         assert_eq!(
-            db.execute_gql(TWO_HOP_B, &bind_rs()).expect("two-hop RETURN b executes"),
+            db.execute_gql(TWO_HOP_B, &bind_rs())
+                .expect("two-hop RETURN b executes"),
             vec![VId(2)],
             "the middle vertex: an :R destination that carries :S edges — \
              7 does not, 9 was never reached"
@@ -139,7 +143,8 @@ fn the_one_hop_statement_is_unmoved() {
         let db = seeded(cx, &dir).await;
 
         assert_eq!(
-            db.execute_gql(ONE_HOP_B, &bind_rs()).expect("one-hop RETURN b executes"),
+            db.execute_gql(ONE_HOP_B, &bind_rs())
+                .expect("one-hop RETURN b executes"),
             vec![VId(2), VId(7)],
             "the dangling :R destination answers in one hop, only the \
              composed statement excludes it"

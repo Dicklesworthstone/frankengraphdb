@@ -83,25 +83,37 @@ fn staged_delete_is_private_and_abort_restores_the_durable_edge() {
                 "transaction overlay omits the deleted destination"
             );
             assert!(
-                database.edge(EDGE).expect("base edge read succeeds").is_some(),
+                database
+                    .edge(EDGE)
+                    .expect("base edge read succeeds")
+                    .is_some(),
                 "base view still contains the durable edge"
             );
             assert_eq!(
-                database.neighbours(VId(1), R).expect("base neighbours read succeeds"),
+                database
+                    .neighbours(VId(1), R)
+                    .expect("base neighbours read succeeds"),
                 vec![VId(2)]
             );
 
             transaction.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
-            assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+            assert_eq!(
+                database.frontier().expect("abort leaves handle healthy"),
+                frontier_before
+            );
             assert!(database.edge(EDGE).expect("edge after abort").is_some());
             assert_eq!(
-                database.neighbours(VId(1), R).expect("neighbours after abort"),
+                database
+                    .neighbours(VId(1), R)
+                    .expect("neighbours after abort"),
                 vec![VId(2)]
             );
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert!(reopened.edge(EDGE).expect("reopen edge").is_some());
         assert_eq!(
             reopened.neighbours(VId(1), R).expect("reopen neighbours"),
@@ -124,7 +136,12 @@ fn committed_delete_consumes_one_sequence_and_survives_reopen() {
             transaction
                 .write(&mut database, delete_edge())
                 .expect("stage edge deletion");
-            assert!(transaction.edge(&database, EDGE).expect("overlay edge").is_none());
+            assert!(
+                transaction
+                    .edge(&database, EDGE)
+                    .expect("overlay edge")
+                    .is_none()
+            );
             assert!(
                 transaction
                     .neighbours(&database, VId(1), R)
@@ -136,15 +153,32 @@ fn committed_delete_consumes_one_sequence_and_survives_reopen() {
                 .commit(&mut database, &commit_cx)
                 .await
                 .expect("commit staged deletion");
-            assert_eq!(committed.0, before.0 + 1, "one transaction consumes one sequence");
-            assert_eq!(database.frontier().expect("healthy committed frontier"), committed);
+            assert_eq!(
+                committed.0,
+                before.0 + 1,
+                "one transaction consumes one sequence"
+            );
+            assert_eq!(
+                database.frontier().expect("healthy committed frontier"),
+                committed
+            );
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(reopened.frontier().expect("healthy reopened frontier"), committed);
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            reopened.frontier().expect("healthy reopened frontier"),
+            committed
+        );
         assert!(reopened.edge(EDGE).expect("reopen edge").is_none());
-        assert!(reopened.neighbours(VId(1), R).expect("reopen neighbours").is_empty());
+        assert!(
+            reopened
+                .neighbours(VId(1), R)
+                .expect("reopen neighbours")
+                .is_empty()
+        );
     });
 }
 
@@ -191,9 +225,16 @@ fn concurrent_delete_of_observed_adjacency_aborts_reader_with_read_01() {
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert!(reopened.edge(EDGE).expect("reopen edge").is_none());
-        assert!(reopened.neighbours(VId(1), R).expect("reopen neighbours").is_empty());
+        assert!(
+            reopened
+                .neighbours(VId(1), R)
+                .expect("reopen neighbours")
+                .is_empty()
+        );
         assert!(
             reopened.vertex(VId(3)).expect("reopen vertex").is_none(),
             "READ-01 abort leaves no disjoint write residue"

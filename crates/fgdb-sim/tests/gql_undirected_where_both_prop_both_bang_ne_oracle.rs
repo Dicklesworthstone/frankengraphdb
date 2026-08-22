@@ -34,9 +34,9 @@ const FILTERED: &str = "MATCH (a)-[:R]-(b) WHERE a.k != 1 AND b.m != 9 RETURN b"
 /// derivation: the `<>`/`<>` law verbatim, because `!=` is an alias.
 fn reference_other_endpoints(graph: &ReferenceGraph) -> Vec<VId> {
     let holds = |vid: VId, key: PropertyKeyId, bad: i64| {
-        graph.vertex(vid).is_some_and(|vertex| {
-            matches!(vertex.props.get(&key), Some(CanonicalScalar::Int(v)) if *v != bad)
-        })
+        graph.vertex(vid).is_some_and(
+            |vertex| matches!(vertex.props.get(&key), Some(CanonicalScalar::Int(v)) if *v != bad),
+        )
     };
     let mut rows = Vec::new();
     for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {

@@ -79,7 +79,10 @@ fn aborted_edges_overlay_replays_only_the_seed_edge() {
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
-        assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+        assert_eq!(
+            database.frontier().expect("abort leaves handle healthy"),
+            frontier_before
+        );
         drop(database);
 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
@@ -126,7 +129,12 @@ fn committed_edges_overlay_deletion_replays_an_empty_edge_set() {
         transaction
             .write(&mut database, delete)
             .expect("stage edge deletion");
-        assert!(transaction.edges(&database).expect("overlay edges").is_empty());
+        assert!(
+            transaction
+                .edges(&database)
+                .expect("overlay edges")
+                .is_empty()
+        );
         let committed = transaction
             .commit(&mut database, &commit_cx)
             .await
@@ -147,7 +155,10 @@ fn committed_edges_overlay_deletion_replays_an_empty_edge_set() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(graph.iter_edges().count(), 0);
-        assert!(graph.edge(EId(10)).is_none(), "committed deletion is durable");
+        assert!(
+            graph.edge(EId(10)).is_none(),
+            "committed deletion is durable"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -182,11 +193,7 @@ fn concurrent_mutation_of_edge_observed_by_edges_aborts_and_replays_only_writer(
             .write(&mut database, disjoint)
             .expect("reader stages disjoint vertex");
         let mut property = WriteBatch::new(R);
-        property.set_edge_property(
-            EId(10),
-            PROPERTY,
-            Some(CanonicalScalar::Int(33)),
-        );
+        property.set_edge_property(EId(10), PROPERTY, Some(CanonicalScalar::Int(33)));
         writer
             .write(&mut database, property)
             .expect("writer stages observed edge mutation");
@@ -220,7 +227,11 @@ fn concurrent_mutation_of_edge_observed_by_edges_aborts_and_replays_only_writer(
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(
-            graph.edge(EId(10)).expect("edge remains durable").props.get(&PROPERTY),
+            graph
+                .edge(EId(10))
+                .expect("edge remains durable")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(33)),
             "B's edge mutation is durable"
         );

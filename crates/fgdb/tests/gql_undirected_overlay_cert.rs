@@ -74,7 +74,8 @@ fn staged_incidence_changes_the_answer_and_not_the_certificate() {
         let mut staged = WriteBatch::new(R);
         staged.create_vertex(VId(3), vec![], vec![]);
         staged.add_edge(EId(11), VId(3), VId(2), vec![]);
-        txn.write(&mut db, staged).expect("stages the second incidence");
+        txn.write(&mut db, staged)
+            .expect("stages the second incidence");
 
         // The answers, at the same instant: the staged edge makes VId(2) a
         // two-way hub for the txn (so every endpoint appears both ways),

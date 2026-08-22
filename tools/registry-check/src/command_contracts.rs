@@ -265,12 +265,13 @@ fn live_handler_declarations(source: &str) -> Result<Vec<LiveHandlerDeclaration>
         .ok_or_else(|| format!("missing {LIVE_HANDLER_INVENTORY_NAME}"))?;
     let tail = &source[start..];
     let end = tail
-        .find("];" )
+        .find("];")
         .ok_or_else(|| format!("unterminated {LIVE_HANDLER_INVENTORY_NAME}"))?;
     let quoted: Vec<String> = tail[..end]
         .split('"')
         .enumerate()
-        .filter_map(|(index, part)| (index % 2 == 1).then(|| part.to_owned()))
+        .filter(|&(index, _)| index % 2 == 1)
+        .map(|(_, part)| part.to_owned())
         .collect();
     if !quoted.len().is_multiple_of(3) {
         return Err(format!(
@@ -278,12 +279,16 @@ fn live_handler_declarations(source: &str) -> Result<Vec<LiveHandlerDeclaration>
         ));
     }
     Ok(quoted
-        .chunks_exact(3)
-        .map(|fields| LiveHandlerDeclaration {
-            contract_id: fields[0].clone(),
-            handler_symbol: fields[1].clone(),
-            union_arm: fields[2].clone(),
-        })
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(
+            |[contract_id, handler_symbol, union_arm]| LiveHandlerDeclaration {
+                contract_id: contract_id.clone(),
+                handler_symbol: handler_symbol.clone(),
+                union_arm: union_arm.clone(),
+            },
+        )
         .collect())
 }
 
@@ -299,10 +304,7 @@ fn source_declares_type(source: &str, type_name: &str) -> bool {
 /// makes both directions checkable: deleting a handler leaves a live row with
 /// no declaration, while adding a handler declaration without a live row is
 /// independently red.
-pub fn validate_live_handler_source(
-    registry: &ContractRegistry,
-    source: &str,
-) -> Vec<Violation> {
+pub fn validate_live_handler_source(registry: &ContractRegistry, source: &str) -> Vec<Violation> {
     let mut out = Vec::new();
     let declarations = match live_handler_declarations(source) {
         Ok(declarations) => declarations,
@@ -324,9 +326,11 @@ pub fn validate_live_handler_source(
                 "one contract id has more than one live handler declaration",
             ));
         }
-        let Some(row) = registry.contracts.iter().find(|row| {
-            row.status == "live" && row.command_contract_id == declaration.contract_id
-        }) else {
+        let Some(row) = registry
+            .contracts
+            .iter()
+            .find(|row| row.status == "live" && row.command_contract_id == declaration.contract_id)
+        else {
             out.push(Violation::new(
                 "contract_handler_row_missing",
                 &declaration.contract_id,

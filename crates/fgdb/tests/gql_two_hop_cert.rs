@@ -129,11 +129,13 @@ fn two_hop_certificates_are_distinct_and_deterministic() {
         // handle: composed [4, 5] versus one-hop [2, 7]. A collision above
         // while these differ is a certificate coarser than its behavior.
         assert_eq!(
-            db.execute_gql(TWO_HOP_C, &bind_rs()).expect("two-hop RETURN c executes"),
+            db.execute_gql(TWO_HOP_C, &bind_rs())
+                .expect("two-hop RETURN c executes"),
             vec![VId(4), VId(5)]
         );
         assert_eq!(
-            db.execute_gql(ONE_HOP_B, &bind_rs()).expect("one-hop RETURN b executes"),
+            db.execute_gql(ONE_HOP_B, &bind_rs())
+                .expect("one-hop RETURN b executes"),
             vec![VId(2), VId(7)]
         );
     });

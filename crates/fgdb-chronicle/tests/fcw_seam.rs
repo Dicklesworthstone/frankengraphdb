@@ -110,10 +110,13 @@ fn log_bytes(dir: &Path) -> Vec<u8> {
     std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap_or_default()
 }
 
+/// Observations one validator wants to share with the test body.
+type SharedValidatorObservations = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
+
 #[derive(Debug)]
 struct RejectChosenPlaintext {
     rejected: Vec<u8>,
-    seen: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
+    seen: SharedValidatorObservations,
 }
 
 impl CommitValidator for RejectChosenPlaintext {

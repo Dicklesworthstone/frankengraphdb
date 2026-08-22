@@ -92,7 +92,8 @@ fn a_staged_edge_delete_hides_the_destination_from_the_txn_only() {
                 "a union-only overlay cannot hide the deleted edge: {overlay:?}"
             );
             assert_eq!(
-                db.execute_gql(PINNED, &bind_r()).expect("base MATCH executes"),
+                db.execute_gql(PINNED, &bind_r())
+                    .expect("base MATCH executes"),
                 vec![VId(2)],
                 "DIRTY DELETE: the staged retirement leaked into the shared \
                  handle before commit"
@@ -108,9 +109,12 @@ fn a_staged_edge_delete_hides_the_destination_from_the_txn_only() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("executes after reopen"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("executes after reopen"),
             vec![VId(2)],
             "the durable edge survived the aborted delete"
         );
@@ -145,7 +149,8 @@ fn a_staged_vertex_delete_cascades_out_of_the_overlay_match() {
                  destination: {overlay:?}"
             );
             assert_eq!(
-                db.execute_gql(PINNED, &bind_r()).expect("base MATCH executes"),
+                db.execute_gql(PINNED, &bind_r())
+                    .expect("base MATCH executes"),
                 vec![VId(2)],
                 "the shared handle serves the durable answer until commit"
             );
@@ -164,7 +169,9 @@ fn a_staged_vertex_delete_cascades_out_of_the_overlay_match() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert!(
             db.execute_gql(PINNED, &bind_r())
                 .expect("executes after reopen")

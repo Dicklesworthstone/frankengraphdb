@@ -32,10 +32,7 @@ fn oracle_keys() -> CapsuleKeys {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "fgdb-writetxn-crash-{}-{name}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("fgdb-writetxn-crash-{}-{name}", std::process::id()))
 }
 
 fn property_update(value: i64) -> WriteBatch {
@@ -49,11 +46,7 @@ async fn seeded_database(cx: &CommitCx, dir: &Path) -> Database {
         .await
         .expect("create product database");
     let mut seed = WriteBatch::new(RELATION);
-    seed.create_vertex(
-        VId(1),
-        vec![],
-        vec![(PROPERTY, CanonicalScalar::Int(0))],
-    );
+    seed.create_vertex(VId(1), vec![], vec![(PROPERTY, CanonicalScalar::Int(0))]);
     database.write(cx, seed).await.expect("seed vertex commits");
     database
 }
@@ -101,7 +94,10 @@ fn crash_before_capsule_releases_pin_and_reference_sees_only_seed() {
         let crashed = transaction
             .commit_with_crash(&mut database, &commit_cx, Some(CrashPoint::BeforeCapsule))
             .await;
-        assert!(crashed.is_err(), "BeforeCapsule must stop the transaction commit");
+        assert!(
+            crashed.is_err(),
+            "BeforeCapsule must stop the transaction commit"
+        );
         assert_no_pins(&txn_cx);
         drop(database);
 
@@ -134,7 +130,10 @@ fn crash_seam_with_none_is_a_durable_commit() {
             .commit_with_crash(&mut database, &commit_cx, None)
             .await
             .expect("None follows the normal durable commit path");
-        assert_eq!(committed.0, 2, "seed is seq 1 and the txn advances to seq 2");
+        assert_eq!(
+            committed.0, 2,
+            "seed is seq 1 and the txn advances to seq 2"
+        );
         assert_no_pins(&txn_cx);
         drop(database);
 

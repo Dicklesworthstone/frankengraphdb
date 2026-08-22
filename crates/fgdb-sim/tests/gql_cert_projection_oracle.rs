@@ -71,7 +71,10 @@ fn plan_certificate_distinguishes_reference_source_and_destination_projections()
             .expect("reference graph exists");
         let mut sources = Vec::new();
         let mut destinations = Vec::new();
-        for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == relation) {
+        for (_, edge) in graph
+            .iter_edges()
+            .filter(|(_, edge)| edge.relation == relation)
+        {
             sources.push(edge.src);
             destinations.push(edge.dst);
         }

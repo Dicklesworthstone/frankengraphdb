@@ -20,10 +20,8 @@ fn keys() -> DatabaseKeys {
 fn where_equal_as_of_excludes_later_self_loop() {
     let ((), report) = run_async_under_lab(0x39_06, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-where-eq-as-of-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-where-eq-as-of-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

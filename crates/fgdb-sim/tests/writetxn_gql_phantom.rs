@@ -1,7 +1,5 @@
 use asupersync::lab::run_async_under_lab;
-use fgdb::{
-    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, RelationBind, WriteBatch, WriteTxnError,
-};
+use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, RelationBind, WriteBatch, WriteTxnError};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::RelationId;

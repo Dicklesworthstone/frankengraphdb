@@ -35,7 +35,10 @@ fn keys() -> DatabaseKeys {
 /// Pid-qualified because concurrent panes share `/tmp`; nothing is removed
 /// (rule 1 carves out no exception for test code).
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("fgdb-two-hop-overlay-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "fgdb-two-hop-overlay-{}-{name}",
+        std::process::id()
+    ))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(PurposeContexts) -> Fut + Send + 'static) -> T
@@ -68,7 +71,9 @@ fn the_overlay_composes_staged_continuations_and_abort_erases_them() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-compose");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut r_batch = WriteBatch::new(R);
         for vid in [1u128, 2, 4, 7, 8, 9] {
             r_batch.create_vertex(VId(vid), vec![LabelId(3)], vec![]);
@@ -78,7 +83,9 @@ fn the_overlay_composes_staged_continuations_and_abort_erases_them() {
         db.write(&commit, r_batch).await.expect("R edges commit");
         let mut s_batch = WriteBatch::new(S);
         s_batch.add_edge(EId(20), VId(2), VId(4), vec![]);
-        db.write(&commit, s_batch).await.expect("durable S edge commits");
+        db.write(&commit, s_batch)
+            .await
+            .expect("durable S edge commits");
 
         // Stage one :S batch: the real continuation 2->5 and the decoy 9->8
         // whose source is no :R destination.
@@ -87,7 +94,8 @@ fn the_overlay_composes_staged_continuations_and_abort_erases_them() {
         staged.create_vertex(VId(5), vec![], vec![]);
         staged.add_edge(EId(21), VId(2), VId(5), vec![]);
         staged.add_edge(EId(22), VId(9), VId(8), vec![]);
-        txn.write(&mut db, staged).expect("stages the continuations");
+        txn.write(&mut db, staged)
+            .expect("stages the continuations");
 
         // THE PAIRING: the staged continuation joins the txn's composed
         // answer — the staged decoy does not — while the shared handle at

@@ -28,10 +28,7 @@ fn reference_destinations(graph: &ReferenceGraph) -> Vec<VId> {
 fn skip_drops_the_reference_smallest_destination_before_limit() {
     let ((), report) = run_async_under_lab(0x46_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-skip-oracle-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fgdb-gql-skip-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let skipped;
         let skipped_limited;

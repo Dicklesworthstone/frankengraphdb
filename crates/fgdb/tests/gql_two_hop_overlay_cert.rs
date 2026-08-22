@@ -67,7 +67,9 @@ fn staging_changes_the_answer_and_not_the_certificate() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-hop-cert");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut r_batch = WriteBatch::new(R);
         for vid in [1u128, 2, 4] {
             r_batch.create_vertex(VId(vid), vec![LabelId(3)], vec![]);
@@ -76,7 +78,9 @@ fn staging_changes_the_answer_and_not_the_certificate() {
         db.write(&commit, r_batch).await.expect("R edge commits");
         let mut s_batch = WriteBatch::new(S);
         s_batch.add_edge(EId(20), VId(2), VId(4), vec![]);
-        db.write(&commit, s_batch).await.expect("durable S edge commits");
+        db.write(&commit, s_batch)
+            .await
+            .expect("durable S edge commits");
 
         let mut txn = db.begin(&txn_cx).expect("txn begins");
         let basis = txn.basis();

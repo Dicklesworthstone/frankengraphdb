@@ -81,10 +81,7 @@ fn undirected_property_predicates_filter_the_anchorings() {
         );
 
         let two_hop = db
-            .execute_gql(
-                "MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k = 1 RETURN c",
-                &bind,
-            )
+            .execute_gql("MATCH (a)-[:R]-(b)-[:S]-(c) WHERE a.k = 1 RETURN c", &bind)
             .expect_err("WHERE on the undirected two-hop chain is off-grammar");
         assert!(
             matches!(two_hop, GqlError::Parse(_)),

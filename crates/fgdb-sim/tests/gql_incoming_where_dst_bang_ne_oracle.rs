@@ -35,9 +35,9 @@ fn reference_unequal_destinations(graph: &ReferenceGraph) -> Vec<VId> {
         .iter_edges()
         .filter(|(_, edge)| edge.relation == R)
         .filter(|(_, edge)| {
-            graph.vertex(edge.dst).is_some_and(|vertex| {
-                matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1)
-            })
+            graph.vertex(edge.dst).is_some_and(
+                |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+            )
         })
         .map(|(_, edge)| edge.dst)
         .collect();
@@ -116,10 +116,7 @@ fn incoming_dest_bang_inequality_equals_its_reference() {
              kernel filtering the origin instead of the pattern's a \
              answers [] and fails"
         );
-        assert!(
-            !rows.contains(&VId(2)),
-            "the k=1 dest fails the inequality"
-        );
+        assert!(!rows.contains(&VId(2)), "the k=1 dest fails the inequality");
         assert!(
             !rows.contains(&VId(6)),
             "the keyless dest is OUT — missing k is not k != 1"

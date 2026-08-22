@@ -99,7 +99,7 @@ fn deleting_live_write_batch_handler_turns_checker_red() {
     let source = std::fs::read_to_string(repo_root().join(LIVE_HANDLER_SOURCE_PATH))
         .expect("handler source reads");
     let mutated = source.replace(
-        "        \"cc:local:local-autocommit-write-spec\",\n        \"fgdb::Database::apply_local_write_batch\",\n        \"WriteBatch\",\n",
+        "    \"cc:local:local-autocommit-write-spec\",\n    \"fgdb::Database::apply_local_write_batch\",\n    \"WriteBatch\",\n",
         "",
     );
     assert_ne!(mutated, source, "negative must delete the planted handler");
@@ -381,9 +381,10 @@ fn phase_b_seed_rows_are_present() {
             "reserved"
         };
         assert!(
-            registry.contracts.iter().any(|row| {
-                row.command_contract_id == id && row.status == expected_status
-            }),
+            registry
+                .contracts
+                .iter()
+                .any(|row| { row.command_contract_id == id && row.status == expected_status }),
             "confirmed seed row {id:?} is missing or has the wrong status"
         );
     }

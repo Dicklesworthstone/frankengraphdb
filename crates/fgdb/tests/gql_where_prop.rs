@@ -22,10 +22,7 @@ fn keys() -> DatabaseKeys {
 fn source_property_equality_filters_match_destinations() {
     let ((), report) = run_async_under_lab(0x41_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-where-prop-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fgdb-gql-where-prop-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");
@@ -56,10 +53,7 @@ fn source_property_equality_filters_match_destinations() {
         );
 
         let missing = db
-            .execute_gql(
-                "MATCH (a)-[:R]->(b) WHERE a.missing = 1 RETURN b",
-                &bind,
-            )
+            .execute_gql("MATCH (a)-[:R]->(b) WHERE a.missing = 1 RETURN b", &bind)
             .expect_err("unbound property must fail");
         assert!(matches!(missing, GqlError::Bind(_)));
         let variable_rhs = db

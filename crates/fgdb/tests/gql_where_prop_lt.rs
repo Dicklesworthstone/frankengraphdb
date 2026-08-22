@@ -35,10 +35,8 @@ fn keys() -> DatabaseKeys {
 fn source_property_less_than_keeps_lesser_sources() {
     let ((), report) = run_async_under_lab(0x55_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-where-prop-lt-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-where-prop-lt-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

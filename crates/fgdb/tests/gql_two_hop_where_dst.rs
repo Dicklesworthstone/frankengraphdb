@@ -38,10 +38,8 @@ fn keys() -> DatabaseKeys {
 fn two_hop_far_end_predicate_keeps_the_matching_chain() {
     let ((), report) = run_async_under_lab(0x33_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-two-hop-where-dst-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-two-hop-where-dst-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");
@@ -116,9 +114,7 @@ fn two_hop_far_end_predicate_keeps_the_matching_chain() {
             "!= aliases <>: the k=1 chain fails and the no-k far end stays OUT"
         );
 
-        for off_grammar in [
-            "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a",
-        ] {
+        for off_grammar in ["MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE c.k = 1 RETURN a"] {
             let err = db.execute_gql(off_grammar, &bind).expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),

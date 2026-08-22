@@ -15,10 +15,8 @@ fn write_txn_plan_certificate_equals_certify_at_its_basis() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit_cx = contexts.commit();
         let txn_cx = contexts.txn();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-writetxn-plan-certify-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-writetxn-plan-certify-{}", std::process::id()));
         let keys = DatabaseKeys::new(
             [0x5a; 32],
             DatabaseSecurityNamespaceId([0x77; 32]),

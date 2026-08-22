@@ -94,7 +94,9 @@ fn certified_rows_equal_uncertified_rows() {
         let dir = scratch("row-parity");
         let db = seeded(cx, &dir).await;
 
-        let plain = db.execute_gql(PINNED, &bind_r()).expect("uncertified executes");
+        let plain = db
+            .execute_gql(PINNED, &bind_r())
+            .expect("uncertified executes");
         let (certified, _certificate) = db
             .execute_gql_certified(PINNED, &bind_r())
             .expect("certified executes");
@@ -201,7 +203,11 @@ fn off_grammar_is_a_typed_parse_error_with_no_certificate() {
         let dir = scratch("cert-off-grammar");
         let db = Database::create(cx, &dir, keys()).await.expect("creates");
 
-        for off_grammar in ["MATCH (a) RETURN a", "MATCH (a)-[:R]->(b) RETURN b EXTRA", ""] {
+        for off_grammar in [
+            "MATCH (a) RETURN a",
+            "MATCH (a)-[:R]->(b) RETURN b EXTRA",
+            "",
+        ] {
             let err = db
                 .execute_gql_certified(off_grammar, &bind_r())
                 .expect_err(off_grammar);

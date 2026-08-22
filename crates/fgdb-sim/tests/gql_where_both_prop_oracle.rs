@@ -12,19 +12,19 @@ use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
 const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(7);
 const M: PropertyKeyId = PropertyKeyId(8);
-const FILTERED: &str =
-    "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m = 9 RETURN b";
+const FILTERED: &str = "MATCH (a)-[:R]->(b) WHERE a.k = 1 AND b.m = 9 RETURN b";
 
 fn reference_destinations(graph: &ReferenceGraph) -> Vec<VId> {
     let mut rows: Vec<_> = graph
         .iter_edges()
         .filter(|(_, edge)| edge.relation == R)
         .filter(|(_, edge)| {
-            graph.vertex(edge.src).is_some_and(|vertex| {
-                vertex.props.get(&K) == Some(&CanonicalScalar::Int(1))
-            }) && graph.vertex(edge.dst).is_some_and(|vertex| {
-                vertex.props.get(&M) == Some(&CanonicalScalar::Int(9))
-            })
+            graph
+                .vertex(edge.src)
+                .is_some_and(|vertex| vertex.props.get(&K) == Some(&CanonicalScalar::Int(1)))
+                && graph
+                    .vertex(edge.dst)
+                    .is_some_and(|vertex| vertex.props.get(&M) == Some(&CanonicalScalar::Int(9)))
         })
         .map(|(_, edge)| edge.dst)
         .collect();

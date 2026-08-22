@@ -23,10 +23,8 @@ fn keys() -> DatabaseKeys {
 fn incoming_two_hop_plan_certificate_is_shape_distinct() {
     let ((), report) = run_async_under_lab(0x37_0c, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-incoming-two-hop-cert-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-incoming-two-hop-cert-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");
@@ -54,14 +52,8 @@ fn incoming_two_hop_plan_certificate_is_shape_distinct() {
             .gql_plan_certificate(OUT_TWO_HOP_C, &bind)
             .expect("outgoing two-hop certifies");
 
-        assert_eq!(
-            incoming_two_hop.snapshot_seq,
-            incoming_one_hop.snapshot_seq
-        );
-        assert_eq!(
-            incoming_two_hop.snapshot_seq,
-            outgoing_two_hop.snapshot_seq
-        );
+        assert_eq!(incoming_two_hop.snapshot_seq, incoming_one_hop.snapshot_seq);
+        assert_eq!(incoming_two_hop.snapshot_seq, outgoing_two_hop.snapshot_seq);
         assert_ne!(incoming_two_hop.digest, incoming_one_hop.digest);
         assert_ne!(incoming_two_hop.digest, outgoing_two_hop.digest);
 

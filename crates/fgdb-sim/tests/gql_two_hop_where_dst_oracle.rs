@@ -36,9 +36,9 @@ fn reference_far_ends_with_k_one(graph: &ReferenceGraph) -> Vec<VId> {
             .iter_edges()
             .filter(|(_, edge)| edge.relation == S && edge.src == first.dst)
         {
-            let far_end_kept = graph.vertex(second.dst).is_some_and(|vertex| {
-                matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v == 1)
-            });
+            let far_end_kept = graph.vertex(second.dst).is_some_and(
+                |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v == 1),
+            );
             if far_end_kept {
                 rows.push(second.dst);
             }

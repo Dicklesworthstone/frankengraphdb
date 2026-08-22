@@ -64,7 +64,9 @@ fn the_overlay_scan_sees_the_staged_person_isolate() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-isolate");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![PERSON], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
@@ -76,7 +78,8 @@ fn the_overlay_scan_sees_the_staged_person_isolate() {
         let mut txn = db.begin(&txn_cx).expect("txn begins");
         let mut staged = WriteBatch::new(R);
         staged.create_vertex(VId(5), vec![PERSON], vec![]);
-        txn.write(&mut db, staged).expect("stages the labeled isolate");
+        txn.write(&mut db, staged)
+            .expect("stages the labeled isolate");
 
         let overlay = txn
             .execute_gql(&db, NODE_ONLY, &bind_r_person())

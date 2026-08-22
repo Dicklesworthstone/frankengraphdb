@@ -9,10 +9,8 @@ use fgdb_types::{EId, VId};
 fn labeled_match_as_of_pins_labeled_sources() {
     let ((), report) = run_async_under_lab(0x9f_01, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-node-label-as-of-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-node-label-as-of-{}", std::process::id()));
         let keys = DatabaseKeys::new(
             [0x5a; 32],
             DatabaseSecurityNamespaceId([0x77; 32]),
@@ -31,12 +29,18 @@ fn labeled_match_as_of_pins_labeled_sources() {
         seed.add_edge(EId(10), VId(1), VId(2), vec![]);
         seed.add_edge(EId(11), VId(3), VId(2), vec![]);
         seed.add_edge(EId(12), VId(3), VId(4), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed S1 graph");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed S1 graph");
         let s1 = database.frontier().expect("capture S1");
 
         let mut later = WriteBatch::new(relation);
         later.set_vertex_label(VId(3), label, true);
-        database.write(&commit_cx, later).await.expect("label source 3");
+        database
+            .write(&commit_cx, later)
+            .await
+            .expect("label source 3");
         let bind = RelationBind::new()
             .with_relation("R", relation)
             .with_label("L", label);
@@ -45,7 +49,9 @@ fn labeled_match_as_of_pins_labeled_sources() {
         let historical = database
             .execute_gql_at(statement, &bind, s1)
             .expect("labeled MATCH at S1");
-        let live = database.execute_gql(statement, &bind).expect("live labeled MATCH");
+        let live = database
+            .execute_gql(statement, &bind)
+            .expect("live labeled MATCH");
         assert_eq!(historical, vec![VId(2)]);
         assert!(!historical.contains(&VId(4)));
         assert_eq!(live, vec![VId(2), VId(4)]);

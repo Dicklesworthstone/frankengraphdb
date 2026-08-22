@@ -36,9 +36,9 @@ const TWO_NE: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k <> 1 RETURN c";
 fn reference_far_ends(graph: &ReferenceGraph, keeps: impl Fn(i64) -> bool) -> Vec<VId> {
     let mut rows = Vec::new();
     for (_, first) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {
-        let origin_kept = graph.vertex(first.src).is_some_and(|vertex| {
-            matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v))
-        });
+        let origin_kept = graph.vertex(first.src).is_some_and(
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v)),
+        );
         if !origin_kept {
             continue;
         }
@@ -146,11 +146,7 @@ fn two_hop_origin_property_filters_equal_their_reference() {
             reference_far_ends(graph, |k| k != 1),
             "two-hop inequality equals its composed derivation"
         );
-        assert_eq!(
-            ne_rows,
-            vec![VId(6)],
-            "the k=9 origin's far end alone"
-        );
+        assert_eq!(ne_rows, vec![VId(6)], "the k=9 origin's far end alone");
         assert!(
             !eq_rows.contains(&VId(9)) && !ne_rows.contains(&VId(9)),
             "the keyless origin's fully composed far end satisfies NEITHER \

@@ -1,7 +1,5 @@
 use asupersync::lab::run_async_under_lab;
-use fgdb::{
-    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError,
-};
+use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -34,10 +32,7 @@ fn oracle_keys() -> CapsuleKeys {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "fgdb-writetxn-fcw-{}-{name}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("fgdb-writetxn-fcw-{}-{name}", std::process::id()))
 }
 
 fn property_update(value: i64) -> WriteBatch {
@@ -58,18 +53,18 @@ fn overlapping_write_txns_are_fcw_and_abort_is_trace_free() {
             .expect("create product database");
 
         let mut seed = WriteBatch::new(RELATION);
-        seed.create_vertex(
-            VId(1),
-            vec![],
-            vec![(PROPERTY, CanonicalScalar::Int(0))],
-        );
+        seed.create_vertex(VId(1), vec![], vec![(PROPERTY, CanonicalScalar::Int(0))]);
         database
             .write(&commit_cx, seed)
             .await
             .expect("seed vertex commits");
 
-        let mut first = database.begin(&txn_cx).expect("begin first pinned transaction");
-        let mut second = database.begin(&txn_cx).expect("begin second pinned transaction");
+        let mut first = database
+            .begin(&txn_cx)
+            .expect("begin first pinned transaction");
+        let mut second = database
+            .begin(&txn_cx)
+            .expect("begin second pinned transaction");
         assert_eq!(
             txn_cx.outstanding_obligations(),
             2,

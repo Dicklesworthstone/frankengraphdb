@@ -63,7 +63,9 @@ fn the_overlay_evaluates_the_label_on_staged_sources() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-person");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![PERSON], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
@@ -78,7 +80,8 @@ fn the_overlay_evaluates_the_label_on_staged_sources() {
         staged.create_vertex(VId(5), vec![PERSON], vec![]);
         staged.create_vertex(VId(6), vec![], vec![]);
         staged.add_edge(EId(12), VId(5), VId(6), vec![]);
-        txn.write(&mut db, staged).expect("stages the labeled source");
+        txn.write(&mut db, staged)
+            .expect("stages the labeled source");
 
         let overlay = txn
             .execute_gql(&db, LABELED_B, &bind_r_person())

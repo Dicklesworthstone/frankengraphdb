@@ -130,12 +130,10 @@ fn new_edge_into_observed_dest_aborts_the_reader_and_replays_only_the_writer() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert!(
-            graph
-                .iter_edges()
-                .any(|(eid, edge)| eid == EId(20)
-                    && edge.src == VId(9)
-                    && edge.relation == R
-                    && edge.dst == VId(2)),
+            graph.iter_edges().any(|(eid, edge)| eid == EId(20)
+                && edge.src == VId(9)
+                && edge.relation == R
+                && edge.dst == VId(2)),
             "B's new edge into the observed dest is durable"
         );
         assert!(

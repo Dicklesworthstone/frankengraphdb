@@ -14,10 +14,8 @@ const BARE: &str = "MATCH (a)-[:R]->(b) RETURN b";
 fn source_greater_or_equal_certificate_is_operator_distinct_and_deterministic() {
     let ((), report) = run_async_under_lab(0x64_02, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-where-prop-ge-cert-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-where-prop-ge-cert-{}", std::process::id()));
         let db = Database::create(
             &commit,
             &dir,

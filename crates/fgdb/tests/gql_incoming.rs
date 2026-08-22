@@ -80,7 +80,9 @@ fn incoming_return_a_projects_the_vertex_with_in_edges() {
         let dir = scratch("in-a");
         let db = seeded(cx, &dir).await;
 
-        let rows = db.execute_gql(IN_RETURN_A, &bind_r()).expect("incoming RETURN a executes");
+        let rows = db
+            .execute_gql(IN_RETURN_A, &bind_r())
+            .expect("incoming RETURN a executes");
         assert_eq!(
             rows,
             vec![VId(2)],
@@ -98,7 +100,9 @@ fn incoming_return_b_projects_the_sources_of_the_in_edges() {
         let dir = scratch("in-b");
         let db = seeded(cx, &dir).await;
 
-        let rows = db.execute_gql(IN_RETURN_B, &bind_r()).expect("incoming RETURN b executes");
+        let rows = db
+            .execute_gql(IN_RETURN_B, &bind_r())
+            .expect("incoming RETURN b executes");
         assert_eq!(
             rows,
             vec![VId(1), VId(3)],
@@ -116,7 +120,9 @@ fn outbound_return_b_is_unmoved() {
         let dir = scratch("out-b");
         let db = seeded(cx, &dir).await;
 
-        let rows = db.execute_gql(OUT_RETURN_B, &bind_r()).expect("outbound RETURN b executes");
+        let rows = db
+            .execute_gql(OUT_RETURN_B, &bind_r())
+            .expect("outbound RETURN b executes");
         assert_eq!(rows, vec![VId(2)], "the outbound projection is unchanged");
     });
 }
@@ -133,7 +139,9 @@ fn malformed_arrows_are_typed_parse_errors() {
         let db = seeded(cx, &dir).await;
 
         for off_grammar in ["MATCH (a)<[:R]->(b) RETURN a"] {
-            let err = db.execute_gql(off_grammar, &bind_r()).expect_err(off_grammar);
+            let err = db
+                .execute_gql(off_grammar, &bind_r())
+                .expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
                 "{off_grammar:?} must be the typed parse arm, got {err:?}"

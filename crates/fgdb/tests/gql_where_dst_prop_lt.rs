@@ -91,7 +91,9 @@ fn less_than_keeps_only_the_below_boundary_dests_source() {
         let dir = scratch("dst-lt");
         let db = seeded(cx, &dir).await;
 
-        let lt = db.execute_gql(LT_A, &bind_rk()).expect("WHERE b.k < 1 executes");
+        let lt = db
+            .execute_gql(LT_A, &bind_rk())
+            .expect("WHERE b.k < 1 executes");
         assert_eq!(
             lt,
             vec![VId(5)],
@@ -104,17 +106,20 @@ fn less_than_keeps_only_the_below_boundary_dests_source() {
         );
 
         assert_eq!(
-            db.execute_gql(GT_A, &bind_rk()).expect("WHERE b.k > 1 executes"),
+            db.execute_gql(GT_A, &bind_rk())
+                .expect("WHERE b.k > 1 executes"),
             vec![VId(3)],
             "the greater-than sibling is unmoved on the same fixture"
         );
         assert_eq!(
-            db.execute_gql(EQ_A, &bind_rk()).expect("WHERE b.k = 1 executes"),
+            db.execute_gql(EQ_A, &bind_rk())
+                .expect("WHERE b.k = 1 executes"),
             vec![VId(1)],
             "the equality answers the boundary carrier's source alone"
         );
         assert_eq!(
-            db.execute_gql(PLAIN_A, &bind_rk()).expect("unfiltered executes"),
+            db.execute_gql(PLAIN_A, &bind_rk())
+                .expect("unfiltered executes"),
             vec![VId(1), VId(3), VId(5), VId(7)],
             "without WHERE every source answers"
         );

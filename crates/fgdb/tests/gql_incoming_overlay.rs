@@ -65,7 +65,9 @@ fn the_incoming_overlay_sees_the_staged_source_and_abort_erases_it() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-in-edge");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![LabelId(3)], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
@@ -77,7 +79,8 @@ fn the_incoming_overlay_sees_the_staged_source_and_abort_erases_it() {
         let mut batch = WriteBatch::new(R);
         batch.create_vertex(VId(9), vec![], vec![]);
         batch.add_edge(EId(11), VId(9), VId(2), vec![]);
-        txn.write(&mut db, batch).expect("stages the new in-edge source");
+        txn.write(&mut db, batch)
+            .expect("stages the new in-edge source");
 
         // THE PAIRING: the staged source joins the txn's incoming
         // projection, CGSE-sorted beside the durable one — while the shared

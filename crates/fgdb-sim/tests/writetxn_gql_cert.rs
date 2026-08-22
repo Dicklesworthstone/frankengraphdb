@@ -89,7 +89,10 @@ fn certified_overlay_is_pinned_to_basis_but_abort_is_not_durable() {
             "overlay certificate must name the transaction's pinned basis"
         );
         assert!(
-            database.execute_gql(MATCH_R, &bind).expect("base MATCH executes").is_empty(),
+            database
+                .execute_gql(MATCH_R, &bind)
+                .expect("base MATCH executes")
+                .is_empty(),
             "the durable view does not contain the certified staged edge"
         );
 
@@ -109,7 +112,10 @@ fn certified_overlay_is_pinned_to_basis_but_abort_is_not_durable() {
             .graph(GRAPH, BRANCH)
             .expect("seeded reference coordinate exists");
         assert!(reference_destinations(graph).is_empty());
-        assert!(graph.edge(EId(1)).is_none(), "aborted staged edge is not durable");
+        assert!(
+            graph.edge(EId(1)).is_none(),
+            "aborted staged edge is not durable"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -192,7 +198,10 @@ fn repeated_certification_of_one_overlay_and_basis_is_identical() {
             .expect("second certified overlay MATCH succeeds");
 
         assert_eq!(first_rows, second_rows);
-        assert_eq!(first.digest, second.digest, "same overlay and basis hash identically");
+        assert_eq!(
+            first.digest, second.digest,
+            "same overlay and basis hash identically"
+        );
         assert_eq!(first.snapshot_seq, basis);
         assert_eq!(second.snapshot_seq, basis);
 
@@ -233,7 +242,10 @@ fn a_new_basis_changes_the_overlay_certificate_digest() {
         let (after_rows, after) = second_transaction
             .execute_gql_certified(&database, MATCH_R, &bind)
             .expect("certify the same bound MATCH at the new basis");
-        assert_eq!(before_rows, after_rows, "the committed overlay preserves the rows");
+        assert_eq!(
+            before_rows, after_rows,
+            "the committed overlay preserves the rows"
+        );
         assert_eq!(before.snapshot_seq.0 + 1, after.snapshot_seq.0);
         assert_eq!(after.snapshot_seq, second_transaction.basis());
         assert_ne!(

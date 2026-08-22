@@ -18,9 +18,9 @@ fn reference_destinations(graph: &ReferenceGraph) -> Vec<VId> {
         .iter_edges()
         .filter(|(_, edge)| edge.relation == R)
         .filter(|(_, edge)| {
-            graph.vertex(edge.src).is_some_and(|vertex| {
-                vertex.props.get(&K) == Some(&CanonicalScalar::Int(1))
-            })
+            graph
+                .vertex(edge.src)
+                .is_some_and(|vertex| vertex.props.get(&K) == Some(&CanonicalScalar::Int(1)))
         })
         .map(|(_, edge)| edge.dst)
         .collect();
@@ -33,10 +33,8 @@ fn reference_destinations(graph: &ReferenceGraph) -> Vec<VId> {
 fn source_property_match_equals_reference_filter() {
     let ((), report) = run_async_under_lab(0x41_02, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-where-prop-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-where-prop-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let rows;
         {

@@ -30,13 +30,21 @@ fn undirected_two_hop_overlay_sees_staged_composed_incident() {
             first.create_vertex(vid, vec![], vec![]);
         }
         first.add_edge(EId(10), VId(1), VId(2), vec![]);
-        database.write(&commit_cx, first).await.expect("seed R edge");
+        database
+            .write(&commit_cx, first)
+            .await
+            .expect("seed R edge");
         let mut second = WriteBatch::new(s);
         second.add_edge(EId(20), VId(2), VId(4), vec![]);
         second.add_edge(EId(21), VId(9), VId(8), vec![]);
-        database.write(&commit_cx, second).await.expect("seed S edges");
+        database
+            .write(&commit_cx, second)
+            .await
+            .expect("seed S edges");
 
-        let bind = RelationBind::new().with_relation("R", r).with_relation("S", s);
+        let bind = RelationBind::new()
+            .with_relation("R", r)
+            .with_relation("S", s);
         let statement = "MATCH (a)-[:R]-(b)-[:S]-(c) RETURN c";
         let mut transaction = database.begin(&txn_cx).expect("begin transaction");
         let mut staged = WriteBatch::new(s);
@@ -50,11 +58,15 @@ fn undirected_two_hop_overlay_sees_staged_composed_incident() {
         assert!(overlay.contains(&VId(4)) && overlay.contains(&VId(5)));
         assert!(!overlay.contains(&VId(8)));
 
-        let durable = database.execute_gql(statement, &bind).expect("durable two-hop MATCH");
+        let durable = database
+            .execute_gql(statement, &bind)
+            .expect("durable two-hop MATCH");
         assert!(durable.contains(&VId(4)));
         assert!(!durable.contains(&VId(5)) && !durable.contains(&VId(8)));
         transaction.abort();
-        let after_abort = database.execute_gql(statement, &bind).expect("MATCH after abort");
+        let after_abort = database
+            .execute_gql(statement, &bind)
+            .expect("MATCH after abort");
         assert!(after_abort.contains(&VId(4)));
         assert!(!after_abort.contains(&VId(5)));
     });

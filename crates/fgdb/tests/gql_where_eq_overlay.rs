@@ -11,10 +11,8 @@ fn equality_match_sees_only_the_staged_self_loop_in_the_overlay() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-where-eq-overlay-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-where-eq-overlay-{}", std::process::id()));
         let relation = RelationId(1);
         let mut db = Database::create(
             &commit,
@@ -48,8 +46,13 @@ fn equality_match_sees_only_the_staged_self_loop_in_the_overlay() {
         assert_eq!(overlay, vec![VId(7)]);
         assert!(!overlay.contains(&VId(2)));
 
-        let base = db.execute_gql(equal, &bind).expect("base equality MATCH executes");
-        assert!(!base.contains(&VId(7)), "staged loop leaked into shared database");
+        let base = db
+            .execute_gql(equal, &bind)
+            .expect("base equality MATCH executes");
+        assert!(
+            !base.contains(&VId(7)),
+            "staged loop leaked into shared database"
+        );
         let unfiltered = txn
             .execute_gql(&db, plain, &bind)
             .expect("unfiltered overlay MATCH executes");

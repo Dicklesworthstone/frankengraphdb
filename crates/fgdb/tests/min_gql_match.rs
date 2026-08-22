@@ -15,6 +15,7 @@
 //!   `RelationBind::new().with_relation(...)`, re-exported from `fgdb-gql`.
 //! - `GqlError::Parse(_)` is the typed off-grammar arm (`Bind` and `Read` are
 //!   its siblings, three arms because three remedies).
+//!
 //! Until `fgdb-gql` lands this file fails to compile — deliberately. It is
 //! the executable acceptance criteria; do not weaken it to make it compile.
 //!
@@ -92,14 +93,18 @@ fn pinned_match_returns_the_destination_and_survives_reopen() {
             batch.add_edge(EId(10), VId(1), VId(2), vec![]);
             db.write(cx, batch).await.expect("commits");
 
-            let rows = db.execute_gql(PINNED, &bind_r()).expect("pinned statement executes");
+            let rows = db
+                .execute_gql(PINNED, &bind_r())
+                .expect("pinned statement executes");
             assert_eq!(rows, vec![VId(2)]);
         }
 
         // NOTHING crosses this line except the path and the keys: the answer
         // below comes from the durable stream, not the writer's fold.
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
-        let rows = db.execute_gql(PINNED, &bind_r()).expect("executes after reopen");
+        let rows = db
+            .execute_gql(PINNED, &bind_r())
+            .expect("executes after reopen");
         assert_eq!(rows, vec![VId(2)]);
     });
 }

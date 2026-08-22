@@ -118,16 +118,16 @@ pub use fcw::FirstCommitterWinsValidator;
 mod gql_cert;
 mod gql_exec;
 mod write_txn;
-/// The replayable certificate [`Database::execute_gql_certified`] returns
-/// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
-/// bind digests, so the same graph state, text, and bind are auditable as
-/// byte-identical.
-pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
 /// catalog), and the plan is re-exported so tests can state that the executor
 /// accepts a [`BoundPlan`] and nothing parse-shaped.
 pub use fgdb_gql::{BoundPlan, RelationBind};
+/// The replayable certificate [`Database::execute_gql_certified`] returns
+/// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
+/// bind digests, so the same graph state, text, and bind are auditable as
+/// byte-identical.
+pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
 pub use write_txn::{WriteTxn, WriteTxnError};
 
 /// The stable law id [`FirstCommitterWinsValidator`] rejects under, keyed on

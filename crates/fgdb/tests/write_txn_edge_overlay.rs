@@ -47,7 +47,10 @@ async fn seeded_vertices(
     for vid in vertices {
         seed.create_vertex(*vid, vec![], vec![]);
     }
-    database.write(cx, seed).await.expect("seed vertices commit");
+    database
+        .write(cx, seed)
+        .await
+        .expect("seed vertices commit");
     database
 }
 
@@ -85,23 +88,44 @@ fn staged_edge_is_visible_only_through_the_transaction_and_abort_discards_it() {
                 "transaction sees its staged edge"
             );
             assert!(
-                database.neighbours(VId(1), R).expect("base neighbours read succeeds").is_empty(),
+                database
+                    .neighbours(VId(1), R)
+                    .expect("base neighbours read succeeds")
+                    .is_empty(),
                 "base view cannot see the private adjacency"
             );
             assert!(
-                database.edge(EId(10)).expect("base edge read succeeds").is_none(),
+                database
+                    .edge(EId(10))
+                    .expect("base edge read succeeds")
+                    .is_none(),
                 "base view cannot see the private edge row"
             );
 
             transaction.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
-            assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
-            assert!(database.neighbours(VId(1), R).expect("reads after abort").is_empty());
+            assert_eq!(
+                database.frontier().expect("abort leaves handle healthy"),
+                frontier_before
+            );
+            assert!(
+                database
+                    .neighbours(VId(1), R)
+                    .expect("reads after abort")
+                    .is_empty()
+            );
             assert!(database.edge(EId(10)).expect("reads after abort").is_none());
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert!(reopened.neighbours(VId(1), R).expect("reopen neighbours").is_empty());
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert!(
+            reopened
+                .neighbours(VId(1), R)
+                .expect("reopen neighbours")
+                .is_empty()
+        );
         assert!(reopened.edge(EId(10)).expect("reopen edge").is_none());
     });
 }
@@ -130,13 +154,25 @@ fn committed_staged_edge_consumes_one_sequence_and_survives_reopen() {
                 .commit(&mut database, &commit_cx)
                 .await
                 .expect("commit staged edge");
-            assert_eq!(committed.0, before.0 + 1, "one transaction consumes one sequence");
-            assert_eq!(database.frontier().expect("healthy committed frontier"), committed);
+            assert_eq!(
+                committed.0,
+                before.0 + 1,
+                "one transaction consumes one sequence"
+            );
+            assert_eq!(
+                database.frontier().expect("healthy committed frontier"),
+                committed
+            );
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(reopened.frontier().expect("healthy reopened frontier"), committed);
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            reopened.frontier().expect("healthy reopened frontier"),
+            committed
+        );
         assert_eq!(
             reopened.neighbours(VId(1), R).expect("reopen neighbours"),
             vec![VId(2)]
@@ -152,8 +188,7 @@ fn concurrent_edge_from_observed_source_aborts_reader_with_read_01() {
         let txn_cx = contexts.txn();
         let dir = scratch("adjacency-read-conflict");
         {
-            let mut database =
-                seeded_vertices(&commit_cx, &dir, &[VId(1), VId(2)]).await;
+            let mut database = seeded_vertices(&commit_cx, &dir, &[VId(1), VId(2)]).await;
             let mut reader = database.begin(&txn_cx).expect("begin adjacency reader");
             let mut writer = database.begin(&txn_cx).expect("begin edge writer");
 
@@ -189,7 +224,9 @@ fn concurrent_edge_from_observed_source_aborts_reader_with_read_01() {
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             reopened.neighbours(VId(1), R).expect("reopen neighbours"),
             vec![VId(2)]

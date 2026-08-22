@@ -64,7 +64,9 @@ fn skip_drops_the_staged_smallest_dest_in_the_overlay_only() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("cut-line");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         for vid in [1u128, 3, 4, 6] {
             seed.create_vertex(VId(vid), vec![LabelId(3)], vec![]);
@@ -77,7 +79,8 @@ fn skip_drops_the_staged_smallest_dest_in_the_overlay_only() {
         let mut staged = WriteBatch::new(R);
         staged.create_vertex(VId(2), vec![], vec![]);
         staged.add_edge(EId(12), VId(1), VId(2), vec![]);
-        txn.write(&mut db, staged).expect("stages the smallest destination");
+        txn.write(&mut db, staged)
+            .expect("stages the smallest destination");
 
         // The unskipped pair first: the overlay merge itself, so the SKIP
         // differences below are attributable to SKIP alone.

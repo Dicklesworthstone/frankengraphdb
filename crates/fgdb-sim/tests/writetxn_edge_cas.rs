@@ -97,7 +97,10 @@ fn aborted_matching_edge_cas_replays_the_old_value() {
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
-        assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+        assert_eq!(
+            database.frontier().expect("abort leaves handle healthy"),
+            frontier_before
+        );
         drop(database);
 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
@@ -232,7 +235,11 @@ fn concurrent_matching_cas_aborts_reader_and_replays_only_writer() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(
-            graph.edge(EDGE).expect("edge remains durable").props.get(&PROPERTY),
+            graph
+                .edge(EDGE)
+                .expect("edge remains durable")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(33)),
             "B's CAS result is durable"
         );

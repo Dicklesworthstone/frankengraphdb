@@ -84,7 +84,10 @@ fn aborted_edge_overlay_is_absent_from_reference_replay() {
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
-        assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+        assert_eq!(
+            database.frontier().expect("abort leaves handle healthy"),
+            frontier_before
+        );
         drop(database);
 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
@@ -99,7 +102,10 @@ fn aborted_edge_overlay_is_absent_from_reference_replay() {
             .graph(GRAPH, BRANCH)
             .expect("seeded reference coordinate exists");
         assert!(graph.neighbours(VId(1), R).is_empty());
-        assert!(graph.edge(EId(10)).is_none(), "aborted staged edge is not durable");
+        assert!(
+            graph.edge(EId(10)).is_none(),
+            "aborted staged edge is not durable"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -153,7 +159,10 @@ fn committed_edge_overlay_is_present_in_reference_replay() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(graph.neighbours(VId(1), R), vec![VId(2)]);
-        assert!(graph.edge(EId(10)).is_some(), "committed staged edge is durable");
+        assert!(
+            graph.edge(EId(10)).is_some(),
+            "committed staged edge is durable"
+        );
     });
     assert!(
         report.lab_test_passed(),

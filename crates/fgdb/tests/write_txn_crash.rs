@@ -12,6 +12,7 @@
 //! - `WriteTxn::commit_with_crash(&mut self, &mut Database<V>, &CommitCx,
 //!    Option<CrashPoint>)` (async) → same `Result<CommitSeq, WriteTxnError>`
 //!   shape as `commit`.
+//!
 //! Until it lands this file fails to compile — deliberately; do not weaken
 //! it to make it compile.
 //!
@@ -67,7 +68,7 @@ where
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// One live vertex carrying `PROP = 0`: the value every crash test below
@@ -121,7 +122,9 @@ fn crash_disabled_commits_exactly_like_commit() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
             vec![(PROP, int(1))],
@@ -191,7 +194,9 @@ fn a_before_capsule_crash_is_residue_free_across_reopen() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.frontier().expect("healthy frontier"),
             frontier_before,

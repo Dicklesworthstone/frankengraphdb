@@ -51,9 +51,7 @@ where
 }
 
 fn bind_r_l() -> RelationBind {
-    RelationBind::new()
-        .with_relation("R", R)
-        .with_label("L", L)
+    RelationBind::new().with_relation("R", R).with_label("L", L)
 }
 
 /// Answers move with staging, the certificate does not.
@@ -63,7 +61,9 @@ fn staging_a_labeled_source_moves_the_answer_and_not_the_certificate() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-labeled-cert");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![L], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
@@ -76,7 +76,8 @@ fn staging_a_labeled_source_moves_the_answer_and_not_the_certificate() {
         staged.create_vertex(VId(9), vec![L], vec![]);
         staged.create_vertex(VId(6), vec![], vec![]);
         staged.add_edge(EId(11), VId(9), VId(6), vec![]);
-        txn.write(&mut db, staged).expect("stages the labeled source");
+        txn.write(&mut db, staged)
+            .expect("stages the labeled source");
 
         // The answers: durable 2 for both, staged 6 for the txn only.
         let overlay = txn

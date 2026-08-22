@@ -101,10 +101,15 @@ fn staged_matching_edge_cas_is_private_and_abort_preserves_old_value() {
 
             transaction.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
-            assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+            assert_eq!(
+                database.frontier().expect("abort leaves handle healthy"),
+                frontier_before
+            );
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             reopened
                 .edge(EDGE)
@@ -134,7 +139,11 @@ fn matching_edge_cas_commits_once_and_mismatch_changes_no_edge_value() {
                 .commit(&mut database, &commit_cx)
                 .await
                 .expect("commit matching CAS");
-            assert_eq!(committed.0, before.0 + 1, "matching CAS consumes one sequence");
+            assert_eq!(
+                committed.0,
+                before.0 + 1,
+                "matching CAS consumes one sequence"
+            );
 
             let mut mismatch = database.begin(&txn_cx).expect("begin mismatch CAS");
             let mut mismatch_batch = WriteBatch::new(R);
@@ -171,8 +180,13 @@ fn matching_edge_cas_commits_once_and_mismatch_changes_no_edge_value() {
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(reopened.frontier().expect("healthy reopened frontier"), committed);
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            reopened.frontier().expect("healthy reopened frontier"),
+            committed
+        );
         assert_eq!(
             reopened
                 .edge(EDGE)
@@ -181,7 +195,12 @@ fn matching_edge_cas_commits_once_and_mismatch_changes_no_edge_value() {
                 .props,
             vec![(PROPERTY, CanonicalScalar::Int(22))]
         );
-        assert!(reopened.vertex(VId(3)).expect("reopen sibling vertex").is_none());
+        assert!(
+            reopened
+                .vertex(VId(3))
+                .expect("reopen sibling vertex")
+                .is_none()
+        );
     });
 }
 
@@ -229,7 +248,9 @@ fn concurrent_matching_cas_of_observed_edge_aborts_reader_with_read_01() {
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             reopened
                 .edge(EDGE)

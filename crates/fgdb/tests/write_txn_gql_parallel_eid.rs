@@ -43,11 +43,7 @@ fn match_overlay_keeps_destination_while_parallel_eid_remains() {
         let bind = RelationBind::new().with_relation("R", relation);
         assert_eq!(
             transaction
-                .execute_gql(
-                    &database,
-                    "MATCH (a)-[:R]->(b) RETURN b",
-                    &bind,
-                )
+                .execute_gql(&database, "MATCH (a)-[:R]->(b) RETURN b", &bind,)
                 .expect("overlay MATCH executes"),
             vec![VId(2)]
         );

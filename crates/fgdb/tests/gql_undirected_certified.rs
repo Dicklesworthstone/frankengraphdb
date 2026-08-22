@@ -23,10 +23,8 @@ fn undirected_certified_rows_and_digest_match_the_bound_plan() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-undirected-certified-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-undirected-certified-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

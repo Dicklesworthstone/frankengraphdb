@@ -1,9 +1,9 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, WriteBatch, WriteTxnError};
 use fgdb_delta_types::RelationId;
+use fgdb_types::VId;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::VId;
 use std::path::PathBuf;
 
 const R: RelationId = RelationId(1);
@@ -77,15 +77,25 @@ fn staged_creation_appears_only_in_transaction_vertices_and_abort_discards_it() 
 
             transaction.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
-            assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+            assert_eq!(
+                database.frontier().expect("abort leaves handle healthy"),
+                frontier_before
+            );
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             vertex_ids(&reopened.vertices().expect("reopen vertices")),
             vec![VId(1)]
         );
-        assert!(reopened.vertex(VId(2)).expect("reopen staged vertex").is_none());
+        assert!(
+            reopened
+                .vertex(VId(2))
+                .expect("reopen staged vertex")
+                .is_none()
+        );
     });
 }
 
@@ -106,7 +116,12 @@ fn staged_deletion_empties_transaction_vertices_and_commits_once() {
                 .write(&mut database, delete)
                 .expect("stage vertex deletion");
 
-            assert!(transaction.vertices(&database).expect("overlay vertices").is_empty());
+            assert!(
+                transaction
+                    .vertices(&database)
+                    .expect("overlay vertices")
+                    .is_empty()
+            );
             assert_eq!(
                 vertex_ids(&database.vertices().expect("base vertices")),
                 vec![VId(1)]
@@ -115,14 +130,28 @@ fn staged_deletion_empties_transaction_vertices_and_commits_once() {
                 .commit(&mut database, &commit_cx)
                 .await
                 .expect("commit staged deletion");
-            assert_eq!(committed.0, before.0 + 1, "one transaction consumes one sequence");
+            assert_eq!(
+                committed.0,
+                before.0 + 1,
+                "one transaction consumes one sequence"
+            );
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(reopened.frontier().expect("healthy reopened frontier"), committed);
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            reopened.frontier().expect("healthy reopened frontier"),
+            committed
+        );
         assert!(reopened.vertices().expect("reopen vertices").is_empty());
-        assert!(reopened.vertex(VId(1)).expect("reopen deleted vertex").is_none());
+        assert!(
+            reopened
+                .vertex(VId(1))
+                .expect("reopen deleted vertex")
+                .is_none()
+        );
     });
 }
 
@@ -137,7 +166,11 @@ fn concurrent_deletion_of_vertex_observed_by_vertices_aborts_reader_with_read_01
             let mut reader = database.begin(&txn_cx).expect("begin vertices reader");
             let mut deleter = database.begin(&txn_cx).expect("begin vertex deleter");
             assert_eq!(
-                vertex_ids(&reader.vertices(&database).expect("transactional vertices read")),
+                vertex_ids(
+                    &reader
+                        .vertices(&database)
+                        .expect("transactional vertices read")
+                ),
                 vec![VId(1)]
             );
             let mut disjoint = WriteBatch::new(R);
@@ -168,9 +201,16 @@ fn concurrent_deletion_of_vertex_observed_by_vertices_aborts_reader_with_read_01
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert!(reopened.vertices().expect("reopen vertices").is_empty());
-        assert!(reopened.vertex(VId(1)).expect("reopen deleted vertex").is_none());
+        assert!(
+            reopened
+                .vertex(VId(1))
+                .expect("reopen deleted vertex")
+                .is_none()
+        );
         assert!(
             reopened.vertex(VId(3)).expect("reopen vertex").is_none(),
             "READ-01 abort leaves no disjoint write residue"

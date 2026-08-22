@@ -92,7 +92,9 @@ fn dest_greater_or_equal_includes_the_boundary_and_strict_does_not() {
         let dir = scratch("dst-ge");
         let db = seeded(cx, &dir).await;
 
-        let ge = db.execute_gql(GE_A, &bind_rk()).expect("WHERE b.k >= 1 executes");
+        let ge = db
+            .execute_gql(GE_A, &bind_rk())
+            .expect("WHERE b.k >= 1 executes");
         assert_eq!(
             ge,
             vec![VId(1), VId(3)],
@@ -110,22 +112,26 @@ fn dest_greater_or_equal_includes_the_boundary_and_strict_does_not() {
         );
 
         assert_eq!(
-            db.execute_gql(GT_A, &bind_rk()).expect("WHERE b.k > 1 executes"),
+            db.execute_gql(GT_A, &bind_rk())
+                .expect("WHERE b.k > 1 executes"),
             vec![VId(3)],
             "the strict sibling excludes the boundary on the same fixture"
         );
         assert_eq!(
-            db.execute_gql(EQ_A, &bind_rk()).expect("WHERE b.k = 1 executes"),
+            db.execute_gql(EQ_A, &bind_rk())
+                .expect("WHERE b.k = 1 executes"),
             vec![VId(1)],
             "equality answers the boundary carrier's source alone"
         );
         assert_eq!(
-            db.execute_gql(LT_A, &bind_rk()).expect("WHERE b.k < 1 executes"),
+            db.execute_gql(LT_A, &bind_rk())
+                .expect("WHERE b.k < 1 executes"),
             vec![VId(5)],
             "strict less is unmoved beside the new spelling"
         );
         assert_eq!(
-            db.execute_gql(PLAIN_A, &bind_rk()).expect("unfiltered executes"),
+            db.execute_gql(PLAIN_A, &bind_rk())
+                .expect("unfiltered executes"),
             vec![VId(1), VId(3), VId(5), VId(7)],
             "without WHERE every source answers"
         );
@@ -147,7 +153,9 @@ fn the_dest_le_spelling_is_still_a_typed_parse_error() {
         // negative now guards the C-style != alias, which never was
         // grammar — moved to a live boundary, not weakened.
         for off_grammar in ["MATCH (a)-[:R]->(b) WHERE a.k != 1 RETURN b"] {
-            let err = db.execute_gql(off_grammar, &bind_rk()).expect_err(off_grammar);
+            let err = db
+                .execute_gql(off_grammar, &bind_rk())
+                .expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
                 "{off_grammar:?} must be the typed parse arm: {err:?}"

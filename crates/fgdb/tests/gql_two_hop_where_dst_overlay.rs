@@ -58,8 +58,7 @@ fn two_hop_far_end_property_equality_sees_the_staged_chain() {
             .with_relation("R", r)
             .with_relation("S", s)
             .with_property("k", key);
-        let filtered =
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k = 1 RETURN c";
+        let filtered = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.k = 1 RETURN c";
         assert_eq!(
             txn.execute_gql(&db, filtered, &bind)
                 .expect("overlay far-end property MATCH executes"),

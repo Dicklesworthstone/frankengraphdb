@@ -82,13 +82,15 @@ fn both_projections_answer_the_incident_vertices() {
         let db = seeded(cx, &dir).await;
 
         assert_eq!(
-            db.execute_gql(UN_RETURN_B, &bind_r()).expect("undirected RETURN b executes"),
+            db.execute_gql(UN_RETURN_B, &bind_r())
+                .expect("undirected RETURN b executes"),
             vec![VId(1), VId(2), VId(3)],
             "each edge binds twice, once per orientation; the isolate 9 is \
              incident to nothing"
         );
         assert_eq!(
-            db.execute_gql(UN_RETURN_A, &bind_r()).expect("undirected RETURN a executes"),
+            db.execute_gql(UN_RETURN_A, &bind_r())
+                .expect("undirected RETURN a executes"),
             vec![VId(1), VId(2), VId(3)],
             "the projections are symmetric when the direction is erased — \
              the dest-only vertex 2 answers as a too"
@@ -107,12 +109,14 @@ fn the_directed_statements_are_unmoved() {
         let db = seeded(cx, &dir).await;
 
         assert_eq!(
-            db.execute_gql(OUT_RETURN_B, &bind_r()).expect("outgoing RETURN b executes"),
+            db.execute_gql(OUT_RETURN_B, &bind_r())
+                .expect("outgoing RETURN b executes"),
             vec![VId(2)],
             "outgoing destinations unchanged"
         );
         assert_eq!(
-            db.execute_gql(IN_RETURN_A, &bind_r()).expect("incoming RETURN a executes"),
+            db.execute_gql(IN_RETURN_A, &bind_r())
+                .expect("incoming RETURN a executes"),
             vec![VId(2)],
             "incoming in-edge-holders unchanged"
         );

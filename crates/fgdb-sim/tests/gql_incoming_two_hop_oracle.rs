@@ -41,7 +41,13 @@ fn engine_keys() -> DatabaseKeys {
 }
 
 fn oracle_keys() -> CapsuleKeys {
-    CapsuleKeys::new(K_OID, NAMESPACE, DEK, CAPSULE_OBJECT_KIND, CapsuleProfile::balanced())
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        DEK,
+        CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 /// A scratch directory that does not yet exist, so `create` owns making it.
@@ -115,7 +121,9 @@ fn the_incoming_two_hop_equals_the_reference_composed_sources() {
         let engine_at_frontier;
         let engine_one_hop;
         {
-            let mut db = Database::create(cx, &dir, engine_keys()).await.expect("creates");
+            let mut db = Database::create(cx, &dir, engine_keys())
+                .await
+                .expect("creates");
             let mut r_batch = WriteBatch::new(R);
             for vid in [1u128, 2, 4, 7, 8, 9] {
                 r_batch.create_vertex(VId(vid), vec![LabelId(3)], vec![]);

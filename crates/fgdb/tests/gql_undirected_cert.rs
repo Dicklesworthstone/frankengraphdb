@@ -32,7 +32,10 @@ fn keys() -> DatabaseKeys {
 /// Pid-qualified because concurrent panes share `/tmp`; nothing is removed
 /// (rule 1 carves out no exception for test code).
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("fgdb-undirected-cert-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "fgdb-undirected-cert-{}-{name}",
+        std::process::id()
+    ))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T
@@ -96,12 +99,14 @@ fn the_undirected_certificate_differs_from_the_directed_one() {
 
         // The behaviors the digests must keep apart, on the same handle.
         assert_eq!(
-            db.execute_gql(UN_RETURN_B, &bind_r()).expect("undirected executes"),
+            db.execute_gql(UN_RETURN_B, &bind_r())
+                .expect("undirected executes"),
             vec![VId(1), VId(2), VId(3)],
             "a colliding certificate cannot hide behind directed dests"
         );
         assert_eq!(
-            db.execute_gql(OUT_RETURN_B, &bind_r()).expect("outgoing executes"),
+            db.execute_gql(OUT_RETURN_B, &bind_r())
+                .expect("outgoing executes"),
             vec![VId(2)]
         );
     });

@@ -72,8 +72,18 @@ fn aborted_vertex_delete_preserves_vertex_and_edge_in_reference_replay() {
         transaction
             .write(&mut database, delete_vertex())
             .expect("stage vertex deletion");
-        assert!(transaction.vertex(&database, VId(2)).expect("overlay vertex").is_none());
-        assert!(transaction.edge(&database, EDGE).expect("overlay edge").is_none());
+        assert!(
+            transaction
+                .vertex(&database, VId(2))
+                .expect("overlay vertex")
+                .is_none()
+        );
+        assert!(
+            transaction
+                .edge(&database, EDGE)
+                .expect("overlay edge")
+                .is_none()
+        );
         assert!(
             transaction
                 .neighbours(&database, VId(1), R)
@@ -82,7 +92,10 @@ fn aborted_vertex_delete_preserves_vertex_and_edge_in_reference_replay() {
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
-        assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+        assert_eq!(
+            database.frontier().expect("abort leaves handle healthy"),
+            frontier_before
+        );
         drop(database);
 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
@@ -97,7 +110,10 @@ fn aborted_vertex_delete_preserves_vertex_and_edge_in_reference_replay() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert!(graph.vertex(VId(2)).is_some(), "abort preserves the vertex");
-        assert!(graph.edge(EDGE).is_some(), "abort preserves the incident edge");
+        assert!(
+            graph.edge(EDGE).is_some(),
+            "abort preserves the incident edge"
+        );
         assert_eq!(graph.neighbours(VId(1), R), vec![VId(2)]);
     });
     assert!(
@@ -145,8 +161,14 @@ fn committed_vertex_delete_cascades_in_reference_replay() {
         let graph = reference
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
-        assert!(graph.vertex(VId(2)).is_none(), "committed vertex deletion is durable");
-        assert!(graph.edge(EDGE).is_none(), "incident edge is cascade-deleted");
+        assert!(
+            graph.vertex(VId(2)).is_none(),
+            "committed vertex deletion is durable"
+        );
+        assert!(
+            graph.edge(EDGE).is_none(),
+            "incident edge is cascade-deleted"
+        );
         assert!(graph.neighbours(VId(1), R).is_empty());
         assert!(graph.vertex(VId(1)).is_some(), "source vertex remains");
     });
@@ -179,7 +201,12 @@ fn concurrent_vertex_delete_aborts_reader_and_replays_only_deleter() {
                 .expect("transactional neighbours read succeeds"),
             vec![VId(2)]
         );
-        assert!(reader.vertex(&database, VId(2)).expect("vertex observation").is_some());
+        assert!(
+            reader
+                .vertex(&database, VId(2))
+                .expect("vertex observation")
+                .is_some()
+        );
         let mut disjoint = WriteBatch::new(R);
         disjoint.create_vertex(VId(3), vec![], vec![]);
         reader
@@ -217,7 +244,10 @@ fn concurrent_vertex_delete_aborts_reader_and_replays_only_deleter() {
         let graph = reference
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
-        assert!(graph.vertex(VId(2)).is_none(), "B's vertex deletion is durable");
+        assert!(
+            graph.vertex(VId(2)).is_none(),
+            "B's vertex deletion is durable"
+        );
         assert!(graph.edge(EDGE).is_none(), "B's cascade is durable");
         assert!(graph.neighbours(VId(1), R).is_empty());
         assert!(

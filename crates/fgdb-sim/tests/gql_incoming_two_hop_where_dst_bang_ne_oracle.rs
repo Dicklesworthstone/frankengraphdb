@@ -16,7 +16,7 @@
 //! exactly what a missing-as-unequal executor wrongly admits.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch, CAPSULE_OBJECT_KIND};
+use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};

@@ -59,8 +59,7 @@ fn both_property_inequalities_see_the_staged_pair_without_dirty_reads() {
             vec![VId(2)]
         );
 
-        let filtered =
-            "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m <> 9 RETURN b";
+        let filtered = "MATCH (a)-[:R]->(b) WHERE a.k <> 1 AND b.m <> 9 RETURN b";
         assert_eq!(
             txn.execute_gql(&db, filtered, &bind)
                 .expect("overlay conjunction executes"),

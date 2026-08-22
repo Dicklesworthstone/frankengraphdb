@@ -81,7 +81,9 @@ fn return_a_projects_the_sources_sorted() {
         let dir = scratch("sources");
         let db = seeded(cx, &dir).await;
 
-        let rows = db.execute_gql(RETURN_A, &bind_r()).expect("RETURN a executes");
+        let rows = db
+            .execute_gql(RETURN_A, &bind_r())
+            .expect("RETURN a executes");
         assert_eq!(
             rows,
             vec![VId(1), VId(3)],
@@ -101,7 +103,9 @@ fn return_b_still_projects_the_destinations() {
         let dir = scratch("dests");
         let db = seeded(cx, &dir).await;
 
-        let rows = db.execute_gql(RETURN_B, &bind_r()).expect("RETURN b executes");
+        let rows = db
+            .execute_gql(RETURN_B, &bind_r())
+            .expect("RETURN b executes");
         assert_eq!(
             rows,
             vec![VId(2)],
@@ -128,7 +132,9 @@ fn return_of_an_unbound_variable_is_a_typed_parse_error() {
             // pattern: the grammar is still exactly one statement shape.
             "MATCH (a) RETURN a",
         ] {
-            let err = db.execute_gql(off_grammar, &bind_r()).expect_err(off_grammar);
+            let err = db
+                .execute_gql(off_grammar, &bind_r())
+                .expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
                 "{off_grammar:?} must be the typed parse arm, got {err:?}"
@@ -154,7 +160,8 @@ fn the_overlay_return_a_includes_the_staged_source() {
         let mut batch = WriteBatch::new(R);
         batch.create_vertex(VId(9), vec![], vec![]);
         batch.add_edge(EId(12), VId(9), VId(2), vec![]);
-        txn.write(&mut db, batch).expect("stages the new source edge");
+        txn.write(&mut db, batch)
+            .expect("stages the new source edge");
 
         let overlay = txn
             .execute_gql(&db, RETURN_A, &bind_r())
@@ -166,7 +173,8 @@ fn the_overlay_return_a_includes_the_staged_source() {
              among the durable ones"
         );
         assert_eq!(
-            db.execute_gql(RETURN_A, &bind_r()).expect("base RETURN a executes"),
+            db.execute_gql(RETURN_A, &bind_r())
+                .expect("base RETURN a executes"),
             vec![VId(1), VId(3)],
             "DIRTY READ: the staged source leaked into the shared handle's \
              projection before commit"

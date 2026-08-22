@@ -65,7 +65,9 @@ fn a_fully_staged_edge_is_matched_by_the_txn_only() {
         let txn_cx = contexts.txn();
         let dir = scratch("staged-edge");
         {
-            let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+            let mut db = Database::create(&commit, &dir, keys())
+                .await
+                .expect("creates");
             let mut seed = WriteBatch::new(R);
             seed.create_vertex(VId(9), vec![], vec![]);
             db.write(&commit, seed).await.expect("isolate seed commits");
@@ -86,7 +88,9 @@ fn a_fully_staged_edge_is_matched_by_the_txn_only() {
                 "the staged edge answers through the overlay — and the \
                  durable isolate VId(9) still contributes nothing"
             );
-            let base = db.execute_gql(PINNED, &bind_r()).expect("base MATCH executes");
+            let base = db
+                .execute_gql(PINNED, &bind_r())
+                .expect("base MATCH executes");
             assert!(
                 base.is_empty(),
                 "DIRTY READ: the staged edge leaked into the shared handle: {base:?}"
@@ -102,7 +106,9 @@ fn a_fully_staged_edge_is_matched_by_the_txn_only() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert!(
             db.execute_gql(PINNED, &bind_r())
                 .expect("executes after reopen")
@@ -122,7 +128,9 @@ fn a_staged_isolate_vertex_is_not_a_destination() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-isolate");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![LabelId(3)], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
@@ -157,7 +165,9 @@ fn staged_edges_come_back_sorted_and_commit_as_one_sequence() {
         let txn_cx = contexts.txn();
         let dir = scratch("staged-sorted");
         {
-            let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+            let mut db = Database::create(&commit, &dir, keys())
+                .await
+                .expect("creates");
             let before = db.frontier().expect("healthy frontier");
 
             let mut txn = db.begin(&txn_cx).expect("txn begins");
@@ -187,16 +197,20 @@ fn staged_edges_come_back_sorted_and_commit_as_one_sequence() {
                 .expect("the staged txn commits");
             assert_eq!(seq.0, before.0 + 1, "one txn, one sequence");
             assert_eq!(
-                db.execute_gql(PINNED, &bind_r()).expect("base MATCH executes"),
+                db.execute_gql(PINNED, &bind_r())
+                    .expect("base MATCH executes"),
                 vec![VId(2), VId(5)],
                 "after commit the shared answer equals the overlay's"
             );
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("executes after reopen"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("executes after reopen"),
             vec![VId(2), VId(5)],
             "the durable stream answers identically"
         );

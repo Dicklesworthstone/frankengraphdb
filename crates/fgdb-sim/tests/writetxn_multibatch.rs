@@ -1,7 +1,5 @@
 use asupersync::lab::run_async_under_lab;
-use fgdb::{
-    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError,
-};
+use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -60,11 +58,7 @@ fn two_writes_commit_as_one_capsule_and_replay_the_composed_state() {
             .expect("stage vertex creation");
 
         let mut property = WriteBatch::new(RELATION);
-        property.set_vertex_property(
-            VId(2),
-            PROPERTY,
-            Some(CanonicalScalar::Int(42)),
-        );
+        property.set_vertex_property(VId(2), PROPERTY, Some(CanonicalScalar::Int(42)));
         transaction
             .write(&mut database, property)
             .expect("compose property update into the transaction");
@@ -120,11 +114,7 @@ fn abort_after_a_write_preserves_the_pre_begin_stream_and_graph() {
             .expect("create product database");
 
         let mut seed = WriteBatch::new(RELATION);
-        seed.create_vertex(
-            VId(1),
-            vec![],
-            vec![(PROPERTY, CanonicalScalar::Int(9))],
-        );
+        seed.create_vertex(VId(1), vec![], vec![(PROPERTY, CanonicalScalar::Int(9))]);
         database
             .write(&commit_cx, seed)
             .await
@@ -162,15 +152,25 @@ fn abort_after_a_write_preserves_the_pre_begin_stream_and_graph() {
             .graph(GRAPH, BRANCH)
             .expect("seeded reference coordinate exists");
         assert_eq!(
-            graph.iter_vertices().map(|(vid, _)| vid).collect::<Vec<_>>(),
+            graph
+                .iter_vertices()
+                .map(|(vid, _)| vid)
+                .collect::<Vec<_>>(),
             vec![VId(1)],
             "replay must match the graph that existed before begin"
         );
         assert_eq!(
-            graph.vertex(VId(1)).expect("seed vertex remains").props.get(&PROPERTY),
+            graph
+                .vertex(VId(1))
+                .expect("seed vertex remains")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(9))
         );
-        assert!(graph.vertex(VId(3)).is_none(), "aborted vertex is not durable");
+        assert!(
+            graph.vertex(VId(3)).is_none(),
+            "aborted vertex is not durable"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -190,11 +190,7 @@ fn overlapping_two_write_txns_are_fcw_and_replay_only_the_winner() {
             .expect("create product database");
 
         let mut seed = WriteBatch::new(RELATION);
-        seed.create_vertex(
-            VId(1),
-            vec![],
-            vec![(PROPERTY, CanonicalScalar::Int(0))],
-        );
+        seed.create_vertex(VId(1), vec![], vec![(PROPERTY, CanonicalScalar::Int(0))]);
         database
             .write(&commit_cx, seed)
             .await
@@ -207,39 +203,23 @@ fn overlapping_two_write_txns_are_fcw_and_replay_only_the_winner() {
         assert_eq!(winner.basis(), loser.basis());
 
         let mut winner_first = WriteBatch::new(RELATION);
-        winner_first.set_vertex_property(
-            VId(1),
-            PROPERTY,
-            Some(CanonicalScalar::Int(1)),
-        );
+        winner_first.set_vertex_property(VId(1), PROPERTY, Some(CanonicalScalar::Int(1)));
         winner
             .write(&mut database, winner_first)
             .expect("winner stages first property");
         let mut winner_second = WriteBatch::new(RELATION);
-        winner_second.set_vertex_property(
-            VId(1),
-            PROPERTY_B,
-            Some(CanonicalScalar::Int(10)),
-        );
+        winner_second.set_vertex_property(VId(1), PROPERTY_B, Some(CanonicalScalar::Int(10)));
         winner
             .write(&mut database, winner_second)
             .expect("winner stages second property");
 
         let mut loser_first = WriteBatch::new(RELATION);
-        loser_first.set_vertex_property(
-            VId(1),
-            PROPERTY,
-            Some(CanonicalScalar::Int(2)),
-        );
+        loser_first.set_vertex_property(VId(1), PROPERTY, Some(CanonicalScalar::Int(2)));
         loser
             .write(&mut database, loser_first)
             .expect("loser stages overlapping property");
         let mut loser_second = WriteBatch::new(RELATION);
-        loser_second.set_vertex_property(
-            VId(1),
-            PROPERTY_B,
-            Some(CanonicalScalar::Int(20)),
-        );
+        loser_second.set_vertex_property(VId(1), PROPERTY_B, Some(CanonicalScalar::Int(20)));
         loser
             .write(&mut database, loser_second)
             .expect("loser stages second property");
@@ -276,10 +256,7 @@ fn overlapping_two_write_txns_are_fcw_and_replay_only_the_winner() {
             2,
             "no property from the losing transaction may survive"
         );
-        assert_eq!(
-            vertex.props.get(&PROPERTY),
-            Some(&CanonicalScalar::Int(1))
-        );
+        assert_eq!(vertex.props.get(&PROPERTY), Some(&CanonicalScalar::Int(1)));
         assert_eq!(
             vertex.props.get(&PROPERTY_B),
             Some(&CanonicalScalar::Int(10))

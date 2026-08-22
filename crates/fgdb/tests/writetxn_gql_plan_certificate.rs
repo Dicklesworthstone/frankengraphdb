@@ -72,7 +72,9 @@ fn the_txn_certificate_names_the_basis_not_the_advanced_frontier() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("names-basis");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![LabelId(3)], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
@@ -88,7 +90,9 @@ fn the_txn_certificate_names_the_basis_not_the_advanced_frontier() {
         widen.create_vertex(VId(3), vec![], vec![]);
         widen.create_vertex(VId(5), vec![], vec![]);
         widen.add_edge(EId(11), VId(3), VId(5), vec![]);
-        db.write(&commit, widen).await.expect("the widening commit lands");
+        db.write(&commit, widen)
+            .await
+            .expect("the widening commit lands");
         let live_frontier = db.frontier().expect("healthy frontier");
         assert_ne!(basis, live_frontier, "the frontier moved past the basis");
 
@@ -96,8 +100,7 @@ fn the_txn_certificate_names_the_basis_not_the_advanced_frontier() {
             .gql_plan_certificate(PINNED, &bind_r())
             .expect("the txn's plan certificate is issued");
         assert_eq!(
-            txn_cert.snapshot_seq,
-            basis,
+            txn_cert.snapshot_seq, basis,
             "THE LAW: the txn certifies the snapshot it answers from — its \
              basis — not the frontier the shared handle advanced to"
         );
@@ -134,13 +137,19 @@ fn off_grammar_and_finished_txn_refuse_typed() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("refusals");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![], vec![]);
         db.write(&commit, seed).await.expect("seed commits");
 
         let txn = db.begin(&txn_cx).expect("txn begins");
-        for off_grammar in ["MATCH (a) RETURN a", "MATCH (a)-[:R]->(b) RETURN b EXTRA", ""] {
+        for off_grammar in [
+            "MATCH (a) RETURN a",
+            "MATCH (a)-[:R]->(b) RETURN b EXTRA",
+            "",
+        ] {
             let err = txn
                 .gql_plan_certificate(off_grammar, &bind_r())
                 .expect_err(off_grammar);

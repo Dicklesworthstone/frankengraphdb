@@ -34,9 +34,9 @@ fn reference_sources(graph: &ReferenceGraph) -> Vec<VId> {
         .iter_edges()
         .filter(|(_, edge)| edge.relation == R)
         .filter(|(_, edge)| {
-            graph.vertex(edge.dst).is_some_and(|vertex| {
-                matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1)
-            })
+            graph.vertex(edge.dst).is_some_and(
+                |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+            )
         })
         .map(|(_, edge)| edge.src)
         .collect();
@@ -47,7 +47,7 @@ fn reference_sources(graph: &ReferenceGraph) -> Vec<VId> {
 
 #[test]
 fn dest_property_inequality_equals_reference_filter() {
-    let ((), report) = run_async_under_lab(0x42_16, |root| async move {
+    let ((), report) = run_async_under_lab(0x4216, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
         let dir = std::env::temp_dir().join(format!(
             "fgdb-gql-where-dst-prop-ne-oracle-{}",

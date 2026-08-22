@@ -68,8 +68,7 @@ fn two_hop_property_inequality_sees_the_staged_origin_without_dirty_reads() {
             vec![VId(3)]
         );
 
-        let filtered =
-            "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k <> 1 RETURN c";
+        let filtered = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k <> 1 RETURN c";
         assert_eq!(
             txn.execute_gql(&db, filtered, &bind)
                 .expect("overlay inequality MATCH executes"),

@@ -73,7 +73,9 @@ fn undirected_certified_at_names_s1_while_live_names_the_frontier() {
         let mut later = WriteBatch::new(R);
         later.create_vertex(VId(3), vec![], vec![]);
         later.add_edge(EId(11), VId(3), VId(2), vec![]);
-        db.write(&commit, later).await.expect("second epoch commits");
+        db.write(&commit, later)
+            .await
+            .expect("second epoch commits");
         let live_frontier = db.frontier().expect("healthy live frontier");
 
         // The pinned pass: first-epoch incidence, CALLER'S sequence stamped.
@@ -159,7 +161,9 @@ fn the_undirected_certified_at_pins_the_s1_incidents() {
 
         let mut widen = WriteBatch::new(R);
         widen.add_edge(EId(11), VId(3), VId(2), vec![]);
-        db.write(cx, widen).await.expect("the widening commit lands");
+        db.write(cx, widen)
+            .await
+            .expect("the widening commit lands");
 
         // The pinned certified execute: S1 rows, S1 named.
         let (pinned_rows, pinned_cert) = db

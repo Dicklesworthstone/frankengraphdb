@@ -28,7 +28,10 @@ fn undirected_match_overlay_sees_staged_incident_vertex() {
         seed.create_vertex(VId(1), vec![], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
         seed.add_edge(EId(10), VId(1), VId(2), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed durable edge");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed durable edge");
 
         let bind = RelationBind::new().with_relation("R", relation);
         let undirected = "MATCH (a)-[:R]-(b) RETURN b";
@@ -47,7 +50,9 @@ fn undirected_match_overlay_sees_staged_incident_vertex() {
             vec![VId(1), VId(2), VId(3)]
         );
         assert_eq!(
-            database.execute_gql(undirected, &bind).expect("durable undirected MATCH"),
+            database
+                .execute_gql(undirected, &bind)
+                .expect("durable undirected MATCH"),
             vec![VId(1), VId(2)]
         );
         assert_eq!(
@@ -58,7 +63,9 @@ fn undirected_match_overlay_sees_staged_incident_vertex() {
         );
         transaction.abort();
         assert_eq!(
-            database.execute_gql(undirected, &bind).expect("MATCH after abort"),
+            database
+                .execute_gql(undirected, &bind)
+                .expect("MATCH after abort"),
             vec![VId(1), VId(2)]
         );
     });

@@ -207,7 +207,9 @@ fn disjoint_prepared_batches_both_commit() {
                 .prepare_write(second)
                 .expect("second prepares against the same snapshot");
 
-            db.commit_prepared(cx, first).await.expect("disjoint: first commits");
+            db.commit_prepared(cx, first)
+                .await
+                .expect("disjoint: first commits");
             db.commit_prepared(cx, second)
                 .await
                 .expect("disjoint write-sets against one basis must BOTH commit");
@@ -241,7 +243,9 @@ fn sequential_overlapping_writes_do_not_false_abort() {
 
             let mut first = WriteBatch::new(KNOWS);
             first.set_vertex_property(VId(1), PROP, Some(int(1)));
-            db.write(cx, first).await.expect("first sequential update commits");
+            db.write(cx, first)
+                .await
+                .expect("first sequential update commits");
 
             let mut second = WriteBatch::new(KNOWS);
             second.set_vertex_property(VId(1), PROP, Some(int(2)));
@@ -327,7 +331,9 @@ fn overlapping_abort_is_attributable_to_fcw_not_the_fold() {
 
         let winner = db.prepare_write(winner).expect("winner prepares");
         let loser = db.prepare_write(loser).expect("loser prepares");
-        db.commit_prepared(cx, winner).await.expect("winner commits");
+        db.commit_prepared(cx, winner)
+            .await
+            .expect("winner commits");
         let err = db
             .commit_prepared(cx, loser)
             .await

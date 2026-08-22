@@ -87,7 +87,9 @@ fn node_only_greater_or_equal_includes_the_boundary_person() {
         let dir = scratch("node-ge");
         let db = seeded(cx, &dir).await;
 
-        let ge = db.execute_gql(GE_A, &bind_all()).expect("WHERE a.k >= 1 executes");
+        let ge = db
+            .execute_gql(GE_A, &bind_all())
+            .expect("WHERE a.k >= 1 executes");
         assert_eq!(
             ge,
             vec![VId(1), VId(2)],
@@ -106,22 +108,26 @@ fn node_only_greater_or_equal_includes_the_boundary_person() {
         assert!(!ge.contains(&VId(6)), "0 >= 1 is false");
 
         assert_eq!(
-            db.execute_gql(GT_A, &bind_all()).expect("WHERE a.k > 1 executes"),
+            db.execute_gql(GT_A, &bind_all())
+                .expect("WHERE a.k > 1 executes"),
             vec![VId(2)],
             "the strict sibling excludes the boundary on the same fixture"
         );
         assert_eq!(
-            db.execute_gql(EQ_A, &bind_all()).expect("WHERE a.k = 1 executes"),
+            db.execute_gql(EQ_A, &bind_all())
+                .expect("WHERE a.k = 1 executes"),
             vec![VId(1)],
             "equality answers the boundary Person alone"
         );
         assert_eq!(
-            db.execute_gql(LT_A, &bind_all()).expect("WHERE a.k < 1 executes"),
+            db.execute_gql(LT_A, &bind_all())
+                .expect("WHERE a.k < 1 executes"),
             vec![VId(6)],
             "strict less is unmoved beside the new spelling"
         );
         assert_eq!(
-            db.execute_gql(PLAIN_A, &bind_all()).expect("unfiltered executes"),
+            db.execute_gql(PLAIN_A, &bind_all())
+                .expect("unfiltered executes"),
             vec![VId(1), VId(2), VId(4), VId(6)],
             "without WHERE every Person answers — and only Persons"
         );
@@ -145,7 +151,9 @@ fn node_only_le_and_the_bare_scan_are_typed_parse_errors() {
             "MATCH (a:Person) WHERE a.k != 1 RETURN a",
             "MATCH (a) WHERE a.k >= 1 RETURN a",
         ] {
-            let err = db.execute_gql(off_grammar, &bind_all()).expect_err(off_grammar);
+            let err = db
+                .execute_gql(off_grammar, &bind_all())
+                .expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
                 "{off_grammar:?} must be the typed parse arm: {err:?}"

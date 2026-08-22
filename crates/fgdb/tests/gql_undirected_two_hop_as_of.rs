@@ -79,7 +79,9 @@ fn the_pinned_undirected_two_hop_answers_the_s1_composition() {
         let mut widen = WriteBatch::new(S);
         widen.create_vertex(VId(5), vec![], vec![]);
         widen.add_edge(EId(22), VId(2), VId(5), vec![]);
-        db.write(cx, widen).await.expect("the widening continuation lands");
+        db.write(cx, widen)
+            .await
+            .expect("the widening continuation lands");
 
         let pinned = db
             .execute_gql_at(UN_TWO_HOP_C, &bind_rs(), s1)

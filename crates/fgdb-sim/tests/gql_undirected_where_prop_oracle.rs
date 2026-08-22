@@ -31,14 +31,11 @@ const UN_NE: &str = "MATCH (a)-[:R]-(b) WHERE a.k <> 1 RETURN b";
 /// Other endpoints of every `:R` edge binding whose `a`-side carries `k`
 /// as an `Int` the comparator keeps — BOTH orientations walked, missing
 /// key out, inside the derivation.
-fn reference_other_endpoints(
-    graph: &ReferenceGraph,
-    keeps: impl Fn(i64) -> bool,
-) -> Vec<VId> {
+fn reference_other_endpoints(graph: &ReferenceGraph, keeps: impl Fn(i64) -> bool) -> Vec<VId> {
     let carrier = |vid: VId| {
-        graph.vertex(vid).is_some_and(|vertex| {
-            matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v))
-        })
+        graph.vertex(vid).is_some_and(
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v)),
+        )
     };
     let mut rows = Vec::new();
     for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {

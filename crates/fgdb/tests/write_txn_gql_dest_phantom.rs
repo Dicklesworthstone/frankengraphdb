@@ -97,7 +97,9 @@ fn a_new_edge_into_the_observed_destination_aborts_the_matcher() {
             assert_eq!(matched, vec![VId(2)], "the observed answer");
             let mut disjoint = WriteBatch::new(R);
             disjoint.create_vertex(VId(3), vec![LabelId(5)], vec![(PROP, int(3))]);
-            txn_a.write(&mut db, disjoint).expect("stages the disjoint write");
+            txn_a
+                .write(&mut db, disjoint)
+                .expect("stages the disjoint write");
 
             // Txn B: a new SOURCE into the observed destination. The
             // destination set stays [2] — this phantom is invisible to a
@@ -106,13 +108,16 @@ fn a_new_edge_into_the_observed_destination_aborts_the_matcher() {
             let mut into_dest = WriteBatch::new(R);
             into_dest.create_vertex(VId(9), vec![], vec![(PROP, int(9))]);
             into_dest.add_edge(EId(11), VId(9), VId(2), vec![]);
-            txn_b.write(&mut db, into_dest).expect("stages the incoming edge");
+            txn_b
+                .write(&mut db, into_dest)
+                .expect("stages the incoming edge");
             txn_b
                 .commit(&mut db, &commit)
                 .await
                 .expect("the phantom writer commits first");
             assert_eq!(
-                db.execute_gql(PINNED, &bind_r()).expect("base MATCH executes"),
+                db.execute_gql(PINNED, &bind_r())
+                    .expect("base MATCH executes"),
                 vec![VId(2)],
                 "control: the RETURNED rows did not change — only the \
                  incidence around the observed destination did"
@@ -137,8 +142,12 @@ fn a_new_edge_into_the_observed_destination_aborts_the_matcher() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
-        let answer = db.execute_gql(PINNED, &bind_r()).expect("executes after reopen");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
+        let answer = db
+            .execute_gql(PINNED, &bind_r())
+            .expect("executes after reopen");
         assert!(
             answer.contains(&VId(2)),
             "the observed destination — now with two incoming edges — is \
@@ -181,7 +190,9 @@ fn a_bare_concurrent_create_still_does_not_abort_the_matcher() {
             let mut txn_b = db.begin(&txn_cx).expect("creator txn begins");
             let mut create = WriteBatch::new(R);
             create.create_vertex(VId(9), vec![], vec![(PROP, int(9))]);
-            txn_b.write(&mut db, create).expect("stages the bare create");
+            txn_b
+                .write(&mut db, create)
+                .expect("stages the bare create");
             txn_b
                 .commit(&mut db, &commit)
                 .await
@@ -193,7 +204,9 @@ fn a_bare_concurrent_create_still_does_not_abort_the_matcher() {
             );
         }
 
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.vertex(VId(3)).expect("reads").expect("row").props,
             vec![(PROP, int(3))],

@@ -101,7 +101,9 @@ fn a_new_qualifying_edge_aborts_the_matcher_typed() {
             assert_eq!(matched, vec![VId(2)], "the pre-phantom answer");
             let mut disjoint = WriteBatch::new(R);
             disjoint.create_vertex(VId(3), vec![LabelId(5)], vec![(PROP, int(3))]);
-            txn_a.write(&mut db, disjoint).expect("stages the disjoint write");
+            txn_a
+                .write(&mut db, disjoint)
+                .expect("stages the disjoint write");
 
             // Txn B widens the ANSWER without touching any returned row:
             // a new vertex and a new qualifying edge from the same source.
@@ -109,7 +111,9 @@ fn a_new_qualifying_edge_aborts_the_matcher_typed() {
             let mut widen = WriteBatch::new(R);
             widen.create_vertex(VId(9), vec![], vec![(PROP, int(9))]);
             widen.add_edge(EId(11), VId(1), VId(9), vec![]);
-            txn_b.write(&mut db, widen).expect("stages the phantom edge");
+            txn_b
+                .write(&mut db, widen)
+                .expect("stages the phantom edge");
             txn_b
                 .commit(&mut db, &commit)
                 .await
@@ -135,9 +139,12 @@ fn a_new_qualifying_edge_aborts_the_matcher_typed() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("executes after reopen"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("executes after reopen"),
             vec![VId(2), VId(9)],
             "the widened answer is durable"
         );
@@ -173,7 +180,9 @@ fn a_bare_concurrent_create_still_does_not_abort_the_matcher() {
             let mut txn_b = db.begin(&txn_cx).expect("creator txn begins");
             let mut create = WriteBatch::new(R);
             create.create_vertex(VId(9), vec![], vec![(PROP, int(9))]);
-            txn_b.write(&mut db, create).expect("stages the bare create");
+            txn_b
+                .write(&mut db, create)
+                .expect("stages the bare create");
             txn_b
                 .commit(&mut db, &commit)
                 .await
@@ -185,9 +194,12 @@ fn a_bare_concurrent_create_still_does_not_abort_the_matcher() {
             );
         }
 
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
-            db.execute_gql(PINNED, &bind_r()).expect("executes after reopen"),
+            db.execute_gql(PINNED, &bind_r())
+                .expect("executes after reopen"),
             vec![VId(2)],
             "the bare vertex never joined the answer"
         );

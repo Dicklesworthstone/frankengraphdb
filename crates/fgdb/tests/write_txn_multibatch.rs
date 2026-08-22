@@ -65,7 +65,7 @@ where
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// One live vertex `VId(1)` carrying `PROP = 0`: the overlap target for
@@ -116,7 +116,9 @@ fn two_writes_commit_as_one_sequence() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         let row = db.vertex(VId(2)).expect("reads").expect("created vertex");
         assert_eq!(row.labels, vec![LabelId(5)]);
         assert_eq!(
@@ -162,7 +164,9 @@ fn abort_discards_both_staged_batches() {
             );
         }
 
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(db.frontier().expect("healthy frontier"), before);
         assert!(
             db.vertex(VId(2)).expect("reads").is_none(),
@@ -185,21 +189,31 @@ fn overlapping_two_write_txns_lose_whole_not_per_batch() {
             let mut db = seeded(&commit, &dir).await;
 
             let mut txn_first = db.begin(&txn_cx).expect("first txn begins");
-            let mut txn_second = db.begin(&txn_cx).expect("second txn begins at the same basis");
+            let mut txn_second = db
+                .begin(&txn_cx)
+                .expect("second txn begins at the same basis");
 
             let mut a1 = WriteBatch::new(KNOWS);
             a1.set_vertex_property(VId(1), PROP, Some(int(1)));
-            txn_first.write(&mut db, a1).expect("winner stages batch one");
+            txn_first
+                .write(&mut db, a1)
+                .expect("winner stages batch one");
             let mut a2 = WriteBatch::new(KNOWS);
             a2.set_vertex_property(VId(1), PROP_B, Some(int(10)));
-            txn_first.write(&mut db, a2).expect("winner stages batch two");
+            txn_first
+                .write(&mut db, a2)
+                .expect("winner stages batch two");
 
             let mut b1 = WriteBatch::new(KNOWS);
             b1.set_vertex_property(VId(1), PROP, Some(int(2)));
-            txn_second.write(&mut db, b1).expect("loser stages batch one");
+            txn_second
+                .write(&mut db, b1)
+                .expect("loser stages batch one");
             let mut b2 = WriteBatch::new(KNOWS);
             b2.set_vertex_property(VId(1), PROP_B, Some(int(20)));
-            txn_second.write(&mut db, b2).expect("loser stages batch two");
+            txn_second
+                .write(&mut db, b2)
+                .expect("loser stages batch two");
 
             txn_first
                 .commit(&mut db, &commit)
@@ -224,7 +238,9 @@ fn overlapping_two_write_txns_lose_whole_not_per_batch() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         let row = db.vertex(VId(1)).expect("reads").expect("row");
         assert_eq!(
             row.props,
@@ -285,7 +301,9 @@ fn a_mixed_relation_second_write_refuses_typed_and_consumes_nothing() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         let row = db.vertex(VId(1)).expect("reads").expect("row");
         assert_eq!(
             row.props,

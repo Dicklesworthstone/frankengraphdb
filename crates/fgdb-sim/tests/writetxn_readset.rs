@@ -40,11 +40,7 @@ fn scratch(name: &str) -> PathBuf {
 
 fn create_vertex(vid: VId, value: i64) -> WriteBatch {
     let mut batch = WriteBatch::new(RELATION);
-    batch.create_vertex(
-        vid,
-        vec![],
-        vec![(PROPERTY, CanonicalScalar::Int(value))],
-    );
+    batch.create_vertex(vid, vec![], vec![(PROPERTY, CanonicalScalar::Int(value))]);
     batch
 }
 
@@ -75,10 +71,7 @@ fn changed_read_aborts_typed_and_replay_contains_only_the_concurrent_writer() {
             .vertex(&database, VId(1))
             .expect("transactional vertex read succeeds")
             .expect("seed vertex exists");
-        assert_eq!(
-            observed.props,
-            vec![(PROPERTY, CanonicalScalar::Int(0))]
-        );
+        assert_eq!(observed.props, vec![(PROPERTY, CanonicalScalar::Int(0))]);
         reader
             .write(&mut database, create_vertex(VId(3), 30))
             .expect("reader stages a write disjoint from its read key");
@@ -115,7 +108,11 @@ fn changed_read_aborts_typed_and_replay_contains_only_the_concurrent_writer() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(
-            graph.vertex(VId(1)).expect("seed vertex remains").props.get(&PROPERTY),
+            graph
+                .vertex(VId(1))
+                .expect("seed vertex remains")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(11)),
             "only the concurrent writer's property is durable"
         );
@@ -183,11 +180,19 @@ fn disjoint_concurrent_create_preserves_the_readers_later_commit() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(
-            graph.vertex(VId(1)).expect("reader's vertex remains").props.get(&PROPERTY),
+            graph
+                .vertex(VId(1))
+                .expect("reader's vertex remains")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(31))
         );
         assert_eq!(
-            graph.vertex(VId(2)).expect("creator's vertex is durable").props.get(&PROPERTY),
+            graph
+                .vertex(VId(2))
+                .expect("creator's vertex is durable")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(20)),
             "independent replay contains both disjoint commits"
         );

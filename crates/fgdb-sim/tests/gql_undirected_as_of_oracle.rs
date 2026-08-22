@@ -11,7 +11,10 @@ use fgdb_types::{BranchId, EId, GraphId, VId};
 
 fn incident_endpoints(graph: &ReferenceGraph, relation: RelationId) -> Vec<VId> {
     let mut rows = Vec::new();
-    for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == relation) {
+    for (_, edge) in graph
+        .iter_edges()
+        .filter(|(_, edge)| edge.relation == relation)
+    {
         rows.push(edge.src);
         rows.push(edge.dst);
     }
@@ -43,27 +46,40 @@ fn undirected_as_of_equals_reference_incident_prefix() {
         seed.create_vertex(VId(1), vec![], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);
         seed.add_edge(EId(10), VId(1), VId(2), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed S1 edge");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed S1 edge");
         let s1 = database.frontier().expect("capture S1");
 
         let mut later = WriteBatch::new(relation);
         later.create_vertex(VId(3), vec![], vec![]);
         later.add_edge(EId(11), VId(3), VId(2), vec![]);
-        database.write(&commit_cx, later).await.expect("add later edge");
+        database
+            .write(&commit_cx, later)
+            .await
+            .expect("add later edge");
         let bind = RelationBind::new().with_relation("R", relation);
         let undirected = "MATCH (a)-[:R]-(b) RETURN b";
         let directed = "MATCH (a)-[:R]->(b) RETURN b";
         let as_of = database
             .execute_gql_at(undirected, &bind, s1)
             .expect("undirected MATCH at S1");
-        let live = database.execute_gql(undirected, &bind).expect("live undirected MATCH");
+        let live = database
+            .execute_gql(undirected, &bind)
+            .expect("live undirected MATCH");
         assert_eq!(as_of, vec![VId(1), VId(2)]);
         assert_eq!(live, vec![VId(1), VId(2), VId(3)]);
         assert_eq!(
-            database.execute_gql(directed, &bind).expect("live directed MATCH"),
+            database
+                .execute_gql(directed, &bind)
+                .expect("live directed MATCH"),
             vec![VId(2)]
         );
-        database.begin(&txn_cx).expect("begin unused transaction").abort();
+        database
+            .begin(&txn_cx)
+            .expect("begin unused transaction")
+            .abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
         drop(database);
 
@@ -80,7 +96,9 @@ fn undirected_as_of_equals_reference_incident_prefix() {
         let prefix = replay_through(&commit_cx, &coordinator, s1)
             .await
             .expect("replay S1 prefix");
-        let full = replay(&commit_cx, &coordinator).await.expect("replay full stream");
+        let full = replay(&commit_cx, &coordinator)
+            .await
+            .expect("replay full stream");
         let prefix_graph = prefix
             .database
             .graph(GraphId(1), BranchId(1))

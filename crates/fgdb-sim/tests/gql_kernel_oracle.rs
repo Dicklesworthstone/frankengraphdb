@@ -12,10 +12,8 @@ use fgdb_types::{BranchId, EId, GraphId, VId};
 fn match_kernel_equals_reference_relation_destinations() {
     let ((), report) = run_async_under_lab(0x93_01, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-kernel-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-kernel-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let mut database = Database::create(
             &commit_cx,
@@ -32,7 +30,10 @@ fn match_kernel_equals_reference_relation_destinations() {
         }
         seed.add_edge(EId(1), VId(1), VId(20), vec![]);
         seed.add_edge(EId(2), VId(2), VId(10), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed R edges");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed R edges");
 
         let statement = "MATCH (a)-[:R]->(b) RETURN b";
         let bind = RelationBind::new().with_relation("R", relation);

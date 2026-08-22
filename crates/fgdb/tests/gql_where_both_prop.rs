@@ -23,10 +23,8 @@ fn keys() -> DatabaseKeys {
 fn source_and_destination_properties_compose() {
     let ((), report) = run_async_under_lab(0x43_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-where-both-prop-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-where-both-prop-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

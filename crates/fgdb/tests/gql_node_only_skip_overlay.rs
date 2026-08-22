@@ -1,9 +1,9 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, RelationId};
+use fgdb_types::VId;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::VId;
 
 #[test]
 fn node_only_skip_runs_after_the_staged_overlay_is_sorted() {
@@ -55,8 +55,7 @@ fn node_only_skip_runs_after_the_staged_overlay_is_sorted() {
             vec![VId(1), VId(2), VId(4)]
         );
         assert_eq!(
-            db.execute_gql(skipped, &bind)
-                .expect("base SKIP executes"),
+            db.execute_gql(skipped, &bind).expect("base SKIP executes"),
             vec![VId(4)]
         );
         assert_eq!(

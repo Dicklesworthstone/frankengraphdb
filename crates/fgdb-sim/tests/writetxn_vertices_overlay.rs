@@ -75,7 +75,10 @@ fn aborted_vertices_overlay_replays_only_the_seed_vertex() {
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
-        assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+        assert_eq!(
+            database.frontier().expect("abort leaves handle healthy"),
+            frontier_before
+        );
         drop(database);
 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
@@ -89,10 +92,16 @@ fn aborted_vertices_overlay_replays_only_the_seed_vertex() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(
-            graph.iter_vertices().map(|(vid, _)| vid).collect::<Vec<_>>(),
+            graph
+                .iter_vertices()
+                .map(|(vid, _)| vid)
+                .collect::<Vec<_>>(),
             vec![VId(1)]
         );
-        assert!(graph.vertex(VId(2)).is_none(), "aborted vertex is not durable");
+        assert!(
+            graph.vertex(VId(2)).is_none(),
+            "aborted vertex is not durable"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -122,7 +131,12 @@ fn committed_vertices_overlay_deletion_replays_an_empty_vertex_set() {
         transaction
             .write(&mut database, delete)
             .expect("stage vertex deletion");
-        assert!(transaction.vertices(&database).expect("overlay vertices").is_empty());
+        assert!(
+            transaction
+                .vertices(&database)
+                .expect("overlay vertices")
+                .is_empty()
+        );
         let committed = transaction
             .commit(&mut database, &commit_cx)
             .await
@@ -143,7 +157,10 @@ fn committed_vertices_overlay_deletion_replays_an_empty_vertex_set() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(graph.iter_vertices().count(), 0);
-        assert!(graph.vertex(VId(1)).is_none(), "committed deletion is durable");
+        assert!(
+            graph.vertex(VId(1)).is_none(),
+            "committed deletion is durable"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -169,7 +186,11 @@ fn concurrent_deletion_of_vertex_observed_by_vertices_aborts_and_replays_only_de
         let mut reader = database.begin(&txn_cx).expect("begin vertices reader");
         let mut deleter = database.begin(&txn_cx).expect("begin vertex deleter");
         assert_eq!(
-            vertex_ids(&reader.vertices(&database).expect("transactional vertices read")),
+            vertex_ids(
+                &reader
+                    .vertices(&database)
+                    .expect("transactional vertices read")
+            ),
             vec![VId(1)]
         );
         let mut disjoint = WriteBatch::new(R);

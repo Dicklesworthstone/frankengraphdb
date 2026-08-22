@@ -102,13 +102,17 @@ fn a_commit_whose_matched_destination_was_overwritten_aborts_typed() {
             assert_eq!(matched, vec![VId(2)], "the seeded destination is matched");
             let mut disjoint = WriteBatch::new(R);
             disjoint.create_vertex(VId(3), vec![LabelId(5)], vec![(PROP, int(3))]);
-            txn_a.write(&mut db, disjoint).expect("stages the disjoint write");
+            txn_a
+                .write(&mut db, disjoint)
+                .expect("stages the disjoint write");
 
             // Txn B overwrites the MATCHED destination, and wins.
             let mut txn_b = db.begin(&txn_cx).expect("writer txn begins");
             let mut overwrite = WriteBatch::new(R);
             overwrite.set_vertex_property(VId(2), PROP, Some(int(1)));
-            txn_b.write(&mut db, overwrite).expect("stages the overwrite");
+            txn_b
+                .write(&mut db, overwrite)
+                .expect("stages the overwrite");
             txn_b
                 .commit(&mut db, &commit)
                 .await
@@ -133,7 +137,9 @@ fn a_commit_whose_matched_destination_was_overwritten_aborts_typed() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.vertex(VId(2)).expect("reads").expect("row").props,
             vec![(PROP, int(1))],
@@ -172,7 +178,9 @@ fn a_disjoint_concurrent_create_does_not_abort_the_matcher() {
             let mut txn_b = db.begin(&txn_cx).expect("creator txn begins");
             let mut create = WriteBatch::new(R);
             create.create_vertex(VId(9), vec![], vec![(PROP, int(9))]);
-            txn_b.write(&mut db, create).expect("stages the bare create");
+            txn_b
+                .write(&mut db, create)
+                .expect("stages the bare create");
             txn_b
                 .commit(&mut db, &commit)
                 .await
@@ -184,7 +192,9 @@ fn a_disjoint_concurrent_create_does_not_abort_the_matcher() {
             );
         }
 
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.vertex(VId(3)).expect("reads").expect("row").props,
             vec![(PROP, int(3))],

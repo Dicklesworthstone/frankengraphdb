@@ -80,12 +80,14 @@ fn both_projections_stay_inside_the_bound_relation_live_and_at() {
         let frontier = db.frontier().expect("healthy frontier");
 
         assert_eq!(
-            db.execute_gql(RETURN_A, &bind_r()).expect("RETURN a executes"),
+            db.execute_gql(RETURN_A, &bind_r())
+                .expect("RETURN a executes"),
             vec![VId(1), VId(3)],
             "sources of :R only — the :S source 7 is not a row"
         );
         assert_eq!(
-            db.execute_gql(RETURN_B, &bind_r()).expect("RETURN b executes"),
+            db.execute_gql(RETURN_B, &bind_r())
+                .expect("RETURN b executes"),
             vec![VId(2)],
             "destination of :R only — the :S destination 8 is not a row"
         );
@@ -133,7 +135,8 @@ fn dedup_and_the_empty_graph_hold() {
         batch.add_edge(EId(11), VId(3), VId(2), vec![]);
         db.write(cx, batch).await.expect("commits");
         assert_eq!(
-            db.execute_gql(RETURN_B, &bind_r()).expect("RETURN b executes"),
+            db.execute_gql(RETURN_B, &bind_r())
+                .expect("RETURN b executes"),
             vec![VId(2)],
             "two matched edges, one destination, one row — dedup intact"
         );

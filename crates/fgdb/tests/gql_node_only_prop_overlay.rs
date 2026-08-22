@@ -33,25 +33,15 @@ fn node_only_property_overlay_sees_staged_matching_isolate() {
             .await
             .expect("creates");
         let mut seed = WriteBatch::new(R);
-        seed.create_vertex(
-            VId(1),
-            vec![PERSON],
-            vec![(K, CanonicalScalar::Int(1))],
-        );
-        seed.create_vertex(
-            VId(2),
-            vec![PERSON],
-            vec![(K, CanonicalScalar::Int(9))],
-        );
-        db.write(&commit, seed).await.expect("durable vertices commit");
+        seed.create_vertex(VId(1), vec![PERSON], vec![(K, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(2), vec![PERSON], vec![(K, CanonicalScalar::Int(9))]);
+        db.write(&commit, seed)
+            .await
+            .expect("durable vertices commit");
 
         let mut txn = db.begin(&txn_cx).expect("txn begins");
         let mut staged = WriteBatch::new(R);
-        staged.create_vertex(
-            VId(7),
-            vec![PERSON],
-            vec![(K, CanonicalScalar::Int(1))],
-        );
+        staged.create_vertex(VId(7), vec![PERSON], vec![(K, CanonicalScalar::Int(1))]);
         txn.write(&mut db, staged)
             .expect("stages matching Person isolate");
 

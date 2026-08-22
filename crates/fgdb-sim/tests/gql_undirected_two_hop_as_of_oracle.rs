@@ -37,7 +37,13 @@ fn engine_keys() -> DatabaseKeys {
 }
 
 fn oracle_keys() -> CapsuleKeys {
-    CapsuleKeys::new(K_OID, NAMESPACE, DEK, CAPSULE_OBJECT_KIND, CapsuleProfile::balanced())
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        DEK,
+        CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 /// A scratch directory that does not yet exist, so `create` owns making it.
@@ -105,7 +111,9 @@ fn the_pinned_undirected_two_hop_equals_the_truncated_oracle() {
         let engine_at_s1;
         let engine_live;
         {
-            let mut db = Database::create(cx, &dir, engine_keys()).await.expect("creates");
+            let mut db = Database::create(cx, &dir, engine_keys())
+                .await
+                .expect("creates");
             let mut r_batch = WriteBatch::new(R);
             for vid in [1u128, 2, 4, 8, 9] {
                 r_batch.create_vertex(VId(vid), vec![LabelId(3)], vec![]);
@@ -121,7 +129,9 @@ fn the_pinned_undirected_two_hop_equals_the_truncated_oracle() {
             let mut widen = WriteBatch::new(S);
             widen.create_vertex(VId(5), vec![], vec![]);
             widen.add_edge(EId(22), VId(2), VId(5), vec![]);
-            db.write(cx, widen).await.expect("the widening continuation lands");
+            db.write(cx, widen)
+                .await
+                .expect("the widening continuation lands");
 
             engine_at_s1 = db
                 .execute_gql_at(UN_TWO_HOP_C, &bind_rs(), s1)
@@ -156,7 +166,9 @@ fn the_pinned_undirected_two_hop_equals_the_truncated_oracle() {
              empty truncation cannot agree vacuously"
         );
 
-        let full = replay(cx, &coordinator).await.expect("the full stream replays");
+        let full = replay(cx, &coordinator)
+            .await
+            .expect("the full stream replays");
         let full_graph = full
             .database
             .graph(GRAPH, BRANCH)

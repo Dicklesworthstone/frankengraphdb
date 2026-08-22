@@ -72,7 +72,12 @@ fn aborted_delete_overlay_preserves_edge_in_reference_replay() {
         transaction
             .write(&mut database, delete_edge())
             .expect("stage edge deletion");
-        assert!(transaction.edge(&database, EDGE).expect("overlay edge").is_none());
+        assert!(
+            transaction
+                .edge(&database, EDGE)
+                .expect("overlay edge")
+                .is_none()
+        );
         assert!(
             transaction
                 .neighbours(&database, VId(1), R)
@@ -81,7 +86,10 @@ fn aborted_delete_overlay_preserves_edge_in_reference_replay() {
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
-        assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+        assert_eq!(
+            database.frontier().expect("abort leaves handle healthy"),
+            frontier_before
+        );
         drop(database);
 
         let coordinator = CommitCoordinator::open(&commit_cx, &dir, oracle_keys())
@@ -96,7 +104,10 @@ fn aborted_delete_overlay_preserves_edge_in_reference_replay() {
             .graph(GRAPH, BRANCH)
             .expect("reference coordinate exists");
         assert_eq!(graph.neighbours(VId(1), R), vec![VId(2)]);
-        assert!(graph.edge(EDGE).is_some(), "abort preserves the durable edge");
+        assert!(
+            graph.edge(EDGE).is_some(),
+            "abort preserves the durable edge"
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -124,7 +135,12 @@ fn committed_delete_overlay_removes_edge_from_reference_replay() {
         transaction
             .write(&mut database, delete_edge())
             .expect("stage edge deletion");
-        assert!(transaction.edge(&database, EDGE).expect("overlay edge").is_none());
+        assert!(
+            transaction
+                .edge(&database, EDGE)
+                .expect("overlay edge")
+                .is_none()
+        );
         let committed = transaction
             .commit(&mut database, &commit_cx)
             .await

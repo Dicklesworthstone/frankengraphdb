@@ -96,10 +96,7 @@ fn node_only_property_inequality_equals_reference_vertices() {
 
         assert_eq!(rows, reference_people_with_k_not_one(graph));
         assert_eq!(rows, vec![VId(3)], "only the k=9 Person passes");
-        assert!(
-            !rows.contains(&VId(1)),
-            "k=1 fails the inequality"
-        );
+        assert!(!rows.contains(&VId(1)), "k=1 fails the inequality");
         assert!(
             !rows.contains(&VId(5)),
             "a missing k excludes the vertex — it is not trivially unequal"

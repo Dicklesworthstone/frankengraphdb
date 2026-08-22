@@ -40,9 +40,9 @@ const OUT_TWO_SRC_EQ: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k = 1 RETURN
 fn reference_far_ends_of_unequal_near_ends(graph: &ReferenceGraph) -> Vec<VId> {
     let mut rows = Vec::new();
     for (_, first) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {
-        let near_end_kept = graph.vertex(first.dst).is_some_and(|vertex| {
-            matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1)
-        });
+        let near_end_kept = graph.vertex(first.dst).is_some_and(
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+        );
         if !near_end_kept {
             continue;
         }

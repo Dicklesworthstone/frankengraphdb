@@ -40,11 +40,7 @@ fn scratch(name: &str) -> PathBuf {
 
 fn create_vertex(vid: VId, value: i64) -> WriteBatch {
     let mut batch = WriteBatch::new(RELATION);
-    batch.create_vertex(
-        vid,
-        vec![],
-        vec![(PROPERTY, CanonicalScalar::Int(value))],
-    );
+    batch.create_vertex(vid, vec![], vec![(PROPERTY, CanonicalScalar::Int(value))]);
     batch
 }
 
@@ -79,7 +75,10 @@ fn overlay_reads_staged_vertex_but_abort_leaves_no_durable_vertex() {
             "the transaction reads its own staged property"
         );
         assert!(
-            database.vertex(VId(2)).expect("base read succeeds").is_none(),
+            database
+                .vertex(VId(2))
+                .expect("base read succeeds")
+                .is_none(),
             "the durable database view must not expose the private overlay"
         );
 

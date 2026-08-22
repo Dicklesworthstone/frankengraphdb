@@ -12,10 +12,8 @@ use fgdb_types::{BranchId, EId, GraphId, VId};
 fn where_equal_matches_reference_self_loop_destinations() {
     let ((), report) = run_async_under_lab(0x9e_02, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-where-eq-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-where-eq-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let mut database = Database::create(
             &commit_cx,
@@ -31,7 +29,10 @@ fn where_equal_matches_reference_self_loop_destinations() {
         }
         seed.add_edge(EId(10), VId(1), VId(2), vec![]);
         seed.add_edge(EId(11), VId(5), VId(5), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed R edges");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed R edges");
 
         let bind = RelationBind::new().with_relation("R", relation);
         let rows = database

@@ -1,7 +1,5 @@
 use asupersync::lab::run_async_under_lab;
-use fgdb::{
-    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, RelationBind, WriteBatch, WriteTxnError,
-};
+use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, RelationBind, WriteBatch, WriteTxnError};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -44,11 +42,7 @@ fn scratch(name: &str) -> PathBuf {
 fn seed_edge() -> WriteBatch {
     let mut batch = WriteBatch::new(R);
     batch.create_vertex(VId(1), vec![], vec![]);
-    batch.create_vertex(
-        VId(2),
-        vec![],
-        vec![(PROPERTY, CanonicalScalar::Int(0))],
-    );
+    batch.create_vertex(VId(2), vec![], vec![(PROPERTY, CanonicalScalar::Int(0))]);
     batch.add_edge(EId(1), VId(1), VId(2), vec![]);
     batch
 }
@@ -88,11 +82,7 @@ fn changed_match_destination_aborts_read_01_and_replays_only_the_writer() {
             .expect("reader stages a write disjoint from MATCH elements");
 
         let mut destination_update = WriteBatch::new(R);
-        destination_update.set_vertex_property(
-            VId(2),
-            PROPERTY,
-            Some(CanonicalScalar::Int(22)),
-        );
+        destination_update.set_vertex_property(VId(2), PROPERTY, Some(CanonicalScalar::Int(22)));
         writer
             .write(&mut database, destination_update)
             .expect("writer stages destination mutation");
@@ -127,7 +117,11 @@ fn changed_match_destination_aborts_read_01_and_replays_only_the_writer() {
             .expect("reference coordinate exists");
         assert_eq!(graph.neighbours(VId(1), R), vec![VId(2)]);
         assert_eq!(
-            graph.vertex(VId(2)).expect("MATCH destination remains").props.get(&PROPERTY),
+            graph
+                .vertex(VId(2))
+                .expect("MATCH destination remains")
+                .props
+                .get(&PROPERTY),
             Some(&CanonicalScalar::Int(22)),
             "independent replay contains only B's destination property"
         );

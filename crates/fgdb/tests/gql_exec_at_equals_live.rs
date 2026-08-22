@@ -9,10 +9,8 @@ use fgdb_types::{EId, VId};
 fn execute_gql_at_live_frontier_equals_execute_gql() {
     let ((), report) = run_async_under_lab(0x91_01, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-at-live-frontier-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-at-live-frontier-{}", std::process::id()));
         let keys = DatabaseKeys::new(
             [0x5a; 32],
             DatabaseSecurityNamespaceId([0x77; 32]),

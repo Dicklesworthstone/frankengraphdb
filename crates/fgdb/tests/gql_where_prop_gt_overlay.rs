@@ -66,7 +66,9 @@ fn the_overlay_sees_the_staged_greater_source_and_the_base_stays_empty() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-gt");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![LabelId(3)], vec![(K, CanonicalScalar::Int(1))]);
         seed.create_vertex(VId(2), vec![], vec![]);

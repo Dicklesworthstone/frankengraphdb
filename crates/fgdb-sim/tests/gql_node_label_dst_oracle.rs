@@ -68,10 +68,8 @@ fn reference_labeled_destinations(graph: &ReferenceGraph) -> Vec<VId> {
 fn the_dest_labeled_match_equals_the_reference_person_dests() {
     let ((), report) = run_async_under_lab(0x38_0d, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-node-label-dst-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-node-label-dst-oracle-{}", std::process::id()));
         let engine_rows;
         {
             let mut db = Database::create(&commit, &dir, engine_keys())

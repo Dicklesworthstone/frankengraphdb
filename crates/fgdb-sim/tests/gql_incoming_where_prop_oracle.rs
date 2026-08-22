@@ -29,17 +29,14 @@ const IN_NE: &str = "MATCH (a)<-[:R]-(b) WHERE b.k <> 1 RETURN a";
 
 /// Destinations of `:R` edges whose ORIGIN carries `k` as an `Int` the
 /// comparator keeps — missing key out, inside the derivation.
-fn reference_destinations(
-    graph: &ReferenceGraph,
-    keeps: impl Fn(i64) -> bool,
-) -> Vec<VId> {
+fn reference_destinations(graph: &ReferenceGraph, keeps: impl Fn(i64) -> bool) -> Vec<VId> {
     let mut rows: Vec<_> = graph
         .iter_edges()
         .filter(|(_, edge)| edge.relation == R)
         .filter(|(_, edge)| {
-            graph.vertex(edge.src).is_some_and(|vertex| {
-                matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v))
-            })
+            graph.vertex(edge.src).is_some_and(
+                |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v)),
+            )
         })
         .map(|(_, edge)| edge.dst)
         .collect();

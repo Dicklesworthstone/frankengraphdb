@@ -34,14 +34,26 @@ fn equality_keeps_only_self_loop_destinations() {
         let plain = "MATCH (a)-[:R]->(b) RETURN b";
         let equal = "MATCH (a)-[:R]->(b) WHERE a = b RETURN b";
         let unequal = "MATCH (a)-[:R]->(b) WHERE a <> b RETURN b";
-        assert_eq!(db.execute_gql(equal, &bind).expect("equality executes"), vec![VId(5)]);
-        assert_eq!(db.execute_gql(plain, &bind).expect("plain MATCH executes"), vec![VId(2), VId(5)]);
-        assert_eq!(db.execute_gql(unequal, &bind).expect("inequality executes"), vec![VId(2)]);
+        assert_eq!(
+            db.execute_gql(equal, &bind).expect("equality executes"),
+            vec![VId(5)]
+        );
+        assert_eq!(
+            db.execute_gql(plain, &bind).expect("plain MATCH executes"),
+            vec![VId(2), VId(5)]
+        );
+        assert_eq!(
+            db.execute_gql(unequal, &bind).expect("inequality executes"),
+            vec![VId(2)]
+        );
 
         let err = db
             .execute_gql("MATCH (a)-[:R]->(b) WHERE a = c RETURN b", &bind)
             .expect_err("unbound c must be rejected");
-        assert!(matches!(err, GqlError::Parse(_)), "expected Parse, got {err:?}");
+        assert!(
+            matches!(err, GqlError::Parse(_)),
+            "expected Parse, got {err:?}"
+        );
     });
     assert!(report.lab_test_passed(), "lab run failed: {report:?}");
 }

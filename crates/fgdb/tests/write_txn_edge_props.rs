@@ -89,7 +89,10 @@ fn staged_edge_property_is_private_and_abort_discards_it() {
 
             transaction.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
-            assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+            assert_eq!(
+                database.frontier().expect("abort leaves handle healthy"),
+                frontier_before
+            );
             assert!(
                 database
                     .edge(EDGE)
@@ -100,7 +103,9 @@ fn staged_edge_property_is_private_and_abort_discards_it() {
             );
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert!(
             reopened
                 .edge(EDGE)
@@ -140,13 +145,25 @@ fn committed_edge_property_consumes_one_sequence_and_survives_reopen() {
                 .commit(&mut database, &commit_cx)
                 .await
                 .expect("commit staged property");
-            assert_eq!(committed.0, before.0 + 1, "one transaction consumes one sequence");
-            assert_eq!(database.frontier().expect("healthy committed frontier"), committed);
+            assert_eq!(
+                committed.0,
+                before.0 + 1,
+                "one transaction consumes one sequence"
+            );
+            assert_eq!(
+                database.frontier().expect("healthy committed frontier"),
+                committed
+            );
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(reopened.frontier().expect("healthy reopened frontier"), committed);
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            reopened.frontier().expect("healthy reopened frontier"),
+            committed
+        );
         assert_eq!(
             reopened
                 .edge(EDGE)
@@ -203,7 +220,9 @@ fn concurrent_property_change_of_observed_edge_aborts_reader_with_read_01() {
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             reopened
                 .edge(EDGE)

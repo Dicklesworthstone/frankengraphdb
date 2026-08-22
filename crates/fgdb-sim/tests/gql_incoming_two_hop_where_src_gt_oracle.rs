@@ -42,9 +42,9 @@ fn reference_far_ends_of_kept_near_ends(
 ) -> Vec<VId> {
     let mut rows = Vec::new();
     for (_, first) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {
-        let near_end_kept = graph.vertex(first.dst).is_some_and(|vertex| {
-            matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v))
-        });
+        let near_end_kept = graph.vertex(first.dst).is_some_and(
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v)),
+        );
         if !near_end_kept {
             continue;
         }

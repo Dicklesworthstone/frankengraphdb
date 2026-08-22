@@ -14,10 +14,8 @@ fn undirected_match_equals_reference_incident_endpoints() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit_cx = contexts.commit();
         let txn_cx = contexts.txn();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-undirected-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-undirected-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let mut database = Database::create(
             &commit_cx,
@@ -33,7 +31,10 @@ fn undirected_match_equals_reference_incident_endpoints() {
         }
         seed.add_edge(EId(10), VId(1), VId(2), vec![]);
         seed.add_edge(EId(11), VId(3), VId(2), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed R edges");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed R edges");
 
         let bind = RelationBind::new().with_relation("R", relation);
         let undirected_a = database
@@ -45,7 +46,10 @@ fn undirected_match_equals_reference_incident_endpoints() {
         let directed_b = database
             .execute_gql("MATCH (a)-[:R]->(b) RETURN b", &bind)
             .expect("directed RETURN b");
-        database.begin(&txn_cx).expect("begin unused transaction").abort();
+        database
+            .begin(&txn_cx)
+            .expect("begin unused transaction")
+            .abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
         drop(database);
 
@@ -68,7 +72,10 @@ fn undirected_match_equals_reference_incident_endpoints() {
             .expect("reference graph exists");
         let mut incident = Vec::new();
         let mut destinations = Vec::new();
-        for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == relation) {
+        for (_, edge) in graph
+            .iter_edges()
+            .filter(|(_, edge)| edge.relation == relation)
+        {
             incident.push(edge.src);
             incident.push(edge.dst);
             destinations.push(edge.dst);

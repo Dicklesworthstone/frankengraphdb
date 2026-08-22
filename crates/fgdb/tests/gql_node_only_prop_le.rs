@@ -87,7 +87,9 @@ fn node_only_less_or_equal_includes_the_boundary_person() {
         let dir = scratch("node-le");
         let db = seeded(cx, &dir).await;
 
-        let le = db.execute_gql(LE_A, &bind_all()).expect("WHERE a.k <= 1 executes");
+        let le = db
+            .execute_gql(LE_A, &bind_all())
+            .expect("WHERE a.k <= 1 executes");
         assert_eq!(
             le,
             vec![VId(1), VId(6)],
@@ -108,28 +110,33 @@ fn node_only_less_or_equal_includes_the_boundary_person() {
         );
 
         assert_eq!(
-            db.execute_gql(LT_A, &bind_all()).expect("WHERE a.k < 1 executes"),
+            db.execute_gql(LT_A, &bind_all())
+                .expect("WHERE a.k < 1 executes"),
             vec![VId(6)],
             "the strict sibling excludes the boundary on the same fixture"
         );
         assert_eq!(
-            db.execute_gql(EQ_A, &bind_all()).expect("WHERE a.k = 1 executes"),
+            db.execute_gql(EQ_A, &bind_all())
+                .expect("WHERE a.k = 1 executes"),
             vec![VId(1)],
             "equality answers the boundary Person alone — <= is its union \
              with the strict <"
         );
         assert_eq!(
-            db.execute_gql(GT_A, &bind_all()).expect("WHERE a.k > 1 executes"),
+            db.execute_gql(GT_A, &bind_all())
+                .expect("WHERE a.k > 1 executes"),
             vec![VId(2)],
             "strict greater is unmoved beside the new spelling"
         );
         assert_eq!(
-            db.execute_gql(GE_A, &bind_all()).expect("WHERE a.k >= 1 executes"),
+            db.execute_gql(GE_A, &bind_all())
+                .expect("WHERE a.k >= 1 executes"),
             vec![VId(1), VId(2)],
             "non-strict greater is unmoved too — and <= is not its alias"
         );
         assert_eq!(
-            db.execute_gql(PLAIN_A, &bind_all()).expect("unfiltered executes"),
+            db.execute_gql(PLAIN_A, &bind_all())
+                .expect("unfiltered executes"),
             vec![VId(1), VId(2), VId(4), VId(6)],
             "without WHERE every Person answers — and only Persons"
         );
@@ -150,7 +157,9 @@ fn the_neq_alias_and_the_bare_scan_are_typed_parse_errors() {
             "MATCH (a:Person) WHERE a.k != 1 RETURN a",
             "MATCH (a) WHERE a.k <= 1 RETURN a",
         ] {
-            let err = db.execute_gql(off_grammar, &bind_all()).expect_err(off_grammar);
+            let err = db
+                .execute_gql(off_grammar, &bind_all())
+                .expect_err(off_grammar);
             assert!(
                 matches!(err, GqlError::Parse(_)),
                 "{off_grammar:?} must be the typed parse arm: {err:?}"

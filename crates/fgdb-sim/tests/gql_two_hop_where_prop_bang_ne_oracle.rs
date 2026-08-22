@@ -35,9 +35,9 @@ const TWO_SRC_BANG_NE: &str = "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a.k != 1 RETU
 fn reference_far_ends_of_unequal_origins(graph: &ReferenceGraph) -> Vec<VId> {
     let mut rows = Vec::new();
     for (_, first) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {
-        let origin_kept = graph.vertex(first.src).is_some_and(|vertex| {
-            matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1)
-        });
+        let origin_kept = graph.vertex(first.src).is_some_and(
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+        );
         if !origin_kept {
             continue;
         }

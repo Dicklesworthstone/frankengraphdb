@@ -22,10 +22,7 @@ fn keys() -> DatabaseKeys {
 fn labeled_plan_certificate_is_distinct_and_deterministic() {
     let ((), report) = run_async_under_lab(0x38_05, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-node-label-cert-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fgdb-node-label-cert-{}", std::process::id()));
         let db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

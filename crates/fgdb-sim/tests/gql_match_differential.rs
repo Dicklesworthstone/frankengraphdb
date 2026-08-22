@@ -64,7 +64,14 @@ fn pinned_match_equals_reference_neighbour_expansion() {
             .expect("create product database");
 
         let mut r_batch = WriteBatch::new(R);
-        for vid in [VId(1), VId(2), VId(3), VId(10), VId(20), OFF_RELATION_DESTINATION] {
+        for vid in [
+            VId(1),
+            VId(2),
+            VId(3),
+            VId(10),
+            VId(20),
+            OFF_RELATION_DESTINATION,
+        ] {
             r_batch.create_vertex(vid, vec![], vec![]);
         }
         r_batch.add_edge(EId(1), VId(1), VId(20), vec![]);

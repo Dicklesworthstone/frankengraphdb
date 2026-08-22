@@ -109,11 +109,13 @@ fn the_projection_is_in_the_certificate_transcript() {
         // ever collide, the certificate is provably coarser than the
         // behavior it certifies.
         assert_eq!(
-            db.execute_gql(RETURN_A, &bind_r()).expect("RETURN a executes"),
+            db.execute_gql(RETURN_A, &bind_r())
+                .expect("RETURN a executes"),
             vec![VId(1), VId(3)]
         );
         assert_eq!(
-            db.execute_gql(RETURN_B, &bind_r()).expect("RETURN b executes"),
+            db.execute_gql(RETURN_B, &bind_r())
+                .expect("RETURN b executes"),
             vec![VId(2)]
         );
     });

@@ -28,10 +28,8 @@ fn reference_people(graph: &ReferenceGraph) -> Vec<VId> {
 fn node_only_label_match_includes_isolated_reference_vertex() {
     let ((), report) = run_async_under_lab(0x40_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-node-only-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-node-only-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let rows;
         {

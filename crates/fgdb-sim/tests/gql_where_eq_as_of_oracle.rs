@@ -52,7 +52,9 @@ fn where_equal_as_of_matches_reference_prefix_self_loops() {
         let mut later = WriteBatch::new(R);
         later.create_vertex(VId(6), vec![], vec![]);
         later.add_edge(EId(12), VId(6), VId(6), vec![]);
-        db.write(&commit, later).await.expect("later self-loop commits");
+        db.write(&commit, later)
+            .await
+            .expect("later self-loop commits");
 
         let bind = RelationBind::new().with_relation("R", R);
         let as_of = db

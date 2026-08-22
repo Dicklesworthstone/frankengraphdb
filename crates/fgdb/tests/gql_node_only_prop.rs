@@ -23,24 +23,14 @@ fn keys() -> DatabaseKeys {
 fn labeled_node_only_property_filter_keeps_matching_isolate() {
     let ((), report) = run_async_under_lab(0x44_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-node-only-prop-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-node-only-prop-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");
         let mut seed = WriteBatch::new(R);
-        seed.create_vertex(
-            VId(1),
-            vec![PERSON],
-            vec![(K, CanonicalScalar::Int(1))],
-        );
-        seed.create_vertex(
-            VId(2),
-            vec![PERSON],
-            vec![(K, CanonicalScalar::Int(9))],
-        );
+        seed.create_vertex(VId(1), vec![PERSON], vec![(K, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(2), vec![PERSON], vec![(K, CanonicalScalar::Int(9))]);
         seed.create_vertex(VId(3), vec![], vec![(K, CanonicalScalar::Int(1))]);
         seed.create_vertex(VId(4), vec![PERSON], vec![]);
         seed.create_vertex(VId(5), vec![], vec![]);

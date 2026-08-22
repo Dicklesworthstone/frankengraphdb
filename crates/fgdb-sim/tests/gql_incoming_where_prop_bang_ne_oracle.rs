@@ -35,9 +35,9 @@ fn reference_destinations_of_unequal_origins(graph: &ReferenceGraph) -> Vec<VId>
         .iter_edges()
         .filter(|(_, edge)| edge.relation == R)
         .filter(|(_, edge)| {
-            graph.vertex(edge.src).is_some_and(|vertex| {
-                matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1)
-            })
+            graph.vertex(edge.src).is_some_and(
+                |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+            )
         })
         .map(|(_, edge)| edge.dst)
         .collect();

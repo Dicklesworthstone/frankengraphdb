@@ -35,7 +35,10 @@ fn keys() -> DatabaseKeys {
 /// Pid-qualified because concurrent panes share `/tmp`; nothing is removed
 /// (rule 1 carves out no exception for test code).
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("fgdb-node-ne-ov-cert-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "fgdb-node-ne-ov-cert-{}-{name}",
+        std::process::id()
+    ))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(PurposeContexts) -> Fut + Send + 'static) -> T
@@ -68,7 +71,9 @@ fn staging_a_nonequal_isolate_moves_the_answer_and_not_the_certificate() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-isolate-cert");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![PERSON], vec![(K, CanonicalScalar::Int(1))]);
         seed.create_vertex(VId(5), vec![PERSON], vec![]);

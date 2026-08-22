@@ -47,16 +47,8 @@ fn node_only_label_and_property_match_equals_reference_vertices() {
             .await
             .expect("database creates");
             let mut seed = WriteBatch::new(R);
-            seed.create_vertex(
-                VId(1),
-                vec![PERSON],
-                vec![(K, CanonicalScalar::Int(1))],
-            );
-            seed.create_vertex(
-                VId(2),
-                vec![PERSON],
-                vec![(K, CanonicalScalar::Int(9))],
-            );
+            seed.create_vertex(VId(1), vec![PERSON], vec![(K, CanonicalScalar::Int(1))]);
+            seed.create_vertex(VId(2), vec![PERSON], vec![(K, CanonicalScalar::Int(9))]);
             seed.create_vertex(VId(3), vec![], vec![(K, CanonicalScalar::Int(1))]);
             seed.create_vertex(VId(4), vec![PERSON], vec![]);
             seed.create_vertex(VId(5), vec![], vec![]);

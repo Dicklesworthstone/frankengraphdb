@@ -9,10 +9,8 @@ use fgdb_types::{EId, VId};
 fn incoming_match_as_of_pins_destinations_and_sources() {
     let ((), report) = run_async_under_lab(0x98_01, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-incoming-as-of-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-incoming-as-of-{}", std::process::id()));
         let keys = DatabaseKeys::new(
             [0x5a; 32],
             DatabaseSecurityNamespaceId([0x77; 32]),
@@ -28,14 +26,20 @@ fn incoming_match_as_of_pins_destinations_and_sources() {
         }
         seed.add_edge(EId(10), VId(1), VId(2), vec![]);
         seed.add_edge(EId(11), VId(3), VId(2), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed S1 edges");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed S1 edges");
         let s1 = database.frontier().expect("read S1");
 
         let mut later = WriteBatch::new(relation);
         later.create_vertex(VId(5), vec![], vec![]);
         later.create_vertex(VId(9), vec![], vec![]);
         later.add_edge(EId(12), VId(9), VId(5), vec![]);
-        database.write(&commit_cx, later).await.expect("advance frontier");
+        database
+            .write(&commit_cx, later)
+            .await
+            .expect("advance frontier");
 
         let bind = RelationBind::new().with_relation("R", relation);
         let incoming_a = "MATCH (a)<-[:R]-(b) RETURN a";
@@ -54,11 +58,15 @@ fn incoming_match_as_of_pins_destinations_and_sources() {
             vec![VId(1), VId(3)]
         );
         assert_eq!(
-            database.execute_gql(incoming_a, &bind).expect("live incoming RETURN a"),
+            database
+                .execute_gql(incoming_a, &bind)
+                .expect("live incoming RETURN a"),
             vec![VId(2), VId(5)]
         );
         assert_eq!(
-            database.execute_gql(incoming_b, &bind).expect("live incoming RETURN b"),
+            database
+                .execute_gql(incoming_b, &bind)
+                .expect("live incoming RETURN b"),
             vec![VId(1), VId(3), VId(9)]
         );
         assert_eq!(

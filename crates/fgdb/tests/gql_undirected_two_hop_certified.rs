@@ -31,13 +31,21 @@ fn undirected_two_hop_execute_gql_certified_rows_and_digest() {
         }
         first.add_edge(EId(10), VId(1), VId(2), vec![]);
         first.add_edge(EId(11), VId(3), VId(2), vec![]);
-        database.write(&commit_cx, first).await.expect("seed R edges");
+        database
+            .write(&commit_cx, first)
+            .await
+            .expect("seed R edges");
         let mut second = WriteBatch::new(s);
         second.add_edge(EId(20), VId(2), VId(4), vec![]);
         second.add_edge(EId(21), VId(9), VId(8), vec![]);
-        database.write(&commit_cx, second).await.expect("seed S edges");
+        database
+            .write(&commit_cx, second)
+            .await
+            .expect("seed S edges");
 
-        let bind = RelationBind::new().with_relation("R", r).with_relation("S", s);
+        let bind = RelationBind::new()
+            .with_relation("R", r)
+            .with_relation("S", s);
         let undirected = "MATCH (a)-[:R]-(b)-[:S]-(c) RETURN c";
         let directed = "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN c";
         let transaction = database.begin(&txn_cx).expect("begin transaction");

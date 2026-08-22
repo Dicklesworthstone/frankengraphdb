@@ -13,6 +13,7 @@
 //! - `WriteTxn::vertex(&self, &Database<V>, VId)` → the same
 //!   `Option<VertexRow>`-shaped answer `Database::vertex` gives, folded as
 //!   pinned basis + this txn's staged batches.
+//!
 //! Until it lands this file fails to compile — deliberately; do not weaken
 //! it to make it compile.
 //!
@@ -66,7 +67,7 @@ where
 }
 
 fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value.into())
+    CanonicalScalar::Int(value)
 }
 
 /// One live vertex `VId(1)` carrying `PROP = 0`: the update target for
@@ -124,7 +125,9 @@ fn staged_create_is_txn_visible_and_base_invisible_until_commit() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         let row = db.vertex(VId(2)).expect("reads").expect("durable vertex");
         assert_eq!(row.labels, vec![LabelId(5)]);
         assert_eq!(row.props, vec![(PROP, int(7))]);
@@ -199,7 +202,9 @@ fn staged_update_overlays_without_leaking_and_abort_restores_nothing() {
             );
         }
 
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
             vec![(PROP, int(0))],

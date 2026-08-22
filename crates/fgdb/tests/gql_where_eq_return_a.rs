@@ -19,10 +19,8 @@ use fgdb_types::{EId, VId};
 fn where_eq_return_a_is_the_loop_source() {
     let ((), report) = run_async_under_lab(0x4e_04, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-where-eq-return-a-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-where-eq-return-a-{}", std::process::id()));
         let relation = RelationId(1);
         let mut db = Database::create(
             &commit,

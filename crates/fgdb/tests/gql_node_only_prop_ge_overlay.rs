@@ -31,20 +31,14 @@ fn node_only_greater_or_equal_includes_boundary_without_dirty_reads() {
         .expect("database creates");
 
         let mut seed = WriteBatch::new(relation);
-        seed.create_vertex(
-            VId(1),
-            vec![person],
-            vec![(key, CanonicalScalar::Int(1))],
-        );
-        db.write(&commit, seed).await.expect("durable vertex commits");
+        seed.create_vertex(VId(1), vec![person], vec![(key, CanonicalScalar::Int(1))]);
+        db.write(&commit, seed)
+            .await
+            .expect("durable vertex commits");
 
         let mut txn = db.begin(&txn_cx).expect("transaction begins");
         let mut staged = WriteBatch::new(relation);
-        staged.create_vertex(
-            VId(2),
-            vec![person],
-            vec![(key, CanonicalScalar::Int(9))],
-        );
+        staged.create_vertex(VId(2), vec![person], vec![(key, CanonicalScalar::Int(9))]);
         txn.write(&mut db, staged).expect("Person isolate stages");
 
         let bind = RelationBind::new()

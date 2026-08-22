@@ -12,10 +12,8 @@ use fgdb_types::{BranchId, EId, GraphId, VId};
 fn incoming_match_projections_equal_reference_endpoints() {
     let ((), report) = run_async_under_lab(0x97_02, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-incoming-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-incoming-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let mut database = Database::create(
             &commit_cx,
@@ -47,7 +45,9 @@ fn incoming_match_projections_equal_reference_endpoints() {
         assert_eq!(incoming_destinations, vec![VId(2)]);
         assert_eq!(incoming_sources, vec![VId(1), VId(3)]);
         assert_eq!(
-            database.execute_gql(outbound_b, &bind).expect("outbound RETURN b"),
+            database
+                .execute_gql(outbound_b, &bind)
+                .expect("outbound RETURN b"),
             vec![VId(2)]
         );
         assert_eq!(
@@ -77,7 +77,10 @@ fn incoming_match_projections_equal_reference_endpoints() {
             .expect("reference graph exists");
         let mut sources = Vec::new();
         let mut destinations = Vec::new();
-        for (_, edge) in graph.iter_edges().filter(|(_, edge)| edge.relation == relation) {
+        for (_, edge) in graph
+            .iter_edges()
+            .filter(|(_, edge)| edge.relation == relation)
+        {
             sources.push(edge.src);
             destinations.push(edge.dst);
         }

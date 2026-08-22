@@ -80,19 +80,22 @@ fn the_inequality_keeps_the_carrier_of_a_different_value_only() {
         let db = seeded(cx, &dir).await;
 
         assert_eq!(
-            db.execute_gql(NE, &bind_all()).expect("WHERE a.k <> 1 executes"),
+            db.execute_gql(NE, &bind_all())
+                .expect("WHERE a.k <> 1 executes"),
             vec![VId(3)],
             "only the k=9 carrier passes: the k=1 isolate fails the \
              inequality, and the keyless 5 satisfies NEITHER predicate — \
              answering it is the complement-of-equality cheat"
         );
         assert_eq!(
-            db.execute_gql(EQ, &bind_all()).expect("WHERE a.k = 1 executes"),
+            db.execute_gql(EQ, &bind_all())
+                .expect("WHERE a.k = 1 executes"),
             vec![VId(1)],
             "the equality still answers exactly the k=1 isolate"
         );
         assert_eq!(
-            db.execute_gql(PLAIN, &bind_all()).expect("unfiltered scan executes"),
+            db.execute_gql(PLAIN, &bind_all())
+                .expect("unfiltered scan executes"),
             vec![VId(1), VId(3), VId(5)],
             "without WHERE all three labeled isolates answer — the predicate \
              machinery did not leak into the plain statement"

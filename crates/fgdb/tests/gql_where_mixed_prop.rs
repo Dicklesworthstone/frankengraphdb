@@ -36,10 +36,8 @@ fn keys() -> DatabaseKeys {
 fn mixed_operator_conjunctions_each_keep_their_own_dest() {
     let ((), report) = run_async_under_lab(0x4f_01, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-where-mixed-prop-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-where-mixed-prop-{}", std::process::id()));
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

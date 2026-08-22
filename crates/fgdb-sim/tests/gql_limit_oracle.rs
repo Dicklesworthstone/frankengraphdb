@@ -28,10 +28,8 @@ fn reference_destinations(graph: &ReferenceGraph) -> Vec<VId> {
 fn limit_one_equals_the_reference_smallest_destination() {
     let ((), report) = run_async_under_lab(0x45_03, |root| async move {
         let commit = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-limit-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-limit-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let limited;
         let unlimited;

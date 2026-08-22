@@ -75,9 +75,15 @@ fn each_comparator_is_a_distinct_plan_certificate() {
         seed.add_edge(EId(10), VId(1), VId(2), vec![]);
         db.write(cx, seed).await.expect("seed commits");
 
-        let lt = db.gql_plan_certificate(LT, &bind_rk()).expect("< certifies");
-        let gt = db.gql_plan_certificate(GT, &bind_rk()).expect("> certifies");
-        let eq = db.gql_plan_certificate(EQ, &bind_rk()).expect("= certifies");
+        let lt = db
+            .gql_plan_certificate(LT, &bind_rk())
+            .expect("< certifies");
+        let gt = db
+            .gql_plan_certificate(GT, &bind_rk())
+            .expect("> certifies");
+        let eq = db
+            .gql_plan_certificate(EQ, &bind_rk())
+            .expect("= certifies");
         let plain = db
             .gql_plan_certificate(PLAIN, &bind_rk())
             .expect("unfiltered certifies");

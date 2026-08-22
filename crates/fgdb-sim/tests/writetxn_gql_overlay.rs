@@ -82,7 +82,10 @@ fn match_reads_staged_edge_but_abort_keeps_it_out_of_reference_replay() {
             "MATCH must see the staged R destination"
         );
         assert!(
-            database.execute_gql(MATCH_R, &bind).expect("base MATCH executes").is_empty(),
+            database
+                .execute_gql(MATCH_R, &bind)
+                .expect("base MATCH executes")
+                .is_empty(),
             "the base database cannot see the private edge"
         );
 

@@ -60,7 +60,9 @@ fn staging_a_self_loop_moves_the_answer_and_not_the_certificate() {
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
         let dir = scratch("staged-loop-cert");
-        let mut db = Database::create(&commit, &dir, keys()).await.expect("creates");
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("creates");
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![LabelId(3)], vec![]);
         seed.create_vertex(VId(2), vec![], vec![]);

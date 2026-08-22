@@ -33,7 +33,10 @@ fn keys() -> DatabaseKeys {
 /// Pid-qualified because concurrent panes share `/tmp`; nothing is removed
 /// (rule 1 carves out no exception for test code).
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("fgdb-undir-2hop-cert-at-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "fgdb-undir-2hop-cert-at-{}-{name}",
+        std::process::id()
+    ))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(PurposeContexts) -> Fut + Send + 'static) -> T
@@ -84,7 +87,9 @@ fn undirected_two_hop_certified_at_names_s1_while_live_names_the_frontier() {
         let mut later = WriteBatch::new(S);
         later.create_vertex(VId(5), vec![], vec![]);
         later.add_edge(EId(22), VId(2), VId(5), vec![]);
-        db.write(&commit, later).await.expect("later continuation commits");
+        db.write(&commit, later)
+            .await
+            .expect("later continuation commits");
         let live_frontier = db.frontier().expect("healthy live frontier");
 
         // The pinned pass: only the first epoch's continuation composes.

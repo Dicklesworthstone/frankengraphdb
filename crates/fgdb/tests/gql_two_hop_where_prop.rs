@@ -59,7 +59,9 @@ fn two_hop_anchor_predicate_gates_the_composed_path() {
         s_seed.add_edge(EId(20), VId(2), VId(3), vec![]);
         s_seed.add_edge(EId(21), VId(5), VId(6), vec![]);
         s_seed.add_edge(EId(22), VId(8), VId(9), vec![]);
-        db.write(&commit, s_seed).await.expect("S continuations commit");
+        db.write(&commit, s_seed)
+            .await
+            .expect("S continuations commit");
 
         let bind = RelationBind::new()
             .with_relation("R", R)

@@ -19,10 +19,7 @@ fn keys() -> DatabaseKeys {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "fgdb-txn-gql-cert-{}-{name}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("fgdb-txn-gql-cert-{}-{name}", std::process::id()))
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(PurposeContexts) -> Fut + Send + 'static) -> T
@@ -71,7 +68,8 @@ fn certified_rows_are_overlay_rows_at_the_pinned_basis() {
         let mut db = seeded(&commit, &dir).await;
 
         let mut txn = db.begin(&txn_cx).expect("txn begins");
-        txn.write(&mut db, staged_edge_batch()).expect("stages edge");
+        txn.write(&mut db, staged_edge_batch())
+            .expect("stages edge");
 
         let overlay = txn
             .execute_gql(&db, PINNED, &bind_r())
@@ -102,7 +100,8 @@ fn digest_is_stable_at_one_basis_and_changes_at_the_next() {
         let mut db = seeded(&commit, &dir).await;
 
         let mut txn = db.begin(&txn_cx).expect("txn begins");
-        txn.write(&mut db, staged_edge_batch()).expect("stages edge");
+        txn.write(&mut db, staged_edge_batch())
+            .expect("stages edge");
         let (first_rows, first) = txn
             .execute_gql_certified(&db, PINNED, &bind_r())
             .expect("first certified MATCH executes");

@@ -22,10 +22,8 @@ fn live_as_of_and_empty_transaction_match_agree() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-kernel-parity-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-kernel-parity-{}", std::process::id()));
         let mut database = Database::create(&commit, &dir, keys())
             .await
             .expect("creates");

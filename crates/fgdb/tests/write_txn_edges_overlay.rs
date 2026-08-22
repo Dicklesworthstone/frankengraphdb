@@ -70,7 +70,11 @@ fn staged_addition_appears_only_in_transaction_edges_and_abort_discards_it() {
                 .expect("stage second edge");
 
             assert_eq!(
-                edge_ids(&transaction.edges(&database).expect("overlay edges read succeeds")),
+                edge_ids(
+                    &transaction
+                        .edges(&database)
+                        .expect("overlay edges read succeeds")
+                ),
                 vec![EId(10), EId(11)]
             );
             assert_eq!(
@@ -81,12 +85,25 @@ fn staged_addition_appears_only_in_transaction_edges_and_abort_discards_it() {
 
             transaction.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
-            assert_eq!(database.frontier().expect("abort leaves handle healthy"), frontier_before);
+            assert_eq!(
+                database.frontier().expect("abort leaves handle healthy"),
+                frontier_before
+            );
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(edge_ids(&reopened.edges().expect("reopen edges")), vec![EId(10)]);
-        assert!(reopened.edge(EId(11)).expect("reopen staged edge").is_none());
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            edge_ids(&reopened.edges().expect("reopen edges")),
+            vec![EId(10)]
+        );
+        assert!(
+            reopened
+                .edge(EId(11))
+                .expect("reopen staged edge")
+                .is_none()
+        );
     });
 }
 
@@ -107,20 +124,42 @@ fn staged_deletion_empties_transaction_edges_and_commits_once() {
                 .write(&mut database, delete)
                 .expect("stage edge deletion");
 
-            assert!(transaction.edges(&database).expect("overlay edges").is_empty());
-            assert_eq!(edge_ids(&database.edges().expect("base edges")), vec![EId(10)]);
+            assert!(
+                transaction
+                    .edges(&database)
+                    .expect("overlay edges")
+                    .is_empty()
+            );
+            assert_eq!(
+                edge_ids(&database.edges().expect("base edges")),
+                vec![EId(10)]
+            );
             committed = transaction
                 .commit(&mut database, &commit_cx)
                 .await
                 .expect("commit staged deletion");
-            assert_eq!(committed.0, before.0 + 1, "one transaction consumes one sequence");
+            assert_eq!(
+                committed.0,
+                before.0 + 1,
+                "one transaction consumes one sequence"
+            );
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
-        assert_eq!(reopened.frontier().expect("healthy reopened frontier"), committed);
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
+        assert_eq!(
+            reopened.frontier().expect("healthy reopened frontier"),
+            committed
+        );
         assert!(reopened.edges().expect("reopen edges").is_empty());
-        assert!(reopened.edge(EId(10)).expect("reopen deleted edge").is_none());
+        assert!(
+            reopened
+                .edge(EId(10))
+                .expect("reopen deleted edge")
+                .is_none()
+        );
     });
 }
 
@@ -135,7 +174,11 @@ fn concurrent_mutation_of_edge_observed_by_edges_aborts_reader_with_read_01() {
             let mut reader = database.begin(&txn_cx).expect("begin edges reader");
             let mut writer = database.begin(&txn_cx).expect("begin edge writer");
             assert_eq!(
-                edge_ids(&reader.edges(&database).expect("transactional edges read succeeds")),
+                edge_ids(
+                    &reader
+                        .edges(&database)
+                        .expect("transactional edges read succeeds")
+                ),
                 vec![EId(10)]
             );
             let mut disjoint = WriteBatch::new(R);
@@ -144,11 +187,7 @@ fn concurrent_mutation_of_edge_observed_by_edges_aborts_reader_with_read_01() {
                 .write(&mut database, disjoint)
                 .expect("reader stages disjoint vertex");
             let mut property = WriteBatch::new(R);
-            property.set_edge_property(
-                EId(10),
-                PROPERTY,
-                Some(CanonicalScalar::Int(33)),
-            );
+            property.set_edge_property(EId(10), PROPERTY, Some(CanonicalScalar::Int(33)));
             writer
                 .write(&mut database, property)
                 .expect("writer stages observed edge mutation");
@@ -170,7 +209,9 @@ fn concurrent_mutation_of_edge_observed_by_edges_aborts_reader_with_read_01() {
             assert_eq!(txn_cx.outstanding_obligations(), 0);
         }
 
-        let reopened = Database::open(&commit_cx, &dir, keys()).await.expect("reopens");
+        let reopened = Database::open(&commit_cx, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             reopened
                 .edge(EId(10))

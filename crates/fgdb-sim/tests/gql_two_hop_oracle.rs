@@ -12,10 +12,8 @@ use fgdb_types::{BranchId, EId, GraphId, VId};
 fn two_hop_match_equals_reference_composed_endpoints() {
     let ((), report) = run_async_under_lab(0x99_01, |root| async move {
         let commit_cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-gql-two-hop-oracle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-gql-two-hop-oracle-{}", std::process::id()));
         let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
         let mut database = Database::create(
             &commit_cx,
@@ -33,14 +31,22 @@ fn two_hop_match_equals_reference_composed_endpoints() {
         first.add_edge(EId(10), VId(1), VId(2), vec![]);
         first.add_edge(EId(11), VId(3), VId(2), vec![]);
         first.add_edge(EId(12), VId(1), VId(7), vec![]);
-        database.write(&commit_cx, first).await.expect("seed R edges");
+        database
+            .write(&commit_cx, first)
+            .await
+            .expect("seed R edges");
         let mut second = WriteBatch::new(s);
         second.add_edge(EId(20), VId(2), VId(4), vec![]);
         second.add_edge(EId(21), VId(2), VId(5), vec![]);
         second.add_edge(EId(22), VId(9), VId(8), vec![]);
-        database.write(&commit_cx, second).await.expect("seed S edges");
+        database
+            .write(&commit_cx, second)
+            .await
+            .expect("seed S edges");
 
-        let bind = RelationBind::new().with_relation("R", r).with_relation("S", s);
+        let bind = RelationBind::new()
+            .with_relation("R", r)
+            .with_relation("S", s);
         let return_c = "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN c";
         let return_a = "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN a";
         let one_hop_b = "MATCH (a)-[:R]->(b) RETURN b";
@@ -59,7 +65,9 @@ fn two_hop_match_equals_reference_composed_endpoints() {
                 .expect("RETURN a at frontier"),
             sources
         );
-        let one_hop = database.execute_gql(one_hop_b, &bind).expect("one-hop RETURN b");
+        let one_hop = database
+            .execute_gql(one_hop_b, &bind)
+            .expect("one-hop RETURN b");
         drop(database);
 
         let keys = CapsuleKeys::new(

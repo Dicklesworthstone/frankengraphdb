@@ -88,7 +88,9 @@ fn greater_than_keeps_only_the_above_boundary_dests_source() {
         let dir = scratch("dst-gt");
         let db = seeded(cx, &dir).await;
 
-        let gt = db.execute_gql(GT_A, &bind_rk()).expect("WHERE b.k > 1 executes");
+        let gt = db
+            .execute_gql(GT_A, &bind_rk())
+            .expect("WHERE b.k > 1 executes");
         assert_eq!(
             gt,
             vec![VId(3)],
@@ -101,12 +103,14 @@ fn greater_than_keeps_only_the_above_boundary_dests_source() {
         );
 
         assert_eq!(
-            db.execute_gql(EQ_A, &bind_rk()).expect("WHERE b.k = 1 executes"),
+            db.execute_gql(EQ_A, &bind_rk())
+                .expect("WHERE b.k = 1 executes"),
             vec![VId(1)],
             "the equality answers the boundary carrier's source alone"
         );
         assert_eq!(
-            db.execute_gql(PLAIN_A, &bind_rk()).expect("unfiltered executes"),
+            db.execute_gql(PLAIN_A, &bind_rk())
+                .expect("unfiltered executes"),
             vec![VId(1), VId(3), VId(5), VId(7)],
             "without WHERE every source answers — the comparator machinery \
              did not leak into the plain statement"

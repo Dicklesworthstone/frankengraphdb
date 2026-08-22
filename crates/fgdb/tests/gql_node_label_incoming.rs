@@ -30,7 +30,10 @@ fn labeled_incoming_return_a_is_the_person_in_holder() {
         seed.create_vertex(VId(4), vec![], vec![]);
         seed.add_edge(EId(10), VId(2), VId(1), vec![]);
         seed.add_edge(EId(11), VId(4), VId(3), vec![]);
-        database.write(&commit_cx, seed).await.expect("seed incoming edges");
+        database
+            .write(&commit_cx, seed)
+            .await
+            .expect("seed incoming edges");
 
         let bind = RelationBind::new()
             .with_relation("R", relation)

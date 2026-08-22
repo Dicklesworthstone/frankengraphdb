@@ -16,6 +16,7 @@
 //! `as_of` like every `_at` read):
 //! - `Database::gql_plan_certificate_at(&self, src, &RelationBind,
 //!    CommitSeq) -> Result<GqlPlanCertificate, GqlError>`
+//!
 //! Until it lands this file fails to compile — deliberately; do not weaken
 //! it to make it compile.
 
@@ -83,9 +84,14 @@ fn the_pinned_plan_certificate_names_the_as_of_seq() {
         widen.create_vertex(VId(3), vec![], vec![]);
         widen.create_vertex(VId(5), vec![], vec![]);
         widen.add_edge(EId(11), VId(3), VId(5), vec![]);
-        db.write(cx, widen).await.expect("the widening commit lands");
+        db.write(cx, widen)
+            .await
+            .expect("the widening commit lands");
         let live_frontier = db.frontier().expect("healthy frontier");
-        assert_ne!(s1, live_frontier, "the widening commit advanced the frontier");
+        assert_ne!(
+            s1, live_frontier,
+            "the widening commit advanced the frontier"
+        );
 
         let pinned = db
             .gql_plan_certificate_at(PINNED, &bind_r(), s1)
@@ -130,7 +136,11 @@ fn off_grammar_plan_certificate_at_is_a_typed_parse_error() {
         seed.create_vertex(VId(1), vec![], vec![]);
         db.write(cx, seed).await.expect("seed commits");
 
-        for off_grammar in ["MATCH (a) RETURN a", "MATCH (a)-[:R]->(b) RETURN b EXTRA", ""] {
+        for off_grammar in [
+            "MATCH (a) RETURN a",
+            "MATCH (a)-[:R]->(b) RETURN b EXTRA",
+            "",
+        ] {
             let err = db
                 .gql_plan_certificate_at(off_grammar, &bind_r(), genesis)
                 .expect_err(off_grammar);

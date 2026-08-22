@@ -77,10 +77,7 @@ fn int(value: i64) -> CanonicalScalar {
 
 /// Seed one live vertex carrying `PROP = 0`, so every conflict below is a
 /// pure property-family update — the shape only FCW can refuse.
-async fn seeded(
-    cx: &fgdb_types::context::CommitCx,
-    dir: &PathBuf,
-) -> Database {
+async fn seeded(cx: &fgdb_types::context::CommitCx, dir: &PathBuf) -> Database {
     let mut db = Database::create(cx, dir, keys()).await.expect("creates");
     let mut seed = WriteBatch::new(KNOWS);
     seed.create_vertex(VId(1), vec![LabelId(3)], vec![(PROP, int(0))]);
@@ -104,7 +101,9 @@ fn overlapping_txns_first_commit_wins_second_aborts_typed() {
             let baseline = txn_cx.outstanding_obligations();
 
             let mut txn_first = db.begin(&txn_cx).expect("first txn begins");
-            let mut txn_second = db.begin(&txn_cx).expect("second txn begins at the same basis");
+            let mut txn_second = db
+                .begin(&txn_cx)
+                .expect("second txn begins at the same basis");
 
             let mut winner = WriteBatch::new(KNOWS);
             winner.set_vertex_property(VId(1), PROP, Some(int(1)));
@@ -146,7 +145,9 @@ fn overlapping_txns_first_commit_wins_second_aborts_typed() {
         }
 
         // NOTHING crosses this line except the path and the keys.
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
             vec![(PROP, int(1))],
@@ -198,7 +199,9 @@ fn abort_releases_the_pin_and_leaves_nothing_durable() {
                 .expect("autocommit after abort works");
         }
 
-        let db = Database::open(&commit, &dir, keys()).await.expect("reopens");
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
             vec![(PROP, int(5))],
