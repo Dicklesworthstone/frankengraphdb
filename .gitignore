@@ -153,3 +153,9 @@ __pycache__/
 .skill-loop-progress.md
 .skill-loop-progress-*.md
 
+
+# Durable test/crashpack artifact root (fgdb-crashpack-artifacts-durable-home-vd35).
+# Pinned by .cargo/config.toml [env] ASUPERSYNC_TEST_ARTIFACTS_DIR so asupersync
+# lab-test crashpacks survive `cargo clean`; bundles stay untracked — only their
+# path stability is contractual, not their contents.
+/artifacts/

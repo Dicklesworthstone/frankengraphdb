@@ -1,3 +1,15 @@
 # Parallel rustc front-end (nightly). Added by build-settings sweep.
 [build]
 rustflags = ["-Z", "threads=4"]
+
+# Crashpacks and regression bundles must survive `cargo clean`
+# (fgdb-crashpack-artifacts-durable-home-vd35). asupersync's lab runtime reads
+# ASUPERSYNC_TEST_ARTIFACTS_DIR lazily and falls back to a CWD-relative
+# `target/test-artifacts`, which cargo resolves INSIDE each crate's cleanable
+# target/ directory. Pin the durable root here so failing-test crashpacks and
+# replay bundles land under <workspace>/artifacts/test/... and the replay
+# commands printed in panic tails stay valid after a clean. `force` stays
+# false (the [env] default), so an explicit operator export still wins — this
+# pin changes only the silent default.
+[env]
+ASUPERSYNC_TEST_ARTIFACTS_DIR = { value = "artifacts/test", relative = true }
