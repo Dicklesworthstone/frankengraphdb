@@ -17,22 +17,22 @@
 # a check. If a future gate ever consumes cached bytes, this note and the
 # cache design must be revisited in the same commit.
 
-name: check
-
 on:
   push:
     branches: [main]
   pull_request:
 
-# A newer push to the same branch supersedes the older run: the verdict that
-# matters is the tip of the branch, not the queue order.
+# Deliberately NOT cancel-in-progress: this chain takes hours, and a
+# superseding push would otherwise erase an in-flight verdict before it
+# completes. Per AGENTS.md the evidence is a COMPLETED run's exit code, so
+# concurrent runs are preferred over lost ones; redundant runs are cheap,
+# lost green proofs are not.
 concurrency:
   group: check-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
-
 jobs:
   check:
     name: scripts/check.sh (the whole chain)
