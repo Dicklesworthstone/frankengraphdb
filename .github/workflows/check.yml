@@ -1,0 +1,92 @@
+# CI for frankengraphdb — the one gate: scripts/check.sh.
+#
+# Bead: fgdb-ci-workflow-check-sh-4csa. AGENTS.md: "When CI is added, wire
+# scripts/check.sh as the CI test step rather than duplicating the commands."
+# This workflow does exactly that and nothing else: the job succeeds if and
+# only if `bash scripts/check.sh` exits 0. Per AGENTS.md, the exit code is the
+# verdict — no step here greps for PASS/FAIL tokens or interprets transcripts.
+#
+# Toolchain: the repository-pinned nightly from rust-toolchain.toml is
+# installed explicitly and re-derived from that file; a stable channel must
+# never be substituted (core::arch / portable_simd kernels require nightly).
+#
+# Caching note (bead acceptance): caches hold ONLY build artifacts (registry,
+# target, rustup toolchains). Every gate — including the file-coverage closure
+# and the registry gates — executes on every run regardless of cache state;
+# none of them reads target/ or the registry, so cache behavior can never skip
+# a check. If a future gate ever consumes cached bytes, this note and the
+# cache design must be revisited in the same commit.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch supersedes the older run: the verdict that
+# matters is the tip of the branch, not the queue order.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: scripts/check.sh (the whole chain)
+    runs-on: ubuntu-latest
+    # The chain includes the w1_unsafe_tool_lanes Miri workloads, which are the
+    # long pole; leave headroom under the 360-minute runner ceiling.
+    timeout-minutes: 350
+    steps:
+      # Full history: g0_negative_evidence_e2e resolves repair commits against
+      # real ancestry and emits false FAILs on shallow clones.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the repo-pinned nightly toolchain
+        run: |
+          set -euo pipefail
+          pin="$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/{print $2; exit}' rust-toolchain.toml)"
+          test -n "$pin" || { echo "rust-toolchain.toml has no channel pin" >&2; exit 1; }
+          echo "Installing pinned toolchain: $pin"
+          rustup toolchain install "$pin" --profile minimal --component clippy,rustfmt,miri
+          rustup default "$pin"
+
+      - name: Restore cargo registry cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            ~/.rustup/toolchains
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Restore target directory cache
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            target-${{ runner.os }}-
+
+      # THE gate. Its exit code is the whole verdict.
+      - name: bash scripts/check.sh
+        run: bash scripts/check.sh
+
+      - name: Summarize the verdict
+        if: always()
+        run: |
+          {
+            echo "## scripts/check.sh verdict"
+            echo ""
+            echo "- exit code: ${{ job.status == 'success' && '0' || 'nonzero' }}"
+            echo "- the transcript above is authoritative; per AGENTS.md the"
+            echo "  exit code is the verdict and PASS/FAIL tokens exist only so"
+            echo "  a reader who greps anyway gets a true answer."
+          } >> "$GITHUB_STEP_SUMMARY"

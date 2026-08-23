@@ -432,6 +432,10 @@ coverage_exempt_reason() {
       echo "verbatim legal text; must not be edited" ;;
     .beads/.write.lock.stale-*)
       echo "STALE BEADS LOCK, COMMITTED BY ACCIDENT — should be removed from the index" ;;
+    .github/workflows/*.yml)
+      echo "CI configuration; nothing local executes it — its own run is the \
+           check, and a broken or red workflow surfaces as a failed run on \
+           GitHub, outside this local chain (fgdb-ci-workflow-check-sh-4csa)" ;;
     *)
       echo "" ;;
   esac

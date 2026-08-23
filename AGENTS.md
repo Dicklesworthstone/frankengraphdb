@@ -238,7 +238,7 @@ so a reader who greps anyway gets a true answer. `$?` is still the verdict.
 
 ### The `cargo test` gate (green-bar requirement)
 
-`cargo test` is a **hard gate**: it MUST exit `0` before any change is handed off or a bead is closed. The convenience wrapper `scripts/check.sh` runs `cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in order and stops on the first failure. When CI is added, wire `scripts/check.sh` as the CI test step rather than duplicating the commands.
+`cargo test` is a **hard gate**: it MUST exit `0` before any change is handed off or a bead is closed. The convenience wrapper `scripts/check.sh` runs `cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in order and stops on the first failure. CI exists: `.github/workflows/check.yml` runs `scripts/check.sh` verbatim on every push to `main` and every pull request, so "CI-enforced" means enforced — the job's exit code is the verdict.
 
 Beyond the bare gate, **every verification domain in §15 is a permanent CI gate** — semantics conformance, transaction-anomaly oracles, the crash-point matrix, format fuzzers, representation-equivalence, incremental correctness, and complexity-witness regression locks (an operator whose observed op-count exceeds its declared bound *fails CI*). A release may bypass a gate only with a public, expiring waiver recorded in the ledger.
 
