@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3846
-projection_fallback_count = 194
-target_source_assignment_sha256 = "8f5db3fe6160f8142cd13852a34a39e1fafa06c2efcd467f343376b83c763101"
+target_count = 3854
+projection_fallback_count = 198
+target_source_assignment_sha256 = "4734d69091cf9aa749d874b149a53a19fdb89def39bb401d24072b7ccbccdbc0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -116753,4 +116753,176 @@ target_row_id = "a20:wire-type:service-catalog-promotion-reservation-receipt-tar
 slice_id = "a20"
 source_key = "projection|wire_types|ServiceCatalogPromotionReservationReceiptTargetPosture"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:operational-pending-independent-reopen-meta-pending-state"
+wire_type_id = 0x0578
+name = "OperationalPendingIndependentReopenMetaPendingState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of the GlobalStatePayloadBootstrapPhase union (a05:1650); a precondition field carries the refined union's u8 tag and never the arm payload; the source precondition further qualifies the phase as ::Sealed (a20:2601), which is verified structurally by this spec's mandatory meta_seal_ref and meta_independent_reopen_proof_ref rows rather than by a second serialized tag, because no restore-path seal-state union is source-declared (fgdb-rqw4)"
+allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:wire-type-operational-pending-independent-reopen-meta-pending-state"
+target_row_id = "a20:wire-type:operational-pending-independent-reopen-meta-pending-state"
+slice_id = "a20"
+source_key = "projection|wire_types|OperationalPendingIndependentReopenMetaPendingState"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-completion-spec-expected-meta-pending-state"
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0008
+stable_name = "expected_meta_pending_state"
+exact_wire_type = "OperationalPendingIndependentReopenMetaPendingState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "inline precondition discriminant refined to the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of GlobalStatePayloadBootstrapPhase; the completion spec is rejected in any other bootstrap phase, while the source's ::Sealed qualifier is witnessed structurally by this spec's mandatory meta_seal_ref and meta_independent_reopen_proof_ref rows instead of a second serialized tag, since no restore-path seal-state union is source-declared (fgdb-rqw4); the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a05:1650, a20:2601)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-completion-spec-expected-meta-pending-state"
+target_row_id = "a20:field:global-restore-service-completion-spec-expected-meta-pending-state"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceCompletionSpec|GlobalRestoreServiceCompletionSpec.expected_meta_pending_state|expected_meta_pending_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:operational-pending-independent-reopen-local-pending-state"
+wire_type_id = 0x0579
+name = "OperationalPendingIndependentReopenLocalPendingState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of the GlobalStatePayloadBootstrapPhase union (a05:1650); a precondition field carries the refined union's u8 tag and never the arm payload; the source precondition further qualifies the phase as ::Sealed (a20:2605), which is verified structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows rather than by a second serialized tag, because no restore-path seal-state union is source-declared (fgdb-rqw4)"
+allowed_containing_schemas = ["LocalRestoreServiceCompletionSpec"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:wire-type-operational-pending-independent-reopen-local-pending-state"
+target_row_id = "a20:wire-type:operational-pending-independent-reopen-local-pending-state"
+slice_id = "a20"
+source_key = "projection|wire_types|OperationalPendingIndependentReopenLocalPendingState"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-completion-spec-expected-pending-state"
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0007
+stable_name = "expected_pending_state"
+exact_wire_type = "OperationalPendingIndependentReopenLocalPendingState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "inline precondition discriminant refined to the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of GlobalStatePayloadBootstrapPhase; the completion spec is rejected in any other bootstrap phase, while the source's ::Sealed qualifier is witnessed structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows instead of a second serialized tag, since no restore-path seal-state union is source-declared (fgdb-rqw4); the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a05:1650, a20:2605)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-completion-spec-expected-pending-state"
+target_row_id = "a20:field:local-restore-service-completion-spec-expected-pending-state"
+slice_id = "a20"
+source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.expected_pending_state|expected_pending_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:operational-pending-independent-reopen-shard-pending-state"
+wire_type_id = 0x057a
+name = "OperationalPendingIndependentReopenShardPendingState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of the GlobalStatePayloadBootstrapPhase union (a05:1650); a precondition field carries the refined union's u8 tag and never the arm payload; the source precondition further qualifies the phase as ::Sealed (a20:2599), which is verified structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows rather than by a second serialized tag, because no restore-path seal-state union is source-declared (fgdb-rqw4)"
+allowed_containing_schemas = ["ShardRestoreReopenConfirmSpec"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:wire-type-operational-pending-independent-reopen-shard-pending-state"
+target_row_id = "a20:wire-type:operational-pending-independent-reopen-shard-pending-state"
+slice_id = "a20"
+source_key = "projection|wire_types|OperationalPendingIndependentReopenShardPendingState"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:shard-restore-reopen-confirm-spec-expected-pending-state"
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0005
+stable_name = "expected_pending_state"
+exact_wire_type = "OperationalPendingIndependentReopenShardPendingState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "inline precondition discriminant refined to the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of GlobalStatePayloadBootstrapPhase; the reopen confirmation is rejected in any other bootstrap phase, while the source's ::Sealed qualifier is witnessed structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows instead of a second serialized tag, since no restore-path seal-state union is source-declared (fgdb-rqw4); the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the confirm spec is retained and cut only with that spec (a05:1650, a20:2599)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:field-shard-restore-reopen-confirm-spec-expected-pending-state"
+target_row_id = "a20:field:shard-restore-reopen-confirm-spec-expected-pending-state"
+slice_id = "a20"
+source_key = "field|ShardRestoreReopenConfirmSpec|ShardRestoreReopenConfirmSpec.expected_pending_state|expected_pending_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:service-catalog-promotion-reservation-receipt-state"
+wire_type_id = 0x057b
+name = "ServiceCatalogPromotionReservationReceiptState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed one-arm u8 tag: ReservedHiddenNonexpiring 0x01; rejects every other tag; the source binds exactly this one state value and source silence claims less, never more, so no sibling arms are invented (a20:2581, fgdb-rqw4/5uj5)"
+allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:wire-type-service-catalog-promotion-reservation-receipt-state"
+target_row_id = "a20:wire-type:service-catalog-promotion-reservation-receipt-state"
+slice_id = "a20"
+source_key = "projection|wire_types|ServiceCatalogPromotionReservationReceiptState"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:service-catalog-promotion-reservation-receipt-state"
+containing_schema = "ServiceCatalogPromotionReservationReceipt"
+field_tag = 0x000d
+stable_name = "state"
+exact_wire_type = "ServiceCatalogPromotionReservationReceiptState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "closed one-arm reservation-state discriminant carrying the declared u8 constant of ReservedHiddenNonexpiring; the receipt exists only in this state, so the row admits exactly it and invents no sibling arms, and it is retained while the receipt is retained and cut only with it (a20:2581, fgdb-rqw4/5uj5)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:field-service-catalog-promotion-reservation-receipt-state"
+target_row_id = "a20:field:service-catalog-promotion-reservation-receipt-state"
+slice_id = "a20"
+source_key = "field|ServiceCatalogPromotionReservationReceipt|ServiceCatalogPromotionReservationReceipt.state|state"
+target_kind = "field"
 definition_status = "declared"

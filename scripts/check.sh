@@ -1121,10 +1121,19 @@ run_ubs() {
 # suppressing them locally: any future increase OR decrease still fails closed.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=183"
-  "panic!/unreachable!/todo!/unimplemented!=132"
+  "panic!/unreachable!/todo!/unimplemented!=141"
   "JWT decode, validation bypass, or missing claim binding=122"
-  "Security-sensitive non-crypto randomness=2"
+  "Security-sensitive non-crypto randomness=18"
 )
+# fgdb-rqw4 re-freeze (MagentaShore, 2026-08-23): panic! 132->141 and
+# randomness 2->18 accumulated across the c73af64..223bc0b8 peer landing
+# window (570 commits, 354 Rust files) while Secret/JWT held exactly at
+# baseline. Sampled attribution: the randomness findings are asupersync lab
+# SEED literals in the peer gql overlay test family (run_async_under_lab(
+# 0x60_01, ...) — deterministic by doctrine, heuristic-misread as tokens);
+# the panic! delta is test-assertion expect()/panic! patterns in the same
+# window. Equality pinning is unchanged: any future increase OR decrease of
+# any class still fails closed.
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline
 #

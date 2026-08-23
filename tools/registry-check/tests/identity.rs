@@ -3668,7 +3668,10 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // shared record mints are wildcard and add no citation.
         // 617 -> 621 (fgdb-ad4m): the LogicalEffectClass parent plus its
         // three exact variants each name their one closed containing schema.
-        (621, 437),
+        // 621 -> 625 (fgdb-rqw4): the three pending-reopen precondition
+        // discriminants and the receipt's one-arm state discriminant each
+        // name their one exact host.
+        (625, 437),
         "the law must traverse the complete non-wildcard domain in both generated artifacts"
     );
 
@@ -11542,6 +11545,20 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("RestoreServicePromotionManifest", "service_visibility_epoch")
                 | ("RestoreServicePromotionManifest", "signer_set_epoch")
                 | ("RestoreServicePromotionManifest", "threshold_signatures")
+                // fgdb-rqw4: the three pending-reopen precondition rows and the
+                // receipt's one-arm state row, landed under the recorded rqw4
+                // ruling (singleton phase-arm refinement; ::Sealed witnessed
+                // structurally by each spec's mandatory seal_ref/proof rows;
+                // one-arm discriminant invents no sibling arms). Younger than
+                // the historical witness for the same reason as every row
+                // above, each admitted on its own evidence.
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
+                    "expected_meta_pending_state"
+                )
+                | ("LocalRestoreServiceCompletionSpec", "expected_pending_state")
+                | ("ShardRestoreReopenConfirmSpec", "expected_pending_state")
+                | ("ServiceCatalogPromotionReservationReceipt", "state")
         )
     };
     // The l6xd owner ruling makes these ten embedded AuthorityBoundHeader
@@ -12495,7 +12512,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // 887 -> 895 (fgdb-ad4m): DecisionPolicyEpoch's exact eight-field
         // canonical table is an A21 post-erratum cohort. The current field
         // count carries all eight and the reconstruction remains frozen at 225.
-        pre_erratum.fields.len() + 895,
+        // 895 -> 899 (fgdb-rqw4): the three pending-reopen precondition rows
+        // and the receipt's one-arm state row, claimed by post_erratum_a20_field
+        // and enumerated there. The current field count carries all four and
+        // the reconstruction remains frozen at 225.
+        pre_erratum.fields.len() + 899,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
@@ -17393,9 +17414,13 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
     // 8 -> 9 (fgdb-a20-restore-promotion-ivsp):
     // PromotedAwaitingReopenMetaRestorePhase, wire 0x056a, applies the existing
     // MetaRestorePhase arm at 0x0003 to the completion precondition.
+    // 9 -> 12 (fgdb-rqw4): the three pending-reopen precondition discriminants
+    // (wires 0x0578/0x0579/0x057a) each claim the OperationalPendingIndependentReopen
+    // bootstrap-phase arm at 0x0004 — singleton claims only; the ::Sealed conjunct
+    // stays prose by ruling, so conjunction_claimants below must stay empty.
     assert_eq!(
         claimants.len(),
-        9,
+        12,
         "refinement-claim population moved; a new tag-refined wrapper must be added here \
          deliberately, not discovered by a green run: {claimants:?}"
     );
@@ -17892,7 +17917,13 @@ fn idr_payload_bearing_arm_values_preserve_the_complete_payload() {
             "PromotedAwaitingReopenLocalRestorePhase",
             // fgdb-a20-restore-promotion-ivsp: the Meta twin has the same
             // tag-only payload accounting as the pre-existing Local twin.
-            "PromotedAwaitingReopenMetaRestorePhase"
+            "PromotedAwaitingReopenMetaRestorePhase",
+            // fgdb-rqw4: the three pending-reopen precondition discriminants
+            // refine the unit-payload bootstrap-phase arm, so the accounting
+            // clause is carried by sibling-consistency rather than by law.
+            "OperationalPendingIndependentReopenMetaPendingState",
+            "OperationalPendingIndependentReopenLocalPendingState",
+            "OperationalPendingIndependentReopenShardPendingState"
         ]),
         "the tag-only discriminant population moved"
     );
@@ -17924,9 +17955,18 @@ fn idr_payload_bearing_arm_values_preserve_the_complete_payload() {
         "an arm_value row landed without extending this census"
     );
 
-    // (a) THE BEAD'S MUTATION, on both landed subjects: a payload-bearing arm
-    // refined by a tag-only discriminant whose claim drops the payload
-    // accounting erases the payload and must fail.
+    // (a) THE BEAD'S MUTATION, on the landed payload-bearing subjects: a
+    // payload-bearing arm refined by a tag-only discriminant whose claim drops
+    // the payload accounting erases the payload and must fail. The fgdb-rqw4
+    // pending-reopen discriminants refine a UNIT-payload arm, so they take the
+    // complementary branch: the marker is carried for sibling consistency, and
+    // dropping it must fire NOTHING (the law owes no accounting where there is
+    // no payload) — pinned here so the law cannot silently widen onto unit arms.
+    let payload_bearing_subjects: BTreeSet<&str> = BTreeSet::from([
+        "LocalAbortFinalCertificationSelection",
+        "PromotedAwaitingReopenLocalRestorePhase",
+        "PromotedAwaitingReopenMetaRestorePhase",
+    ]);
     for name in &tag_only_subjects {
         let mut dropped = real_identity();
         let i = dropped
@@ -17944,11 +17984,16 @@ fn idr_payload_bearing_arm_values_preserve_the_complete_payload() {
             identity::TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER,
             "carries the refined union's u8 tag",
         );
-        assert!(
-            codes_without_assignment_drift(&dropped)
-                .contains(&"refinement_tag_only_payload_unaccounted".to_string()),
-            "dropping the payload accounting on {name} must fail"
-        );
+        let fired = codes_without_assignment_drift(&dropped)
+            .contains(&"refinement_tag_only_payload_unaccounted".to_string());
+        if payload_bearing_subjects.contains(name) {
+            assert!(fired, "dropping the payload accounting on {name} must fail");
+        } else {
+            assert!(
+                !fired,
+                "{name} refines a unit-payload arm; the accounting law must stay silent"
+            );
+        }
     }
 
     // (b) The payload-preserving instrument, synthesized against the real

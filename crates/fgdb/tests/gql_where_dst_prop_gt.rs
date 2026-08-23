@@ -12,7 +12,7 @@
 //! parse error rather than a silently-weakened bound.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, GqlError, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;

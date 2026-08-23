@@ -6092,3 +6092,39 @@ wire_tag = 0x0003
 encoding_context = "arm CanonicalStateAffecting of closed discriminant LogicalEffectClass"
 allowed_containing_schemas = ["LogicalEffectClass"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0578
+name = "OperationalPendingIndependentReopenMetaPendingState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of the GlobalStatePayloadBootstrapPhase union (a05:1650); a precondition field carries the refined union's u8 tag and never the arm payload; the source precondition further qualifies the phase as ::Sealed (a20:2601), which is verified structurally by this spec's mandatory meta_seal_ref and meta_independent_reopen_proof_ref rows rather than by a second serialized tag, because no restore-path seal-state union is source-declared (fgdb-rqw4)"
+allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0579
+name = "OperationalPendingIndependentReopenLocalPendingState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of the GlobalStatePayloadBootstrapPhase union (a05:1650); a precondition field carries the refined union's u8 tag and never the arm payload; the source precondition further qualifies the phase as ::Sealed (a20:2605), which is verified structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows rather than by a second serialized tag, because no restore-path seal-state union is source-declared (fgdb-rqw4)"
+allowed_containing_schemas = ["LocalRestoreServiceCompletionSpec"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x057a
+name = "OperationalPendingIndependentReopenShardPendingState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of the GlobalStatePayloadBootstrapPhase union (a05:1650); a precondition field carries the refined union's u8 tag and never the arm payload; the source precondition further qualifies the phase as ::Sealed (a20:2599), which is verified structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows rather than by a second serialized tag, because no restore-path seal-state union is source-declared (fgdb-rqw4)"
+allowed_containing_schemas = ["ShardRestoreReopenConfirmSpec"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x057b
+name = "ServiceCatalogPromotionReservationReceiptState"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed one-arm u8 tag: ReservedHiddenNonexpiring 0x01; rejects every other tag; the source binds exactly this one state value and source silence claims less, never more, so no sibling arms are invented (a20:2581, fgdb-rqw4/5uj5)"
+allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
+max_size_bytes = 1

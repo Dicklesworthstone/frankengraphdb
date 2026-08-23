@@ -35,11 +35,14 @@ use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
-// fgdb-strata, then fgdb by fgdb-j0vu). Derived from the gate's own drift
-// message, never hand-computed. The semantic contract covers activation_status
-// AND posture status, so activating a crate MUST move this — a pin that
-// survived the change would be pinning nothing.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:e365cf08c82c2750";
+// fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
+// §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
+// the f2fb2a45 landing left the test-side pins behind the committed TOML).
+// Derived from the gate's own drift message, never hand-computed. The
+// semantic contract covers activation_status AND posture status, so
+// activating a crate MUST move this — a pin that survived the change would
+// be pinning nothing.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:f8c73256905a48d7";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -165,8 +168,8 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        20,
-        "seventeen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's \
+        21,
+        "eighteen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's \
          BLAKE3/AEAD kernel, fgdb-chronicle by fgdb-w2-object-identity-t0f's \
          §5.1 identity pipeline, fgdb-reference by fgdb-w2-delta-batches-og6n's \
          semantics oracle, fgdb-sim by fgdb-verif-sim-q97e's \
@@ -177,7 +180,8 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
          deferred to live, and fgdb-gql by fgdb-w5-parsers-nje — the syntax \
          layer whose parser/binder the spine's execute paths already bind \
          through, activated when its live dependency edge made planned status \
-         a topology violation) plus all three landed islands: \
+         a topology violation, and fgdb-bench by fgdb-p95p's §17 adversarial \
+         benchmark harness) plus all three landed islands: \
          fgdb-unsafe-simd, fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(

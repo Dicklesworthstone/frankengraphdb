@@ -4495,6 +4495,20 @@ max_size_bytes = 1
 
 [[field]]
 containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0008
+stable_name = "expected_meta_pending_state"
+exact_wire_type = "OperationalPendingIndependentReopenMetaPendingState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "inline precondition discriminant refined to the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of GlobalStatePayloadBootstrapPhase; the completion spec is rejected in any other bootstrap phase, while the source's ::Sealed qualifier is witnessed structurally by this spec's mandatory meta_seal_ref and meta_independent_reopen_proof_ref rows instead of a second serialized tag, since no restore-path seal-state union is source-declared (fgdb-rqw4); the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a05:1650, a20:2601)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "GlobalRestoreServiceCompletionSpec"
 field_tag = 0x0009
 stable_name = "expected_source_lease_generation"
 exact_wire_type = "u64"
@@ -7116,6 +7130,20 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "role-local"
 retention_and_cut_rule = "inline precondition discriminant refined to the PromotedAwaitingReopen arm (arm_tag 0x0003) of LocalRestorePhase; the completion spec is rejected in any other registry state, so the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a18:2381, a20:2605)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0007
+stable_name = "expected_pending_state"
+exact_wire_type = "OperationalPendingIndependentReopenLocalPendingState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "inline precondition discriminant refined to the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of GlobalStatePayloadBootstrapPhase; the completion spec is rejected in any other bootstrap phase, while the source's ::Sealed qualifier is witnessed structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows instead of a second serialized tag, since no restore-path seal-state union is source-declared (fgdb-rqw4); the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a05:1650, a20:2605)"
 version_status = "reserved"
 max_size_bytes = 1
 
@@ -14468,6 +14496,20 @@ digest_class = "target"
 
 [[field]]
 containing_schema = "ServiceCatalogPromotionReservationReceipt"
+field_tag = 0x000d
+stable_name = "state"
+exact_wire_type = "ServiceCatalogPromotionReservationReceiptState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "closed one-arm reservation-state discriminant carrying the declared u8 constant of ReservedHiddenNonexpiring; the receipt exists only in this state, so the row admits exactly it and invents no sibling arms, and it is retained while the receipt is retained and cut only with it (a20:2581, fgdb-rqw4/5uj5)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "ServiceCatalogPromotionReservationReceipt"
 field_tag = 0x000e
 stable_name = "authority_signatures"
 exact_wire_type = "bytes"
@@ -14991,6 +15033,20 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the exact shard independent reopen proof this confirmation consumes as the only transition out of the sealed pending state; retained while the confirm spec is retained and cut only with that spec, and order 40 <= 44 keeps the edge backward-only (a20:2599)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0005
+stable_name = "expected_pending_state"
+exact_wire_type = "OperationalPendingIndependentReopenShardPendingState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "inline precondition discriminant refined to the OperationalPendingIndependentReopen arm (arm_tag 0x0004) of GlobalStatePayloadBootstrapPhase; the reopen confirmation is rejected in any other bootstrap phase, while the source's ::Sealed qualifier is witnessed structurally by this spec's mandatory seal_ref and independent_reopen_proof_ref rows instead of a second serialized tag, since no restore-path seal-state union is source-declared (fgdb-rqw4); the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the confirm spec is retained and cut only with that spec (a05:1650, a20:2599)"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[field]]
 containing_schema = "ShardRestoreReopenConfirmSpec"
