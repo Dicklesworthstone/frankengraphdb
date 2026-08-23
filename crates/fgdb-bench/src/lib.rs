@@ -333,21 +333,28 @@ pub async fn load_model_durably(
             Ok(_) => commit_samples.push(started.elapsed()),
             Err(error) if is_publish_fence(&error) => {
                 reopens += 1;
+                // fgdb-a7sz instrument: how many sealed blocks had
+                // accumulated when the next root offer refused? Each stored
+                // .block file is one 56-byte root reference, so this count is
+                // the W3 owner's threshold-arithmetic denominator.
+                let stored_blocks = std::fs::read_dir(dir.join("strata-blocks"))
+                    .map(|entries| entries.flatten().count() as u128)
+                    .unwrap_or(0);
                 // Release the exclusive writer lease BEFORE reopening.
                 drop(db);
                 db = match Database::open(cx, dir, keys()).await {
                     Ok(db) => db,
                     Err(open_error) => {
-                        // MEASURED ENGINE LIMIT (fgdb-p95p): once a delta
-                        // block over the object ceiling is durable in the
-                        // stream, EVERY later open refuses during rebuild --
-                        // the directory admits no documented recovery. This
-                        // is the honest sustainable-ingest number today.
-                        let message =
-                            format!("fences_survived={reopens} then open refused: {open_error}");
-                        if open_error.to_string().contains("16384-byte limit")
-                            || open_error.to_string().contains("-byte limit")
-                        {
+                        // MEASURED ENGINE LIMIT (fgdb-a7sz): once the offer
+                        // crosses the ceiling, EVERY later open refuses
+                        // during rebuild -- the directory admits no
+                        // documented recovery. This is the honest
+                        // sustainable-ingest number today.
+                        let message = format!(
+                            "fences_survived={reopens} stored_blocks={stored_blocks} \
+                             then open refused: {open_error}"
+                        );
+                        if open_error.to_string().contains("-byte limit") {
                             return Err(format!("ENGINE_LIMIT: {message}"));
                         }
                         return Err(format!("reopen after fence: {open_error}"));
@@ -401,11 +408,13 @@ pub async fn verify_model(db: &Database, model: &Model) -> Result<(), String> {
 
 pub const VERTEX_COUNT: usize = 2_000;
 pub const EDGES_PER_NEW_VERTEX: usize = 3;
-// MEASURED by this harness's first run: sustained ingest crosses the block
-// store's 16 KiB object ceiling after a handful of batches regardless of batch
-// size (blocks accumulate several commits), so the loader treats the fence as
-// a normal continuation and counts reopens as a published metric. The ceiling
-// itself is an §17-relevant operational bound this bead documents.
+// MEASURED by this harness's first run (fgdb-a7sz): sustained ingest fences
+// after ~4-6 commits REGARDLESS of batch size -- the delta blocks accumulate
+// several commits, and the object that finally crosses the store's 16 KiB
+// ceiling is the PARTITION ROOT's reference enumeration (56 B/ref), not any
+// batch. The loader survives fences by reopen-and-probe and publishes the
+// reopen count; the ceiling itself is the §17-relevant bound this bead
+// documents.
 pub const INGEST_BATCH_EDGES: usize = 64;
 pub const LOAD_SEED: u64 = 0x46474442; // "FGDB"
 
