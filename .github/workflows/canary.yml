@@ -1,0 +1,9 @@
+name: canary
+on:
+  push:
+    branches: [ci-red-proof]
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo canary-ok
