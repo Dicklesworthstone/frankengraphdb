@@ -997,14 +997,20 @@ impl core::fmt::Debug for CompareAndSetMismatch {
 /// user graph properties and therefore stay redacted until the batch is
 /// consumed by the write path.
 ///
-/// **THIS IS NOT THE TRANSACTION MODEL AND MUST NOT BE READ AS ONE.** There is
-/// no snapshot, no conflict detection, no isolation level, and no abort: a batch
-/// is a set of rows that become durable together or not at all. The real
-/// transaction model — workspaces, statement lifecycle, first-committer-wins,
-/// SSI — lives in `fgdb-reference::txn` as executable semantics and in
-/// `fgdb-w4-*` as the engine, and neither is wired here. Doctrine 7's line is
-/// that a subset may do LESS while a substitute pretends to do the same thing;
-/// this type is named for what it is so it cannot be mistaken for the other.
+/// **THIS IS NOT THE TRANSACTION MODEL AND MUST NOT BE READ AS ONE.** A batch
+/// is a set of rows that become durable together or not at all: it carries no
+/// snapshot, no workspace, and no isolation semantics of its own. What IS
+/// wired around it (fgdb-fcw-writebatch-6cxf): every `Database` constructor
+/// installs [`crate::fcw::FirstCommitterWinsValidator`], and the basis-pinned
+/// [`Database::prepare_write`] / [`Database::commit_prepared`] pair enforces
+/// first-committer-wins over the canonical delta encoding, so a committed
+/// write whose basis went stale is rejected instead of silently landing.
+/// Still NOT wired here: multi-statement workspaces, statement lifecycle, and
+/// snapshot-isolation/SSI semantics — those live in `fgdb-reference::txn` as
+/// executable semantics and in `fgdb-w4-*` as the engine. Doctrine 7's line
+/// stands: a subset may do LESS while a substitute pretends to do the same
+/// thing; this type is named for what it is so it cannot be mistaken for the
+/// other.
 ///
 /// One batch carries one relation, because a `CoordinateEntry` names one.
 ///

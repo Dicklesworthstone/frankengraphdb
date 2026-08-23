@@ -178,7 +178,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | 1 | `fgdb-sim` | active | `forbid` | test_only | W1 | fgdb-verif-sim-q97e | The whole database under the lab runtime: virtual time, DPOR, chaos, crashpacks. |
 | 2 | `fgdb-reference` | active | `forbid` | test_only | W1 | fgdb-verif-reference-3kkp | executable semantics oracle |
 | 3 | `fgdb-oracles` | planned | `forbid` | test_only | verification_ladder | fgdb-verif-oracles-fqie | SI/SSI, obligation-leak, quiescence, and Elle-class history oracles. |
-| 4 | `fgdb-bench` | active | `forbid` | test_only | verification_ladder | fgdb-p95p | The §17 bench harness: one binary per gate with committed baselines. |
+| 4 | `fgdb-bench` | active | `forbid` | test_only | verification_ladder | fgdb-p95p | The §17 bench harness: one binary per gate; baselines are machine-local today (no pinned manifest — empirical_gate_activated=false on every event until fgdb-epic-perf-4xe lands them). |
 | 5 | `fgdb-conformance` | planned | `forbid` | test_only | verification_ladder | — | openCypher TCK and the GQL feature-conformance corpus keyed to ISO feature IDs. |
 | 6 | `fgdb-fuzz` | planned | `forbid` | test_only | verification_ladder | — | Grammar, frame, format-reader, and SymbolRecord fuzz targets. |
 

@@ -2,7 +2,7 @@
 
 This is a synthesized, agent-facing changelog for the full history of **frankengraphdb**.
 
-Scope window: project inception on **2026-07-15** through unreleased HEAD **[`f4ad4af`](https://github.com/Dicklesworthstone/frankengraphdb/commit/f4ad4af0b534d3ab4af58f974929bc48f7badca9)** on **2026-08-19**.
+Scope window: project inception on **2026-07-15** through unreleased HEAD **[`076552b2`](https://github.com/Dicklesworthstone/frankengraphdb/commit/076552b2)** on **2026-08-23** (wave 9 below).
 
 **frankengraphdb** is a memory-safe property-graph database in Rust: fountain-coded commit stream, temperature-tiered CSR storage, GQL (ISO/IEC 39075:2024) with an openCypher on-ramp, git-style branches, and a deterministic lab runtime. Workspace version is **`0.0.1`**. There are **no git tags** and **no GitHub Releases** as of this writing (`gh release list -R Dicklesworthstone/frankengraphdb` is empty). Do not invent a `v0.x` release page.
 
@@ -26,7 +26,7 @@ It is organized by landed capabilities, not raw diff order. Representative commi
 | inception [`1cf64cce`](https://github.com/Dicklesworthstone/frankengraphdb/commit/1cf64ccee08260ba49662ad866c4e14f23333a6a) | unreleased HEAD | 2026-07-15 | Master plan, README, AGENTS, license. Two days of adversarial plan review (Sol Ultra, Kimi K3, Fable). |
 | G0 constitution [`ee8aa1a5`](https://github.com/Dicklesworthstone/frankengraphdb/commit/ee8aa1a58dd82220704e9b0676c7918b44546d08) | unreleased HEAD | 2026-07-21 | Claim registries, twenty-invariant spine, identity constitution. |
 | runnable spine [`42b4b0d3`](https://github.com/Dicklesworthstone/frankengraphdb/commit/42b4b0d34b919de36b8cf6faeda21770543de2e6) | unreleased HEAD | 2026-08-04 | `fgdb::Database` a person can actually run; `main()` opens a database. |
-| current HEAD [`f4ad4af0`](https://github.com/Dicklesworthstone/frankengraphdb/commit/f4ad4af0b534d3ab4af58f974929bc48f7badca9) | unreleased HEAD | 2026-08-19 | Chronicle + Strata spine with FaultVfs lab, incremental publish, MVCC formats. Workspace still `0.0.1`. |
+| current HEAD [`076552b2`](https://github.com/Dicklesworthstone/frankengraphdb/commit/076552b2) | unreleased HEAD | 2026-08-23 | Product FCW validator, GQL parse→plan→execute slice with certificates, Vfs-backed Strata durability, §17 adversarial bench, GitHub Actions gate. Workspace still `0.0.1`. |
 
 ---
 
@@ -251,6 +251,32 @@ Small hygiene. Historical LLM plan reviews leave repo root; the master plan stay
 
 - [`3ee449b`](https://github.com/Dicklesworthstone/frankengraphdb/commit/3ee449b14ddd2a6ada2610f4876d9860dbdb3d2a) Untrack skill-loop scratch; move root planning docs into `docs/planning/` (gitignore only).
 - [`f4ad4af`](https://github.com/Dicklesworthstone/frankengraphdb/commit/f4ad4af0b534d3ab4af58f974929bc48f7badca9) Move historical LLM plan reviews into `docs/planning/`.
+
+---
+
+## 9) Product FCW, the GQL execution slice, Vfs-backed Strata, and the §17 bench (2026-08-19 → unreleased HEAD)
+
+The wave that turns spine plumbing into product behavior: transactions get a real validator, GQL gets a parse→plan→execute slice with auditable certificates, Strata durability moves onto the production async Vfs seam, and a §17 adversarial harness starts publishing honest engine limits.
+
+### Delivered capability
+
+- Transactions: every `Database` constructor installs `FirstCommitterWinsValidator` (fgdb-fcw-writebatch-6cxf) — no product handle commits under Chronicle's PassThrough default; basis-pinned `prepare_write`/`commit_prepared` reject stale-basis commits; WriteTxn overlap is FCW, not SnapshotAdvanced (fgdb-w4-g1-txn-core-qpmg.2, fgdb-writetxn-pin-l8wb).
+- GQL: the parse→plan→execute slice with `GqlPlanCertificate`; hop-1 AND/`!=`/alias families (`<>`, bang-ne) landed across fgdb-w5-parsers-nje.57–64 with three-way witnesses (fgdb test + sim-vs-reference oracle); destination-label filters fold into certificate digests; ~200 integration test files in `crates/fgdb/tests` and 84 differential-oracle suites in `crates/fgdb-sim/tests` (measured 2026-08-23).
+- Strata: BlockStore durability I/O runs through the same async Vfs Chronicle uses (fgdb-tvg8.1) — one-plane rollback under a lying Vfs is witnessed; creation-barrier order logged for lab replay.
+- Bench: `fgdb-bench` §17 adversarial harness lands five hostile shapes on the real durable path (fgdb-p95p), honestly publishing machine-local baselines (`empirical_gate_activated=false`) — and immediately finds fgdb-a7sz: sustained ingest fences at the 16 KiB partition-root ceiling (~292 refs × 56 B) and re-fences deterministically on reopen; root-format fix routed to W3+G0.
+- Gates: GitHub Actions CI runs `scripts/check.sh` verbatim on push/PR (fgdb-ci-workflow-check-sh-4csa), making "CI-enforced" literal.
+
+### Representative commits
+
+- [`ea40cd90`](https://github.com/Dicklesworthstone/frankengraphdb/commit/ea40cd90) Install FCW validator on product open; prepare/commit_prepared (fgdb-fcw-writebatch-6cxf).
+- [`c23faeda`](https://github.com/Dicklesworthstone/frankengraphdb/commit/c23faeda) A stale-snapshot WriteBatch cannot become durable under FCW (fgdb-fcw-writebatch-6cxf).
+- [`894d9cba`](https://github.com/Dicklesworthstone/frankengraphdb/commit/894d9cba) Take asupersync as a production Vfs dependency (fgdb-tvg8.1).
+- [`c7a4c82d`](https://github.com/Dicklesworthstone/frankengraphdb/commit/c7a4c82d) Witness one-plane Strata rollback under a lying Vfs (fgdb-tvg8.1).
+- [`f2fb2a45`](https://github.com/Dicklesworthstone/frankengraphdb/commit/f2fb2a45) Land fgdb-bench §17 adversarial harness — five hostile shapes on the real durable path (fgdb-p95p).
+- [`8dceb212`](https://github.com/Dicklesworthstone/frankengraphdb/commit/8dceb212) Fence telemetry + corrected a7sz mechanism note (partition-root ceiling arithmetic).
+- [`c3fd2762`](https://github.com/Dicklesworthstone/frankengraphdb/commit/c3fd2762) Fold destination-label filter into certificate digest; bind far-end != in two-hop WHERE.
+- [`37de0fdd`](https://github.com/Dicklesworthstone/frankengraphdb/commit/37de0fdd) Activate fgdb-gql; expand durable state-slot and transition-writer registries.
+- [`076552b2`](https://github.com/Dicklesworthstone/frankengraphdb/commit/076552b2) CI: wire scripts/check.sh as the GitHub Actions gate (fgdb-ci-workflow-check-sh-4csa).
 
 ---
 

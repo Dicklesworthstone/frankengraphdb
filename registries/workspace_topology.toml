@@ -1662,7 +1662,7 @@ manifest_dir = ""
 name = "fgdb-bench"
 layer = "verification"
 layer_position = 4
-role = "The §17 bench harness: one binary per gate with committed baselines."
+role = "The §17 bench harness: one binary per gate; baselines are machine-local today (no pinned manifest — empirical_gate_activated=false on every event until fgdb-epic-perf-4xe lands them)."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
 activation_status = "active"

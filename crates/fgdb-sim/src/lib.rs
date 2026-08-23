@@ -312,12 +312,14 @@ pub async fn replay_through<V: asupersync::fs::Vfs>(
 /// Bind every replay of one durable coordinator directory to the same reference
 /// database authority.
 ///
-/// The current Chronicle slice has not yet threaded Appendix A's persisted
-/// `database_id` through `CommitCoordinator`, so the verification layer derives a
-/// deterministic stand-in from the canonical directory plus its complete capsule
-/// identity domain. The directory is included because two independent databases
-/// may deliberately use the same key/namespace profile. Once the root stack owns
-/// `DatabaseId`, this derivation is replaced by that field without changing
+/// `RootSlot` now persists Appendix A's `database_id`
+/// (`fgdb-chronicle::root`), but this verification helper still derives a
+/// deterministic stand-in from the coordinator's key material and canonical
+/// directory instead of loading that field, because the replay binds from the
+/// coordinator handle alone. The directory is included because two independent
+/// databases may deliberately use the same key/namespace profile. Replacing
+/// the derivation with the persisted `RootSlot.database_id` — read through the
+/// same VFS-restricted path — is the follow-up, without changing
 /// `ReferenceDatabase`'s contract.
 fn reference_database_id<V: asupersync::fs::Vfs>(
     cx: &CommitCx,
