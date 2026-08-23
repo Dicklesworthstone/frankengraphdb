@@ -1,12 +1,299 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-08-20.** This document is revised in place. Older
-commit-bound assessments are retained below as superseded historical snapshots because
-they explain several decisions; their counts and statements about missing seams are not
-current unless the 2026-08-20 delta repeats them.
+**Current measurement: 2026-08-22** (evidence window 2026-08-23T02:30–03:00Z).
+This document is revised in place. Older commit-bound assessments are retained
+below as superseded historical snapshots because they explain several decisions;
+their counts and statements about missing seams are not current unless the
+2026-08-22 delta repeats them.
 
 ---
 
+## Current delta — 2026-08-22
+
+### Product verdict
+
+**FrankenGraphDB still is not the database product the README describes in the
+present tense — but for the first time, product-critical seams exist where the
+2026-08-20 audit recorded absence.** HEAD moved `df733010` → `8dceb212`
+(563 commits; 368 files; +52,547/−724 lines, overwhelmingly under
+`crates/fgdb/tests` and `crates/fgdb-sim/tests`; measured non-test vs test LOC:
+218k / 151k across 414 integration test files). The classification is unchanged
+in kind and materially advanced in degree. Three seams crossed from zero to
+real:
+
+1. **The production write path got its validator.** Every `Database`
+   constructor funnels through `bind_with_vfs`, which installs
+   `FirstCommitterWinsValidator` (`crates/fgdb/src/lib.rs:2120-2130`,
+   landed by `fgdb-fcw-writebatch-6cxf`); `PassThroughValidator` survives only
+   on a bare-coordinator fixture (`crates/fgdb-chronicle/src/commit.rs:397`).
+   Basis-pinned `prepare_write`/`commit_prepared` implement first-committer-wins
+   over the canonical delta encoding (lib.rs:2495-2573), and WriteTxn carries
+   its own crash matrix under sim. The 08-20 Gap-2 success criterion —
+   "PassThroughValidator gone from the product open path" — is met at the FCW
+   layer. Session/workspace ownership and SSI-at-the-validator-seam remain.
+2. **A bounded GQL slice runs text → rows end to end, differentially tested.**
+   `fgdb-gql` (one module, 3,186 LOC) parses labeled node scans, one-hop
+   oriented/undirected edges, exactly-two-hop chains, integer property
+   predicates, ≤2 ANDed endpoint predicates, single-variable RETURN,
+   SKIP/LIMIT into a private AST → `BoundPlan` (lib.rs :97/:240/:386).
+   `crates/fgdb/src/gql_exec.rs` executes it;
+   `execute_gql{,_at,_certified,_certified_at}` plus a `GqlPlanCertificate`
+   digest over plan + snapshot (`crates/fgdb/src/gql_cert.rs`) complete the
+   surface. ~200 integration tests cover every bounded grammar shape ×
+   live/as-of/overlay/certified, and **86 differential oracle suites** in
+   `crates/fgdb-sim/tests/*_oracle*.rs` compare engine rows against an
+   independently replayed `fgdb-reference` graph — whose own scope grew far
+   past the spine era: path modes (Walk/Trail/Simple/Acyclic), valid-time
+   selectors, branches/forks with lineage-walking conflict rules, 9 of 18
+   Appendix-B intent kinds, an SI transaction oracle, an SSI dangerous-
+   structure checker (Fekete pivot + Cahill refinement), net-effect
+   normal-form folding. Caveat that keeps Gap 3 open: `BoundPlan` bypasses any
+   algebra; there is no operator enum anywhere in the workspace.
+3. **Strata joined the lab, and §17 got its first harness.**
+   `BlockStore::open_with_vfs` exists beside plain-path open
+   (`crates/fgdb-strata/src/store.rs:498/:534`; `fgdb-tvg8.1` closed).
+   `fgdb-bench` publishes five hostile shapes on the real durable path with
+   in-region correctness assertions and NDJSON events. Publication-only by
+   design today: every event carries `empirical_gate_activated:false`, no
+   baseline artifact is committed, and no CI exists to fail.
+
+One load-bearing negative discovery, made explicit by the bench and pinned in
+commit `8dceb212`: **sustained ingest currently cannot run continuously.**
+Publish fences trip after roughly 4–6 commits against the 16 KiB
+partition-root reference ceiling (~292 root refs at 56 B/ref; 380 stored
+blocks measured at one fence), and a single delta block over that ceiling
+renders the database unreopenable (`fgdb-a7sz`, P1, open; no seal-at-size
+policy exists yet). Every throughput ambition — including honestly activating
+any §17 gate — sits downstream of this fix.
+
+### The five questions this skill asks
+
+1. **What is working right now.** The durable spine, deeper than ever:
+   two-fsync commit with named CrashPoints (commit.rs:712/:807/:829/:870-884),
+   domain-separated chained markers ("fgdb:commit-marker-chain:v2",
+   marker.rs:44/:180) with head-CAS and torn-tail/corruption split in
+   recovery, dual-slot `manifest.root` fail-closed selection incl.
+   `DivergentPair` refusal (root.rs:413-480), AEAD XChaCha20-Poly1305 +
+   asupersync RaptorQ on every production capsule with keyed ObjectId
+   recomputation on read (FG-INV-09). Strata Tier D end to end: block formats
+   V3–V7, single-patch vertex/edge property patches, half-open MVCC
+   visibility, compaction with retention floor + property carry, FGSM V2
+   manifests binding `published_chain_hash` to the Chronicle chain,
+   checkpoint-selected reopen verifying that commitment or refusing and
+   rebuilding. FCW transactions on the product path (above). The GQL slice +
+   certificates + differential verification (above). Sim lab: FaultVfs fault
+   model (fsync-lie, interior torn writes, bit flips, ENOSPC variants, dirent
+   loss/lie, latency), virtual time via asupersync lab, LDFI forced schedules,
+   claim-typed campaigns that structurally cannot claim "verified", replayable
+   crashpacks — Chronicle, Strata, and the composition spine all run under
+   it. G0 machinery: registry-check bijections over
+   `LIVE_LOCAL_SEMANTIC_HANDLER_INVENTORY`, the nine-gate `scripts/check.sh`
+   chain with file-coverage closure and enforced verdict contract, the unsafe
+   ledger complete (3 islands / 7 sites, site↔row bijection plus a
+   public-API surface checker), and a proof-lane gate that hard-fails on zero
+   checked lanes and genuinely invokes Lean. Behavioral witness re-run during
+   this audit: `rch exec -- cargo run -p fgdb --example open_a_database` →
+   "OK: opened, wrote, dropped, reopened, agreed." exit 0.
+2. **What is not working or not yet implemented.** Sessions, prepared
+   statements, a sync embedded API, `:memory:`; multi-graph/branch/partition
+   coordinates (the engine pins `GRAPH`/`BRANCH` constants while the reference
+   models full fork lineage); GLA algebra, optimizer, Loom operators
+   (per-query O(E) full-scan adjacency rebuild; results are deduped ascending
+   `Vec<VId>`; no ORDER BY, variable-length paths, writes-through-GQL, or
+   branch/time selector syntax — as-of is an API argument); Tier I/R/A
+   (Tier-D blocks stored unsealed, plaintext, un-FEC'd at rest); retention
+   cooling as the temporal database; Ripple, Beacon, Prism, Warden, Fabric,
+   Aegis entirely; CLI `fgdb`, server `fgdbd`, Python, installer, releases;
+   CI (`.github/` absent — every "CI-enforced" phrase in AGENTS/README is
+   aspiration until a workflow runs `scripts/check.sh`); 0/20 invariant
+   clauses enforced (40 stub fg_inv checker/negative rows);
+   `formal/tla` nonexistent though four registered lanes cite it; and the
+   sustained-ingest ceiling above.
+3. **What is blocking us.** Sequencing plus a nearly empty actionable queue.
+   `br stats`: 879 records / 582 closed / 277 open / 12 in progress /
+   286 dependency-blocked / **2 ready** (an owner ruling, `fgdb-6wgl`, and the
+   `fgdb-a7sz` unreopenable bug). `bv --robot-triage` counts 16 actionable
+   under its broader predicate and ranks `fgdb-g0-identity-registries-hrx`
+   (P0) on top. G0 cannot freeze on 174 reserved contracts (1 live:
+   `cc:local:local-autocommit-write-spec`, handler inventory real). The
+   Genesis slice `fgdb-gate-genesis-lce` is unclosed. Swarm energy remains
+   spine-first — locally rational, and this cycle it also produced the query
+   seam prior audits demanded, which is exactly the right ordering.
+4. **Would implementing all open beads close the gap?** Yes for tracking: the
+   22 open epics own the README's whole 1.0 surface, and completing every leaf
+   to its written acceptance criteria would cover it. Not automatically for
+   G4: W5–W11 leaves remain whole-subsystem slices, zero invariants are
+   enforced, certificates are plan hashes rather than replayable executions,
+   and execution risk concentrates wherever a leaf assumes an entire
+   subsystem. Three thin NO_BEAD seams found this audit are now filed
+   (below); everything else has an owner row.
+5. **Vision goals with no bead until today.** (a) CI workflows running
+   `scripts/check.sh` — zero prior owner; every "fails CI" claim aspirational
+   until this lands. (b) An owner for migrating the shipped `BoundPlan`/
+   `gql_exec` slice onto the GLA family — without one, the bespoke executor
+   fossilizes into exactly the "fourth planner" the 08-20 audit warned
+   against. (c) Crashpack artifact durability — sim regression reproducers
+   land under `crates/fgdb-sim/target/test-artifacts/**`, inside a cleanable
+   `target/`. Plus four stale honesty surfaces folded into one hygiene bead
+   (WriteBatch disclaimer still says FCW "is not wired here" while lib.rs:2130
+   wires it; sim's `database_id` comment vs `RootSlot`; topology registry
+   promising "committed baselines" the bench disclaims; CHANGELOG ending at
+   `f4ad4af`/08-19 missing wave 9).
+
+### Vision checklist — 2026-08-22 refresh
+
+| # | Goal | Status | Evidence |
+|---|------|--------|----------|
+| 1 | Embedded sync `Database::open(path\|:memory:)` | PARTIAL | async `create/open(cx,path,keys)` lib.rs:1903-1919; `:memory:` absent; sessions/prepared deliberately absent lib.rs:57-61 |
+| 2 | Durable commit stream, no double-write | PARTIAL+ | capsules/markers/root real; retention cooling and Global EffectSource arm pending (marker.rs:28-31) |
+| 3 | Temperature-tiered Strata (I/D/R/A) | PARTIAL | Tier D real + VFS-injected; I/R/A named absences strata/lib.rs:25-28; blocks unsealed/plaintext (store.rs module doc) |
+| 4 | GQL + openCypher + FQL | **PARTIAL** (was NOT_STARTED) | bounded MATCH executes differentially vs oracle w/ certificates; no var-length/ORDER BY/DML/temporal-or-branch syntax; LanguageContracts unfrozen (`fgdb-g0-language-contracts-54g`) |
+| 5 | FreeJoin/WCO/factorized execution | NOT_STARTED | zero operator enums; W5 stages open (`fgdb-5vp9`, `fgdb-rz12`); migration seam filed |
+| 6 | Ripple views/subscriptions | NOT_STARTED | epic `fgdb-epic-w6-65w` open |
+| 7 | STRICT determinism + certificates | PARTIAL+ | `GqlPlanCertificate` hashes plan+snapshot (gql_cert.rs); byte-replay still absent |
+| 8 | Agent-native B6 | NOT_STARTED | engine single-branch constants; reference models forks |
+| 9 | Server `fgdbd` (FGP/Bolt/…) | NOT_STARTED | no crate/binary |
+| 10 | CLI robot mode | NOT_STARTED | no crate/binary |
+| 11 | Python wheels | NOT_STARTED | no package tree |
+| 12 | Install script/releases | NOT_STARTED | claims-lint tripwire holding |
+| 13 | SSI transactions | **PARTIAL** (was STUB-in-production) | FCW real on commit path; SSI oracle-side (reference ssi.rs); workspaces/session ownership absent |
+| 14 | Larger-than-memory operators | NOT DEMONSTRATED | decoded-RAM snapshot; spill beads open; ingest ceiling compounds |
+| 15 | §17 empirical gates | UNPROVEN (harness exists) | five shapes w/ in-region correctness; `empirical_gate_activated=false` throughout; no baselines; no CI |
+| 16 | FG-INV live checkers | STUB | 20/20 clauses stub; expected_enforced=0 both directions, fail-safe |
+| 17 | Lab VFS before first fsync | WORKING-for-what-exists | BlockStore VFS-injected store.rs:534; Chronicle VFS-generic |
+| 18 | Closed dependency universe | WORKING | unchanged |
+| 19 | `unsafe_code="forbid"` + ledger | WORKING | 3 islands/7 sites bijective + public-API checker |
+| 20 | G0 constitutional freeze | PARTIAL+ | machinery self-testing; **1/175** contracts live (`command_contracts.toml:2896-2922`) |
+
+Vision delivery: still 2 of 20 fully working (18, 19). Goals 4 and 13 became
+genuine PARTIALs; 15 gained a harness; 17 holds for everything durable that
+exists. Everything a README reader would type remains NOT_STARTED.
+
+### Inventory
+
+| Measure | 08-18 | 08-20 | 08-22 |
+|---|---|---|---|
+| HEAD | `8d295653` | `df733010` | `8dceb212` |
+| Commits between audits | 23 | ~8 | **563** (+52,547/−724, 368 files) |
+| Topology slots | 70: 19 active | unchanged | 70: 21 active (cardinalities :60-76); 22 Cargo members |
+| Binaries | 5 checker tools | unchanged | 6 (+`fgdb-bench`); `fgdb`/`fgdbd` still absent |
+| Cargo [[bench]] targets | 0 | 0 | 0 (harness ships as a bin) |
+| Command contracts | metadata | 176 reserved / 0 live | **175 reserved / 1 live**, epoch 40 |
+| Invariant enforcement | 0/0 | 0/0 | 0/0 (honest pinned zero) |
+| Checker rows | 57 live / 42 stub | 58 / 43 | 99 rows: 57 live + 42 stub (fg_inv_01..20 pairs enumerated) |
+| Proof lanes checked | 1/10 | 1/10 | 1/10; `formal/tla` absent; lane gate hard-fails on zero lanes |
+| Tracker | 759 / 462 closed / 0 ready | 766 / 466 / 3 ready | 879 / 582 / **2 ready**, 286 blocked |
+| Engine `todo!()` | 0 | 0 | 0 |
+
+### Bridge plan updates (order = vision impact)
+
+**NEW Gap 0 — sustained ingest must stop fencing.** Land `fgdb-a7sz`'s fix and
+a seal-at-size / partition-root growth policy so long-running commits never
+hit the publish fence. Until then, the bench's `ENGINE_LIMIT` events are the
+honest headline number, and no throughput claim can be activated. Everything
+else below assumes this converges.
+
+**Gap 1 — G0 command universe:** the pipeline is proven end to end (one row →
+union arm → handler inventory → bijection tests). The remaining 174 rows are
+mechanical-but-large; `fgdb-5uw2` owns; do not fork.
+
+**Gap 2 — transactions:** next slice is session/workspace ownership, SSI at
+the validator seam, purpose-narrowed `TxnCx`. Downgraded XL → L/M: the
+highest-unknown (validator wiring under crash) is done and covered.
+
+**Gap 3 — minimum query path:** criterion amended — keep the differential
+slice AND add the BoundPlan→GLA lowering so the executor becomes Loom's seed
+rather than a parallel planner. Filed as
+`fgdb-boundplan-gla-lowering-seam-r2kd`, sequenced behind `fgdb-5vp9` so
+operator contracts and migration share one design pass, and wired as a
+prerequisite of `fgdb-gate-genesis-lce`.
+
+**Gap 4 — bounded recovery / larger-than-memory:** VFS injection done.
+Remaining: Tier R seal path, bounded-open suffix accounting, and the first
+larger-than-memory demonstration (spill-backed operator over sealed objects).
+
+**Gap 5 — invariant promotion:** unchanged discipline — promote
+FG-INV-03/08/09/18 only when checker + distinct negative test go live in the
+same change. Fail-closed behavior verified this audit
+(`g0_proof_lanes_e2e` fails on zero checked lanes or missing artifacts).
+
+**Gap 6 — product surface:** unchanged except CI, now owned by
+`fgdb-ci-workflow-check-sh-4csa` (dependency-free, immediately ready — the
+ready queue needed an actionable item).
+
+**Gap 7 — later layers (Ripple/Beacon/Prism/Warden/Fabric/Aegis):** unchanged
+warning; doing them before Gaps 0–3 converge produces islands.
+
+### Evidence boundary
+
+Pinned to tracked commit `8dceb212938226235744b8e3e65cc68ed1d386fa`
+("feat(bench): fence telemetry …"), measured 2026-08-23T02:30–03:00Z. Method:
+four parallel read-only audits (query pipeline; chronicle/strata/spine;
+registries+gates; topology/sim/bench/surface) cross-checked against three
+independently re-read load-bearing sites (FCW install lib.rs:2130; the live
+contract row command_contracts.toml:2896-2922; bench fence comments
+main.rs:31-58). Behavioral: fresh `rch` run of the spine example exited 0
+with agreement output. The same three untracked foreign artifacts as prior
+audits (`.beads/beads.db-wal-cert*`, `tools/registry-check/src/claims.rs`)
+were observed untouched and were neither edited nor removed, per repo rule.
+
+### Ambition rounds applied to this revision
+
+- **Round 1** refused to let the three upgrades read as victory: elevated the
+  ingest fence to Gap 0, amended Gap 3's success criterion to require algebra
+  migration (a better-built island is still an island), and surfaced CI as a
+  claims-honesty gap rather than infrastructure nicety.
+- **Round 2** swept for second-order seams: found the crashpack `target/`
+  hazard and the four stale honesty surfaces, folding them into single beads
+  instead of scattering; reordered the bridge so nothing above Gap 0 may be
+  called "next".
+- **Round 3** searched for further structural additions and found none — the
+  epics already own every remaining README surface. Rounds converged.
+
+### Refinement passes on the new beads
+
+- **Pass 1** rewrote acceptance criteria to be observable (exit codes, file
+  existence, grep-anchored doc fixes), wired the GLA-seam dependency chain,
+  left the CI bead free so readiness improves today.
+- **Pass 2** added negative-test requirements (CI red-run demonstration;
+  guard test asserting the artifact root never moves back under `target/`)
+  and bet labels beside workstream tags per the ADR provenance law.
+- **Pass 3** found nothing further — stopping per the skill's convergence
+  rule.
+
+### Beads filed from this measurement (only uncovered seams)
+
+| ID | Seam |
+|---|---|
+| `fgdb-ci-workflow-check-sh-4csa` | GitHub Actions workflow running `scripts/check.sh`; converts aspirational "CI-enforced" claims into enforceable ones |
+| `fgdb-boundplan-gla-lowering-seam-r2kd` | Migrate `BoundPlan`/`gql_exec` onto the GLA operator family; prerequisite edge into Genesis; depends on `fgdb-5vp9` |
+| `fgdb-stale-honesty-surfaces-sync-npas` | Four stale honesty surfaces: WriteBatch FCW wording, sim `database_id` comment, topology baseline wording, CHANGELOG wave 9 |
+| `fgdb-crashpack-artifacts-durable-home-vd35` | Move sim crashpack/regression artifacts out of cleanable `target/` with a guard test |
+
+**Same-day pickup (postscript, 2026-08-23).** Within hours of filing, the
+swarm claimed `fgdb-ci-workflow-check-sh-4csa` and landed the workflow
+(`076552b2`: push(main)+PR trigger; pinned nightly installed from
+`rust-toolchain.toml`; caches keyed on `Cargo.lock` with the documented
+invariant that cache behavior can never skip a gate; the job's verdict is
+exactly `scripts/check.sh`'s exit code), with the red-proof demonstration
+(`crates/fgdb/tests/ci_red_proof.rs`) in flight at measurement close.
+`fgdb-p95p` published its first honest numbers in the same window
+(`ae579dcb`: point-reads p50=122us / p99=152us under skew; cold-reopen
+p50=40.5ms; compaction-under-load 104ms over 130 traversals — machine-local,
+unpinned). The seam-filing discipline is validated: file it ready, and the
+fleet eats it. This postscript records tree state through HEAD `076552b2`;
+the audit body above remains pinned at `8dceb212`.
+
+### Tracker hygiene
+
+- `fgdb-p95p` remains in_progress after `f2fb2a45` landed the harness —
+  legitimate remainder (baselines/gating story). Close on the gating
+  increment, not the commit message.
+- `fgdb-fcw-writebatch-6cxf` was correctly post-review closed.
+- Do not create parallel epics for CI, GLA migration, or doc hygiene: they
+  are leaves under existing owners (verification/G0, W5, doc-sync lineage).
+
+---
 ## Current delta — 2026-08-20
 
 ### Product verdict
