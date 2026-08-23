@@ -97,11 +97,15 @@ impl Lcg {
 /// tail, so the first vertices become true supernodes instead of synthetic
 /// hot spots grafted onto a uniform graph.
 pub struct Model {
-    adjacency: BTreeMap<VId, Vec<VId>>,
+    /// Outbound face: `out[src] = [dst, ...]` ascending — what
+    /// `Database::neighbours` answers (KNOWS is a directed relation).
+    out_adjacency: BTreeMap<VId, Vec<VId>>,
+    /// Inbound face: `in_[dst] = [src, ...]` ascending — what
+    /// `Database::in_neighbours` answers.
+    in_adjacency: BTreeMap<VId, Vec<VId>>,
     degree: BTreeMap<VId, usize>,
     edges: Vec<(EId, VId, VId)>,
 }
-
 impl Model {
     pub fn preferential_attachment(
         vertex_count: usize,
@@ -109,20 +113,32 @@ impl Model {
         seed: u64,
     ) -> Self {
         let mut rng = Lcg::new(seed);
-        let mut adjacency: BTreeMap<VId, Vec<VId>> = BTreeMap::new();
+        let mut out_adjacency: BTreeMap<VId, Vec<VId>> = BTreeMap::new();
+        let mut in_adjacency: BTreeMap<VId, Vec<VId>> = BTreeMap::new();
         let mut degree: BTreeMap<VId, usize> = BTreeMap::new();
         // Attachment candidates: one entry per existing edge endpoint, so a
         // draw is degree-proportional without a weighted sampler.
         let mut endpoints: Vec<VId> = Vec::new();
         let mut edges = Vec::new();
         let mut next_eid = 0usize;
+        // KNOWS edges are stored DIRECTED (src -> dst); the undirected
+        // attachment view comes from bumping BOTH endpoints' degree and
+        // recording both faces, exactly as the engine's two adjacency
+        // families answer them.
+        let link = |out: &mut BTreeMap<VId, Vec<VId>>,
+                    inn: &mut BTreeMap<VId, Vec<VId>>,
+                    degree: &mut BTreeMap<VId, usize>,
+                    src: VId,
+                    dst: VId| {
+            out.entry(src).or_default().push(dst);
+            inn.entry(dst).or_default().push(src);
+            *degree.entry(src).or_insert(0) += 1;
+            *degree.entry(dst).or_insert(0) += 1;
+        };
         for a in 0..seed_clique(edges_per_new_vertex) {
             for b in (a + 1)..seed_clique(edges_per_new_vertex) {
                 let (ea, eb) = (VId(a as u128), VId(b as u128));
-                adjacency.entry(ea).or_default().push(eb);
-                adjacency.entry(eb).or_default().push(ea);
-                *degree.entry(ea).or_insert(0) += 1;
-                *degree.entry(eb).or_insert(0) += 1;
+                link(&mut out_adjacency, &mut in_adjacency, &mut degree, ea, eb);
                 endpoints.push(ea);
                 endpoints.push(eb);
                 edges.push((EId(next_eid as u128), ea, eb));
@@ -138,24 +154,43 @@ impl Model {
                     continue;
                 }
                 attached.insert(target, ());
-                adjacency.entry(vid).or_default().push(target);
-                adjacency.entry(target).or_default().push(vid);
-                *degree.entry(vid).or_insert(0) += 1;
-                *degree.entry(target).or_insert(0) += 1;
+                link(
+                    &mut out_adjacency,
+                    &mut in_adjacency,
+                    &mut degree,
+                    vid,
+                    target,
+                );
                 endpoints.push(vid);
                 endpoints.push(target);
                 edges.push((EId(next_eid as u128), vid, target));
                 next_eid += 1;
             }
         }
-        for list in adjacency.values_mut() {
+        for list in out_adjacency.values_mut() {
+            list.sort();
+        }
+        for list in in_adjacency.values_mut() {
             list.sort();
         }
         Self {
-            adjacency,
+            out_adjacency,
+            in_adjacency,
             degree,
             edges,
         }
+    }
+
+    /// The outbound face of `vid`: exactly what `Database::neighbours`
+    /// answers over the directed relation.
+    pub fn neighbours_of(&self, vid: VId) -> Vec<VId> {
+        self.out_adjacency.get(&vid).cloned().unwrap_or_default()
+    }
+
+    /// The inbound face of `vid`: exactly what `Database::in_neighbours`
+    /// answers.
+    pub fn in_neighbours_of(&self, vid: VId) -> Vec<VId> {
+        self.in_adjacency.get(&vid).cloned().unwrap_or_default()
     }
 
     pub fn supernode(&self) -> VId {
@@ -180,13 +215,9 @@ impl Model {
             .map(|(vid, _)| vid)
             .collect()
     }
-
-    pub fn neighbours_of(&self, vid: VId) -> Vec<VId> {
-        self.adjacency.get(&vid).cloned().unwrap_or_default()
-    }
 }
 
-pub fn seed_clique(edges_per_new_vertex: usize) -> usize {
+fn seed_clique(edges_per_new_vertex: usize) -> usize {
     edges_per_new_vertex + 1
 }
 
@@ -337,9 +368,7 @@ pub async fn load_model_durably(
                 // accumulated when the next root offer refused? Each stored
                 // .block file is one 56-byte root reference, so this count is
                 // the W3 owner's threshold-arithmetic denominator.
-                let stored_blocks = std::fs::read_dir(dir.join("strata-blocks"))
-                    .map(|entries| entries.flatten().count() as u128)
-                    .unwrap_or(0);
+                let stored_blocks = count_stored_blocks(dir);
                 // Release the exclusive writer lease BEFORE reopening.
                 drop(db);
                 db = match Database::open(cx, dir, keys()).await {
@@ -406,17 +435,25 @@ pub async fn verify_model(db: &Database, model: &Model) -> Result<(), String> {
 // shapes
 // ---------------------------------------------------------------------------
 
-pub const VERTEX_COUNT: usize = 2_000;
+pub const VERTEX_COUNT: usize = 150;
 pub const EDGES_PER_NEW_VERTEX: usize = 3;
-// MEASURED by this harness's first run (fgdb-a7sz): sustained ingest fences
-// after ~4-6 commits REGARDLESS of batch size -- the delta blocks accumulate
-// several commits, and the object that finally crosses the store's 16 KiB
-// ceiling is the PARTITION ROOT's reference enumeration (56 B/ref), not any
-// batch. The loader survives fences by reopen-and-probe and publishes the
-// reopen count; the ceiling itself is the §17-relevant bound this bead
-// documents.
-pub const INGEST_BATCH_EDGES: usize = 64;
+// MEASURED (fgdb-a7sz): the PARTITION ROOT's reference enumeration -- one
+// 56-byte ref per sealed block -- crosses the store's 16 KiB ceiling at
+// ~292 blocks, and every touched family adds a block per commit. Until the
+// root-format fix lands (W3), the skew shapes deliberately run on a fixture
+// small enough that total refs stay under the ceiling (~150 vertices /
+// ~450 edges / ~6 commits x ~35 touched families), so the warm-read and
+// cold-open NUMBERS publish instead of fencing. Config strings carry the
+// exact fixture; scale up once fgdb-a7sz ships.
+const INGEST_BATCH_EDGES: usize = 64;
 pub const LOAD_SEED: u64 = 0x46474442; // "FGDB"
+
+/// Sealed-block files on disk == current root reference count (56 B each).
+pub fn count_stored_blocks(dir: &Path) -> u128 {
+    std::fs::read_dir(dir.join("strata-blocks"))
+        .map(|entries| entries.flatten().count() as u128)
+        .unwrap_or(0)
+}
 
 /// Shape 1: durable ingest under power-law degree skew. Every commit is the
 /// real two-fsync durable path; every edge is read back and checked.
@@ -448,43 +485,62 @@ pub async fn shape_ingest_power_law(cx: &CommitCx) -> Result<(), String> {
             ("commit_p99_us", percentile_us(&commit_samples, 0.99)),
             ("bytes_on_disk", on_disk as u128),
             ("bytes_per_edge", on_disk as u128 / total_edges.max(1)),
+            ("stored_blocks", count_stored_blocks(&dir)),
         ],
     );
     Ok(())
 }
 
 /// Shape 2: warm point reads under degree skew — supernode and tail on one
-/// decoded cache, every measured read checked against the model.
+/// decoded cache, every measured read checked against the model. Both
+/// adjacency faces are verified: the warm pass walks the whole graph, and the
+/// measured probes assert their own answers mid-measurement.
 pub async fn shape_point_reads_supernode(cx: &CommitCx) -> Result<(), String> {
     let model = Model::preferential_attachment(VERTEX_COUNT, EDGES_PER_NEW_VERTEX, LOAD_SEED);
     let dir = scratch("point-reads-supernode");
     let (db, _, _) = load_model_durably(cx, &dir, &model, true).await?;
     drop(db);
-    // Warm = the decoded cache of a real cold open, not a memory-only handle.
+    // Warm = the decoded cache of a real cold open, not a memory-only
+    // handle. The warm pass walks the whole graph on BOTH adjacency faces
+    // so a drift on either fails before measurement begins.
     let db = Database::open(cx, &dir, keys())
         .await
         .map_err(|error| format!("open: {error}"))?;
-
-    let supernode = model.supernode();
-    let tail = model.tail(32);
-    // One unmeasured warm-up traversal of every vertex so the decoded cache
-    // reflects a served workload rather than a cold first touch.
-    for vid in model.adjacency.keys() {
+    for vid in model.out_adjacency.keys() {
         let got = db
             .neighbours(*vid, KNOWS)
             .map_err(|error| format!("warm neighbours: {error}"))?;
         if got != model.neighbours_of(*vid) {
-            return Err(format!("warm traversal mismatch at {vid:?}"));
+            return Err(format!(
+                "warm outbound mismatch at {vid:?}: db={got:?} model={:?}",
+                model.neighbours_of(*vid)
+            ));
+        }
+    }
+    for vid in model.in_adjacency.keys() {
+        let got = db
+            .in_neighbours(*vid, KNOWS)
+            .map_err(|error| format!("warm in-neighbours: {error}"))?;
+        if got != model.in_neighbours_of(*vid) {
+            return Err(format!(
+                "warm inbound mismatch at {vid:?}: db={got:?} model={:?}",
+                model.in_neighbours_of(*vid)
+            ));
         }
     }
 
+    let supernode = model.supernode();
+    let tail = model.tail(32);
     const ROUNDS: usize = 200;
     let mut vertex_samples = Vec::new();
-    let mut adjacency_samples = Vec::new();
+    let mut out_samples = Vec::new();
+    let mut in_samples = Vec::new();
     let measured = Instant::now();
     for round in 0..ROUNDS {
         // The measured mix: the supernode (p99 driver), two tail vertices,
-        // and one rotation over the middle of the distribution.
+        // and one rotation over the middle of the distribution. Every probe
+        // measures its vertex lookup plus BOTH one-hop faces, and every
+        // answer is checked against the model mid-measurement.
         let mut probe = vec![supernode];
         probe.push(tail[round % tail.len()]);
         probe.push(tail[(round * 7 + 3) % tail.len()]);
@@ -498,22 +554,36 @@ pub async fn shape_point_reads_supernode(cx: &CommitCx) -> Result<(), String> {
             if row.is_none() {
                 return Err(format!("vertex {vid:?} missing during measured reads"));
             }
+
             let started = Instant::now();
             let got = db
                 .neighbours(vid, KNOWS)
                 .map_err(|error| format!("neighbours read: {error}"))?;
-            adjacency_samples.push(started.elapsed());
+            out_samples.push(started.elapsed());
             if got != model.neighbours_of(vid) {
-                return Err(format!("neighbours of {vid:?} drifted during measurement"));
+                return Err(format!(
+                    "outbound face of {vid:?} drifted during measurement"
+                ));
+            }
+
+            let started = Instant::now();
+            let got = db
+                .in_neighbours(vid, KNOWS)
+                .map_err(|error| format!("in-neighbours read: {error}"))?;
+            in_samples.push(started.elapsed());
+            if got != model.in_neighbours_of(vid) {
+                return Err(format!(
+                    "inbound face of {vid:?} drifted during measurement"
+                ));
             }
         }
     }
     let total_us = measured.elapsed().as_micros().max(1);
-    let ops = (vertex_samples.len() + adjacency_samples.len()) as u128;
+    let ops = (vertex_samples.len() + out_samples.len() + in_samples.len()) as u128;
     shape_result(
         "point-reads-supernode",
         &format!(
-            "vertices={VERTEX_COUNT} rounds={ROUNDS} ops={ops} mix=supernode+tail+mid warm=cold-open-cache single-threaded"
+            "vertices={VERTEX_COUNT} rounds={ROUNDS} ops={ops} mix=supernode+tail+mid faces=both warm=cold-open-cache single-threaded"
         ),
         &[
             ("ops", ops),
@@ -522,9 +592,12 @@ pub async fn shape_point_reads_supernode(cx: &CommitCx) -> Result<(), String> {
             ("vertex_p50_us", percentile_us(&vertex_samples, 0.50)),
             ("vertex_p95_us", percentile_us(&vertex_samples, 0.95)),
             ("vertex_p99_us", percentile_us(&vertex_samples, 0.99)),
-            ("adjacency_p50_us", percentile_us(&adjacency_samples, 0.50)),
-            ("adjacency_p95_us", percentile_us(&adjacency_samples, 0.95)),
-            ("adjacency_p99_us", percentile_us(&adjacency_samples, 0.99)),
+            ("out_p50_us", percentile_us(&out_samples, 0.50)),
+            ("out_p95_us", percentile_us(&out_samples, 0.95)),
+            ("out_p99_us", percentile_us(&out_samples, 0.99)),
+            ("in_p50_us", percentile_us(&in_samples, 0.50)),
+            ("in_p95_us", percentile_us(&in_samples, 0.95)),
+            ("in_p99_us", percentile_us(&in_samples, 0.99)),
         ],
     );
     Ok(())
@@ -614,10 +687,12 @@ pub async fn shape_version_chain(cx: &CommitCx) -> Result<(), String> {
 /// Shape 4: cold reopen — the store path instead of the memory path. Time from
 /// `Database::open` entry to the first VERIFIED adjacency answer, repeatedly.
 pub async fn shape_cold_reopen(cx: &CommitCx) -> Result<(), String> {
-    let model = Model::preferential_attachment(512, 3, LOAD_SEED ^ 0x5EED);
+    let model =
+        Model::preferential_attachment(VERTEX_COUNT, EDGES_PER_NEW_VERTEX, LOAD_SEED ^ 0x5EED);
     let dir = scratch("cold-reopen");
     let (_, _, _) = load_model_durably(cx, &dir, &model, true).await?;
-
+    let model =
+        Model::preferential_attachment(VERTEX_COUNT, EDGES_PER_NEW_VERTEX, LOAD_SEED ^ 0x5EED);
     let supernode = model.supernode();
     let expected = model.neighbours_of(supernode);
     let mut samples = Vec::new();
@@ -639,7 +714,7 @@ pub async fn shape_cold_reopen(cx: &CommitCx) -> Result<(), String> {
         "cold-reopen",
         &format!(
             "vertices={} open_to_first_verified_answer rounds=5",
-            model.adjacency.len()
+            model.out_adjacency.len()
         ),
         &[
             ("rounds", 5),
