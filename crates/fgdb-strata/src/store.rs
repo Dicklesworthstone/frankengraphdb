@@ -89,12 +89,19 @@ const PUBLICATION_LOCK_FILE: &str = ".block-publication.lock";
 /// can become canonical.
 const PUBLICATION_STAGING_FILE: &str = ".block-publication.staging";
 
-/// The largest persisted Strata object this store will materialize.
+/// The largest persisted BLOCK, vertex patch, edge-property patch, or
+/// manifest this store will materialize.
 ///
-/// A block entry occupies 56 bytes, so 64 bytes per admitted entry leaves room
-/// for the block header and is also comfortably above the smaller root-format
-/// maximum. The bound follows the format's cardinality ceiling instead of being
-/// an unrelated process-local allocation policy.
+/// A block entry occupies 56 bytes, so 64 bytes per admitted entry leaves
+/// room for the block header. The bound follows the format's cardinality
+/// ceiling instead of being an unrelated process-local allocation policy.
+/// ROOTS are NOT covered by this constant: their own layout declares a much
+/// larger lawful maximum (crate::root::MAX_ENCODED_ROOT_BYTES -- up to
+/// MAX_ROOT_BLOCKS x MAX_ROOT_PATCHES references), and admitting them here
+/// against the block-derived bound fenced every handle whose root reference
+/// enumeration outgrew 16 KiB, with rebuild re-offering the same lawful root
+/// forever (fgdb-a7sz). Admission is per-family: see
+/// put_object_with_steps.
 const MAX_STORED_OBJECT_BYTES: u64 = (crate::MAX_BLOCK_ENTRIES as u64) * 64;
 
 /// The largest manifest this store will materialize: header plus the record
@@ -737,7 +744,18 @@ impl<V: Vfs> BlockStore<V> {
         after_staging_sync: impl FnOnce(),
     ) -> Result<ObjectId, StoreError> {
         let offered_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        ensure_size_within_limit(offered_len, MAX_STORED_OBJECT_BYTES)?;
+        // fgdb-a7sz: each stored family admits against ITS OWN format
+        // ceiling. Roots encode up to MAX_ENCODED_ROOT_BYTES (the layout's
+        // declared MAX_ROOT_BLOCKS/MAX_ROOT_PATCHES x REF_LEN, which reads
+        // via get_root have always admitted) -- admitting them here against
+        // the block-derived bound fenced every handle whose root reference
+        // enumeration legitimately outgrew 16 KiB, and rebuild re-offered
+        // the same lawful root forever: the directory admitted no recovery.
+        let limit = match kind {
+            StoredObjectKind::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
+            _ => MAX_STORED_OBJECT_BYTES,
+        };
+        ensure_size_within_limit(offered_len, limit)?;
 
         let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
         let path = self.path(id);
@@ -771,7 +789,7 @@ impl<V: Vfs> BlockStore<V> {
                 let reread = cx
                     .with_restriction_async(self.vfs.open(&path, &existing_opts))
                     .await?;
-                let existing = read_bounded(cx, reread, MAX_STORED_OBJECT_BYTES).await?;
+                let existing = read_bounded(cx, reread, limit).await?;
                 let actual = kind.identity(self.k_oid.expose(), self.namespace, &existing);
                 if actual != id {
                     return Err(StoreError::DamagedExisting {

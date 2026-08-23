@@ -1911,3 +1911,57 @@ fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
         }
     });
 }
+
+/// fgdb-a7sz regression: roots admit against THEIR OWN format ceiling
+/// (MAX_ENCODED_ROOT_BYTES), not the block-derived object bound. A root whose
+/// reference enumeration lawfully outgrew 16 KiB -- here 400 refs x 48 B --
+/// used to be refused at publication AFTER its commit marker was durable, and
+/// rebuild re-offered the same root on every later open: the directory
+/// admitted no recovery. The store now applies each family's own ceiling.
+#[test]
+fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
+    let dir = scratch_dir("root-format-ceiling-admission");
+    under_lab(7, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        const REFS: usize = 400;
+        let mut refs = Vec::with_capacity(REFS);
+        for k in 0..REFS {
+            let bytes = encode_block(
+                0,
+                None,
+                &[entry(1_000 + k as u128, 500_000 + k as u128, 1)],
+            )
+            .expect("encodes");
+            let stored = store.put(&cx, &bytes).await.expect("stores block");
+            refs.push(fgdb_strata::root::BlockRef {
+                block_id: stored.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            });
+        }
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(2),
+            blocks: refs,
+            vertex_patches: vec![],
+        };
+        let encoded = fgdb_strata::root::encode_root(&root).expect("encodes root");
+        assert!(
+            encoded.len() > 16_384,
+            "fixture regressed: {} bytes no longer exercises the seam",
+            encoded.len()
+        );
+        assert!(encoded.len() <= fgdb_strata::root::MAX_ENCODED_ROOT_BYTES);
+
+        let root_id = store
+            .put_root(&cx, &root)
+            .await
+            .expect("a format-lawful root is admitted");
+        let read_back = store.get_root(&cx, root_id).await.expect("reads back");
+        assert_eq!(read_back.blocks.len(), REFS);
+    });
+}
