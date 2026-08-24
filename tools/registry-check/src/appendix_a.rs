@@ -15967,8 +15967,7 @@ name = "Probe"
             while let Some(pos) = rest.find(member) {
                 let before = rest[..pos].chars().next_back();
                 let after = rest[pos + member.len()..].chars().next();
-                let delimited =
-                    |c: Option<char>| c.is_none() || c == Some('|') || c == Some('.');
+                let delimited = |c: Option<char>| c.is_none() || c == Some('|') || c == Some('.');
                 if delimited(before) && delimited(after) {
                     return true;
                 }
@@ -15979,13 +15978,15 @@ name = "Probe"
         for member in [
             "local_prepare_evidence",
             "local_configuration_and_endpoint_commitment",
-            "target_tombstone_skeleton_recip",
+            "target_tombstone_skeleton_recipe",
             "active_projection_ref",
         ] {
             let near_misses: Vec<&String> =
                 keys.iter().filter(|key| key.contains(member)).collect();
-            let matched: Vec<&String> =
-                keys.iter().filter(|key| token_bounded(key, member)).collect();
+            let matched: Vec<&String> = keys
+                .iter()
+                .filter(|key| token_bounded(key, member))
+                .collect();
             assert!(
                 !matched.is_empty(),
                 "the repaired census must emit the formerly lost member site \
