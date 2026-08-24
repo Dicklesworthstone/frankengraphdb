@@ -3982,3 +3982,272 @@ fn unknown_key_fails_the_load() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// fgdb-5ekk residue 3: the generated family unions reconstruct from the
+/// normative contract rows, exhaustively and densely.
+mod generated_family_unions {
+    use super::*;
+    use registry_check::command_contracts::{
+        GENERATED_FAMILY_GLOBAL_UNION, GENERATED_FAMILY_LOCAL_UNION, ContractRegistry,
+        GeneratedFamilyUnion, generated_family_unions,
+    };
+
+    fn find_arm<'a>(
+        union: &'a GeneratedFamilyUnion,
+        tag: i64,
+    ) -> &'a registry_check::command_contracts::GeneratedFamilyArm {
+        union
+            .arms
+            .iter()
+            .find(|arm| arm.arm_tag == tag)
+            .unwrap_or_else(|| panic!("no arm at {tag:#06x}"))
+    }
+
+    #[test]
+    fn real_registry_derives_both_wrappers_exactly() {
+        let unions = generated_family_unions(&registry()).expect("derivation succeeds");
+        assert_eq!(unions.len(), 2, "exactly two wrappers derive");
+        assert_eq!(unions[0].union_name, GENERATED_FAMILY_LOCAL_UNION);
+        assert_eq!(unions[1].union_name, GENERATED_FAMILY_GLOBAL_UNION);
+        // The frozen v1 family expansion (fgdb-5uw2 Phase B): F1-F16 Local in
+        // the L1916 sentence order, Meta families from L1770. A moved count
+        // here means the contract corpus moved — update this landing note,
+        // not this assertion's meaning.
+        assert_eq!(unions[0].arms.len(), 104, "Local family arms");
+        assert_eq!(unions[1].arms.len(), 26, "Global family arms");
+        assert_eq!(
+            find_arm(&unions[0], 0x0001).source_arm_name,
+            "recovery-bridge-spec"
+        );
+        assert_eq!(
+            find_arm(&unions[0], 0x0069).source_arm_name,
+            "begin-role-transition-spec"
+        );
+        assert_eq!(
+            find_arm(&unions[1], 0x0001).source_arm_name,
+            "recovery-bridge-spec"
+        );
+        assert_eq!(
+            find_arm(&unions[1], 0x001a).source_arm_name,
+            "global-gc-cancellation-prepare-spec"
+        );
+        // Armed members share one family arm named by the member root.
+        assert_eq!(
+            find_arm(&unions[0], 0x0004).source_arm_name,
+            "local-attempt-registration-spec"
+        );
+        assert_eq!(
+            find_arm(&unions[0], 0x001c).source_arm_name,
+            "remote-retention-control-spec"
+        );
+    }
+
+    #[test]
+    fn derivation_is_deterministic() {
+        let first = generated_family_unions(&registry()).expect("first derivation");
+        let second = generated_family_unions(&registry()).expect("second derivation");
+        assert_eq!(first, second, "same registry state derives identical unions");
+    }
+
+    #[test]
+    fn rows_outside_the_generated_wrappers_are_excluded() {
+        let mut row = synthetic_row();
+        row.command_contract_id = "cc:local:local-autocommit-write-spec".into();
+        row.outer_command_union = "LocalSemanticCommand".into();
+        let mut registry = registry();
+        registry.contracts.push(row);
+        let unions = generated_family_unions(&registry).expect("derivation succeeds");
+        assert_eq!(
+            unions[0].arms.len(),
+            104,
+            "the embedded-spine row adds no arm"
+        );
+    }
+
+    #[test]
+    fn a_tag_selecting_two_members_fails_closed() {
+        let mut conflict = synthetic_row();
+        conflict.command_contract_id = "cc:local:impostor-spec".into();
+        conflict.outer_command_union = GENERATED_FAMILY_LOCAL_UNION.into();
+        conflict.outer_wire_tag = 0x0001;
+        let mut registry = registry();
+        registry.contracts.push(conflict);
+        let error = generated_family_unions(&registry).expect_err("conflict must fail");
+        assert!(
+            error.contains("selects two members"),
+            "must name the member-conflict law, got: {error}"
+        );
+    }
+
+    #[test]
+    fn family_tag_gaps_are_lawful_and_pinned() {
+        let unions = generated_family_unions(&registry()).expect("derivation succeeds");
+        // The outer tags are frozen ordinals of the whole role-command space;
+        // the live embedded-spine autocommit command holds Local ordinal
+        // 0x0005 under LocalSemanticCommand, so the Local family space has a
+        // permanent gap there. A gap that MOVES means a tag was re-dated —
+        // lawful only under the plan-line-290 amendment discipline.
+        assert!(
+            !unions[0].arms.iter().any(|arm| arm.arm_tag == 0x0005),
+            "Local ordinal 0x0005 belongs to the embedded-spine union"
+        );
+        let tags: Vec<i64> = unions[0].arms.iter().map(|arm| arm.arm_tag).collect();
+        let mut sorted = tags.clone();
+        sorted.sort_unstable();
+        assert_eq!(tags, sorted, "arms derive in ascending frozen-tag order");
+    }
+
+    /// Emits the exact catalog projection rows for both generated family
+    /// unions so the catalog text stays mechanically derived from the
+    /// normative registry. Run with `--nocapture`, review, and land the
+    /// emitted rows verbatim:
+    /// `cargo test -p registry-check --test command_contracts
+    /// mint_emits_catalog_rows -- --nocapture`. Row ids follow grammar v3 and
+    /// are re-derived independently by `projection_row_identity`, so a drifted
+    /// emission fails closed.
+    #[test]
+    fn mint_emits_catalog_rows() {
+        // Opt-in reviewed landing aid: when FGDB_MINT_OUT names a writable
+        // path, the emission is written there verbatim for the reviewer to
+        // inspect and land. The test never touches the repository itself.
+        let mint_out = std::env::var("FGDB_MINT_OUT");
+        use registry_check::hash::sha256_hex;
+
+        fn lower_kebab(value: &str) -> String {
+            let mut out = String::with_capacity(value.len());
+            for ch in value.chars() {
+                if ch.is_ascii_uppercase() {
+                    if !out.is_empty() && !out.ends_with('-') {
+                        out.push('-');
+                    }
+                    out.push(ch.to_ascii_lowercase());
+                } else if ch.is_ascii_alphanumeric() {
+                    out.push(ch);
+                } else if !out.is_empty() && !out.ends_with('-') {
+                    out.push('-');
+                }
+            }
+            while out.ends_with('-') {
+                out.pop();
+            }
+            out
+        }
+
+        fn short_digest(source_key: &str) -> String {
+            sha256_hex(source_key.as_bytes())[..16].to_owned()
+        }
+
+        let unions = generated_family_unions(&registry()).expect("derivation succeeds");
+        let mut printed = String::new();
+        for union in &unions {
+            let slice = if union.union_name == GENERATED_FAMILY_LOCAL_UNION {
+                "a10"
+            } else {
+                "a07"
+            };
+            let name = union.union_name;
+            let kebab = lower_kebab(name);
+            println!("# === {name} (slice {slice}) ===");
+            let union_block = format!(
+                "[[union]]\n\
+                 slice_id = \"{slice}\"\n\
+                 row_id = \"{slice}:union:{kebab}-{}\"\n\
+                 union_name = \"{name}\"\n\
+                 containing_schema = \"{name}\"\n\
+                 union_path = \"{name}\"\n\
+                 tag_wire_type = \"u16\"\n\
+                 encoding_context = \"closed-tagged\"\n\
+                 allowed_containing_schemas = [\"{name}\"]\n\
+                 role_predicate = \"{}\"\n\
+                 version_status = \"reserved\"\n\
+                 max_size_bytes = 16777216\n",
+                short_digest(&format!("union|{name}|{name}")),
+                if slice == "a10" { "role-local" } else { "role-meta" },
+            );
+            print!("{union_block}");
+            printed.push_str(&union_block);
+            for arm in &union.arms {
+                let member = &arm.source_arm_name;
+                let arm_digest = short_digest(&format!("arm|{name}|{name}|{member}"));
+                let arm_kebab = format!("{kebab}-{}", lower_kebab(member));
+                let arm_suffix = format!("{arm_kebab}-{arm_digest}");
+                let arm_row_id = format!("{slice}:union-arm:{arm_suffix}");
+                let arm_block = format!(
+                    "\n[[union_arm]]\n\
+                     slice_id = \"{slice}\"\n\
+                     row_id = \"{arm_row_id}\"\n\
+                     union_name = \"{name}\"\n\
+                     containing_schema = \"{name}\"\n\
+                     union_path = \"{name}\"\n\
+                     arm_tag = {tag:#06x}\n\
+                     source_arm_name = \"{member}\"\n\
+                     stable_name = \"{member}\"\n\
+                     payload_kind = \"inline-record\"\n\
+                     payload_sha256 = \"{payload}\"\n\
+                     role_predicate = \"{role}\"\n\
+                     version_status = \"reserved\"\n\
+                     max_size_bytes = 16777216\n",
+                    role = if slice == "a10" { "role-local" } else { "role-meta" },
+                    tag = arm.arm_tag,
+                    payload = arm.payload_sha256,
+                );
+                print!("{arm_block}");
+                printed.push_str(&arm_block);
+                // Every primary projection row needs exactly one companion
+                // target row binding it to the source key its own identity
+                // derives — the projection-fallback key, admitted by the
+                // contract-derived reconstruction law (fgdb-5ekk).
+                let fallback_key =
+                    format!("projection|durable_fields|{name}.{name}.{member}");
+                let target_block = format!(
+                    "\n[[target]]\n\
+                     row_id = \"{slice}:target:union-arm-{arm_suffix}\"\n\
+                     target_row_id = \"{arm_row_id}\"\n\
+                     slice_id = \"{slice}\"\n\
+                     source_key = \"{fallback_key}\"\n\
+                     target_kind = \"union-arm\"\n\
+                     definition_status = \"declared\"\n"
+                );
+                print!("{target_block}");
+                printed.push_str(&target_block);
+            }
+            // The union's own target row, after all of its arms.
+            let union_suffix = format!(
+                "{kebab}-{}",
+                short_digest(&format!("union|{name}|{name}"))
+            );
+            let union_row_id = format!("{slice}:union:{union_suffix}");
+            let union_fallback_key = format!("projection|durable_fields|{name}.{name}");
+            let target_block = format!(
+                "\n[[target]]\n\
+                 row_id = \"{slice}:target:union-{union_suffix}\"\n\
+                 target_row_id = \"{union_row_id}\"\n\
+                 slice_id = \"{slice}\"\n\
+                 source_key = \"{union_fallback_key}\"\n\
+                 target_kind = \"union\"\n\
+                 definition_status = \"declared\"\n"
+            );
+            print!("{target_block}");
+            printed.push_str(&target_block);
+        }
+        assert_eq!(
+            printed.matches("[[union]]").count(),
+            2,
+            "emission must include both union blocks"
+        );
+        assert_eq!(
+            printed.matches("[[union_arm]]").count(),
+            130,
+            "emission must include every family arm"
+        );
+        assert_eq!(
+            printed.matches("[[target]]").count(),
+            132,
+            "emission must include every companion target row"
+        );
+        if let Ok(path) = &mint_out {
+            std::fs::write(path, &printed)
+                .unwrap_or_else(|error| panic!("cannot write mint output {path:?}: {error}"));
+        }
+    }
+}

@@ -2522,6 +2522,72 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     );
 }
 
+/// fgdb-atke Ruling 3(a): a plural `role_predicates` arm row parses, renders
+/// back as the plural array in the durable_fields projection, and the legacy
+/// singular spelling keeps rendering byte-identically. The XOR law rejects a
+/// row carrying both spellings and an empty matrix.
+#[test]
+fn appendix_a_reference_union_arm_role_matrix_round_trips() {
+    let source = real_appendix_catalog_text();
+    let legacy = "role_predicate = \"role-local\"";
+    assert!(
+        source.contains(legacy),
+        "fixture expects at least one legacy singular arm row"
+    );
+
+    // Round trip: plural in -> plural out, exactly where the mutation landed.
+    let mutated = source.replacen(
+        legacy,
+        "role_predicates = [\"role-local||role-meta\", \"role-shard\"]",
+        1,
+    );
+    let catalog = appendix_a::parse_catalog(&mutated).expect("matrix arm row must parse");
+    let generated = appendix_a::generated_projections(&catalog);
+    let (_, durable) = generated
+        .iter()
+        .find(|(file, _)| file == "durable_fields.toml")
+        .expect("durable_fields projection is always rendered");
+    assert!(
+        durable.contains("role_predicates = [\"role-local||role-meta\", \"role-shard\"]"),
+        "matrix row must render as the plural array"
+    );
+
+    // Byte stability: with no mutation, no plural key may appear anywhere.
+    let baseline = real_appendix_catalog();
+    for (file, rendered) in appendix_a::generated_projections(&baseline) {
+        assert!(
+            !rendered.contains("role_predicates"),
+            "{file} must not invent plural predicates for legacy rows"
+        );
+    }
+
+    // XOR: both spellings on one row fail closed.
+    let both = source.replacen(
+        legacy,
+        "role_predicate = \"role-local\"\nrole_predicates = [\"role-meta\"]",
+        1,
+    );
+    let error = appendix_a::parse_catalog(&both)
+        .expect_err("a row carrying both predicate spellings must fail closed");
+    assert!(
+        error
+            .iter()
+            .any(|violation| violation.msg.contains("exactly one of")),
+        "XOR violation must name the mutual exclusion: {error:?}"
+    );
+
+    // Empty matrix fails closed.
+    let empty = source.replacen(legacy, "role_predicates = []", 1);
+    let error =
+        appendix_a::parse_catalog(&empty).expect_err("an empty role matrix must fail closed");
+    assert!(
+        error
+            .iter()
+            .any(|violation| violation.msg.contains("at least one matrix line")),
+        "empty-matrix violation must name the floor: {error:?}"
+    );
+}
+
 #[test]
 fn appendix_a_catalog_header_and_projection_order_are_canonical() {
     let baseline = real_appendix_catalog();

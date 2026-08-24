@@ -631,6 +631,83 @@ fn sat_unclassified_reference_wrapper() {
     );
 }
 
+/// fgdb-atke Ruling 3(a): reference-union arms carry their exact role/posture
+/// matrix. A plural `role_predicates` row is lawful when every entry parses
+/// under the closed grammar; a malformed entry fires union_arm_policy_mismatch.
+/// The legacy singular spelling keeps the historical conflation law exactly.
+#[test]
+fn sat_reference_union_arm_role_matrix() {
+    use registry_check::identity::{ReferenceUnion, ReferenceUnionArm};
+
+    fn matrix_union(predicates: Vec<Vec<&str>>) -> IdentityRegistries {
+        let mut r = base();
+        let mut arms = Vec::new();
+        for (index, entries) in predicates.iter().enumerate() {
+            arms.push(ReferenceUnionArm {
+                union_name: "GrantTargetRef".to_owned(),
+                containing_schema: "GrantSpec".to_owned(),
+                field_tag: 1,
+                arm_tag: 0x0001 + index as i64,
+                stable_name: format!("Target{index}"),
+                target_schema_id: format!("Target{index}"),
+                role: "meta".to_owned(),
+                identity_class: "logical".to_owned(),
+                reference_semantics: "strong".to_owned(),
+                role_predicates: entries.iter().map(|s| s.to_string()).collect(),
+                retention_and_cut_rule: "retained with the owning witness".to_owned(),
+                version_status: "reserved".to_owned(),
+                max_size_bytes: 40,
+            });
+            r.logical
+                .push(kind(&format!("Target{index}"), 0x9100 + index as u32, 5));
+        }
+        r.unions = vec![ReferenceUnion {
+            union_name: "GrantTargetRef".to_owned(),
+            containing_schema: "GrantSpec".to_owned(),
+            field_tag: 1,
+            role: "meta".to_owned(),
+            arms,
+        }];
+        r
+    }
+
+    // SATISFYING (matrix): every entry parses under the closed grammar.
+    let ok = matrix_union(vec![vec!["role-local||role-meta"], vec!["true"]]);
+    let ok_codes = codes(&ok);
+    assert!(
+        ok_codes.is_empty(),
+        "matrix satisfying witness fired unrelated violations: {ok_codes:?}"
+    );
+
+    // TRIGGER: an entry outside the closed grammar must fail the law.
+    let bad = matrix_union(vec![vec!["role-wizard"]]);
+    assert_eq!(
+        codes(&bad),
+        ["union_arm_policy_mismatch"],
+        "malformed matrix trigger must exercise exactly the policy law"
+    );
+
+    // LEGACY: the singular spelling keeps its historical conflation law —
+    // a meta-union arm authorizing only local holders stays rejected, and the
+    // matching predicate stays accepted.
+    let legacy_ok = matrix_union(vec![vec!["role-meta"]]);
+    assert!(
+        codes(&legacy_ok).is_empty(),
+        "legacy satisfying witness fired unrelated violations"
+    );
+    let mut legacy_bad = matrix_union(vec![vec!["role-local"]]);
+    if let Some(union) = legacy_bad.unions.first_mut() {
+        for arm in &mut union.arms {
+            arm.role_predicates = vec!["role-local".to_owned()];
+        }
+    }
+    assert_eq!(
+        codes(&legacy_bad),
+        ["union_arm_policy_mismatch"],
+        "legacy conflation trigger must exercise exactly the policy law"
+    );
+}
+
 /// The source-extracted code set and the reviewed coverage/backlog partition
 /// must remain exact. Prevents silent omission and count-preserving swaps.
 #[test]
