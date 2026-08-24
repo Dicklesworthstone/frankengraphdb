@@ -15927,6 +15927,52 @@ name = "Probe"
         );
     }
 
+    /// fgdb-complete-census-law-vacuous-twice-54jf acceptance probe. The
+    /// fgdb-qh3r closure names four member sites the pre-repair census never
+    /// emitted — `local_prepare_evidence`,
+    /// `local_configuration_and_endpoint_commitment`,
+    /// `target_tombstone_skeleton_recipe`, `active_projection_ref` — as "0
+    /// hits" pre-fix, and as the minimum any census-reader repair must
+    /// recover, because they stay unnamed by the completeness law until the
+    /// census emits them. This is that measurement, kept live so a future
+    /// reader-side regression reloses them loudly instead of silently.
+    #[test]
+    fn the_four_lost_member_sites_are_emitted_by_the_repaired_census() {
+        let (_catalog, census) = real_catalog_and_census();
+        let mut corpus = String::new();
+        for field in &census.fields {
+            corpus.push_str(&field.key.source_key());
+            corpus.push('\n');
+        }
+        for union in &census.unions {
+            corpus.push_str(&union.key.schema_owner);
+            corpus.push('|');
+            corpus.push_str(&union.key.union_path);
+            corpus.push('\n');
+        }
+        for arm in &census.arms {
+            corpus.push_str(&arm.key.schema_owner);
+            corpus.push('|');
+            corpus.push_str(&arm.key.union_path);
+            corpus.push('|');
+            corpus.push_str(&arm.key.arm_name);
+            corpus.push('\n');
+        }
+        for member in [
+            "local_prepare_evidence",
+            "local_configuration_and_endpoint_commitment",
+            "target_tombstone_skeleton_recipe",
+            "active_projection_ref",
+        ] {
+            assert!(
+                corpus.contains(member),
+                "the repaired census must emit the formerly lost member site \
+                 {member:?}; its absence means the reader regressed or the \
+                 member was renamed without re-homing its registration"
+            );
+        }
+    }
+
     #[test]
     fn arm_interior_census_field_requires_a_covering_arm_target() {
         let census = census_with_slice(
