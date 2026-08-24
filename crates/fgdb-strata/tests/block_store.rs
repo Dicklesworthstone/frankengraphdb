@@ -1928,12 +1928,8 @@ fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
         const REFS: usize = 400;
         let mut refs = Vec::with_capacity(REFS);
         for k in 0..REFS {
-            let bytes = encode_block(
-                0,
-                None,
-                &[entry(1_000 + k as u128, 500_000 + k as u128, 1)],
-            )
-            .expect("encodes");
+            let bytes = encode_block(0, None, &[entry(1_000 + k as u128, 500_000 + k as u128, 1)])
+                .expect("encodes");
             let stored = store.put(&cx, &bytes).await.expect("stores block");
             refs.push(fgdb_strata::root::BlockRef {
                 block_id: stored.0,
