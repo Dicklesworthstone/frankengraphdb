@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3854
-projection_fallback_count = 198
-target_source_assignment_sha256 = "4734d69091cf9aa749d874b149a53a19fdb89def39bb401d24072b7ccbccdbc0"
+target_count = 3986
+projection_fallback_count = 330
+target_source_assignment_sha256 = "5c4f3e2a68daedc139bbc44e16c694e40fea07107e13ccab1d63a5ac9f4df126"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 87
+registry_epoch = 88
 
 [[logical_kind]]
 slice_id = "a03"
@@ -116925,4 +116925,2919 @@ target_row_id = "a20:field:service-catalog-promotion-reservation-receipt-state"
 slice_id = "a20"
 source_key = "field|ServiceCatalogPromotionReservationReceipt|ServiceCatalogPromotionReservationReceipt.state|state"
 target_kind = "field"
+definition_status = "declared"
+
+# =============================================================================
+# Generated family unions (fgdb-5ekk residue 3) — mechanically derived, NOT
+# hand-minted. Plan line 1914 spells both wrappers; line 1916 derives the Local
+# union from command_contracts.toml ("exhaustive ... no hand-maintained
+# allowlist"); the mv6g I-0 owner ruling designates that registry normative for
+# both arm sets. Rows below are the verbatim emission of
+# `generated_family_unions()` (tools/registry-check/src/command_contracts.rs)
+# via the `mint_emits_catalog_rows` harness; row ids follow grammar v3 and are
+# re-derived independently by `projection_row_identity`, and
+# `verify_generated_family_unions` re-checks the projected arm set against the
+# contract registry on every run. Arm payload shapes are committed by the per-
+# member body/result schema ids carried on the contract rows themselves.
+# =============================================================================
+[[union]]
+slice_id = "a10"
+row_id = "a10:union:sequence-neutral-spec-tag-462d0a39094cac6e"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SequenceNeutralSpec<Tag>"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-recovery-bridge-spec-85d68c88edb722f3"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0001
+source_arm_name = "recovery-bridge-spec"
+stable_name = "recovery-bridge-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-recovery-bridge-spec-85d68c88edb722f3"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-recovery-bridge-spec-85d68c88edb722f3"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.recovery-bridge-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-begin-reservation-spec-5c53cddf073a3611"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0002
+source_arm_name = "local-begin-reservation-spec"
+stable_name = "local-begin-reservation-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-begin-reservation-spec-5c53cddf073a3611"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-begin-reservation-spec-5c53cddf073a3611"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-begin-reservation-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-begin-terminal-spec-f81255128af797a3"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0003
+source_arm_name = "local-begin-terminal-spec"
+stable_name = "local-begin-terminal-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-begin-terminal-spec-f81255128af797a3"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-begin-terminal-spec-f81255128af797a3"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-begin-terminal-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-attempt-registration-spec-1da2875298237e3f"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0004
+source_arm_name = "local-attempt-registration-spec"
+stable_name = "local-attempt-registration-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-attempt-registration-spec-1da2875298237e3f"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-attempt-registration-spec-1da2875298237e3f"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-attempt-registration-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-txn-ownership-transition-spec-018c30e24b426d18"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0006
+source_arm_name = "txn-ownership-transition-spec"
+stable_name = "txn-ownership-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-txn-ownership-transition-spec-018c30e24b426d18"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-txn-ownership-transition-spec-018c30e24b426d18"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.txn-ownership-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-txn-ownership-expiry-abort-spec-c0099ee91df46bde"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0007
+source_arm_name = "txn-ownership-expiry-abort-spec"
+stable_name = "txn-ownership-expiry-abort-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-txn-ownership-expiry-abort-spec-c0099ee91df46bde"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-txn-ownership-expiry-abort-spec-c0099ee91df46bde"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.txn-ownership-expiry-abort-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-statement-registration-spec-aadf2f6870748463"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0008
+source_arm_name = "local-statement-registration-spec"
+stable_name = "local-statement-registration-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-statement-registration-spec-aadf2f6870748463"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-statement-registration-spec-aadf2f6870748463"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-statement-registration-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-statement-publication-spec-4acaa52814c9da93"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0009
+source_arm_name = "local-statement-publication-spec"
+stable_name = "local-statement-publication-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-statement-publication-spec-4acaa52814c9da93"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-statement-publication-spec-4acaa52814c9da93"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-statement-publication-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-statement-abort-spec-0376e9a35939a476"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x000a
+source_arm_name = "local-statement-abort-spec"
+stable_name = "local-statement-abort-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-statement-abort-spec-0376e9a35939a476"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-statement-abort-spec-0376e9a35939a476"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-statement-abort-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-prepare-admission-spec-05befe21d70a8bcf"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x000b
+source_arm_name = "local-prepare-admission-spec"
+stable_name = "local-prepare-admission-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-prepare-admission-spec-05befe21d70a8bcf"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-prepare-admission-spec-05befe21d70a8bcf"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-prepare-admission-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-read-close-spec-7b46f9d10c7c5e24"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x000c
+source_arm_name = "local-read-close-spec"
+stable_name = "local-read-close-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-read-close-spec-7b46f9d10c7c5e24"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-read-close-spec-7b46f9d10c7c5e24"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-read-close-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-terminal-completion-spec-1ddb6d161dde3d55"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x000d
+source_arm_name = "local-terminal-completion-spec"
+stable_name = "local-terminal-completion-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-terminal-completion-spec-1ddb6d161dde3d55"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-terminal-completion-spec-1ddb6d161dde3d55"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-terminal-completion-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-txn-abort-spec-199d32f36c4f872e"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x000e
+source_arm_name = "txn-abort-spec"
+stable_name = "txn-abort-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-txn-abort-spec-199d32f36c4f872e"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-txn-abort-spec-199d32f36c4f872e"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.txn-abort-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-outcome-compaction-spec-79e043f20ad3b77b"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x000f
+source_arm_name = "local-outcome-compaction-spec"
+stable_name = "local-outcome-compaction-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-outcome-compaction-spec-79e043f20ad3b77b"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-outcome-compaction-spec-79e043f20ad3b77b"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-outcome-compaction-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-outcome-expiry-spec-c788f8baffafe37f"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0010
+source_arm_name = "local-outcome-expiry-spec"
+stable_name = "local-outcome-expiry-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-outcome-expiry-spec-c788f8baffafe37f"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-outcome-expiry-spec-c788f8baffafe37f"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-outcome-expiry-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-conflict-compaction-spec-ea35737fc9b93390"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0011
+source_arm_name = "local-conflict-compaction-spec"
+stable_name = "local-conflict-compaction-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-conflict-compaction-spec-ea35737fc9b93390"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-conflict-compaction-spec-ea35737fc9b93390"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-conflict-compaction-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-allocation-reservation-transition-spec-3f92587bbf7ccc66"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0012
+source_arm_name = "allocation-reservation-transition-spec"
+stable_name = "allocation-reservation-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-allocation-reservation-transition-spec-3f92587bbf7ccc66"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-allocation-reservation-transition-spec-3f92587bbf7ccc66"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.allocation-reservation-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-final-certification-reserve-spec-ffbd74711ce6ac43"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0013
+source_arm_name = "local-final-certification-reserve-spec"
+stable_name = "local-final-certification-reserve-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-final-certification-reserve-spec-ffbd74711ce6ac43"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-final-certification-reserve-spec-ffbd74711ce6ac43"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-final-certification-reserve-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-final-certification-cancel-spec-423799d3bcf34e90"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0014
+source_arm_name = "local-final-certification-cancel-spec"
+stable_name = "local-final-certification-cancel-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-final-certification-cancel-spec-423799d3bcf34e90"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-final-certification-cancel-spec-423799d3bcf34e90"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-final-certification-cancel-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-finalization-allocation-disposition-spec-0382b55318d50737"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0015
+source_arm_name = "finalization-allocation-disposition-spec"
+stable_name = "finalization-allocation-disposition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-finalization-allocation-disposition-spec-0382b55318d50737"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-finalization-allocation-disposition-spec-0382b55318d50737"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.finalization-allocation-disposition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-checkpoint-install-spec-7ce5ef7d4298b951"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0016
+source_arm_name = "checkpoint-install-spec"
+stable_name = "checkpoint-install-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-checkpoint-install-spec-7ce5ef7d4298b951"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-checkpoint-install-spec-7ce5ef7d4298b951"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.checkpoint-install-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-initial-config-floor-install-spec-fa9aa9ca888b7136"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0017
+source_arm_name = "initial-config-floor-install-spec"
+stable_name = "initial-config-floor-install-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-initial-config-floor-install-spec-fa9aa9ca888b7136"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-initial-config-floor-install-spec-fa9aa9ca888b7136"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.initial-config-floor-install-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-history-cut-activation-spec-a321221fbe05517a"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0018
+source_arm_name = "history-cut-activation-spec"
+stable_name = "history-cut-activation-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-history-cut-activation-spec-a321221fbe05517a"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-history-cut-activation-spec-a321221fbe05517a"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.history-cut-activation-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-configuration-transition-spec-9893fd6ccd18f668"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0019
+source_arm_name = "configuration-transition-spec"
+stable_name = "configuration-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-configuration-transition-spec-9893fd6ccd18f668"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-configuration-transition-spec-9893fd6ccd18f668"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.configuration-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-format-transition-spec-5f78fa45f9c36601"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x001a
+source_arm_name = "format-transition-spec"
+stable_name = "format-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-format-transition-spec-5f78fa45f9c36601"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-format-transition-spec-5f78fa45f9c36601"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.format-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-delta-batch-retention-cut-spec-5886adf6fdf9eb44"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x001b
+source_arm_name = "local-delta-batch-retention-cut-spec"
+stable_name = "local-delta-batch-retention-cut-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-delta-batch-retention-cut-spec-5886adf6fdf9eb44"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-delta-batch-retention-cut-spec-5886adf6fdf9eb44"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-delta-batch-retention-cut-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-remote-retention-control-spec-93fe85aa6d55cfe8"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x001c
+source_arm_name = "remote-retention-control-spec"
+stable_name = "remote-retention-control-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-remote-retention-control-spec-93fe85aa6d55cfe8"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-remote-retention-control-spec-93fe85aa6d55cfe8"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.remote-retention-control-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-advance-remote-configuration-evidence-spec-11a1a0d1aae3275f"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x001d
+source_arm_name = "advance-remote-configuration-evidence-spec"
+stable_name = "advance-remote-configuration-evidence-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-advance-remote-configuration-evidence-spec-11a1a0d1aae3275f"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-advance-remote-configuration-evidence-spec-11a1a0d1aae3275f"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.advance-remote-configuration-evidence-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-validate-remote-configuration-anchor-spec-b042cd71d7b185c2"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x001e
+source_arm_name = "validate-remote-configuration-anchor-spec"
+stable_name = "validate-remote-configuration-anchor-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-validate-remote-configuration-anchor-spec-b042cd71d7b185c2"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-validate-remote-configuration-anchor-spec-b042cd71d7b185c2"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.validate-remote-configuration-anchor-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-epoch-boundary-reserve-spec-549300bb7660a29f"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x001f
+source_arm_name = "branch-epoch-boundary-reserve-spec"
+stable_name = "branch-epoch-boundary-reserve-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-branch-epoch-boundary-reserve-spec-549300bb7660a29f"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-epoch-boundary-reserve-spec-549300bb7660a29f"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.branch-epoch-boundary-reserve-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-fork-spec-38e588bd2716d969"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0020
+source_arm_name = "branch-fork-spec"
+stable_name = "branch-fork-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-branch-fork-spec-38e588bd2716d969"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-fork-spec-38e588bd2716d969"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.branch-fork-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-grant-spec-7cd6f56022dffc42"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0021
+source_arm_name = "branch-grant-spec"
+stable_name = "branch-grant-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-branch-grant-spec-7cd6f56022dffc42"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-grant-spec-7cd6f56022dffc42"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.branch-grant-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-epoch-boundary-cancel-spec-30cf82efa04dd022"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0022
+source_arm_name = "branch-epoch-boundary-cancel-spec"
+stable_name = "branch-epoch-boundary-cancel-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-branch-epoch-boundary-cancel-spec-30cf82efa04dd022"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-epoch-boundary-cancel-spec-30cf82efa04dd022"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.branch-epoch-boundary-cancel-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-epoch-boundary-abandon-spec-0a0a935aefd074b3"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0023
+source_arm_name = "branch-epoch-boundary-abandon-spec"
+stable_name = "branch-epoch-boundary-abandon-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-branch-epoch-boundary-abandon-spec-0a0a935aefd074b3"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-epoch-boundary-abandon-spec-0a0a935aefd074b3"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.branch-epoch-boundary-abandon-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-retire-spec-62c80de79fb7d174"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0024
+source_arm_name = "branch-retire-spec"
+stable_name = "branch-retire-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-branch-retire-spec-62c80de79fb7d174"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-retire-spec-62c80de79fb7d174"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.branch-retire-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-retire-finalize-spec-e98511720c929322"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0025
+source_arm_name = "branch-retire-finalize-spec"
+stable_name = "branch-retire-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-branch-retire-finalize-spec-e98511720c929322"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-branch-retire-finalize-spec-e98511720c929322"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.branch-retire-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-merge-reject-spec-1d6a9170d28e7000"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0026
+source_arm_name = "merge-reject-spec"
+stable_name = "merge-reject-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-merge-reject-spec-1d6a9170d28e7000"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-merge-reject-spec-1d6a9170d28e7000"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.merge-reject-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-merge-prepare-spec-cec0b01ec490b8a1"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0027
+source_arm_name = "merge-prepare-spec"
+stable_name = "merge-prepare-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-merge-prepare-spec-cec0b01ec490b8a1"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-merge-prepare-spec-cec0b01ec490b8a1"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.merge-prepare-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-merge-execute-spec-b0d259bfbc797ffd"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0028
+source_arm_name = "merge-execute-spec"
+stable_name = "merge-execute-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-merge-execute-spec-b0d259bfbc797ffd"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-merge-execute-spec-b0d259bfbc797ffd"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.merge-execute-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-resource-ledger-transition-spec-6b3efbebe419b73d"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0029
+source_arm_name = "resource-ledger-transition-spec"
+stable_name = "resource-ledger-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-resource-ledger-transition-spec-6b3efbebe419b73d"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-resource-ledger-transition-spec-6b3efbebe419b73d"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.resource-ledger-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-escrow-rights-transition-spec-ac8f6112b66bfa95"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x002a
+source_arm_name = "escrow-rights-transition-spec"
+stable_name = "escrow-rights-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-escrow-rights-transition-spec-ac8f6112b66bfa95"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-escrow-rights-transition-spec-ac8f6112b66bfa95"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.escrow-rights-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-expiry-epoch-advance-spec-c9d4718500a2747c"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x002b
+source_arm_name = "expiry-epoch-advance-spec"
+stable_name = "expiry-epoch-advance-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-expiry-epoch-advance-spec-c9d4718500a2747c"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-expiry-epoch-advance-spec-c9d4718500a2747c"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.expiry-epoch-advance-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-policy-transition-spec-325b7cf1a85eaab3"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x002c
+source_arm_name = "policy-transition-spec"
+stable_name = "policy-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-policy-transition-spec-325b7cf1a85eaab3"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-policy-transition-spec-325b7cf1a85eaab3"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.policy-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-revocation-transition-spec-6eea545a15527e11"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x002d
+source_arm_name = "revocation-transition-spec"
+stable_name = "revocation-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-revocation-transition-spec-6eea545a15527e11"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-revocation-transition-spec-6eea545a15527e11"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.revocation-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-time-issuance-admission-freeze-spec-4f1cd6fa7d9a1b76"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x002e
+source_arm_name = "time-issuance-admission-freeze-spec"
+stable_name = "time-issuance-admission-freeze-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-time-issuance-admission-freeze-spec-4f1cd6fa7d9a1b76"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-time-issuance-admission-freeze-spec-4f1cd6fa7d9a1b76"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.time-issuance-admission-freeze-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-rotation-intent-spec-6974cb7ba53898ea"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x002f
+source_arm_name = "time-authority-rotation-intent-spec"
+stable_name = "time-authority-rotation-intent-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-time-authority-rotation-intent-spec-6974cb7ba53898ea"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-rotation-intent-spec-6974cb7ba53898ea"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.time-authority-rotation-intent-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-issuance-close-spec-cca4d2a507a49810"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0030
+source_arm_name = "time-authority-issuance-close-spec"
+stable_name = "time-authority-issuance-close-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-time-authority-issuance-close-spec-cca4d2a507a49810"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-issuance-close-spec-cca4d2a507a49810"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.time-authority-issuance-close-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-issuance-fence-authorize-spec-0aac95d6d59dc72c"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0031
+source_arm_name = "time-authority-issuance-fence-authorize-spec"
+stable_name = "time-authority-issuance-fence-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-time-authority-issuance-fence-authorize-spec-0aac95d6d59dc72c"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-issuance-fence-authorize-spec-0aac95d6d59dc72c"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.time-authority-issuance-fence-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-registry-transition-authorize-spec-883629000c9afe13"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0032
+source_arm_name = "time-authority-registry-transition-authorize-spec"
+stable_name = "time-authority-registry-transition-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-time-authority-registry-transition-authorize-spec-883629000c9afe13"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-registry-transition-authorize-spec-883629000c9afe13"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.time-authority-registry-transition-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-profile-transition-spec-bd891568120c8c42"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0033
+source_arm_name = "time-authority-profile-transition-spec"
+stable_name = "time-authority-profile-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-time-authority-profile-transition-spec-bd891568120c8c42"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-profile-transition-spec-bd891568120c8c42"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.time-authority-profile-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-profile-retirement-spec-222c64bb1dda2974"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0034
+source_arm_name = "time-authority-profile-retirement-spec"
+stable_name = "time-authority-profile-retirement-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-time-authority-profile-retirement-spec-222c64bb1dda2974"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-time-authority-profile-retirement-spec-222c64bb1dda2974"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.time-authority-profile-retirement-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-privacy-continuity-import-spec-18768f52c8ba0d5a"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0035
+source_arm_name = "privacy-continuity-import-spec"
+stable_name = "privacy-continuity-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-privacy-continuity-import-spec-18768f52c8ba0d5a"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-privacy-continuity-import-spec-18768f52c8ba0d5a"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.privacy-continuity-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-dp-transition-spec-f4dd6593f855fa11"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0036
+source_arm_name = "dp-transition-spec"
+stable_name = "dp-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-dp-transition-spec-f4dd6593f855fa11"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-dp-transition-spec-f4dd6593f855fa11"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.dp-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-ticket-admission-spec-6ff0adfaafe44fc4"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0037
+source_arm_name = "audit-ticket-admission-spec"
+stable_name = "audit-ticket-admission-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-audit-ticket-admission-spec-6ff0adfaafe44fc4"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-ticket-admission-spec-6ff0adfaafe44fc4"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.audit-ticket-admission-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-terminal-freeze-spec-efbffb4e83e028ea"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0038
+source_arm_name = "audit-terminal-freeze-spec"
+stable_name = "audit-terminal-freeze-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-audit-terminal-freeze-spec-efbffb4e83e028ea"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-terminal-freeze-spec-efbffb4e83e028ea"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.audit-terminal-freeze-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-terminal-plan-abandon-spec-7e76e0a11365d8a9"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0039
+source_arm_name = "audit-terminal-plan-abandon-spec"
+stable_name = "audit-terminal-plan-abandon-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-audit-terminal-plan-abandon-spec-7e76e0a11365d8a9"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-terminal-plan-abandon-spec-7e76e0a11365d8a9"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.audit-terminal-plan-abandon-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-terminal-spec-b378657cf4cee6be"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x003a
+source_arm_name = "audit-terminal-spec"
+stable_name = "audit-terminal-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-audit-terminal-spec-b378657cf4cee6be"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-terminal-spec-b378657cf4cee6be"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.audit-terminal-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-recovery-spec-2b8dabd487ed5992"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x003b
+source_arm_name = "audit-recovery-spec"
+stable_name = "audit-recovery-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-audit-recovery-spec-2b8dabd487ed5992"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-recovery-spec-2b8dabd487ed5992"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.audit-recovery-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-completeness-transition-spec-569036d317aa0df4"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x003c
+source_arm_name = "audit-completeness-transition-spec"
+stable_name = "audit-completeness-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-audit-completeness-transition-spec-569036d317aa0df4"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-audit-completeness-transition-spec-569036d317aa0df4"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.audit-completeness-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-bulk-load-transition-spec-36202de873c12b12"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x003d
+source_arm_name = "bulk-load-transition-spec"
+stable_name = "bulk-load-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-bulk-load-transition-spec-36202de873c12b12"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-bulk-load-transition-spec-36202de873c12b12"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.bulk-load-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-derived-build-transition-spec-9c349b28eed95957"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x003e
+source_arm_name = "derived-build-transition-spec"
+stable_name = "derived-build-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-derived-build-transition-spec-9c349b28eed95957"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-derived-build-transition-spec-9c349b28eed95957"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.derived-build-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-key-destroy-authorize-spec-b33618a4887906ab"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x003f
+source_arm_name = "key-destroy-authorize-spec"
+stable_name = "key-destroy-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-key-destroy-authorize-spec-b33618a4887906ab"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-key-destroy-authorize-spec-b33618a4887906ab"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.key-destroy-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-key-destroy-finalize-spec-4ccb0fba84e1d7f2"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0040
+source_arm_name = "key-destroy-finalize-spec"
+stable_name = "key-destroy-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-key-destroy-finalize-spec-4ccb0fba84e1d7f2"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-key-destroy-finalize-spec-4ccb0fba84e1d7f2"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.key-destroy-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-key-destroy-certificate-publish-spec-14c984f464f8312d"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0041
+source_arm_name = "key-destroy-certificate-publish-spec"
+stable_name = "key-destroy-certificate-publish-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-key-destroy-certificate-publish-spec-14c984f464f8312d"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-key-destroy-certificate-publish-spec-14c984f464f8312d"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.key-destroy-certificate-publish-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-gc-authorize-spec-c82566297a678791"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0042
+source_arm_name = "local-gc-authorize-spec"
+stable_name = "local-gc-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-gc-authorize-spec-c82566297a678791"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-gc-authorize-spec-c82566297a678791"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-gc-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-gc-apply-quarantine-spec-79fc700ea6b77f04"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0043
+source_arm_name = "local-gc-apply-quarantine-spec"
+stable_name = "local-gc-apply-quarantine-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-gc-apply-quarantine-spec-79fc700ea6b77f04"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-gc-apply-quarantine-spec-79fc700ea6b77f04"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-gc-apply-quarantine-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-gc-cancellation-authorize-spec-936c583b32471370"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0044
+source_arm_name = "local-gc-cancellation-authorize-spec"
+stable_name = "local-gc-cancellation-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-gc-cancellation-authorize-spec-936c583b32471370"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-gc-cancellation-authorize-spec-936c583b32471370"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-gc-cancellation-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-gc-physical-disposition-import-spec-9bf6fba8148a6572"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0045
+source_arm_name = "gc-physical-disposition-import-spec"
+stable_name = "gc-physical-disposition-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-gc-physical-disposition-import-spec-9bf6fba8148a6572"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-gc-physical-disposition-import-spec-9bf6fba8148a6572"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.gc-physical-disposition-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-barrier-spec-8a65dc2a4ebdc328"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0046
+source_arm_name = "local-backup-barrier-spec"
+stable_name = "local-backup-barrier-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-barrier-spec-8a65dc2a4ebdc328"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-barrier-spec-8a65dc2a4ebdc328"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-barrier-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-closure-publish-spec-b12ef606ac1c7726"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0047
+source_arm_name = "local-backup-closure-publish-spec"
+stable_name = "local-backup-closure-publish-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-closure-publish-spec-b12ef606ac1c7726"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-closure-publish-spec-b12ef606ac1c7726"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-closure-publish-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-seal-spec-de20dc075dfbc7c5"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0048
+source_arm_name = "local-backup-seal-spec"
+stable_name = "local-backup-seal-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-seal-spec-de20dc075dfbc7c5"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-seal-spec-de20dc075dfbc7c5"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-seal-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-publication-authorize-spec-aa863f190af08c21"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0049
+source_arm_name = "local-backup-publication-authorize-spec"
+stable_name = "local-backup-publication-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-publication-authorize-spec-aa863f190af08c21"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-publication-authorize-spec-aa863f190af08c21"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-publication-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-publication-receipt-import-spec-9cd84c16ef7b7ec2"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x004a
+source_arm_name = "local-backup-publication-receipt-import-spec"
+stable_name = "local-backup-publication-receipt-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-publication-receipt-import-spec-9cd84c16ef7b7ec2"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-publication-receipt-import-spec-9cd84c16ef7b7ec2"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-publication-receipt-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-grant-issue-import-spec-968f3c4b2852b476"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x004b
+source_arm_name = "local-backup-grant-issue-import-spec"
+stable_name = "local-backup-grant-issue-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-grant-issue-import-spec-968f3c4b2852b476"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-grant-issue-import-spec-968f3c4b2852b476"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-grant-issue-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-artifact-verify-spec-05a35d4906ca3c98"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x004c
+source_arm_name = "local-backup-artifact-verify-spec"
+stable_name = "local-backup-artifact-verify-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-artifact-verify-spec-05a35d4906ca3c98"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-artifact-verify-spec-05a35d4906ca3c98"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-artifact-verify-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-release-spec-70066a0f10bdafcd"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x004d
+source_arm_name = "local-backup-release-spec"
+stable_name = "local-backup-release-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-release-spec-70066a0f10bdafcd"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-release-spec-70066a0f10bdafcd"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-release-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-archive-source-release-completion-import-spec-c2e0076331687445"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x004e
+source_arm_name = "archive-source-release-completion-import-spec"
+stable_name = "archive-source-release-completion-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-archive-source-release-completion-import-spec-c2e0076331687445"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-archive-source-release-completion-import-spec-c2e0076331687445"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.archive-source-release-completion-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-abort-spec-ee308caa5a770052"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x004f
+source_arm_name = "local-backup-abort-spec"
+stable_name = "local-backup-abort-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-backup-abort-spec-ee308caa5a770052"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-backup-abort-spec-ee308caa5a770052"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-backup-abort-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-activation-spec-d425f19271ecb2af"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0050
+source_arm_name = "local-restore-activation-spec"
+stable_name = "local-restore-activation-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-restore-activation-spec-d425f19271ecb2af"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-activation-spec-d425f19271ecb2af"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-restore-activation-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-service-prepare-spec-c63480dba1b96c2c"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0051
+source_arm_name = "local-restore-service-prepare-spec"
+stable_name = "local-restore-service-prepare-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-restore-service-prepare-spec-c63480dba1b96c2c"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-service-prepare-spec-c63480dba1b96c2c"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-restore-service-prepare-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-service-promotion-spec-74834f23959e6964"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0052
+source_arm_name = "local-restore-service-promotion-spec"
+stable_name = "local-restore-service-promotion-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-restore-service-promotion-spec-74834f23959e6964"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-service-promotion-spec-74834f23959e6964"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-restore-service-promotion-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-service-completion-spec-90cb51da63670371"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0053
+source_arm_name = "local-restore-service-completion-spec"
+stable_name = "local-restore-service-completion-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-restore-service-completion-spec-90cb51da63670371"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-service-completion-spec-90cb51da63670371"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-restore-service-completion-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-abandon-finalize-spec-6875d5ae7d4553ee"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0054
+source_arm_name = "local-restore-abandon-finalize-spec"
+stable_name = "local-restore-abandon-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-restore-abandon-finalize-spec-6875d5ae7d4553ee"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-abandon-finalize-spec-6875d5ae7d4553ee"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-restore-abandon-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-abandonment-pin-install-spec-ff375f60b72267a9"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0055
+source_arm_name = "local-restore-abandonment-pin-install-spec"
+stable_name = "local-restore-abandonment-pin-install-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-local-restore-abandonment-pin-install-spec-ff375f60b72267a9"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-local-restore-abandonment-pin-install-spec-ff375f60b72267a9"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.local-restore-abandonment-pin-install-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-abandon-spec-78c52abab5e806f0"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0056
+source_arm_name = "restore-abandon-spec"
+stable_name = "restore-abandon-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-abandon-spec-78c52abab5e806f0"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-abandon-spec-78c52abab5e806f0"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-abandon-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-enter-promotion-pending-spec-499dc61fae9b2b87"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0057
+source_arm_name = "directory-bound-enter-promotion-pending-spec"
+stable_name = "directory-bound-enter-promotion-pending-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-directory-bound-enter-promotion-pending-spec-499dc61fae9b2b87"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-enter-promotion-pending-spec-499dc61fae9b2b87"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.directory-bound-enter-promotion-pending-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-finalize-operational-authority-spec-922f90d22674a0bb"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0058
+source_arm_name = "directory-bound-finalize-operational-authority-spec"
+stable_name = "directory-bound-finalize-operational-authority-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-directory-bound-finalize-operational-authority-spec-922f90d22674a0bb"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-finalize-operational-authority-spec-922f90d22674a0bb"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.directory-bound-finalize-operational-authority-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-abandon-apply-spec-4854e543c383b6c1"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0059
+source_arm_name = "directory-bound-abandon-apply-spec"
+stable_name = "directory-bound-abandon-apply-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-directory-bound-abandon-apply-spec-4854e543c383b6c1"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-abandon-apply-spec-4854e543c383b6c1"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.directory-bound-abandon-apply-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-abandon-receipt-import-spec-42102de3ad82cf5c"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x005a
+source_arm_name = "directory-bound-abandon-receipt-import-spec"
+stable_name = "directory-bound-abandon-receipt-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-directory-bound-abandon-receipt-import-spec-42102de3ad82cf5c"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-directory-bound-abandon-receipt-import-spec-42102de3ad82cf5c"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.directory-bound-abandon-receipt-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-key-access-cleanup-finalize-spec-89ff48568540982f"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x005b
+source_arm_name = "restore-source-key-access-cleanup-finalize-spec"
+stable_name = "restore-source-key-access-cleanup-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-key-access-cleanup-finalize-spec-89ff48568540982f"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-key-access-cleanup-finalize-spec-89ff48568540982f"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-key-access-cleanup-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-authorized-never-armed-finalize-spec-aba9048b9745c613"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x005c
+source_arm_name = "restore-source-lease-renew-authorized-never-armed-finalize-spec"
+stable_name = "restore-source-lease-renew-authorized-never-armed-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-renew-authorized-never-armed-finalize-spec-aba9048b9745c613"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-authorized-never-armed-finalize-spec-aba9048b9745c613"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-renew-authorized-never-armed-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-authorized-never-armed-finalize-spec-fc7222bd185e0e38"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x005d
+source_arm_name = "restore-source-lease-release-authorized-never-armed-finalize-spec"
+stable_name = "restore-source-lease-release-authorized-never-armed-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-release-authorized-never-armed-finalize-spec-fc7222bd185e0e38"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-authorized-never-armed-finalize-spec-fc7222bd185e0e38"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-release-authorized-never-armed-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-terminal-pin-release-finalize-spec-c068cde5dbce3572"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x005e
+source_arm_name = "restore-terminal-pin-release-finalize-spec"
+stable_name = "restore-terminal-pin-release-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-terminal-pin-release-finalize-spec-c068cde5dbce3572"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-terminal-pin-release-finalize-spec-c068cde5dbce3572"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-terminal-pin-release-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-key-access-cleanup-authorize-spec-3773f98a7977933b"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x005f
+source_arm_name = "restore-source-key-access-cleanup-authorize-spec"
+stable_name = "restore-source-key-access-cleanup-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-key-access-cleanup-authorize-spec-3773f98a7977933b"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-key-access-cleanup-authorize-spec-3773f98a7977933b"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-key-access-cleanup-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-key-access-cleanup-import-spec-49ce9fd6bfda5712"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0060
+source_arm_name = "restore-source-key-access-cleanup-import-spec"
+stable_name = "restore-source-key-access-cleanup-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-key-access-cleanup-import-spec-49ce9fd6bfda5712"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-key-access-cleanup-import-spec-49ce9fd6bfda5712"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-key-access-cleanup-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-authorize-spec-a8c1530196a160db"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0061
+source_arm_name = "restore-source-lease-renew-authorize-spec"
+stable_name = "restore-source-lease-renew-authorize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-renew-authorize-spec-a8c1530196a160db"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-authorize-spec-a8c1530196a160db"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-renew-authorize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-finalize-spec-e3f2c6090b026c22"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0062
+source_arm_name = "restore-source-lease-renew-finalize-spec"
+stable_name = "restore-source-lease-renew-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-renew-finalize-spec-e3f2c6090b026c22"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-finalize-spec-e3f2c6090b026c22"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-renew-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-no-effect-finalize-spec-6df58e36921293b7"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0063
+source_arm_name = "restore-source-lease-renew-no-effect-finalize-spec"
+stable_name = "restore-source-lease-renew-no-effect-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-renew-no-effect-finalize-spec-6df58e36921293b7"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-renew-no-effect-finalize-spec-6df58e36921293b7"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-renew-no-effect-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-spec-99b90e6f6ca19d81"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0064
+source_arm_name = "restore-source-lease-release-spec"
+stable_name = "restore-source-lease-release-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-release-spec-99b90e6f6ca19d81"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-spec-99b90e6f6ca19d81"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-release-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-finalize-spec-86f3b27b7a007cca"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0065
+source_arm_name = "restore-source-lease-release-finalize-spec"
+stable_name = "restore-source-lease-release-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-release-finalize-spec-86f3b27b7a007cca"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-finalize-spec-86f3b27b7a007cca"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-release-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-no-effect-finalize-spec-cda8661d5d2b19e8"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0066
+source_arm_name = "restore-source-lease-release-no-effect-finalize-spec"
+stable_name = "restore-source-lease-release-no-effect-finalize-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-restore-source-lease-release-no-effect-finalize-spec-cda8661d5d2b19e8"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-restore-source-lease-release-no-effect-finalize-spec-cda8661d5d2b19e8"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.restore-source-lease-release-no-effect-finalize-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-sharding-freeze-spec-6c6166c9d2aa0d89"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0067
+source_arm_name = "sharding-freeze-spec"
+stable_name = "sharding-freeze-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-sharding-freeze-spec-6c6166c9d2aa0d89"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-sharding-freeze-spec-6c6166c9d2aa0d89"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.sharding-freeze-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-sharding-unfreeze-spec-7e2a429f5c189b27"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0068
+source_arm_name = "sharding-unfreeze-spec"
+stable_name = "sharding-unfreeze-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-sharding-unfreeze-spec-7e2a429f5c189b27"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-sharding-unfreeze-spec-7e2a429f5c189b27"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.sharding-unfreeze-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:sequence-neutral-spec-tag-begin-role-transition-spec-dd87527c2321da17"
+union_name = "SequenceNeutralSpec<Tag>"
+containing_schema = "SequenceNeutralSpec<Tag>"
+union_path = "SequenceNeutralSpec<Tag>"
+arm_tag = 0x0069
+source_arm_name = "begin-role-transition-spec"
+stable_name = "begin-role-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-arm-sequence-neutral-spec-tag-begin-role-transition-spec-dd87527c2321da17"
+target_row_id = "a10:union-arm:sequence-neutral-spec-tag-begin-role-transition-spec-dd87527c2321da17"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>.begin-role-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-sequence-neutral-spec-tag-462d0a39094cac6e"
+target_row_id = "a10:union:sequence-neutral-spec-tag-462d0a39094cac6e"
+slice_id = "a10"
+source_key = "projection|durable_fields|SequenceNeutralSpec<Tag>.SequenceNeutralSpec<Tag>"
+target_kind = "union"
+definition_status = "declared"
+# === GlobalSequenceNeutralSpec<Tag> (slice a07) ===
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:global-sequence-neutral-spec-tag-f1f0eeb9eab4a1fc"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalSequenceNeutralSpec<Tag>"]
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-recovery-bridge-spec-8296504261b5ca54"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0001
+source_arm_name = "recovery-bridge-spec"
+stable_name = "recovery-bridge-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-recovery-bridge-spec-8296504261b5ca54"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-recovery-bridge-spec-8296504261b5ca54"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.recovery-bridge-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-begin-reservation-spec-e6c639d9e2341c80"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0002
+source_arm_name = "global-begin-reservation-spec"
+stable_name = "global-begin-reservation-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-begin-reservation-spec-e6c639d9e2341c80"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-begin-reservation-spec-e6c639d9e2341c80"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-begin-reservation-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-begin-terminal-spec-c545ac0a57240deb"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0003
+source_arm_name = "global-begin-terminal-spec"
+stable_name = "global-begin-terminal-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-begin-terminal-spec-c545ac0a57240deb"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-begin-terminal-spec-c545ac0a57240deb"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-begin-terminal-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-attempt-registration-spec-efd0910ca7da6cc6"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0004
+source_arm_name = "global-attempt-registration-spec"
+stable_name = "global-attempt-registration-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-attempt-registration-spec-efd0910ca7da6cc6"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-attempt-registration-spec-efd0910ca7da6cc6"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-attempt-registration-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-txn-ownership-transition-spec-d2b9920bffedacf8"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0005
+source_arm_name = "txn-ownership-transition-spec"
+stable_name = "txn-ownership-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-txn-ownership-transition-spec-d2b9920bffedacf8"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-txn-ownership-transition-spec-d2b9920bffedacf8"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.txn-ownership-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-txn-ownership-expiry-abort-spec-931263577b607977"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0006
+source_arm_name = "txn-ownership-expiry-abort-spec"
+stable_name = "txn-ownership-expiry-abort-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-txn-ownership-expiry-abort-spec-931263577b607977"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-txn-ownership-expiry-abort-spec-931263577b607977"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.txn-ownership-expiry-abort-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-statement-registration-spec-619cf26880ba3009"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0007
+source_arm_name = "global-statement-registration-spec"
+stable_name = "global-statement-registration-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-statement-registration-spec-619cf26880ba3009"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-statement-registration-spec-619cf26880ba3009"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-statement-registration-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-statement-publication-spec-5a33321f04c19e25"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0008
+source_arm_name = "global-statement-publication-spec"
+stable_name = "global-statement-publication-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-statement-publication-spec-5a33321f04c19e25"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-statement-publication-spec-5a33321f04c19e25"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-statement-publication-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-statement-abort-spec-d42ad55b73bef190"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0009
+source_arm_name = "global-statement-abort-spec"
+stable_name = "global-statement-abort-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-statement-abort-spec-d42ad55b73bef190"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-statement-abort-spec-d42ad55b73bef190"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-statement-abort-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-attempt-cancel-spec-84b480812494caa5"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x000a
+source_arm_name = "global-attempt-cancel-spec"
+stable_name = "global-attempt-cancel-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-attempt-cancel-spec-84b480812494caa5"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-attempt-cancel-spec-84b480812494caa5"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-attempt-cancel-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-prepare-admission-spec-9d3ff34d4faa9d5e"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x000b
+source_arm_name = "global-prepare-admission-spec"
+stable_name = "global-prepare-admission-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-prepare-admission-spec-9d3ff34d4faa9d5e"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-prepare-admission-spec-9d3ff34d4faa9d5e"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-prepare-admission-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-read-close-spec-c8af1170c1e7ab8b"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x000c
+source_arm_name = "global-read-close-spec"
+stable_name = "global-read-close-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-read-close-spec-c8af1170c1e7ab8b"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-read-close-spec-c8af1170c1e7ab8b"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-read-close-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-final-certification-reserve-spec-200cb606e0e5b3eb"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x000d
+source_arm_name = "global-final-certification-reserve-spec"
+stable_name = "global-final-certification-reserve-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-final-certification-reserve-spec-200cb606e0e5b3eb"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-final-certification-reserve-spec-200cb606e0e5b3eb"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-final-certification-reserve-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-final-certification-cancel-spec-a154a895a568ae4c"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x000e
+source_arm_name = "global-final-certification-cancel-spec"
+stable_name = "global-final-certification-cancel-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-final-certification-cancel-spec-a154a895a568ae4c"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-final-certification-cancel-spec-a154a895a568ae4c"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-final-certification-cancel-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-terminal-completion-spec-92354cc66335d0b2"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x000f
+source_arm_name = "global-terminal-completion-spec"
+stable_name = "global-terminal-completion-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-terminal-completion-spec-92354cc66335d0b2"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-terminal-completion-spec-92354cc66335d0b2"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-terminal-completion-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-never-registered-floor-spec-70d756fba3271a00"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0010
+source_arm_name = "never-registered-floor-spec"
+stable_name = "never-registered-floor-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-never-registered-floor-spec-70d756fba3271a00"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-never-registered-floor-spec-70d756fba3271a00"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.never-registered-floor-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-outcome-expiry-spec-6ecfa9df155fe375"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0011
+source_arm_name = "global-outcome-expiry-spec"
+stable_name = "global-outcome-expiry-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-outcome-expiry-spec-6ecfa9df155fe375"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-outcome-expiry-spec-6ecfa9df155fe375"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-outcome-expiry-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-closed-attempt-compaction-spec-7e225b1ab2737efc"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0012
+source_arm_name = "closed-attempt-compaction-spec"
+stable_name = "closed-attempt-compaction-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-closed-attempt-compaction-spec-7e225b1ab2737efc"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-closed-attempt-compaction-spec-7e225b1ab2737efc"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.closed-attempt-compaction-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-closed-attempt-floor-publish-spec-904f909e2f45debb"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0013
+source_arm_name = "global-closed-attempt-floor-publish-spec"
+stable_name = "global-closed-attempt-floor-publish-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-closed-attempt-floor-publish-spec-904f909e2f45debb"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-closed-attempt-floor-publish-spec-904f909e2f45debb"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-closed-attempt-floor-publish-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-meta-configuration-transition-spec-1aaf8fc5f3e584dc"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0014
+source_arm_name = "meta-configuration-transition-spec"
+stable_name = "meta-configuration-transition-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-meta-configuration-transition-spec-1aaf8fc5f3e584dc"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-meta-configuration-transition-spec-1aaf8fc5f3e584dc"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.meta-configuration-transition-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-shard-reconfiguration-authorization-spec-49d3b97346b5f5c4"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0015
+source_arm_name = "shard-reconfiguration-authorization-spec"
+stable_name = "shard-reconfiguration-authorization-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-shard-reconfiguration-authorization-spec-49d3b97346b5f5c4"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-shard-reconfiguration-authorization-spec-49d3b97346b5f5c4"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.shard-reconfiguration-authorization-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-shard-configuration-adoption-spec-37e7c999b21b72bb"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0016
+source_arm_name = "shard-configuration-adoption-spec"
+stable_name = "shard-configuration-adoption-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-shard-configuration-adoption-spec-37e7c999b21b72bb"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-shard-configuration-adoption-spec-37e7c999b21b72bb"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.shard-configuration-adoption-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-gc-authorization-spec-7cb133cd8047032d"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0017
+source_arm_name = "global-gc-authorization-spec"
+stable_name = "global-gc-authorization-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-gc-authorization-spec-7cb133cd8047032d"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-gc-authorization-spec-7cb133cd8047032d"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-gc-authorization-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-meta-gc-apply-quarantine-spec-63ac995fb01e66e0"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0018
+source_arm_name = "meta-gc-apply-quarantine-spec"
+stable_name = "meta-gc-apply-quarantine-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-meta-gc-apply-quarantine-spec-63ac995fb01e66e0"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-meta-gc-apply-quarantine-spec-63ac995fb01e66e0"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.meta-gc-apply-quarantine-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-gc-physical-disposition-import-spec-10f8b6925d637111"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x0019
+source_arm_name = "gc-physical-disposition-import-spec"
+stable_name = "gc-physical-disposition-import-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-gc-physical-disposition-import-spec-10f8b6925d637111"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-gc-physical-disposition-import-spec-10f8b6925d637111"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.gc-physical-disposition-import-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-gc-cancellation-prepare-spec-a53e51529b3a127b"
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x001a
+source_arm_name = "global-gc-cancellation-prepare-spec"
+stable_name = "global-gc-cancellation-prepare-spec"
+payload_kind = "inline-record"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:union-arm-global-sequence-neutral-spec-tag-global-gc-cancellation-prepare-spec-a53e51529b3a127b"
+target_row_id = "a07:union-arm:global-sequence-neutral-spec-tag-global-gc-cancellation-prepare-spec-a53e51529b3a127b"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>.global-gc-cancellation-prepare-spec"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-global-sequence-neutral-spec-tag-f1f0eeb9eab4a1fc"
+target_row_id = "a07:union:global-sequence-neutral-spec-tag-f1f0eeb9eab4a1fc"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>"
+target_kind = "union"
 definition_status = "declared"

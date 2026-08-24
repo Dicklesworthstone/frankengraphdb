@@ -13,7 +13,7 @@ use crate::appendix_source::{
 use crate::hash::sha256_hex;
 use crate::identity::{self, IdentityRegistries};
 use crate::toml::{self, Table, Value};
-use crate::{architecture, model};
+use crate::{architecture, command_contracts, model};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3854;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3986;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "346d31ecd427d8c1a5e5d11ebd1d2616a80c61982708b13655eb480e55a23c51";
-pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 198;
+    "98c64821fef974ddc0c46b98e804d260a854a754bb2e99a8521c49c518104491";
+pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 330;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "4734d69091cf9aa749d874b149a53a19fdb89def39bb401d24072b7ccbccdbc0";
+    "5c4f3e2a68daedc139bbc44e16c694e40fea07107e13ccab1d63a5ac9f4df126";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -6500,7 +6500,127 @@ pub fn appendix_a_catalog_source(catalog: &Catalog, source: &[u8]) -> Vec<Violat
 
 /// Live checker-index entry point for deterministic consumer projection diffs.
 pub fn appendix_a_catalog_projection_diff(repo_root: &Path, catalog: &Catalog) -> Vec<Violation> {
-    verify_projections(repo_root, catalog)
+    let mut out = verify_projections(repo_root, catalog);
+    out.extend(verify_generated_family_unions(repo_root, catalog));
+    sort_violations(&mut out);
+    out
+}
+
+/// Enforce the generator law for the two generated family unions (fgdb-5ekk
+/// residue 3): plan line 1916 derives the Local `SequenceNeutralSpec` semantic
+/// union from `command_contracts.toml` ("exhaustive ... no hand-maintained
+/// allowlist") and line 1914 gives `GlobalSequenceNeutralSpec<Tag>` the
+/// identical wrapper under the separate Global tag registry. The projected
+/// ordinary-union rows must therefore reconstruct EXACTLY from the normative
+/// contract rows — one arm per distinct outer tag, named by the member root —
+/// on every run. Hand-edited or stale arm sets fail closed here instead of
+/// drifting into a second allowlist.
+fn verify_generated_family_unions(
+    repo_root: &Path,
+    catalog: &Catalog,
+) -> Vec<Violation> {
+    let contracts = match command_contracts::load_from_repo(repo_root) {
+        Ok(registry) => registry,
+        Err(error) => {
+            return vec![Violation::new(
+                "generated_family_contracts_unavailable",
+                command_contracts::REGISTRY_PATH,
+                error.to_string(),
+            )];
+        }
+    };
+    let derived = match command_contracts::generated_family_unions(&contracts) {
+        Ok(unions) => unions,
+        Err(error) => {
+            return vec![Violation::new(
+                "generated_family_derivation_invalid",
+                command_contracts::REGISTRY_PATH,
+                error,
+            )];
+        }
+    };
+    let mut out = Vec::new();
+    for family in &derived {
+        let projected = catalog
+            .identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == family.union_name);
+        let Some(projected) = projected else {
+            out.push(Violation::new(
+                "generated_family_union_missing",
+                "durable_fields",
+                format!(
+                    "generated family union {:?} is not projected; it must carry one \
+                     [[union]] row derived from {}",
+                    family.union_name,
+                    command_contracts::REGISTRY_PATH
+                ),
+            ));
+            continue;
+        };
+        let projected_arms: BTreeMap<i64, &str> = projected
+            .arms
+            .iter()
+            .map(|arm| (arm.arm_tag, arm.source_arm_name.as_str()))
+            .collect();
+        let derived_arms: BTreeMap<i64, &str> = family
+            .arms
+            .iter()
+            .map(|arm| (arm.arm_tag, arm.source_arm_name.as_str()))
+            .collect();
+        if projected_arms != derived_arms {
+            out.push(Violation::new(
+                "generated_family_arm_set_mismatch",
+                family.union_name,
+                format!(
+                    "projected family arms must reconstruct exactly from {}: \
+                     projected {}/{} arms, derived {}/{} arms",
+                    command_contracts::REGISTRY_PATH,
+                    projected.arms.len(),
+                    projected_arms.len(),
+                    family.arms.len(),
+                    derived_arms.len(),
+                ),
+            ));
+        }
+        let projected_payloads: BTreeMap<i64, &str> = projected
+            .arms
+            .iter()
+            .map(|arm| (arm.arm_tag, arm.payload_sha256.as_deref().unwrap_or("")))
+            .collect();
+        let derived_payloads: BTreeMap<i64, &str> = family
+            .arms
+            .iter()
+            .map(|arm| (arm.arm_tag, arm.payload_sha256.as_str()))
+            .collect();
+        if projected_payloads != derived_payloads {
+            out.push(Violation::new(
+                "generated_family_payload_drift",
+                family.union_name,
+                format!(
+                    "projected arm payload digests must equal the sha256 of each \
+                     member's canonical contract transcript from {}; a drifted \
+                     digest means the contracts moved and the projection is stale",
+                    command_contracts::REGISTRY_PATH,
+                ),
+            ));
+        }
+    }
+    // No other ordinary union may claim a generated wrapper name.
+    for union in &catalog.identity.ordinary_unions {
+        if !derived.iter().any(|family| family.union_name == union.union_name)
+            && union.union_name.contains("SequenceNeutralSpec")
+        {
+            out.push(Violation::new(
+                "generated_family_name_squatting",
+                &union.union_name,
+                "durable_fields: ordinary-union name resembles a generated family union \
+                 but does not derive from the contract registry",
+            ));
+        }
+    }
+    out
 }
 
 /// Live checker-index entry point for exact type/owner/evidence closure.
@@ -12569,9 +12689,23 @@ struct ExpectedStructuralKeys {
     /// nothing at all about the name.
     generated_reference_union: BTreeSet<String>,
     generated_reference_union_arm: BTreeSet<String>,
+    /// Projection-fallback keys of the two contract-derived family unions
+    /// (fgdb-5ekk): `SequenceNeutralSpec<Tag>` and its Global twin.  Their
+    /// arm sets are pinned to the normative contract registry on every run by
+    /// `verify_generated_family_unions`, so a target whose source_key is the
+    /// key its own row derives is reconstruction-checked, not hand-admitted.
+    contract_derived_family_union: BTreeSet<String>,
+    contract_derived_family_arm: BTreeSet<String>,
 }
 
 impl ExpectedStructuralKeys {
+    fn contract_derived_family_supported(&self, row: &Target) -> bool {
+        match row.target_kind.as_str() {
+            "union" => self.contract_derived_family_union.contains(&row.source_key),
+            "union-arm" => self.contract_derived_family_arm.contains(&row.source_key),
+            _ => false,
+        }
+    }
     /// True when `row` is a generated reference union or arm whose `source_key`
     /// byte-matches the key its own identity row derives.  A drifted or
     /// hand-edited name is rejected exactly as an ordinary union's would be.
@@ -12593,10 +12727,19 @@ fn expected_structural_keys(catalog: &Catalog) -> ExpectedStructuralKeys {
         );
     }
     for union in &catalog.identity.ordinary_unions {
+        let is_family_union = union.union_name
+            == command_contracts::GENERATED_FAMILY_LOCAL_UNION
+            || union.union_name == command_contracts::GENERATED_FAMILY_GLOBAL_UNION;
         keys.union_expected.insert(
             format!("{}.{}", union.containing_schema, union.union_path),
             format!("union|{}|{}", union.containing_schema, union.union_path),
         );
+        if is_family_union {
+            keys.contract_derived_family_union.insert(format!(
+                "projection|durable_fields|{name}.{name}",
+                name = union.union_name
+            ));
+        }
         for arm in &union.arms {
             keys.arm_expected.insert(
                 format!(
@@ -12608,6 +12751,17 @@ fn expected_structural_keys(catalog: &Catalog) -> ExpectedStructuralKeys {
                     arm.containing_schema, arm.union_path, arm.source_arm_name
                 ),
             );
+            if is_family_union {
+                // The canonical symbol of an ordinary union-arm row is
+                // "{containing_schema}.{union_path}.{source_arm_name}", so
+                // the projection-fallback key repeats the wrapper name — the
+                // exact key the arm's own identity row derives.
+                keys.contract_derived_family_arm.insert(format!(
+                    "projection|durable_fields|{name}.{name}.{member}",
+                    name = union.union_name,
+                    member = arm.stable_name
+                ));
+            }
         }
     }
     for union in &catalog.identity.unions {
@@ -12651,6 +12805,14 @@ fn validate_target_source_identity(
     }
     if row.source_key == projection_source_key {
         if matches!(projection.row_kind.as_str(), "union" | "union-arm") {
+            // The two contract-derived family unions carry the fallback key
+            // their own identity rows derive, exactly like generated
+            // reference unions: no census key exists for them in any
+            // spelling, and the arm set is pinned to the normative contract
+            // registry by `verify_generated_family_unions` on every run.
+            if keys.contract_derived_family_supported(row) {
+                return;
+            }
             out.push(Violation::new(
                 "catalog_target_source_identity_mismatch",
                 &row.row_id,

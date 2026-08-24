@@ -17,15 +17,15 @@
 //! WHY UNKNOWN KEYS ARE REJECTED. Same law as `laws.rs`: a row carrying a
 //! field this reader does not understand has not been understood, and the
 //! reader fails closed before reading anything else.
-//!
 //! WHY TAG BOUNDS ARE CHECKED HERE. Plan line 290: each registry has a 16-bit
 //! code space with `0x0000` and `0xffff` permanently invalid, and a released
 //! code is never reassigned. A row that lands outside the space is a durable
 //! defect the moment it is released, so the validator refuses it on entry.
-
-use crate::toml::{get_int, get_opt_str, get_str, get_str_array, get_table_array, parse};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+use crate::hash::sha256_hex;
+use crate::toml::{get_int, get_opt_str, get_str, get_str_array, get_table_array, parse};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -250,6 +250,158 @@ pub fn load_from_repo(root: &Path) -> Result<ContractRegistry, LoadError> {
 
 pub fn registry_path(root: &Path) -> PathBuf {
     root.join(REGISTRY_PATH)
+}
+
+/// The two generated family unions (fgdb-5ekk residue 3).
+///
+/// Plan line 1914 spells each wrapper — `SequenceNeutralSpec<Tag>
+/// {wire_tag:u16,schema_version:u16,body:Body<Tag>,terminal_audit_freeze:
+/// AuditFreezeField<Tag>,terminal_audit_gate:TerminalAuditGate}` and the
+/// identical `GlobalSequenceNeutralSpec<Tag>` under the separate Global tag
+/// registry — and line 1916 fixes the derivation law for the Local union: "the
+/// local SequenceNeutralSpec semantic union is generated from
+/// command_contracts.toml; it is exhaustive and has no hand-maintained
+/// allowlist." Plan line 294 makes that registry normative for every role-valid
+/// command arm, so the generator rule is the only contract there is and no
+/// census key can exist for these arms (they are never spelled structurally in
+/// any slice). The arms below are therefore RECONSTRUCTED from the typed
+/// contract rows on every load — never hand-minted (fgdb-mtxm doctrine).
+pub const GENERATED_FAMILY_LOCAL_UNION: &str = "SequenceNeutralSpec<Tag>";
+pub const GENERATED_FAMILY_GLOBAL_UNION: &str = "GlobalSequenceNeutralSpec<Tag>";
+
+/// One generated family-union arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedFamilyArm {
+    /// The wrapper's u16 family selector (a10:1914 field tag 0x0001): the
+    /// contract row's frozen `outer_wire_tag`.
+    pub arm_tag: i64,
+    /// Kebab member name derived from the contract id convention
+    /// `cc:{role-lower}:{kebab(member)}[:{kebab(inner-arm)}]` — inner-arm
+    /// dispositions share one family arm; the member root names it.
+    pub source_arm_name: String,
+    /// Content commitment for the arm payload: sha256 over the canonical
+    /// transcript of every contract row carrying this tag (see
+    /// [`family_payload_transcript`]). This is what lets the projected
+    /// [[union_arm]] row carry a lawful `payload_sha256` — the shape is
+    /// committed by the normative contract rows instead of a census payload.
+    pub payload_sha256: String,
+}
+
+/// Canonical transcript of the contract rows behind one family arm: rows
+/// sorted by `command_contract_id`, each rendered as
+/// `{command_contract_id}|{input_schema_id}|{body_schema_id}|{result_schema_id}|{applied_record_schema_id}|{status}`,
+/// newline-joined. Any drift in the member's contracts changes the digest and
+/// fails `verify_generated_family_unions`.
+pub fn family_payload_transcript(rows: &[&Contract]) -> String {
+    let mut ordered: Vec<&Contract> = rows.iter().copied().collect();
+    ordered.sort_by(|left, right| left.command_contract_id.cmp(&right.command_contract_id));
+    ordered
+        .iter()
+        .map(|row| {
+            format!(
+                "{}|{}|{}|{}|{}|{}",
+                row.command_contract_id,
+                row.input_schema_id,
+                row.body_schema_id,
+                row.result_schema_id,
+                row.applied_record_schema_id,
+                row.status,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One generated family union with its complete closed arm set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedFamilyUnion {
+    /// Wrapper name; also the containing schema (a whole-schema union).
+    pub union_name: &'static str,
+    /// Sorted by `arm_tag`; ascending frozen-tag order (I-1).
+    pub arms: Vec<GeneratedFamilyArm>,
+}
+
+/// Derive the kebab member root of a contract id, rejecting malformed ids.
+fn contract_member_root(command_contract_id: &str) -> Result<&str, String> {
+    let mut parts = command_contract_id.split(':');
+    let cc = parts.next().unwrap_or_default();
+    let role = parts.next().unwrap_or_default();
+    let member = parts.next().unwrap_or_default();
+    if cc != "cc" || role.is_empty() || member.is_empty() {
+        return Err(format!(
+            "contract id {command_contract_id:?} does not follow the \
+             cc:{{role}}:{{member}}[:{{arm}}] convention"
+        ));
+    }
+    Ok(member)
+}
+
+/// Reconstruct both generated family unions from live contract rows.
+///
+/// Laws enforced here (all fail closed):
+/// * one arm per distinct `outer_wire_tag` within a union;
+/// * every row carrying a tag agrees on the member root it selects;
+/// * arms iterate in ascending tag order (the frozen family order);
+/// * a row whose `outer_command_union` names neither generated wrapper is
+///   simply not part of this derivation (e.g. the live embedded-spine row).
+///
+/// NOT enforced here, deliberately: tag density. The outer tags are frozen
+/// ordinals of the WHOLE role-command space (plan line 294), not of one
+/// union's slice of it — the live embedded-spine autocommit command holds
+/// Local ordinal 0x0005 under `LocalSemanticCommand`, so both family spaces
+/// carry permanent gaps exactly where another union owns the ordinal.
+pub fn generated_family_unions(
+    registry: &ContractRegistry,
+) -> Result<Vec<GeneratedFamilyUnion>, String> {
+    let mut locals: BTreeMap<i64, Vec<&Contract>> = BTreeMap::new();
+    let mut globals: BTreeMap<i64, Vec<&Contract>> = BTreeMap::new();
+    for row in &registry.contracts {
+        let member = contract_member_root(&row.command_contract_id)?;
+        let target: &mut BTreeMap<i64, Vec<&Contract>> = match row.outer_command_union.as_str()
+        {
+            GENERATED_FAMILY_LOCAL_UNION => &mut locals,
+            GENERATED_FAMILY_GLOBAL_UNION => &mut globals,
+            _ => continue,
+        };
+        if let Some(existing) = target.get_mut(&row.outer_wire_tag) {
+            let existing_member = contract_member_root(&existing[0].command_contract_id)?;
+            if existing_member != member {
+                return Err(format!(
+                    "outer_wire_tag {:#06x} selects two members ({existing_member:?}, {member:?})",
+                    row.outer_wire_tag
+                ));
+            }
+            existing.push(row);
+        } else {
+            target.insert(row.outer_wire_tag, vec![row]);
+        }
+    }
+    let build = |union_name: &'static str,
+                 families: &BTreeMap<i64, Vec<&Contract>>|
+     -> GeneratedFamilyUnion {
+        GeneratedFamilyUnion {
+            union_name,
+            arms: families
+                .iter()
+                .map(|(tag, rows)| {
+                    let transcript = family_payload_transcript(rows);
+                    GeneratedFamilyArm {
+                        arm_tag: *tag,
+                        source_arm_name: contract_member_root(
+                            &rows[0].command_contract_id,
+                        )
+                        .unwrap_or_default()
+                        .to_owned(),
+                        payload_sha256: sha256_hex(transcript.as_bytes()),
+                    }
+                })
+                .collect(),
+        }
+    };
+    Ok(vec![
+        build(GENERATED_FAMILY_LOCAL_UNION, &locals),
+        build(GENERATED_FAMILY_GLOBAL_UNION, &globals),
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
