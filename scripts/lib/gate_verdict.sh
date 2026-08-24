@@ -609,6 +609,14 @@ gate_diag() {
 #                 classifies as none even if it also mentions offline mode, so
 #                 a real red can never borrow this class. A compile error does
 #                 not emit that string; dependency resolution alone does.
+#   ubs-module-timeout  an UBS scanner module hit its wall-clock budget and
+#                 recorded only a PARTIAL domain scan (bead fgdb-zoar: under
+#                 concurrent fleet load the rust module timed out at 300s with
+#                 Files: 0, so every baselined critical class went unreported
+#                 and the ratchet failed closed on classes that never ran).
+#                 Sentinel: "(MODULE_TIMEOUT)" — a partial partition is never
+#                 a product verdict about the whole tracked set, whatever else
+#                 the log contains.
 #
 # Any other content — including unreadable or absent logs — prints "none" and
 # returns 1: the failure stays a product verdict. This function reads logs and
@@ -634,6 +642,12 @@ gate_env_failure_class() {
     if grep -Fq 'you are in the offline mode' "$log" \
       && ! grep -Eq '^test result:' "$log"; then
       printf 'cargo-offline'
+      return 0
+    fi
+  done
+  for log in "$@"; do
+    if grep -Fq '(MODULE_TIMEOUT)' "$log"; then
+      printf 'ubs-module-timeout'
       return 0
     fi
   done

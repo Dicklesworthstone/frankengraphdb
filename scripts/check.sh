@@ -794,7 +794,14 @@ run_ubs() {
   fi
   echo "    domain: ${#rust_sources[@]} tracked Rust source(s), from git ls-files"
 
-  ubs --only=rust --ci "${rust_sources[@]}" 2>&1 | tee "$log"
+  # fgdb-zoar: under concurrent fleet load the rust module's 300s default
+  # budget expired with Files: 0 scanned, and the ratchet then failed closed
+  # on baselined classes that never ran. The healthy same-day control needed
+  # ~377s over the full tracked set; 1800s is the error text's own sanctioned
+  # headroom. A timeout that still fires classifies as ubs-module-timeout via
+  # gate_env_failure_class in run_core_gate — UNRUN-retryable, not product red.
+  UBS_MODULE_TIMEOUT="${UBS_MODULE_TIMEOUT:-1800}" \
+    ubs --only=rust --ci "${rust_sources[@]}" 2>&1 | tee "$log"
   ubs_rc=${PIPESTATUS[0]}
   if grep -Eiq \
     'nothing was checked|did not run any scanner|no supported languages detected' \
@@ -805,6 +812,16 @@ run_ubs() {
   if grep -Eiq 'Directory too large|exceeds limit of' "$log"; then
     echo "ERROR: UBS refused to start on a size guard. The domain is the tracked" >&2
     echo "  set, so this must not happen; do NOT raise UBS_MAX_DIR_SIZE_MB." >&2
+    return 1
+  fi
+  # fgdb-zoar: a module timeout means the partition is PARTIAL. Running the
+  # ratchet over it manufactures "baselined class no longer reported" failures
+  # for classes that never executed; refusing here lets run_core_gate classify
+  # the captured sentinel as ubs-module-timeout and report UNRUN-retryable.
+  if grep -Fq '(MODULE_TIMEOUT)' "$log"; then
+    echo "ERROR: an UBS scanner module hit its wall-clock budget; the partial" >&2
+    echo "  scan is not a verdict about the tracked set. Retryable — raise" >&2
+    echo "  UBS_MODULE_TIMEOUT only with measured evidence, per zoar." >&2
     return 1
   fi
   # The verdict is the RATCHET, not ubs's raw exit status. ubs exits 1 whenever
