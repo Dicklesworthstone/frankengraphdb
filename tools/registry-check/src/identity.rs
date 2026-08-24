@@ -1153,10 +1153,23 @@ pub struct ReferenceUnionArm {
     pub role: String,
     pub identity_class: String,
     pub reference_semantics: String,
-    pub role_predicate: String,
+    /// fgdb-atke Ruling 3(a): the exact per-target role/posture matrix. A
+    /// single-string `role_predicate` row normalizes to length 1; a
+    /// `role_predicates` array row carries one entry per matrix line. Both
+    /// keys present, neither present, or an empty array are read errors.
+    pub role_predicates: Vec<String>,
     pub retention_and_cut_rule: String,
     pub version_status: String,
     pub max_size_bytes: i64,
+}
+
+impl ReferenceUnionArm {
+    /// The legacy view: lawful exactly when every entry collapsed to one
+    /// string joined by the grammar's own disjunction operator, which is the
+    /// canonical rendering the projection writer emits for length > 1.
+    pub fn role_predicate_joined(&self) -> String {
+        self.role_predicates.join(" || ")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1619,25 +1632,56 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
         .enumerate()
     {
         let ctx = format!("durable_fields.toml.reference_union_arm[{i}]");
-        exact_keys(
-            t,
-            &[
-                "union_name",
-                "containing_schema",
-                "field_tag",
-                "arm_tag",
-                "stable_name",
-                "target_schema_id",
-                "role",
-                "identity_class",
-                "reference_semantics",
-                "role_predicate",
-                "retention_and_cut_rule",
-                "version_status",
-                "max_size_bytes",
-            ],
-            &ctx,
-        )?;
+        // fgdb-atke Ruling 3(a): `role_predicate` (legacy singular) and
+        // `role_predicates` (matrix array) are mutually exclusive, and one of
+        // them must be present. exact_keys runs on the key set the row
+        // actually chose, so an unknown key is still rejected and a row
+        // carrying both spellings fails the XOR guard below with a precise
+        // message instead of a generic unknown-key error.
+        let has_singular = t.contains_key("role_predicate");
+        let has_plural = t.contains_key("role_predicates");
+        if has_singular == has_plural {
+            return Err(ReadError {
+                path: format!("{ctx}.role_predicate"),
+                msg: "reference-union arm rows carry exactly one of \
+                      role_predicate (single string) or role_predicates \
+                      (nonempty string array)"
+                    .to_owned(),
+            });
+        }
+        let mut allowed = vec![
+            "union_name",
+            "containing_schema",
+            "field_tag",
+            "arm_tag",
+            "stable_name",
+            "target_schema_id",
+            "role",
+            "identity_class",
+            "reference_semantics",
+            "retention_and_cut_rule",
+            "version_status",
+            "max_size_bytes",
+        ];
+        allowed.push(if has_singular {
+            "role_predicate"
+        } else {
+            "role_predicates"
+        });
+        exact_keys(t, &allowed, &ctx)?;
+        let role_predicates = if has_singular {
+            vec![get_str(t, "role_predicate", &ctx)?]
+        } else {
+            let entries = get_str_array(t, "role_predicates", &ctx)?;
+            if entries.is_empty() {
+                return Err(ReadError {
+                    path: format!("{ctx}.role_predicates"),
+                    msg: "role_predicates must carry at least one matrix line"
+                        .to_owned(),
+                });
+            }
+            entries
+        };
         let arm = ReferenceUnionArm {
             union_name: get_str(t, "union_name", &ctx)?,
             containing_schema: get_str(t, "containing_schema", &ctx)?,
@@ -1648,7 +1692,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
             role: get_str(t, "role", &ctx)?,
             identity_class: get_str(t, "identity_class", &ctx)?,
             reference_semantics: get_str(t, "reference_semantics", &ctx)?,
-            role_predicate: get_str(t, "role_predicate", &ctx)?,
+            role_predicates,
             retention_and_cut_rule: get_str(t, "retention_and_cut_rule", &ctx)?,
             version_status: get_str(t, "version_status", &ctx)?,
             max_size_bytes: get_int(t, "max_size_bytes", &ctx)?,
@@ -4357,7 +4401,20 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     "arm reference semantics and lifecycle must match the anchored field",
                 ));
             }
-            if !predicate_allows_role(&arm.role_predicate, &u.role)
+            // fgdb-atke Ruling 3(a). Legacy singular rows keep the exact
+            // historical law: the predicate must authorize the union's role.
+ // A plural matrix row is its own authorization statement — every entry
+            // must parse under the same closed grammar (role_predicate_roles),
+            // and conflation with the union's containing-plane role is not
+            // meaningful across group boundaries, so it is not applied.
+            let predicate_lawful = if arm.role_predicates.len() == 1 {
+                predicate_allows_role(&arm.role_predicates[0], &u.role)
+            } else {
+                arm.role_predicates.iter().all(|entry| {
+                    role_predicate_roles(entry).is_some_and(|roles| !roles.is_empty())
+                })
+            };
+            if !predicate_lawful
                 || arm.retention_and_cut_rule.trim().is_empty()
                 || arm.max_size_bytes <= 0
             {

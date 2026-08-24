@@ -14496,7 +14496,14 @@ fn render_fields(identity: &IdentityRegistries) -> String {
             write_string(&mut out, "role", &arm.role);
             write_string(&mut out, "identity_class", &arm.identity_class);
             write_string(&mut out, "reference_semantics", &arm.reference_semantics);
-            write_string(&mut out, "role_predicate", &arm.role_predicate);
+            // fgdb-atke Ruling 3(a): length-1 renders as the legacy singular
+            // key (byte-identical for every row landed before the ruling);
+            // longer matrices render as the plural array in parse order.
+            if arm.role_predicates.len() == 1 {
+                write_string(&mut out, "role_predicate", &arm.role_predicates[0]);
+            } else {
+                write_string_array(&mut out, "role_predicates", &arm.role_predicates);
+            }
             write_string(
                 &mut out,
                 "retention_and_cut_rule",
