@@ -4236,6 +4236,58 @@ mod generated_family_unions {
             );
             print!("{target_block}");
             printed.push_str(&target_block);
+            // Residue 2: the wrapper's generic body field, spelled
+            // `body:Body<Tag>` at plan line 1914 and resolved through the
+            // normative contract rows by the identity resolution law.
+            let field_row_id = format!("{slice}:field:{kebab}-body");
+            let field_block = format!(
+                "\n[[field]]\n\
+                 slice_id = \"{slice}\"\n\
+                 row_id = \"{field_row_id}\"\n\
+                 containing_schema = \"{name}\"\n\
+                 field_tag = 0x0003\n\
+                 stable_name = \"body\"\n\
+                 exact_wire_type = \"Body<Tag>\"\n\
+                 cardinality = \"one\"\n\
+                 identity_class = \"inline\"\n\
+                 reference_semantics = \"none\"\n\
+                 construction_order = 10\n\
+                 role_predicate = \"{}\"\n\
+                 retention_and_cut_rule = \"a10:1914 source-position tag 3; the Tag-selected generic body hole resolving per family arm through the normative command-contract registry (mv6g I-0), embedded by value and retained and cut with {}\"\
+                 \n\
+                 version_status = \"reserved\"\n\
+                 max_size_bytes = 16777216\n",
+                if slice == "a10" {
+                    "role-local"
+                } else {
+                    "role-meta"
+                },
+                name,
+            );
+            print!("{field_block}");
+            printed.push_str(&field_block);
+            // The a10 wrapper is structurally spelled at plan line 1914, so
+            // its body field anchors on the real census key; the Global twin
+            // is NamedConceptNoBody in every spelling, so no census key can
+            // exist and the projection-fallback key (the one its own row
+            // derives) is the lawful anchor, mirroring generated reference
+            // unions.
+            let field_source_key = if slice == "a10" {
+                format!("field|{name}|{name}.body|body")
+            } else {
+                format!("projection|durable_fields|{name}.body")
+            };
+            let field_target_block = format!(
+                "\n[[target]]\n\
+                 row_id = \"{slice}:target:field-{kebab}-body\"\n\
+                 target_row_id = \"{field_row_id}\"\n\
+                 slice_id = \"{slice}\"\n\
+                 source_key = \"{field_source_key}\"\n\
+                 target_kind = \"field\"\n\
+                 definition_status = \"declared\"\n"
+            );
+            print!("{field_target_block}");
+            printed.push_str(&field_target_block);
         }
         assert_eq!(
             printed.matches("[[union]]").count(),
@@ -4248,8 +4300,13 @@ mod generated_family_unions {
             "emission must include every family arm"
         );
         assert_eq!(
+            printed.matches("[[field]]").count(),
+            2,
+            "emission must include both wrapper body field rows"
+        );
+        assert_eq!(
             printed.matches("[[target]]").count(),
-            132,
+            134,
             "emission must include every companion target row"
         );
         if let Ok(path) = &mint_out {

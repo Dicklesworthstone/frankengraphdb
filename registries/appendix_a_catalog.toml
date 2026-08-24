@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3986
-projection_fallback_count = 330
-target_source_assignment_sha256 = "5c4f3e2a68daedc139bbc44e16c694e40fea07107e13ccab1d63a5ac9f4df126"
+target_count = 3988
+projection_fallback_count = 331
+target_source_assignment_sha256 = "d40a48f0e8b55147016623236c56f01c1c035012d889665dcfaa4046001de96d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 88
+registry_epoch = 89
 
 [[logical_kind]]
 slice_id = "a03"
@@ -112810,6 +112810,22 @@ max_size_bytes = 2
 
 [[field]]
 slice_id = "a10"
+row_id = "a10:field:sequence-neutral-spec-tag-body"
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0003
+stable_name = "body"
+exact_wire_type = "Body<Tag>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 3; the Tag-selected associated-type payload hole resolved through command_contracts.toml as the normative per-member body_schema_id registry under the mv6g I-0 ruling, embedded by value and retained and cut with SequenceNeutralSpec<Tag>, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a10"
 row_id = "a10:field:sequence-neutral-spec-tag-terminal-audit-freeze"
 containing_schema = "SequenceNeutralSpec<Tag>"
 field_tag = 0x0004
@@ -112893,6 +112909,38 @@ row_id = "a10:target:field-sequence-neutral-spec-tag-terminal-audit-gate"
 target_row_id = "a10:field:sequence-neutral-spec-tag-terminal-audit-gate"
 slice_id = "a10"
 source_key = "field|SequenceNeutralSpec<Tag>|SequenceNeutralSpec<Tag>.terminal_audit_gate|terminal_audit_gate"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-sequence-neutral-spec-tag-body"
+target_row_id = "a10:field:sequence-neutral-spec-tag-body"
+slice_id = "a10"
+source_key = "field|SequenceNeutralSpec<Tag>|SequenceNeutralSpec<Tag>.body|body"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-sequence-neutral-spec-tag-body"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+field_tag = 0x0003
+stable_name = "body"
+exact_wire_type = "Body<Tag>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "role-meta"
+retention_and_cut_rule = "a10:1914 source-position tag 3; the Tag-selected generic body hole resolving per family arm through the normative command-contract registry (mv6g I-0), embedded by value and retained and cut with GlobalSequenceNeutralSpec<Tag>"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a07:target:field-global-sequence-neutral-spec-tag-body"
+target_row_id = "a07:field:global-sequence-neutral-spec-tag-body"
+slice_id = "a07"
+source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.body"
 target_kind = "field"
 definition_status = "declared"
 
@@ -119971,3 +120019,4 @@ slice_id = "a07"
 source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>"
 target_kind = "union"
 definition_status = "declared"
+

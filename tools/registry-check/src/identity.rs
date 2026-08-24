@@ -89,6 +89,10 @@
 //!                           their one legal cross-field truth table
 //!   bad_field               enum/shape violation
 
+use crate::command_contracts::{
+    GENERATED_FAMILY_GLOBAL_UNION as GENERATED_FAMILY_GLOBAL_UNION_NAME,
+    GENERATED_FAMILY_LOCAL_UNION as GENERATED_FAMILY_LOCAL_UNION_NAME,
+};
 use crate::hash::fnv1a64;
 use crate::model::LoadError;
 use crate::toml::{
@@ -2402,7 +2406,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:d643ccffa1ccd2d2";
-    const FIELDS: &str = "fnv1a64:3c86e6ffcb17e368";
+    const FIELDS: &str = "fnv1a64:a88db52d1aa95add";
 
     let logical = rows_pin(
         r.logical
@@ -2559,7 +2563,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 88,
+            expected_epoch: 89,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -3359,7 +3363,26 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         // (RootSlot.bootstrap: RootBootstrap at a pinned offset, §5.1) —
         // frames are schemas in the bootstrap identity class, not wire types.
         let is_inline_frame = bootstrap_names.contains(f.exact_wire_type.as_str());
-        if !is_builtin && !is_wire && !is_ordinary_union && !is_union && !is_inline_frame {
+        // The generic associated-type hole of the two generated family
+        // wrappers (fgdb-5ekk residue 2): plan line 1914 spells
+        // `body:Body<Tag>` on both wrappers, and the mv6g I-0 ruling makes
+        // command_contracts.toml the normative source of the per-member
+        // concrete bodies. The hole resolves ONLY here — the same spelling
+        // anywhere else is still `field_unresolved_wire_type` — and each
+        // arm's concrete body commitment is re-pinned against the registry
+        // by appendix_a's verify_generated_family_unions payload digests.
+        let is_generated_family_body = f.exact_wire_type == "Body<Tag>"
+            && matches!(
+                f.containing_schema.as_str(),
+                GENERATED_FAMILY_LOCAL_UNION_NAME | GENERATED_FAMILY_GLOBAL_UNION_NAME
+            );
+        if !is_builtin
+            && !is_wire
+            && !is_ordinary_union
+            && !is_union
+            && !is_inline_frame
+            && !is_generated_family_body
+        {
             out.push(v(
                 "field_unresolved_wire_type",
                 "durable_fields",

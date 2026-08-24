@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 88
+registry_epoch = 89
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4780,6 +4780,20 @@ reference_semantics = "none"
 construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "shared closed terminal-audit gate carried by the finalize spec; embedded by value and retained/cut with GlobalRestoreServiceFinalizeSpec, with no independent reachability edge (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+field_tag = 0x0003
+stable_name = "body"
+exact_wire_type = "Body<Tag>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "role-meta"
+retention_and_cut_rule = "a10:1914 source-position tag 3; the Tag-selected generic body hole resolving per family arm through the normative command-contract registry (mv6g I-0), embedded by value and retained and cut with GlobalSequenceNeutralSpec<Tag>"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -14308,6 +14322,20 @@ role_predicate = "role-local"
 retention_and_cut_rule = "a10:1914 source-position tag 2; the u16 schema version of the selected sequence-neutral body, embedded by value and retained and cut with SequenceNeutralSpec<Tag>, and never traversed as a reachability edge"
 version_status = "reserved"
 max_size_bytes = 2
+
+[[field]]
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0003
+stable_name = "body"
+exact_wire_type = "Body<Tag>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 3; the Tag-selected associated-type payload hole resolved through command_contracts.toml as the normative per-member body_schema_id registry under the mv6g I-0 ruling, embedded by value and retained and cut with SequenceNeutralSpec<Tag>, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "SequenceNeutralSpec<Tag>"

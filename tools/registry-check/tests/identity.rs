@@ -10862,7 +10862,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // wrapper field row (a10:1914) is younger than the witness — the schema had
     // zero field rows before that increment, so the schema scope cannot
     // over-filter a historical row.
-    let post_erratum_a10_wrapper_field = |schema: &str| schema == "SequenceNeutralSpec<Tag>";
+    let post_erratum_a10_wrapper_field = |schema: &str| {
+        matches!(
+            schema,
+            "SequenceNeutralSpec<Tag>" | "GlobalSequenceNeutralSpec<Tag>"
+        )
+    };
     // The a19 StrongRef field tranche. Every row is a post-erratum
     // addition, so the historical witness must reconstruct the namespace
     // that predates it.
@@ -12599,7 +12604,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // and the receipt's one-arm state row, claimed by post_erratum_a20_field
         // and enumerated there. The current field count carries all four and
         // the reconstruction remains frozen at 225.
-        pre_erratum.fields.len() + 899,
+        // 899 -> 901 (fgdb-5ekk): the two wrapper body fields (a10
+        // SequenceNeutralSpec<Tag>, a07 GlobalSequenceNeutralSpec<Tag> twin),
+        // claimed by post_erratum_a10_wrapper_field. The current field count
+        // carries both and the reconstruction stays frozen at 225.
+        pre_erratum.fields.len() + 901,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
