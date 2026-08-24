@@ -31,3 +31,5 @@ pub mod toml;
 pub mod topology;
 pub mod unsafe_ledger;
 pub mod validate;
+
+fn deliberately_unformatted():i32{42}
