@@ -36,8 +36,7 @@ fn contains_target_component(path: &Path) -> bool {
 
 #[test]
 fn artifact_root_pin_is_present_durable_and_writable() {
-    let raw = std::env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR")
-        .unwrap_or_default();
+    let raw = std::env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR").unwrap_or_default();
     assert!(
         !raw.is_empty(),
         "ASUPERSYNC_TEST_ARTIFACTS_DIR is unset: the .cargo/config.toml [env] \
