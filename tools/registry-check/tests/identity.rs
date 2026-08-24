@@ -2530,17 +2530,25 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
 fn appendix_a_reference_union_arm_role_matrix_round_trips() {
     let source = real_appendix_catalog_text();
     let legacy = "role_predicate = \"role-local\"";
-    assert!(
-        source.contains(legacy),
-        "fixture expects at least one legacy singular arm row"
-    );
+    // Mutate an ACTUAL [[reference_union_arm]] row: the first singular
+    // occurrence in file order belongs to a logical kind, which keeps the
+    // singular-only schema.
+    let arm_at = source
+        .find("[[reference_union_arm]]")
+        .expect("catalog carries reference union arms");
+    let predicate_at = source[arm_at..]
+        .find(legacy)
+        .expect("first arm row carries the legacy singular spelling")
+        + arm_at;
+
+    let mutate_first_arm = |replacement: &str| {
+        let mut mutated = source.clone();
+        mutated.replace_range(predicate_at..predicate_at + legacy.len(), replacement);
+        mutated
+    };
 
     // Round trip: plural in -> plural out, exactly where the mutation landed.
-    let mutated = source.replacen(
-        legacy,
-        "role_predicates = [\"role-local||role-meta\", \"role-shard\"]",
-        1,
-    );
+    let mutated = mutate_first_arm("role_predicates = [\"role-local||role-meta\", \"role-shard\"]");
     let catalog = appendix_a::parse_catalog(&mutated).expect("matrix arm row must parse");
     let generated = appendix_a::generated_projections(&catalog);
     let (_, durable) = generated
@@ -2560,13 +2568,9 @@ fn appendix_a_reference_union_arm_role_matrix_round_trips() {
             "{file} must not invent plural predicates for legacy rows"
         );
     }
-
-    // XOR: both spellings on one row fail closed.
-    let both = source.replacen(
-        legacy,
-        "role_predicate = \"role-local\"\nrole_predicates = [\"role-meta\"]",
-        1,
-    );
+    // XOR: both spellings on one arm row fail closed.
+    let both =
+        mutate_first_arm("role_predicate = \"role-local\"\nrole_predicates = [\"role-meta\"]");
     let error = appendix_a::parse_catalog(&both)
         .expect_err("a row carrying both predicate spellings must fail closed");
     assert!(
@@ -2577,7 +2581,7 @@ fn appendix_a_reference_union_arm_role_matrix_round_trips() {
     );
 
     // Empty matrix fails closed.
-    let empty = source.replacen(legacy, "role_predicates = []", 1);
+    let empty = mutate_first_arm("role_predicates = []");
     let error =
         appendix_a::parse_catalog(&empty).expect_err("an empty role matrix must fail closed");
     assert!(
@@ -3737,8 +3741,10 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // 621 -> 625 (fgdb-rqw4): the three pending-reopen precondition
         // discriminants and the receipt's one-arm state discriminant each
         // name their one exact host.
-        (625, 437),
-        "the law must traverse the complete non-wildcard domain in both generated artifacts"
+        // 437 -> 439 (fgdb-5ekk): each generated family union names its own
+        // wrapper as the single concrete containing schema (self-rooted
+        // closure; no external embedder exists).
+        (625, 439),
     );
 
     let baseline = appendix_a::validate_catalog(&catalog);
@@ -10344,6 +10350,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 // MandatoryInventoryEntry on the wire host — younger than the
                 // frozen A10 witness, and its two arms fold into the same
                 // historical-width pins the rest of this list protects.
+                // fgdb-5ekk lands the two whole-schema family unions derived
+                // from command_contracts.toml (mv6g I-0, plan lines
+                // 1914/1916) -- younger than the frozen A10 witness, with
+                // 130 contract-digest arms folding into the same arm-width
+                // pins.
+                | "SequenceNeutralSpec<Tag>"
+                | "GlobalSequenceNeutralSpec<Tag>"
                 | "MandatoryInventoryEntryValue"
         )
     };
@@ -12347,7 +12360,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // value union on the wire host, claimed by post_erratum_union; both of
         // its arms fold into the same reconstruction the arm-width pins freeze.
         // current_union_count carries it (391 -> 392).
-        pre_erratum.ordinary_unions.len() + 385,
+        pre_erratum.ordinary_unions.len() + 387,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
          removed a number of unions other than 378. This assert compares a \
@@ -12453,7 +12466,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // MandatoryInventoryEntryValue, fold into the same reconstruction
             // with the union its filter claims. current_ordinary_arm_count
             // carries both (1_146 -> 1_148).
-            + 1_126,
+            // 1_126 -> 1_256 (fgdb-5ekk): the 130 contract-derived family
+            // arms of the two generated wrapper unions, each carrying its
+            // member's contract-transcript payload digest; claimed whole by
+            // post_erratum_5ekk_generated_family_union.
+            + 1_256,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
@@ -12605,7 +12622,6 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     pre_erratum.ordinary_unions.retain(|union| {
         !post_erratum_e55p_union(&union.union_name) && !post_erratum_i1rx_union(&union.union_name)
     });
-    // A one-element `for` is a clippy::single_element_loop error under -D warnings.
     // Destructured rather than looped: there is exactly one pre-ymqm arm to restore,
     // and if a second is ever needed this should become a real slice with more than
     // one row rather than a loop that pretends it already is one.

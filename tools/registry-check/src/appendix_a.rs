@@ -6515,10 +6515,7 @@ pub fn appendix_a_catalog_projection_diff(repo_root: &Path, catalog: &Catalog) -
 /// contract rows — one arm per distinct outer tag, named by the member root —
 /// on every run. Hand-edited or stale arm sets fail closed here instead of
 /// drifting into a second allowlist.
-fn verify_generated_family_unions(
-    repo_root: &Path,
-    catalog: &Catalog,
-) -> Vec<Violation> {
+fn verify_generated_family_unions(repo_root: &Path, catalog: &Catalog) -> Vec<Violation> {
     let contracts = match command_contracts::load_from_repo(repo_root) {
         Ok(registry) => registry,
         Err(error) => {
@@ -6609,7 +6606,9 @@ fn verify_generated_family_unions(
     }
     // No other ordinary union may claim a generated wrapper name.
     for union in &catalog.identity.ordinary_unions {
-        if !derived.iter().any(|family| family.union_name == union.union_name)
+        if !derived
+            .iter()
+            .any(|family| family.union_name == union.union_name)
             && union.union_name.contains("SequenceNeutralSpec")
         {
             out.push(Violation::new(
@@ -12727,8 +12726,7 @@ fn expected_structural_keys(catalog: &Catalog) -> ExpectedStructuralKeys {
         );
     }
     for union in &catalog.identity.ordinary_unions {
-        let is_family_union = union.union_name
-            == command_contracts::GENERATED_FAMILY_LOCAL_UNION
+        let is_family_union = union.union_name == command_contracts::GENERATED_FAMILY_LOCAL_UNION
             || union.union_name == command_contracts::GENERATED_FAMILY_GLOBAL_UNION;
         keys.union_expected.insert(
             format!("{}.{}", union.containing_schema, union.union_path),

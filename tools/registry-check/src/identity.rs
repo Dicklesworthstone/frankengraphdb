@@ -1676,8 +1676,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
             if entries.is_empty() {
                 return Err(ReadError {
                     path: format!("{ctx}.role_predicates"),
-                    msg: "role_predicates must carry at least one matrix line"
-                        .to_owned(),
+                    msg: "role_predicates must carry at least one matrix line".to_owned(),
                 });
             }
             entries
@@ -2403,7 +2402,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:d643ccffa1ccd2d2";
-    const FIELDS: &str = "fnv1a64:6ce683bd7e89cd3e";
+    const FIELDS: &str = "fnv1a64:3c86e6ffcb17e368";
 
     let logical = rows_pin(
         r.logical
@@ -4403,16 +4402,16 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             }
             // fgdb-atke Ruling 3(a). Legacy singular rows keep the exact
             // historical law: the predicate must authorize the union's role.
- // A plural matrix row is its own authorization statement — every entry
+            // A plural matrix row is its own authorization statement — every entry
             // must parse under the same closed grammar (role_predicate_roles),
             // and conflation with the union's containing-plane role is not
             // meaningful across group boundaries, so it is not applied.
             let predicate_lawful = if arm.role_predicates.len() == 1 {
                 predicate_allows_role(&arm.role_predicates[0], &u.role)
             } else {
-                arm.role_predicates.iter().all(|entry| {
-                    role_predicate_roles(entry).is_some_and(|roles| !roles.is_empty())
-                })
+                arm.role_predicates
+                    .iter()
+                    .all(|entry| role_predicate_roles(entry).is_some_and(|roles| !roles.is_empty()))
             };
             if !predicate_lawful
                 || arm.retention_and_cut_rule.trim().is_empty()

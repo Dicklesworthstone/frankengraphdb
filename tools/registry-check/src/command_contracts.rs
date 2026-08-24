@@ -293,7 +293,7 @@ pub struct GeneratedFamilyArm {
 /// newline-joined. Any drift in the member's contracts changes the digest and
 /// fails `verify_generated_family_unions`.
 pub fn family_payload_transcript(rows: &[&Contract]) -> String {
-    let mut ordered: Vec<&Contract> = rows.iter().copied().collect();
+    let mut ordered: Vec<&Contract> = rows.to_vec();
     ordered.sort_by(|left, right| left.command_contract_id.cmp(&right.command_contract_id));
     ordered
         .iter()
@@ -357,8 +357,7 @@ pub fn generated_family_unions(
     let mut globals: BTreeMap<i64, Vec<&Contract>> = BTreeMap::new();
     for row in &registry.contracts {
         let member = contract_member_root(&row.command_contract_id)?;
-        let target: &mut BTreeMap<i64, Vec<&Contract>> = match row.outer_command_union.as_str()
-        {
+        let target: &mut BTreeMap<i64, Vec<&Contract>> = match row.outer_command_union.as_str() {
             GENERATED_FAMILY_LOCAL_UNION => &mut locals,
             GENERATED_FAMILY_GLOBAL_UNION => &mut globals,
             _ => continue,
@@ -387,11 +386,9 @@ pub fn generated_family_unions(
                     let transcript = family_payload_transcript(rows);
                     GeneratedFamilyArm {
                         arm_tag: *tag,
-                        source_arm_name: contract_member_root(
-                            &rows[0].command_contract_id,
-                        )
-                        .unwrap_or_default()
-                        .to_owned(),
+                        source_arm_name: contract_member_root(&rows[0].command_contract_id)
+                            .unwrap_or_default()
+                            .to_owned(),
                         payload_sha256: sha256_hex(transcript.as_bytes()),
                     }
                 })

@@ -3988,7 +3988,7 @@ fn unknown_key_fails_the_load() {
 mod generated_family_unions {
     use super::*;
     use registry_check::command_contracts::{
-        GENERATED_FAMILY_GLOBAL_UNION, GENERATED_FAMILY_LOCAL_UNION, ContractRegistry,
+        ContractRegistry, GENERATED_FAMILY_GLOBAL_UNION, GENERATED_FAMILY_LOCAL_UNION,
         GeneratedFamilyUnion, generated_family_unions,
     };
 
@@ -4046,7 +4046,10 @@ mod generated_family_unions {
     fn derivation_is_deterministic() {
         let first = generated_family_unions(&registry()).expect("first derivation");
         let second = generated_family_unions(&registry()).expect("second derivation");
-        assert_eq!(first, second, "same registry state derives identical unions");
+        assert_eq!(
+            first, second,
+            "same registry state derives identical unions"
+        );
     }
 
     #[test]
@@ -4162,7 +4165,11 @@ mod generated_family_unions {
                  version_status = \"reserved\"\n\
                  max_size_bytes = 16777216\n",
                 short_digest(&format!("union|{name}|{name}")),
-                if slice == "a10" { "role-local" } else { "role-meta" },
+                if slice == "a10" {
+                    "role-local"
+                } else {
+                    "role-meta"
+                },
             );
             print!("{union_block}");
             printed.push_str(&union_block);
@@ -4187,7 +4194,11 @@ mod generated_family_unions {
                      role_predicate = \"{role}\"\n\
                      version_status = \"reserved\"\n\
                      max_size_bytes = 16777216\n",
-                    role = if slice == "a10" { "role-local" } else { "role-meta" },
+                    role = if slice == "a10" {
+                        "role-local"
+                    } else {
+                        "role-meta"
+                    },
                     tag = arm.arm_tag,
                     payload = arm.payload_sha256,
                 );
@@ -4197,8 +4208,7 @@ mod generated_family_unions {
                 // target row binding it to the source key its own identity
                 // derives — the projection-fallback key, admitted by the
                 // contract-derived reconstruction law (fgdb-5ekk).
-                let fallback_key =
-                    format!("projection|durable_fields|{name}.{name}.{member}");
+                let fallback_key = format!("projection|durable_fields|{name}.{name}.{member}");
                 let target_block = format!(
                     "\n[[target]]\n\
                      row_id = \"{slice}:target:union-arm-{arm_suffix}\"\n\
@@ -4212,10 +4222,7 @@ mod generated_family_unions {
                 printed.push_str(&target_block);
             }
             // The union's own target row, after all of its arms.
-            let union_suffix = format!(
-                "{kebab}-{}",
-                short_digest(&format!("union|{name}|{name}"))
-            );
+            let union_suffix = format!("{kebab}-{}", short_digest(&format!("union|{name}|{name}")));
             let union_row_id = format!("{slice}:union:{union_suffix}");
             let union_fallback_key = format!("projection|durable_fields|{name}.{name}");
             let target_block = format!(
