@@ -4008,7 +4008,7 @@ fn idr_a18_wire_consumer_allowlists_are_exact() {
             "RestoreTerminalPinReleaseAuthorization",
             "body",
             0x0001,
-            44,
+            115,
         ),
     ] {
         let expected_consumers = vec![container.to_owned()];
@@ -6109,7 +6109,7 @@ fn idr_a20_reservation_backed_promotion_certificates_and_ready_edges_are_exact()
         (
             "GlobalRestoreServiceFinalCertificate",
             0x02c6,
-            44,
+            115,
             "role-meta",
             "top|GlobalRestoreServiceFinalCertificate",
         ),
@@ -6123,7 +6123,7 @@ fn idr_a20_reservation_backed_promotion_certificates_and_ready_edges_are_exact()
         (
             "RestoreShardOperationalAck",
             0x03ea,
-            50,
+            97,
             "role-shard",
             "top|RestoreShardOperationalAck",
         ),
@@ -6294,7 +6294,7 @@ fn idr_a20_structural_body_promotion_commands_and_activation_union_are_exact() {
         (
             "GlobalRestoreServiceCompletionSpec",
             0x055f,
-            50,
+            116,
             "role-meta",
         ),
         ("GlobalRestoreServiceFinalizeSpec", 0x0560, 35, "role-meta"),
@@ -6306,8 +6306,8 @@ fn idr_a20_structural_body_promotion_commands_and_activation_union_are_exact() {
             "role-local",
         ),
         ("LocalRestoreServicePromotionSpec", 0x0563, 35, "role-local"),
-        ("ShardRestoreReopenConfirmSpec", 0x0564, 44, "role-shard"),
-        ("ShardRestoreServiceOpenSpec", 0x0565, 44, "role-shard"),
+        ("ShardRestoreReopenConfirmSpec", 0x0564, 116, "role-shard"),
+        ("ShardRestoreServiceOpenSpec", 0x0565, 116, "role-shard"),
     ] {
         let logical = identity
             .logical
@@ -7041,7 +7041,7 @@ fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
             3,
             "StrongRef",
             Some("RestorePromotionRootSeal"),
-            50,
+            116,
         ),
         (
             "GlobalRestoreServiceCompletionSpec",
@@ -7049,7 +7049,7 @@ fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
             6,
             "ExternalCasRestoreServicePromotionReceiptRef",
             Some("RestoreServicePromotionReceipt"),
-            50,
+            116,
         ),
         (
             "GlobalRestoreServiceFinalizeSpec",
@@ -7097,7 +7097,7 @@ fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
             8,
             "StrongRef",
             Some("RestorePromotionRootSeal"),
-            50,
+            97,
         ),
         (
             "ShardRestoreReopenConfirmSpec",
@@ -7105,7 +7105,7 @@ fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
             3,
             "StrongRef",
             Some("RestorePromotionRootSeal"),
-            44,
+            116,
         ),
         (
             "ShardRestoreServiceOpenSpec",
@@ -7113,7 +7113,7 @@ fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
             3,
             "ExternalCasRestoreServicePromotionReceiptRef",
             Some("RestoreServicePromotionReceipt"),
-            44,
+            116,
         ),
     ] {
         let rows = base
@@ -14031,7 +14031,7 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
         backlink.target_schema_id.as_deref(),
         Some("GlobalTxnRecord")
     );
-    assert_eq!(backlink.construction_order, 44);
+    assert_eq!(backlink.construction_order, 114);
     assert_eq!(
         backlink.construction_relation.as_deref(),
         Some(identity::PRIOR_OBJECT_CONSTRUCTION_RELATION)
@@ -14047,19 +14047,19 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
     //   GlobalTxnRecord -> GlobalStatePayload
     component
         .logical
-        .push(kind(0x7ffe, "GlobalDeltaBatchIndex", "reserved", 44));
+        .push(kind(0x7ffe, "GlobalDeltaBatchIndex", "reserved", 114));
     let mut state_to_index = field(
         "GlobalStatePayload",
         0x7ffe,
         "global_delta_batch_index_root",
-        44,
+        114,
     );
     state_to_index.target_schema_id = Some("GlobalDeltaBatchIndex".into());
     state_to_index.version_status = "reserved".into();
     state_to_index.retention_and_cut_rule =
         "fixture strong owner of the exact retained GlobalDeltaBatchIndex".into();
     component.fields.push(state_to_index);
-    let mut index_to_batch = field("GlobalDeltaBatchIndex", 0x0001, "entries", 44);
+    let mut index_to_batch = field("GlobalDeltaBatchIndex", 0x0001, "entries", 114);
     index_to_batch.target_schema_id = Some("GlobalLogicalDeltaBatch".into());
     index_to_batch.version_status = "reserved".into();
     index_to_batch.retention_and_cut_rule =
@@ -14072,7 +14072,7 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
     );
 
     // Vacuity control: restoring the backlink to the ordinary schema relation
-    // must recreate the all-44 cycle. If this does not fire, the component
+    // must recreate the all-114 cycle. If this does not fire, the component
     // fixture is not actually exercising the repair.
     let mut restored = component.clone();
     restored
@@ -14086,7 +14086,7 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
         .construction_relation = None;
     assert!(
         component_codes(&restored).contains(&"dag_cycle".to_owned()),
-        "restoring the GlobalLogicalDeltaBatch@44 -> GlobalTxnRecord@44 schema edge must fire dag_cycle"
+        "restoring the GlobalLogicalDeltaBatch@114 -> GlobalTxnRecord@114 schema edge must fire dag_cycle"
     );
 
     let mut misspelled = component.clone();
@@ -14103,19 +14103,19 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
     assert!(
         misspelled_codes.contains(&"bad_field".to_owned())
             && misspelled_codes.contains(&"dag_cycle".to_owned()),
-        "an unregistered construction relation must be rejected and must not cut the all-44 cycle: {misspelled_codes:?}"
+        "an unregistered construction relation must be rejected and must not cut the all-114 cycle: {misspelled_codes:?}"
     );
 
-    // Both reference directions constrain GlobalStatePayload@44. Lowering it
-    // to 43 makes its outbound index target future; raising it to 45 makes the
-    // inbound GlobalTxnRecord@44 result digest future.
+    // Both reference directions constrain GlobalStatePayload@114. Lowering it
+    // to 113 makes its outbound index target future; raising it to 115 makes the
+    // inbound GlobalTxnRecord@114 result digest future.
     let mut lowered = component.clone();
     lowered
         .logical
         .iter_mut()
         .find(|kind| kind.name == "GlobalStatePayload")
         .expect("GlobalStatePayload")
-        .construction_order = 43;
+        .construction_order = 113;
     lowered
         .fields
         .iter_mut()
@@ -14124,10 +14124,10 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
                 && field.stable_name == "global_delta_batch_index_root"
         })
         .expect("state-to-index fixture")
-        .construction_order = 43;
+        .construction_order = 113;
     assert!(
         component_codes(&lowered).contains(&"dag_future_result".to_owned()),
-        "GlobalStatePayload 44 -> 43 must fire on outbound GlobalDeltaBatchIndex@44"
+        "GlobalStatePayload 114 -> 113 must fire on outbound GlobalDeltaBatchIndex@114"
     );
 
     let mut raised = component;
@@ -14136,7 +14136,7 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
         .iter_mut()
         .find(|kind| kind.name == "GlobalStatePayload")
         .expect("GlobalStatePayload")
-        .construction_order = 45;
+        .construction_order = 115;
     raised
         .fields
         .iter_mut()
@@ -14145,10 +14145,10 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
                 && field.stable_name == "global_delta_batch_index_root"
         })
         .expect("state-to-index fixture")
-        .construction_order = 45;
+        .construction_order = 115;
     assert!(
         component_codes(&raised).contains(&"dag_future_result".to_owned()),
-        "GlobalStatePayload 44 -> 45 must fire on inbound GlobalTxnRecord@44"
+        "GlobalStatePayload 114 -> 115 must fire on inbound GlobalTxnRecord@114"
     );
 }
 
