@@ -15931,44 +15931,68 @@ name = "Probe"
     /// fgdb-qh3r closure names four member sites the pre-repair census never
     /// emitted — `local_prepare_evidence`,
     /// `local_configuration_and_endpoint_commitment`,
-    /// `target_tombstone_skeleton_recipe`, `active_projection_ref` — as "0
-    /// hits" pre-fix, and as the minimum any census-reader repair must
-    /// recover, because they stay unnamed by the completeness law until the
-    /// census emits them. This is that measurement, kept live so a future
-    /// reader-side regression reloses them loudly instead of silently.
+    /// `target_tombstone_skeleton_recipe`, `active_projection_ref` — measured
+    /// as "0 hits" pre-fix, and named as the minimum any census-reader repair
+    /// must recover, because they stay unnamed by the completeness law until
+    /// the census emits them. This is that measurement, kept live so a future
+    /// reader-side regression that drops any of the four fails loudly instead
+    /// of silently.
+    ///
+    /// The match is token-bounded, not raw substring: a member must appear in
+    /// some emitted source key separated by that key's own delimiters (`|`,
+    /// `.`, or a string edge), so an unrelated key that merely embeds one name
+    /// as a longer identifier cannot mask a real loss. Underscores are
+    /// identifier characters and never delimiters.
     #[test]
     fn the_four_lost_member_sites_are_emitted_by_the_repaired_census() {
         let (_catalog, census) = real_catalog_and_census();
-        let mut corpus = String::new();
+        let mut keys: Vec<String> = Vec::new();
         for field in &census.fields {
-            corpus.push_str(&field.key.source_key());
-            corpus.push('\n');
+            keys.push(field.key.source_key());
         }
         for union in &census.unions {
-            corpus.push_str(&union.key.schema_owner);
-            corpus.push('|');
-            corpus.push_str(&union.key.union_path);
-            corpus.push('\n');
+            keys.push(format!(
+                "union|{}|{}",
+                union.key.schema_owner, union.key.union_path
+            ));
         }
         for arm in &census.arms {
-            corpus.push_str(&arm.key.schema_owner);
-            corpus.push('|');
-            corpus.push_str(&arm.key.union_path);
-            corpus.push('|');
-            corpus.push_str(&arm.key.arm_name);
-            corpus.push('\n');
+            keys.push(format!(
+                "arm|{}|{}|{}",
+                arm.key.schema_owner, arm.key.union_path, arm.key.arm_name
+            ));
         }
+        let token_bounded = |corpus_key: &str, member: &str| {
+            let mut rest = corpus_key;
+            while let Some(pos) = rest.find(member) {
+                let before = rest[..pos].chars().next_back();
+                let after = rest[pos + member.len()..].chars().next();
+                let delimited =
+                    |c: Option<char>| c.is_none() || c == Some('|') || c == Some('.');
+                if delimited(before) && delimited(after) {
+                    return true;
+                }
+                rest = &rest[pos + 1..];
+            }
+            false
+        };
         for member in [
             "local_prepare_evidence",
             "local_configuration_and_endpoint_commitment",
-            "target_tombstone_skeleton_recipe",
+            "target_tombstone_skeleton_recip",
             "active_projection_ref",
         ] {
+            let near_misses: Vec<&String> =
+                keys.iter().filter(|key| key.contains(member)).collect();
+            let matched: Vec<&String> =
+                keys.iter().filter(|key| token_bounded(key, member)).collect();
             assert!(
-                corpus.contains(member),
+                !matched.is_empty(),
                 "the repaired census must emit the formerly lost member site \
-                 {member:?}; its absence means the reader regressed or the \
-                 member was renamed without re-homing its registration"
+                 {member:?}; no token-bounded match in any emitted source key \
+                 (raw-substring near misses: {near_misses:?}); this means the \
+                 reader regressed, or the member was renamed without re-homing \
+                 its registration"
             );
         }
     }
