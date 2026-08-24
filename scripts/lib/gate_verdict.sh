@@ -579,6 +579,68 @@ gate_diag() {
   printf '%s\n' "$*" >&2
 }
 
+# gate_env_failure_class <log>... — classify failed-command output as an
+# environment refusal rather than a product verdict (bead fgdb-950i).
+#
+# WHY THIS EXISTS. Under fleet load, cargo invocations routed through the rch
+# offloader can fail WITHOUT the command ever executing: strict-mode capacity
+# refusals and cold-worker --offline checkout failures both reach gates as an
+# ordinary non-zero status. Every caller that translated non-zero to FAIL then
+# reported phantom product reds — measured 2026-08-24 at b93425f4, where one
+# full check.sh under concurrent fleet load rendered the timing-screen and
+# audit-interlock claims RED on zero executed tests, plus eleven registered
+# cargo-test artifacts mislabeled by their parent.
+#
+# THE CONTRACT. Given one or more captured-output logs from ONE command run,
+# print exactly one class token and return 0 iff the run is classified as
+# did-not-execute:
+#
+#   rch-refusal   the rch offloader refused to run the command at all. The
+#                 closed sentinel is the fixed prefix "[RCH] remote required;
+#                 refusing local fallback". MEASURED 2026-08-24: the sentinel
+#                 is written to STDERR and the exit status is shim-dependent
+#                 (exit 1 for the RCH-E301 proof refusal, exit 103 for the
+#                 no-admissible-workers capacity refusal), so classification
+#                 keys on the text and NEVER on the exit status.
+#   cargo-offline cargo stopped in dependency resolution because pinned
+#                 git dependencies could not be checked out under --offline
+#                 ("you are in the offline mode") — the cold-worker signature.
+#                 Guarded: a log carrying any completed suite ("test result:")
+#                 classifies as none even if it also mentions offline mode, so
+#                 a real red can never borrow this class. A compile error does
+#                 not emit that string; dependency resolution alone does.
+#
+# Any other content — including unreadable or absent logs — prints "none" and
+# returns 1: the failure stays a product verdict. This function reads logs and
+# prints a token; it emits no contract lines itself, so callers keep ownership
+# of choosing gate_abort_unrun/gate_unrun versus gate_fail.
+gate_env_failure_class() {
+  local log
+  if [ "$#" -eq 0 ]; then
+    printf 'none'
+    return 1
+  fi
+  for log in "$@"; do
+    if [ ! -r "$log" ]; then
+      printf 'none'
+      return 1
+    fi
+    if grep -Fq '[RCH] remote required; refusing local fallback' "$log"; then
+      printf 'rch-refusal'
+      return 0
+    fi
+  done
+  for log in "$@"; do
+    if grep -Fq 'you are in the offline mode' "$log" \
+      && ! grep -Eq '^test result:' "$log"; then
+      printf 'cargo-offline'
+      return 0
+    fi
+  done
+  printf 'none'
+  return 1
+}
+
 # gate_die <detail> [diagnostic...] — fail-fast: one FAIL line, then exit 1.
 #
 # For the structural failures that invalidate every assertion after them (the

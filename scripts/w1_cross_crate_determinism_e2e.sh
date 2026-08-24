@@ -200,6 +200,17 @@ workspace_test_failed() { # stage log exit-code genuine-failure-diagnostic
   local rc="$3"
   local failure_diagnostic="$4"
 
+  # fgdb-950i: an rch refusal or a cold-worker offline failure means cargo
+  # never executed, so no verdict — product or otherwise — is attributable.
+  # Classify before any logic below; gate_abort_unrun exits 2 on a match, so
+  # everything underneath is reached only by genuine product failures.
+  case "$(gate_env_failure_class "$log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "retained evidence: $EVIDENCE_DIR"
+      gate_abort_unrun "$stage did not execute ($(gate_env_failure_class "$log")); retryable environment refusal, not a product verdict"
+      ;;
+  esac
+
   # A failing run must not be classified RED while the tree it ran against was
   # mutating underneath it. The mid/after pin checks below the run sites never
   # execute on this path — the failure handler preempts them — which is exactly

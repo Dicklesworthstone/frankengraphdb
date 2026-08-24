@@ -330,6 +330,21 @@ rg -q '"event":"claim_scan_flag".*"line":[0-9]+' "$OVERREACH_OUT"
 rg -q 'claim-scan\[TMS-1\] docs/THREAT_AND_TRUST_MODEL\.md:[0-9]+:' "$OVERREACH_OUT.stderr"
 
 echo "==> run the attenuation property and typed mutation suite"
-cargo test -p registry-check --test threat_model
+TMS_SUITE_RC=0
+cargo test -p registry-check --test threat_model \
+  >"$EVIDENCE_DIR/cargo-mutation-suite.log" 2>&1 || TMS_SUITE_RC=$?
+if [ "$TMS_SUITE_RC" -eq 0 ]; then
+  :
+else
+  case "$(gate_env_failure_class "$EVIDENCE_DIR/cargo-mutation-suite.log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  suite transcript: $EVIDENCE_DIR/cargo-mutation-suite.log"
+      gate_abort_unrun "attenuation property and typed mutation suite did not execute ($(gate_env_failure_class "$EVIDENCE_DIR/cargo-mutation-suite.log")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_die "attenuation property and typed mutation suite failed (exit $TMS_SUITE_RC); transcript: $EVIDENCE_DIR/cargo-mutation-suite.log"
+      ;;
+  esac
+fi
 
 gate_pass "THREAT MODEL E2E GREEN; retained deterministic evidence: $EVIDENCE_DIR"

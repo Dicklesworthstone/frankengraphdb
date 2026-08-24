@@ -338,6 +338,8 @@ Parse `file:line:col` → location, 💡 → suggested fix. Fix root cause, not 
 
 RCH offloads `cargo build/test/clippy` to remote workers to avoid local compilation storms. Installed at `~/.local/bin/rch`, hooked into Claude Code's PreToolUse — usually transparent. Manual: `rch exec -- cargo build --release`. Health: `rch doctor`, `rch status`. Fails open (builds run locally if workers unavailable). **Codex/GPT users:** no auto-hook — manually `rch exec -- <cmd>` for heavy builds.
 
+Local-proof lane: `RCH_CARGO_WRAPPER_BYPASS=1` runs a cargo command with the shim disabled, for proving a verdict locally when the fleet is degraded. When the shim refuses (strict-mode capacity refusal, cold-worker `--offline` checkout failure), the command never executed its subject: registered gates classify this via `gate_env_failure_class` in `scripts/lib/gate_verdict.sh` and report **UNRUN (retryable), never FAIL/RED** — an offloader refusal is not a product regression. Read `$?`, not grep, per the gate-reading rule above.
+
 ---
 
 ## ast-grep vs ripgrep vs warp_grep

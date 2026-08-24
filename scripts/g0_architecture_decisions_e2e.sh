@@ -356,6 +356,21 @@ assert any(
 PY
 
 echo "==> run the complete typed mutation and property suite"
-cargo test -p registry-check --test architecture_decisions
+ADR_SUITE_RC=0
+cargo test -p registry-check --test architecture_decisions \
+  >"$EVIDENCE_DIR/cargo-mutation-suite.log" 2>&1 || ADR_SUITE_RC=$?
+if [ "$ADR_SUITE_RC" -eq 0 ]; then
+  :
+else
+  case "$(gate_env_failure_class "$EVIDENCE_DIR/cargo-mutation-suite.log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  suite transcript: $EVIDENCE_DIR/cargo-mutation-suite.log"
+      gate_abort_unrun "typed mutation and property suite did not execute ($(gate_env_failure_class "$EVIDENCE_DIR/cargo-mutation-suite.log")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_die "typed mutation and property suite failed (exit $ADR_SUITE_RC); transcript: $EVIDENCE_DIR/cargo-mutation-suite.log"
+      ;;
+  esac
+fi
 
 gate_pass "ADR E2E GREEN; retained deterministic evidence: $EVIDENCE_DIR"

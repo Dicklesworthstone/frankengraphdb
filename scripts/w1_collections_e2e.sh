@@ -90,11 +90,20 @@ cargo test --locked -p fgdb-collections --all-targets -- --test-threads=1 \
 if [ "$SUITE_RC" -eq 0 ]; then
   gate_pass "the complete fgdb-collections target suite ran and passed"
 else
-  gate_fail "the fgdb-collections target suite exited $SUITE_RC"
-  gate_diag "  Cargo transcript: $SUITE_LOG"
-  gate_diag "  retained evidence: $EVIDENCE_DIR"
-  gate_verdict
-  exit $?
+  case "$(gate_env_failure_class "$SUITE_LOG")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  Cargo transcript: $SUITE_LOG"
+      gate_diag "  retained evidence: $EVIDENCE_DIR"
+      gate_abort_unrun "the fgdb-collections suite did not execute ($(gate_env_failure_class "$SUITE_LOG")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "the fgdb-collections target suite exited $SUITE_RC"
+      gate_diag "  Cargo transcript: $SUITE_LOG"
+      gate_diag "  retained evidence: $EVIDENCE_DIR"
+      gate_verdict
+      exit $?
+      ;;
+  esac
 fi
 
 if matrix_complete "$SUITE_LOG"; then

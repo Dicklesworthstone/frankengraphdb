@@ -49,16 +49,43 @@ fi
 
 cd "$ROOT" || exit 1
 
-if cargo audit --deny warnings; then
+# fgdb-950i: the two full-graph scans below predate the scratch root, so they
+# capture their own retained transcripts; classification needs the bytes.
+SCAN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-dep-policy-scans.XXXXXX")"
+gate_diag "scan transcripts retained at $SCAN_DIR"
+
+AUDIT_SCAN_RC=0
+cargo audit --deny warnings \
+  >"$SCAN_DIR/audit-graph.stdout" 2>"$SCAN_DIR/audit-graph.stderr" || AUDIT_SCAN_RC=$?
+if [ "$AUDIT_SCAN_RC" -eq 0 ]; then
   gate_pass "cargo-audit found no vulnerability, unsoundness, yanked, or unmaintained advisory in Cargo.lock"
 else
-  gate_fail "cargo-audit rejected Cargo.lock"
+  case "$(gate_env_failure_class "$SCAN_DIR/audit-graph.stdout" "$SCAN_DIR/audit-graph.stderr")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  scan transcript: $SCAN_DIR/audit-graph.stderr"
+      gate_abort_unrun "dependency vulnerability scan did not execute ($(gate_env_failure_class "$SCAN_DIR/audit-graph.stdout" "$SCAN_DIR/audit-graph.stderr")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "cargo-audit rejected Cargo.lock"
+      ;;
+  esac
 fi
 
-if cargo deny -L error --locked check licenses bans sources; then
+DENY_SCAN_RC=0
+cargo deny -L error --locked check licenses bans sources \
+  >"$SCAN_DIR/deny-graph.stdout" 2>"$SCAN_DIR/deny-graph.stderr" || DENY_SCAN_RC=$?
+if [ "$DENY_SCAN_RC" -eq 0 ]; then
   gate_pass "cargo-deny accepted the all-features dependency graph, including dev dependencies"
 else
-  gate_fail "cargo-deny rejected the dependency policy"
+  case "$(gate_env_failure_class "$SCAN_DIR/deny-graph.stdout" "$SCAN_DIR/deny-graph.stderr")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  scan transcript: $SCAN_DIR/deny-graph.stderr"
+      gate_abort_unrun "dependency license/source policy scan did not execute ($(gate_env_failure_class "$SCAN_DIR/deny-graph.stdout" "$SCAN_DIR/deny-graph.stderr")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "cargo-deny rejected the dependency policy"
+      ;;
+  esac
 fi
 
 WORK_ROOT="${FGDB_GATE_TMP:-/data/tmp/fgdb_swarm/dependency_policy}"
@@ -91,7 +118,15 @@ elif grep -q 'RUSTSEC-2018-0003' "$RUN_DIR/audit.stdout" \
     "$RUN_DIR/audit.stderr"; then
   gate_pass "control: cargo-audit rejected the planted RUSTSEC-2018-0003 release"
 else
-  gate_fail "control: cargo-audit failed for a reason other than the planted advisory"
+  case "$(gate_env_failure_class "$RUN_DIR/audit.stdout" "$RUN_DIR/audit.stderr")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  transcripts: $RUN_DIR/audit.stdout $RUN_DIR/audit.stderr"
+      gate_abort_unrun "control: cargo-audit did not execute ($(gate_env_failure_class "$RUN_DIR/audit.stdout" "$RUN_DIR/audit.stderr")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "control: cargo-audit failed for a reason other than the planted advisory"
+      ;;
+  esac
 fi
 
 awk '
@@ -112,7 +147,15 @@ elif grep -q 'unlicensed' "$RUN_DIR/license.stdout" "$RUN_DIR/license.stderr" \
     && grep -q 'fnx-classes' "$RUN_DIR/license.stdout" "$RUN_DIR/license.stderr"; then
   gate_pass "control: cargo-deny rejected the planted foundation license mismatch"
 else
-  gate_fail "control: cargo-deny failed for a reason other than the planted license mismatch"
+  case "$(gate_env_failure_class "$RUN_DIR/license.stdout" "$RUN_DIR/license.stderr")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  transcripts: $RUN_DIR/license.stdout $RUN_DIR/license.stderr"
+      gate_abort_unrun "control: cargo-deny license check did not execute ($(gate_env_failure_class "$RUN_DIR/license.stdout" "$RUN_DIR/license.stderr")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "control: cargo-deny failed for a reason other than the planted license mismatch"
+      ;;
+  esac
 fi
 
 awk '
@@ -136,7 +179,15 @@ elif grep -q 'source-not-allowed' "$RUN_DIR/source.stdout" \
     "$RUN_DIR/source.stderr"; then
   gate_pass "control: cargo-deny rejected the planted unapproved transitive registry source"
 else
-  gate_fail "control: cargo-deny failed for a reason other than the planted transitive-source violation"
+  case "$(gate_env_failure_class "$RUN_DIR/source.stdout" "$RUN_DIR/source.stderr")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  transcripts: $RUN_DIR/source.stdout $RUN_DIR/source.stderr"
+      gate_abort_unrun "control: cargo-deny source check did not execute ($(gate_env_failure_class "$RUN_DIR/source.stdout" "$RUN_DIR/source.stderr")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "control: cargo-deny failed for a reason other than the planted transitive-source violation"
+      ;;
+  esac
 fi
 
 gate_verdict

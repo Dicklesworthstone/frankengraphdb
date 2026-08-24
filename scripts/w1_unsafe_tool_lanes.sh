@@ -33,11 +33,20 @@ if cargo run --quiet --locked -p registry-check --bin unsafe-ledger-check -- \
   --root . --checked-plan >"$PLAN" 2>"$PLAN_ERR"; then
   gate_pass "unsafe verification manifest and ledger form one checked plan"
 else
-  gate_fail "unsafe verification manifest could not produce a checked plan"
-  gate_diag "  checker diagnostics: $PLAN_ERR"
-  gate_diag "  retained evidence: $EVIDENCE_DIR"
-  gate_verdict
-  exit $?
+  case "$(gate_env_failure_class "$PLAN_ERR")" in
+    rch-refusal | cargo-offline)
+      gate_diag "  checker diagnostics: $PLAN_ERR"
+      gate_diag "  retained evidence: $EVIDENCE_DIR"
+      gate_abort_unrun "unsafe-ledger-check did not execute ($(gate_env_failure_class "$PLAN_ERR")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "unsafe verification manifest could not produce a checked plan"
+      gate_diag "  checker diagnostics: $PLAN_ERR"
+      gate_diag "  retained evidence: $EVIDENCE_DIR"
+      gate_verdict
+      exit $?
+      ;;
+  esac
 fi
 
 PLAN_COUNT="$(grep -c . "$PLAN" || true)"
@@ -133,10 +142,18 @@ while IFS=$'\t' read -r tool site workload; do
           MIRI_ARENA_RC=0
         else
           MIRI_ARENA_RC=$?
-        fi
-        MIRI_ARENA_STATUS="$(miri_outcome_from_rc "$MIRI_ARENA_RC")"
-        if [ "$MIRI_ARENA_STATUS" = "unrun" ]; then
-          MIRI_ARENA_UNRUN_DETAIL="$(miri_unrun_detail "$MIRI_ARENA_RC")"
+          case "$(gate_env_failure_class "$MIRI_ARENA_LOG")" in
+            rch-refusal | cargo-offline)
+              gate_diag "  Miri transcript: $MIRI_ARENA_LOG"
+              gate_abort_unrun "$tool $site: Miri workload did not execute ($(gate_env_failure_class "$MIRI_ARENA_LOG")); retryable environment refusal, not a product verdict"
+              ;;
+            *)
+              MIRI_ARENA_STATUS="$(miri_outcome_from_rc "$MIRI_ARENA_RC")"
+              if [ "$MIRI_ARENA_STATUS" = "unrun" ]; then
+                MIRI_ARENA_UNRUN_DETAIL="$(miri_unrun_detail "$MIRI_ARENA_RC")"
+              fi
+              ;;
+          esac
         fi
       fi
       case "$MIRI_ARENA_STATUS" in

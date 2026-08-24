@@ -101,6 +101,7 @@ REGISTERED_BINARY_EXPECTED=0
 REGISTERED_BINARY_EXECUTED=0
 REGISTERED_OTHER_EXPECTED=0
 REGISTERED_SEQ=0
+CORE_SEQ=0
 LAST_GATE_RC=0
 GATE_LOG_DIR=""
 CARGO_TEST_LOG=""
@@ -280,6 +281,8 @@ run_core_gate() {
   local label="$1"
   local domain="all-tracked"
   local outcome
+  local gate_rc
+  local core_log=""
   shift
   CORE_EXPECTED=$((CORE_EXPECTED + 1))
 
@@ -301,15 +304,47 @@ run_core_gate() {
     return 0
   fi
 
+  # fgdb-950i: capture the child's merged output when a log directory is
+  # available, so a non-zero exit can be classified by
+  # gate_env_failure_class instead of being reported as product red. tee keeps
+  # the transcript live exactly as before; PIPESTATUS[0] recovers the child's
+  # own status from under pipefail. Without a usable log directory (some
+  # self-test fixtures) the legacy uncaptured path runs unchanged.
+  if [ -n "$GATE_LOG_DIR" ] && [ -d "$GATE_LOG_DIR" ] && [ -w "$GATE_LOG_DIR" ]; then
+    CORE_SEQ=$((CORE_SEQ + 1))
+    core_log="$GATE_LOG_DIR/core-$CORE_SEQ.log"
+    # Condition context: a failing child must reach the classifier below, not
+    # abort the shell under a set -e inherited from a fixture or caller.
+    if "$@" 2>&1 | tee -- "$core_log"; then
+      gate_rc=0
+    else
+      gate_rc=${PIPESTATUS[0]}
+    fi
+  else
+    if "$@"; then
+      gate_rc=0
+    else
+      gate_rc=$?
+    fi
+  fi
+
   CORE_EXECUTED=$((CORE_EXECUTED + 1))
   echo "==> $label"
-  if "$@"; then
+  if [ "$gate_rc" -eq 0 ]; then
     CORE_PASSED=$((CORE_PASSED + 1))
     LAST_GATE_RC=0
     gate_pass "core: $label"
     outcome=pass
+  elif [ "$(gate_env_failure_class "$core_log")" != "none" ]; then
+    # The offloader refused or dependency resolution never completed: the
+    # assertions did not run, so neither RED nor PASS may be claimed. UNRUN is
+    # still non-green at every tally that consumes it.
+    CORE_UNRUN=$((CORE_UNRUN + 1))
+    LAST_GATE_RC="$GATE_EXIT_UNRUN"
+    gate_unrun "core: $label — command did not execute ($(gate_env_failure_class "$core_log")); retryable, not a product verdict; log: $core_log"
+    outcome=unrun
   else
-    LAST_GATE_RC=$?
+    LAST_GATE_RC=$gate_rc
     CORE_RED=$((CORE_RED + 1))
     # RED is the refinement, FAIL is the contract token. Both anchored, both on
     # stdout, emitted together. See THE REPORTING CONTRACT.
@@ -1517,6 +1552,11 @@ run_registered_command() {
     if registered_command_reported_only_unrun "$gate_rc" "$log"; then
       record_registered_result "$kind" "$artifact" unrun \
         "exit $gate_rc; transcript $log; diagnostics $diagnostics_log"
+    elif [ "$(gate_env_failure_class "$log" "$diagnostics_log")" != "none" ]; then
+      # fgdb-950i: the child never executed its subject — the offloader refused
+      # or dependency resolution failed — so a red would blame innocent code.
+      record_registered_result "$kind" "$artifact" unrun \
+        "exit $gate_rc; command did not execute ($(gate_env_failure_class "$log" "$diagnostics_log")); retryable; transcript $log; diagnostics $diagnostics_log"
     else
       record_registered_result "$kind" "$artifact" red \
         "exit $gate_rc; transcript $log; diagnostics $diagnostics_log"

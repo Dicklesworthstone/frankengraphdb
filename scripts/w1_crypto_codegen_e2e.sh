@@ -73,8 +73,16 @@ if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
   >"$EVIDENCE_DIR/source-linkage.log" 2>&1; then
   gate_pass "owned crypto-derived state delegates to witnessed scrub boundaries"
 else
-  gate_fail "crypto state no longer delegates to the witnessed scrub boundaries"
-  gate_diag "  source-linkage transcript: $EVIDENCE_DIR/source-linkage.log"
+  case "$(gate_env_failure_class "$EVIDENCE_DIR/source-linkage.log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  source-linkage transcript: $EVIDENCE_DIR/source-linkage.log"
+      gate_abort_unrun "source-linkage assertion did not execute ($(gate_env_failure_class "$EVIDENCE_DIR/source-linkage.log")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "crypto state no longer delegates to the witnessed scrub boundaries"
+      gate_diag "  source-linkage transcript: $EVIDENCE_DIR/source-linkage.log"
+      ;;
+  esac
 fi
 
 if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
@@ -82,8 +90,16 @@ if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
   >"$EVIDENCE_DIR/timing-evidence.log" 2>&1; then
   gate_pass "bounded AEAD Welch-t screen is quiet and its planted early-exit detector fires"
 else
-  gate_fail "bounded AEAD timing screen or its planted detector failed"
-  gate_diag "  timing-evidence transcript: $EVIDENCE_DIR/timing-evidence.log"
+  case "$(gate_env_failure_class "$EVIDENCE_DIR/timing-evidence.log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  timing-evidence transcript: $EVIDENCE_DIR/timing-evidence.log"
+      gate_abort_unrun "AEAD timing screen did not execute ($(gate_env_failure_class "$EVIDENCE_DIR/timing-evidence.log")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "bounded AEAD timing screen or its planted detector failed"
+      gate_diag "  timing-evidence transcript: $EVIDENCE_DIR/timing-evidence.log"
+      ;;
+  esac
 fi
 
 if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
@@ -91,27 +107,52 @@ if cargo test --offline --locked -p fgdb-crypto --test constant_time_audit \
   >"$EVIDENCE_DIR/external-audit-interlock.log" 2>&1; then
   gate_pass "external crypto audit evidence is canonical and exact release admission fails closed"
 else
-  gate_fail "external crypto audit evidence or release admission interlock failed"
-  gate_diag "  external-audit transcript: $EVIDENCE_DIR/external-audit-interlock.log"
+  case "$(gate_env_failure_class "$EVIDENCE_DIR/external-audit-interlock.log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  external-audit transcript: $EVIDENCE_DIR/external-audit-interlock.log"
+      gate_abort_unrun "external-audit interlock did not execute ($(gate_env_failure_class "$EVIDENCE_DIR/external-audit-interlock.log")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "external crypto audit evidence or release admission interlock failed"
+      gate_diag "  external-audit transcript: $EVIDENCE_DIR/external-audit-interlock.log"
+      ;;
+  esac
 fi
 
 if cargo test --offline --locked -p fgdb-crypto --doc \
   >"$EVIDENCE_DIR/compile-fail.log" 2>&1; then
   gate_pass "public secret owners remain non-cloneable and consuming at compile time"
 else
-  gate_fail "a secret owner regained a clone or reuse path"
-  gate_diag "  compile-fail transcript: $EVIDENCE_DIR/compile-fail.log"
+  case "$(gate_env_failure_class "$EVIDENCE_DIR/compile-fail.log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  compile-fail transcript: $EVIDENCE_DIR/compile-fail.log"
+      gate_abort_unrun "ownership compile-fail suite did not execute ($(gate_env_failure_class "$EVIDENCE_DIR/compile-fail.log")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_fail "a secret owner regained a clone or reuse path"
+      gate_diag "  compile-fail transcript: $EVIDENCE_DIR/compile-fail.log"
+      ;;
+  esac
 fi
 
 if CARGO_TARGET_DIR="$TARGET_DIR" cargo rustc --offline --locked --release \
   -p fgdb-crypto --lib -- --emit=obj >"$BUILD_LOG" 2>&1; then
   gate_pass "optimized fgdb-crypto production object compiled"
 else
-  gate_unrun "optimized fgdb-crypto production object did not compile"
-  gate_diag "  compiler transcript: $BUILD_LOG"
-  gate_diag "  retained evidence: $EVIDENCE_DIR"
-  gate_verdict
-  exit $?
+  case "$(gate_env_failure_class "$BUILD_LOG")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  compiler transcript: $BUILD_LOG"
+      gate_diag "  retained evidence: $EVIDENCE_DIR"
+      gate_abort_unrun "optimized production object compilation did not execute ($(gate_env_failure_class "$BUILD_LOG")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      gate_unrun "optimized fgdb-crypto production object did not compile"
+      gate_diag "  compiler transcript: $BUILD_LOG"
+      gate_diag "  retained evidence: $EVIDENCE_DIR"
+      gate_verdict
+      exit $?
+      ;;
+  esac
 fi
 
 mapfile -t OBJECTS < <(

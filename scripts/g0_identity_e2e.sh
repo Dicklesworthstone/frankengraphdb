@@ -516,10 +516,21 @@ else
   )"
   die "Appendix A completion event is missing or incomplete; expected projection_rows=$EXPECT_TARGET_COUNT reservations=$EXPECT_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_COMPLETION"
 fi
-if (cd "$ROOT" && cargo test -p registry-check hash::tests --lib --quiet); then
+SHA_SUITE_RC=0
+(cd "$ROOT" && cargo test -p registry-check hash::tests --lib --quiet) \
+  >"$WORK/sha-vectors.log" 2>&1 || SHA_SUITE_RC=$?
+if [ "$SHA_SUITE_RC" -eq 0 ]; then
   ok "SHA-256 standard vectors pass"
 else
-  die "SHA-256 standard vectors failed"
+  case "$(gate_env_failure_class "$WORK/sha-vectors.log")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  suite transcript: $WORK/sha-vectors.log"
+      gate_abort_unrun "SHA-256 standard-vector suite did not execute ($(gate_env_failure_class "$WORK/sha-vectors.log")); retryable environment refusal, not a product verdict"
+      ;;
+    *)
+      die "SHA-256 standard vectors failed (exit $SHA_SUITE_RC; transcript: $WORK/sha-vectors.log)"
+      ;;
+  esac
 fi
 
 # --- Phase 1: shipped identity registries validate ---------------------------
