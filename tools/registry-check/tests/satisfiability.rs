@@ -659,8 +659,10 @@ fn sat_reference_union_arm_role_matrix() {
                 max_size_bytes: 40,
             });
             r.logical
-                .push(kind(&format!("Target{index}"), 0x9100 + index as u32, 5));
+                .push(kind(&format!("Target{index}"), 0x9100 + index as u32, 4));
         }
+        // The union's containing schema must resolve to a live logical row.
+        r.logical.push(kind("GrantSpec", 0x9099, 4));
         r.unions = vec![ReferenceUnion {
             union_name: "GrantTargetRef".to_owned(),
             containing_schema: "GrantSpec".to_owned(),
@@ -668,6 +670,30 @@ fn sat_reference_union_arm_role_matrix() {
             role: "meta".to_owned(),
             arms,
         }];
+        // The generator law requires the declaring anchor field row.
+        r.fields.push(FieldRow {
+            containing_schema: "GrantSpec".to_owned(),
+            field_tag: 1,
+            stable_name: "target_ref".to_owned(),
+            exact_wire_type: "GrantTargetRef".to_owned(),
+            cardinality: "one".to_owned(),
+            identity_class: "logical".to_owned(),
+            reference_semantics: "strong".to_owned(),
+            target_schema_id: None,
+            construction_order: 4,
+            construction_relation: None,
+            role_predicate: "true".to_owned(),
+            retention_and_cut_rule: "retained with the owning witness".to_owned(),
+            version_status: "reserved".to_owned(),
+            max_size_bytes: 40,
+            digest_class: None,
+            transcript_recipe: None,
+            bd_domain_separator: None,
+            bd_schema_major: None,
+            bd_included_field_tags: None,
+            bd_excluded_field_tags: None,
+            recipe_pin: None,
+        });
         r
     }
 
