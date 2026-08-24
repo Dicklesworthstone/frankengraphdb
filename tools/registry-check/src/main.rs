@@ -1406,7 +1406,7 @@ fn run_identity(root: &Path) -> Result<usize, String> {
                 ("role", s(&arm.role)),
                 ("identity_class", s(&arm.identity_class)),
                 ("reference_semantics", s(&arm.reference_semantics)),
-                ("role_predicate", s(&arm.role_predicate_joined())),
+                ("role_predicate", s(arm.role_predicate_joined())),
                 ("retention_and_cut_rule", s(&arm.retention_and_cut_rule)),
                 ("version_status", s(&arm.version_status)),
                 ("max_size_bytes", n(arm.max_size_bytes)),

@@ -328,9 +328,15 @@ run_core_gate() {
     fi
   fi
 
-  CORE_EXECUTED=$((CORE_EXECUTED + 1))
   echo "==> $label"
+  # fgdb-950i: "executed" means the gate produced a color verdict (pass or
+  # red) — the same convention record_registered_result applies on the
+  # registered side, and the same one gate_scope_void_result restores toward
+  # when it reclassifies a voided verdict as UNRUN. An environment-classified
+  # UNRUN ran its command but produced no verdict about anything, so it counts
+  # in EXPECTED and UNRUN only.
   if [ "$gate_rc" -eq 0 ]; then
+    CORE_EXECUTED=$((CORE_EXECUTED + 1))
     CORE_PASSED=$((CORE_PASSED + 1))
     LAST_GATE_RC=0
     gate_pass "core: $label"
@@ -344,6 +350,7 @@ run_core_gate() {
     gate_unrun "core: $label — command did not execute ($(gate_env_failure_class "$core_log")); retryable, not a product verdict; log: $core_log"
     outcome=unrun
   else
+    CORE_EXECUTED=$((CORE_EXECUTED + 1))
     LAST_GATE_RC=$gate_rc
     CORE_RED=$((CORE_RED + 1))
     # RED is the refinement, FAIL is the contract token. Both anchored, both on
