@@ -927,6 +927,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/cross_log_transparency_freshness/"
 
 [[kind]]
+object_kind = 0x0283
+name = "CumulativeReadWitnessRoot"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/cumulative_read_witness_root/"
+
+[[kind]]
+object_kind = 0x0284
+name = "CumulativeTxnEffectRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/cumulative_txn_effect_root/"
+
+[[kind]]
 object_kind = 0x0285
 name = "DeliveredDeltaPayload"
 status = "reserved"
@@ -1881,6 +1899,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_restore_terminal_tombstone/"
 
 [[kind]]
+object_kind = 0x035f
+name = "MetaTerminalAdmissionFence"
+status = "reserved"
+construction_order = 28
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_terminal_admission_fence/"
+
+[[kind]]
 object_kind = 0x0364
 name = "MutationPermitReadProjection"
 status = "reserved"
@@ -1933,6 +1960,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/new_database_identity_reservation/"
+
+[[kind]]
+object_kind = 0x036b
+name = "NoCommittedGraphEffectProof"
+status = "reserved"
+construction_order = 58
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_committed_graph_effect_proof/"
 
 [[kind]]
 object_kind = 0x0371
@@ -3706,6 +3742,15 @@ construction_order = 36
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_time_bound_subject_retirement_proof/"
+
+[[kind]]
+object_kind = 0x0483
+name = "ShardWorkspaceReleaseAck"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_workspace_release_ack/"
 
 [[kind]]
 object_kind = 0x0484

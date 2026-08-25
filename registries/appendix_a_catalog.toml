@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3995
-projection_fallback_count = 336
-target_source_assignment_sha256 = "6e6f7c35bde7fbda2f8395656e2bcd11fdb3079e0cbe398d70b789513a8f6d5a"
+target_count = 4000
+projection_fallback_count = 341
+target_source_assignment_sha256 = "e2bd879e3fa1a9a79cc8f99e4f576f22eb88007ba80eb21a80c6b841e1ed6e0c"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -2075,6 +2075,62 @@ construction_order = 84
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_statement_classification/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:cumulative-read-witness-root"
+object_kind = 0x0283
+name = "CumulativeReadWitnessRoot"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/cumulative_read_witness_root/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:cumulative-txn-effect-root"
+object_kind = 0x0284
+name = "CumulativeTxnEffectRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/cumulative_txn_effect_root/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:no-committed-graph-effect-proof"
+object_kind = 0x036b
+name = "NoCommittedGraphEffectProof"
+status = "reserved"
+construction_order = 58
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_committed_graph_effect_proof/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:meta-terminal-admission-fence"
+object_kind = 0x035f
+name = "MetaTerminalAdmissionFence"
+status = "reserved"
+construction_order = 28
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_terminal_admission_fence/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:shard-workspace-release-ack"
+object_kind = 0x0483
+name = "ShardWorkspaceReleaseAck"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_workspace_release_ack/"
+
 
 
 [[logical_kind]]
@@ -42941,7 +42997,7 @@ symbol = "CumulativeReadWitnessRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0283"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:cumulative-txn-effect-root"
@@ -42950,7 +43006,7 @@ symbol = "CumulativeTxnEffectRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0284"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:cursor-disconnect-record"
@@ -45218,7 +45274,7 @@ symbol = "MetaTerminalAdmissionFence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x035f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:meta-terminal-coordinate-hold-root"
@@ -45326,7 +45382,7 @@ symbol = "NoCommittedGraphEffectProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x036b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a12:reservation:no-committed-transaction-at-basis"
@@ -48206,7 +48262,7 @@ symbol = "ShardWorkspaceReleaseAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0483"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:sharded-genesis-certificate"
@@ -105338,6 +105394,46 @@ source_key = "projection|logical_object_kinds|CanonicalStatementClassification"
 target_kind = "logical-kind"
 definition_status = "declared"
 
+
+[[target]]
+row_id = "a07:target:logical-kind-cumulative-read-witness-root"
+target_row_id = "a07:logical-kind:cumulative-read-witness-root"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|CumulativeReadWitnessRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-cumulative-txn-effect-root"
+target_row_id = "a07:logical-kind:cumulative-txn-effect-root"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|CumulativeTxnEffectRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-no-committed-graph-effect-proof"
+target_row_id = "a07:logical-kind:no-committed-graph-effect-proof"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|NoCommittedGraphEffectProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-meta-terminal-admission-fence"
+target_row_id = "a07:logical-kind:meta-terminal-admission-fence"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|MetaTerminalAdmissionFence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-shard-workspace-release-ack"
+target_row_id = "a07:logical-kind:shard-workspace-release-ack"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|ShardWorkspaceReleaseAck"
+target_kind = "logical-kind"
+definition_status = "declared"
 
 [[logical_kind]]
 slice_id = "a12"
