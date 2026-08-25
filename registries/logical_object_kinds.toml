@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 64
+registry_epoch = 65
 
 [[kind]]
 object_kind = 0x0001
@@ -547,6 +547,15 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/authorization_decision_record/"
+
+[[kind]]
+object_kind = 0x023a
+name = "BackupContentReopenProof"
+status = "reserved"
+construction_order = 78
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_content_reopen_proof/"
 
 [[kind]]
 object_kind = 0x023d
@@ -3319,6 +3328,24 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_applied_ack/"
+
+[[kind]]
+object_kind = 0x043a
+name = "ShardBackupClosureCertificate"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_backup_closure_certificate/"
+
+[[kind]]
+object_kind = 0x043b
+name = "ShardBackupCopyVerification"
+status = "reserved"
+construction_order = 79
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_backup_copy_verification/"
 
 [[kind]]
 object_kind = 0x0440

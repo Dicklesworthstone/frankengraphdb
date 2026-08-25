@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 3988
-projection_fallback_count = 331
-target_source_assignment_sha256 = "d40a48f0e8b55147016623236c56f01c1c035012d889665dcfaa4046001de96d"
+target_count = 3991
+projection_fallback_count = 332
+target_source_assignment_sha256 = "ad69e760399ee6721460b7602e9a7fd4c1a0b5eafa5ef32bc10598a56032f058"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 64
+registry_epoch = 65
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1979,6 +1979,17 @@ golden_corpus = "corpus/logical/key_reference_quarantine/"
 
 [[logical_kind]]
 slice_id = "a15"
+row_id = "a15:logical-kind:backup-content-reopen-proof"
+object_kind = 0x023a
+name = "BackupContentReopenProof"
+status = "reserved"
+construction_order = 78
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_content_reopen_proof/"
+
+[[logical_kind]]
+slice_id = "a15"
 row_id = "a15:logical-kind:backup-inventory-bijection-proof"
 object_kind = 0x023d
 name = "BackupInventoryBijectionProof"
@@ -1998,6 +2009,28 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/backup_recoverability_proof/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:shard-backup-copy-verification"
+object_kind = 0x043b
+name = "ShardBackupCopyVerification"
+status = "reserved"
+construction_order = 79
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_backup_copy_verification/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:shard-backup-closure-certificate"
+object_kind = 0x043a
+name = "ShardBackupClosureCertificate"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_backup_closure_certificate/"
 
 [[logical_kind]]
 slice_id = "a06"
@@ -42116,7 +42149,7 @@ symbol = "BackupContentReopenProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x023a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:backup-external-operation-record"
@@ -47444,7 +47477,7 @@ symbol = "ShardBackupClosureCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x043a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:shard-backup-copy-verification"
@@ -47453,7 +47486,7 @@ symbol = "ShardBackupCopyVerification"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x043b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:shard-backup-pin-record"
@@ -59164,7 +59197,7 @@ symbol = "ShardBackupClosureCertificate"
 generic_signature = ""
 source_key = "top|ShardBackupClosureCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2129"]
 
 [[top_level_candidate]]
@@ -59184,7 +59217,7 @@ symbol = "ShardBackupCopyVerification"
 generic_signature = ""
 source_key = "top|ShardBackupCopyVerification"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2129"]
 
 [[top_level_candidate]]
@@ -105202,6 +105235,31 @@ slice_id = "a15"
 source_key = "field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest"
 target_kind = "field"
 definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-backup-content-reopen-proof"
+target_row_id = "a15:logical-kind:backup-content-reopen-proof"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|BackupContentReopenProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-shard-backup-copy-verification"
+target_row_id = "a15:logical-kind:shard-backup-copy-verification"
+slice_id = "a15"
+source_key = "top|ShardBackupCopyVerification"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-shard-backup-closure-certificate"
+target_row_id = "a15:logical-kind:shard-backup-closure-certificate"
+slice_id = "a15"
+source_key = "top|ShardBackupClosureCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
 
 [[logical_kind]]
 slice_id = "a12"
