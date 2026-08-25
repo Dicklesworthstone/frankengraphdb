@@ -3988,14 +3988,14 @@ fn unknown_key_fails_the_load() {
 mod generated_family_unions {
     use super::*;
     use registry_check::command_contracts::{
-        ContractRegistry, GENERATED_FAMILY_GLOBAL_UNION, GENERATED_FAMILY_LOCAL_UNION,
-        GeneratedFamilyUnion, generated_family_unions,
+        GENERATED_FAMILY_GLOBAL_UNION, GENERATED_FAMILY_LOCAL_UNION, GeneratedFamilyUnion,
+        generated_family_unions,
     };
 
-    fn find_arm<'a>(
-        union: &'a GeneratedFamilyUnion,
+    fn find_arm(
+        union: &GeneratedFamilyUnion,
         tag: i64,
-    ) -> &'a registry_check::command_contracts::GeneratedFamilyArm {
+    ) -> &registry_check::command_contracts::GeneratedFamilyArm {
         union
             .arms
             .iter()
