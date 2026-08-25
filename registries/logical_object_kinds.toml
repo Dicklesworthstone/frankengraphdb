@@ -693,6 +693,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_restore_source_acquisition_plan_copy/"
 
 [[kind]]
+object_kind = 0x025f
+name = "CanonicalStatementClassification"
+status = "reserved"
+construction_order = 84
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_statement_classification/"
+
+[[kind]]
 object_kind = 0x0261
 name = "CapabilityMigrationConsumedTombstone"
 status = "reserved"
@@ -4086,6 +4095,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/zero_reference_proof/"
 
 [[kind]]
+object_kind = 0x04cb
+name = "BoundQuery"
+status = "reserved"
+construction_order = 83
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/bound_query/"
+
+[[kind]]
 object_kind = 0x04cc
 name = "BranchMergeLedgerRoot"
 status = "reserved"
@@ -4147,6 +4165,24 @@ construction_order = 14
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/escaping_allocation_reservation_record/"
+
+[[kind]]
+object_kind = 0x04e4
+name = "ExecutableEffectContract"
+status = "reserved"
+construction_order = 81
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/executable_effect_contract/"
+
+[[kind]]
+object_kind = 0x04f0
+name = "PreparedQueryTemplate"
+status = "reserved"
+construction_order = 82
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_query_template/"
 
 [[kind]]
 object_kind = 0x04fc
