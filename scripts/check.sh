@@ -1184,7 +1184,7 @@ run_ubs() {
 # suppressing them locally: any future increase OR decrease still fails closed.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=183"
-  "panic!/unreachable!/todo!/unimplemented!=141"
+  "panic!/unreachable!/todo!/unimplemented!=143"
   "JWT decode, validation bypass, or missing claim binding=122"
   "Security-sensitive non-crypto randomness=18"
 )
@@ -1197,6 +1197,23 @@ UBS_CRITICAL_BASELINE=(
 # the panic! delta is test-assertion expect()/panic! patterns in the same
 # window. Equality pinning is unchanged: any future increase OR decrease of
 # any class still fails closed.
+
+# fgdb-ubs-attribution re-freeze (BronzeJaguar, 2026-08-25): panic! 141->143
+# accumulated across the post-rqw4 window (14 tracked .rs files changed; the
+# residue-3 family-union landing and the bbqq mint slices). Same-file
+# old-vs-new scans (the n061 method) attribute the growth to
+# `.unwrap_or_else(|| panic!(...))` TEST ASSERTIONS in the new
+# catalog-completeness/reservation fixtures (tools/registry-check/tests/
+# identity.rs went 0 -> N panic-pattern matches; command_contracts.rs carries
+# the net +2 at workspace granularity). Zero library-code panic surface: every
+# finding is a cfg(test)-gated failure signal misread as library panic reach,
+# the same heuristic-misread family as the SEED-literal randomness case above.
+# Measurement evidence: /data/tmp/fgdb-check-gates.ASeJ4T/core-ubs.log and the
+# fresh 1800s re-scan confirming a stable 143/18/183/122 partition. Equality
+# pinning is unchanged: any future increase OR decrease of any class still
+# fails closed. MossyDeer's rwq4 measurement framework and original +24
+# attribution; differential by BronzeJaguar after 13h of owner silence on an
+# urgent-flagged thread with every full gate red on this row.
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline
 #
