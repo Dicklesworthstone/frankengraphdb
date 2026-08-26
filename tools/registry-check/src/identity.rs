@@ -4496,7 +4496,37 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                             ),
                         ));
                     }
-                    if !predicate_allows_role(&target_kind.role_predicate, &u.role) {
+                    // fgdb-bbqq option (a), ratifying the cross-group reading
+                    // Ruling 3(a) introduced for arm predicates: a matrix arm
+                    // authorizes against its TARGET's own predicate (every
+                    // matrix entry must name roles the target admits); the
+                    // containing plane's single role is not conflated across
+                    // group boundaries. Legacy singular arms keep the exact
+                    // historical law unchanged.
+                    let target_admits = role_predicate_roles(&target_kind.role_predicate);
+                    let role_lawful = match target_admits {
+                        // Target admits every plane: the containing-plane
+                        // authorization is trivially satisfied.
+                        None => true,
+                        Some(roles) => {
+                            // Legacy path: the arm's own singular predicate
+                            // authorizes via the containing plane...
+                            let legacy = arm.role_predicates.len() == 1
+                                && predicate_allows_role(
+                                    &arm.role_predicates[0],
+                                    &u.role,
+                                );
+                            // ...or every matrix entry names a role the
+                            // target itself admits (cross-group reference,
+                            // fgdb-bbqq option (a)).
+                            let matrix = arm.role_predicates.iter().all(|entry| {
+                                role_predicate_roles(entry)
+                                    .is_some_and(|set| !set.is_empty() && set.is_subset(&roles))
+                            });
+                            legacy || matrix
+                        }
+                    };
+                    if !role_lawful {
                         out.push(v(
                             "union_role_mismatch",
                             "durable_fields",
