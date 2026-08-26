@@ -2969,3 +2969,93 @@ fn every_witness_row_names_a_distinct_law() {
         "a row with an empty code asserts nothing"
     );
 }
+
+// ===========================================================================
+// fgdb-wi4f: logical_object_kinds arm-binding witnesses
+//
+// `validate_active_logical_kind_arms` reads BOTH of its inputs fresh from the
+// root — `registries/logical_object_kinds.toml` and the generated
+// `crates/fgdb-types/src/refs.rs` — so each witness below is a scratch root
+// carrying the real refs.rs and a singly mutated kind table (plus a copy of
+// the whole registries dir, because `model::load_registries` loads every
+// registry it knows about). The full validate_all sweep runs on top; codes
+// from unrelated minimal-root legs co-fire freely and every assertion names
+// exactly one target code.
+// ===========================================================================
+
+fn logical_kind_scratch(tag: &str, mutate_toml: fn(&mut String)) -> PathBuf {
+    let root = scratch_root(tag);
+    let registries_src = repo_root().join("registries");
+    for entry in std::fs::read_dir(&registries_src).expect("registries dir readable") {
+        let entry = entry.expect("registries dir entry");
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        write_fixture(
+            &root,
+            &std::path::Path::new("registries")
+                .join(&name)
+                .to_string_lossy(),
+            &std::fs::read_to_string(entry.path()).unwrap_or_default(),
+        );
+    }
+    let refs = repo_root().join("crates/fgdb-types/src/refs.rs");
+    write_fixture(
+        &root,
+        "crates/fgdb-types/src/refs.rs",
+        &std::fs::read_to_string(refs).expect("refs.rs readable"),
+    );
+    let mut toml =
+        std::fs::read_to_string(repo_root().join("registries/logical_object_kinds.toml"))
+            .expect("kind table readable");
+    mutate_toml(&mut toml);
+    write_fixture(&root, "registries/logical_object_kinds.toml", &toml);
+    root
+}
+
+#[test]
+fn appendix_validate_logical_kind_mutations_are_seen_to_fire() {
+    let codes_of = |root: &Path| -> Vec<String> {
+        let registries =
+            model::load_registries(&root.join("registries")).expect("scratch registries load");
+        validate::validate_all(&registries, root)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect::<Vec<_>>()
+    };
+
+    // active_logical_kind_none_parsed: zero active rows survive.
+    let root = logical_kind_scratch("lk-none-parsed", |toml| {
+        *toml = toml.replace("status = \"active\"", "status = \"zzz\"");
+    });
+    assert_code(&codes_of(&root), "active_logical_kind_none_parsed");
+
+    // logical_kind_projection_layout: an active row's object_kind/name/status
+    // stop being adjacent in that exact order.
+    let root = logical_kind_scratch("lk-layout", |toml| {
+        let needle = "\nobject_kind = 0x0001\nname = \"LogicalStatePayload\"\nstatus = \"active\"";
+        assert!(
+            toml.contains(needle),
+            "layout witness anchor moved; re-derive from the real table"
+        );
+        *toml = toml.replacen(
+            needle,
+            "\nname = \"LogicalStatePayload\"\nobject_kind = 0x0001\nstatus = \"active\"",
+            1,
+        );
+    });
+    assert_code(&codes_of(&root), "logical_kind_projection_layout");
+
+    // arm_without_active_logical_kind: one entire active row disappears while
+    // refs.rs still declares its arm.
+    let root = logical_kind_scratch("lk-arm-orphan", |toml| {
+        let needle = "\nobject_kind = 0x0001\nname = \"LogicalStatePayload\"\nstatus = \"active\"";
+        assert!(
+            toml.contains(needle),
+            "arm-orphan witness anchor moved; re-derive from the real table"
+        );
+        *toml = toml.replacen(needle, "", 1);
+    });
+    assert_code(&codes_of(&root), "arm_without_active_logical_kind");
+}
