@@ -1082,18 +1082,30 @@ fn appendix_a_completion_layer_schemas_are_readable_closed_and_versioned() {
         "authoring_policy"
     ));
 
+    // Per-arm isolation (fgdb-witness-census-named-not-witnessed-11fo): the
+    // original 2-way matches! let one arm mask a permanently dead sibling.
+    // Block REORDER moves layers off their canonical order -> drift;
+    // in-place FIELD mutation keeps the order but changes the hashed payload
+    // -> mismatch. Each assertion names exactly one code.
     let reordered = swap_first_two_table_blocks(&source, "[[completion_layer]]");
     let violations =
         appendix_a::parse_catalog(&reordered).expect_err("completion layers have canonical order");
     assert!(
-        violations.iter().any(|violation| {
-            matches!(
-                violation.code.as_str(),
-                "catalog_completion_layer_schema_drift"
-                    | "catalog_completion_layer_schema_mismatch"
-            )
-        }),
-        "reordered completion layers escaped the readable/hash pins: {violations:?}"
+        violations
+            .iter()
+            .any(|violation| violation.code == "catalog_completion_layer_schema_drift"),
+        "reordered completion layers escaped the canonical-order pin: {violations:?}"
+    );
+
+    let mut field_drift = real_appendix_catalog();
+    let first = &mut field_drift.completion_layers[0];
+    first.schema_version = first.schema_version.wrapping_add(1);
+    let violations = appendix_a::validate_catalog(&field_drift);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "catalog_completion_layer_schema_mismatch"),
+        "an in-place completion-layer payload change escaped the readable/hash pins: {violations:?}"
     );
 }
 
@@ -1265,15 +1277,21 @@ fn appendix_a_catalog_projection_targets_are_exact_and_reservations_are_nonseman
         "requires exactly one"
     ));
 
+    // Per-arm isolation (fgdb-witness-census-named-not-witnessed-11fo): the
+    // suffixed-row_id mutation fired only row_id_derived_mismatch, leaving
+    // catalog_target_duplicate permanently masked behind the disjunction. A
+    // VERBATIM clone keeps the derived id lawful, so the duplicate-key law
+    // fires alone.
     let mut duplicate_target = baseline.clone();
-    let mut duplicate = duplicate_target.targets[0].clone();
-    duplicate.row_id.push_str("-duplicate");
+    let duplicate = duplicate_target.targets[0].clone();
     duplicate_target.targets.push(duplicate);
     let violations = appendix_a::validate_catalog(&duplicate_target);
-    assert!(violations.iter().any(|violation| matches!(
-        violation.code.as_str(),
-        "catalog_target_duplicate" | "catalog_row_id_derived_mismatch"
-    )));
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "catalog_target_duplicate"),
+        "a verbatim duplicate target escaped the duplicate-key pin: {violations:?}"
+    );
 
     let mut self_target = baseline.clone();
     self_target.targets[0].target_row_id = self_target.targets[0].row_id.clone();
@@ -2110,6 +2128,62 @@ fn an_unrelated_orphan_bead_does_not_make_appendix_bindings_unavailable() {
             .collect::<Vec<_>>()
     );
 }
+// Positive witness for catalog_repository_beads_unavailable
+// (fgdb-witness-census-named-not-witnessed-11fo): until now the code was named
+// only in a must-be-ABSENT assertion, so no test ever watched it fire. A
+// scratch root whose architecture registry loads but whose .beads/issues.jsonl
+// is unparseable makes bead_provenance_index itself fail closed.
+#[test]
+fn appendix_a_bindings_fail_closed_when_the_bead_file_is_unreadable() {
+    let root =
+        std::env::temp_dir().join(format!("fgdb-11fo-{}-beads-unreadable", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("registries")).expect("fixture registries dir");
+    std::fs::create_dir_all(root.join(".beads")).expect("fixture beads dir");
+    std::fs::write(
+        root.join("registries/architecture_decisions.toml"),
+        std::fs::read_to_string(repo_root().join("registries/architecture_decisions.toml"))
+            .expect("real architecture decisions readable"),
+    )
+    .expect("fixture registry write");
+    std::fs::write(root.join(".beads/issues.jsonl"), "{ not json\n").expect("fixture beads write");
+
+    let catalog = real_appendix_catalog();
+    let violations = appendix_a::verify_repository_bindings(&root, &catalog);
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.code == "catalog_repository_beads_unavailable"),
+        "an unparseable bead file must fail the repository bindings closed; got {:?}",
+        violations
+            .iter()
+            .map(|v| v.code.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+// Positive witness for source_target_key_missing
+// (fgdb-witness-census-named-not-witnessed-11fo): the code was named only in a
+// `//` comment explaining the k3sa fallback rule, and a comment mention once
+// moved a code out of the residue with no assertion behind it.
+#[test]
+fn appendix_a_target_source_key_drift_is_seen_to_fire() {
+    let mut catalog = real_appendix_catalog();
+    let target = catalog
+        .targets
+        .iter_mut()
+        .find(|t| t.source_key.starts_with("field|"))
+        .expect("a field-keyed census target exists");
+    target.source_key.push_str("-drift");
+    let bytes = real_plan_source();
+    let violations = appendix_a::verify_source(&catalog, &bytes);
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.code == "source_target_key_missing"),
+        "a drifted field| source key escaped the structural source census: {violations:?}"
+    );
+}
 
 #[test]
 fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
@@ -2852,14 +2926,25 @@ fn appendix_a_complete_slice_requires_full_source_target_and_evidence_closure() 
     slice.definition_status = "complete".to_owned();
 
     let violations = appendix_a::validate_catalog(&catalog);
+
+    // Per-arm singleton assertions (fgdb-witness-census-named-not-witnessed-
+    // 11fo). The original two 3-way matches! forms could stay green with five
+    // of six arms dead. Probe-verified at 393247f3+76c350e0 (stripped-union
+    // fixture): under this single flip, target_declared, census_pin_mismatch,
+    // annotation_missing, semantic/static/runtime evidence-missing ALL fire,
+    // while complete_slice_ambiguity does not — it keeps its own dedicated
+    // witness below.
     assert!(
-        violations.iter().any(|violation| matches!(
-            violation.code.as_str(),
-            "complete_slice_ambiguity"
-                | "complete_slice_target_declared"
-                | "slice_census_pin_mismatch"
-        )),
-        "vacuously complete A02 did not expose unresolved source coverage: {violations:?}"
+        violations
+            .iter()
+            .any(|violation| violation.code == "complete_slice_target_declared"),
+        "vacuously complete A02 did not flag still-declared targets: {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "slice_census_pin_mismatch"),
+        "vacuously complete A02 did not move its census pins: {violations:?}"
     );
     assert!(
         violations
@@ -2868,14 +2953,31 @@ fn appendix_a_complete_slice_requires_full_source_target_and_evidence_closure() 
         "vacuously complete A02 did not require exact annotations: {violations:?}"
     );
     assert!(
-        violations.iter().any(|violation| matches!(
-            violation.code.as_str(),
-            "complete_slice_semantic_binding_missing"
-                | "complete_slice_static_evidence_missing"
-                | "complete_slice_runtime_evidence_missing"
-        )),
-        "vacuously complete A02 did not require real owner/evidence closure: {violations:?}"
+        violations
+            .iter()
+            .any(|violation| violation.code == "complete_slice_semantic_binding_missing"),
+        "vacuously complete A02 did not require a semantic binding: {violations:?}"
     );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "complete_slice_static_evidence_missing"),
+        "vacuously complete A02 did not require static live evidence: {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "complete_slice_runtime_evidence_missing"),
+        "vacuously complete A02 did not require runtime evidence: {violations:?}"
+    );
+
+    // complete_slice_ambiguity CANNOT fire: no such code exists in
+    // src/appendix_a.rs (grep-verified). The bead's third arm was a stale
+    // shorthand; the live successor is `source_complete_slice_ambiguity_
+    // unresolved` (appendix_a.rs:9041), witnessed positively in
+    // tests/violation_witnesses.rs::appendix_source_ambiguity_laws under the
+    // fgdb-tsfs closure. Recorded here so the census does not re-count the
+    // dead name as a live arm.
 
     let mut class_drift = real_appendix_catalog();
     class_drift.slices[1].expected_projection_classes.swap(0, 1);
