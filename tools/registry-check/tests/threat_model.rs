@@ -1084,3 +1084,30 @@ fn tm_checker_index_registers_every_threat_entrypoint() {
         );
     }
 }
+
+// -----------------------------------------------------------------------------
+// fgdb-wi4f: header pin witnesses
+//
+// `replay_command` and `id_table_hash` were named in no assertion anywhere —
+// the census-integrity pass found them as residue. Each is a compiled-pin
+// drift law over one registry header field; each witness mutates exactly that
+// field and requires its exact code.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn tm_replay_command_pin_is_seen_to_fire() {
+    let codes = codes_after(
+        "replay_command = \"cargo run -p registry-check --bin threat-check -- --root .\"",
+        "replay_command = \"cargo run -p registry-check --bin threat-check -- --drifted\"",
+    );
+    assert_code(&codes, "replay_command");
+}
+
+#[test]
+fn tm_id_table_hash_pin_is_seen_to_fire() {
+    let codes = codes_after(
+        "id_table_hash = \"fnv1a64:48faccd46e13140a\"",
+        "id_table_hash = \"fnv1a64:0000000000000000\"",
+    );
+    assert_code(&codes, "id_table_hash");
+}
