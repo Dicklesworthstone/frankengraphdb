@@ -1362,7 +1362,6 @@ struct RootLaw {
 }
 
 enum RootEntry {
-    Projections,
     Bindings,
     /// The aggregate projection gate over the REAL repository: projections +
     /// generated-family unions + adjudication law allowlists.
@@ -1378,7 +1377,6 @@ enum RootEntry {
 impl RootEntry {
     fn run(&self, catalog: &appendix_a::Catalog) -> Vec<String> {
         let violations = match self {
-            RootEntry::Projections => appendix_a::verify_projections(&repo_root(), catalog),
             RootEntry::Bindings => appendix_a::verify_repository_bindings(&repo_root(), catalog),
             RootEntry::ProjectionDiff | RootEntry::ProjectionDiffScratch => {
                 let root = match self {
@@ -2183,15 +2181,69 @@ fn appendix_source_census_laws() -> Vec<SourceLaw> {
             }),
             mutate_bytes: identity_bytes,
         },
+        SourceLaw {
+            code: "source_annotation_contract_ambiguous",
+            fact: "a complete field annotation stands over a field whose ambiguity discharge was revoked, so no single unambiguous source exact_type backs it",
+            mutate_catalog: Some(|c| {
+                let adj = c
+                    .ambiguity_adjudications
+                    .iter_mut()
+                    .find(|row| {
+                        row.row_id
+                            == "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459"
+                    })
+                    .expect("discharging adjudication exists");
+                adj.resolution = "corrupted".into();
+                let target = c
+                    .targets
+                    .iter_mut()
+                    .find(|t| {
+                        t.source_key
+                            == "field|ExportLeaf<T>|ExportLeaf<T>.authority_ledger_floor|authority_ledger_floor"
+                    })
+                    .expect("ExportLeaf floor field target exists");
+                target.definition_status = "complete".into();
+                let projection_row_id = target.target_row_id.clone();
+                c.annotations.push(appendix_a::Annotation {
+                    row_id: "zz:witness:ambiguous-annotation".into(),
+                    target_row_id: projection_row_id,
+                    exact_type: String::new(),
+                    cardinality: String::new(),
+                    layout: String::new(),
+                    role: String::new(),
+                    posture: String::new(),
+                    authority: String::new(),
+                    locality: String::new(),
+                    generic_expansions: Vec::new(),
+                    role_expansions: Vec::new(),
+                    reference_semantics: String::new(),
+                    target_schema_ids: Vec::new(),
+                    construction_order: String::new(),
+                    retention_and_cut_rule: String::new(),
+                    digest_recipe: String::new(),
+                    redaction_class: String::new(),
+                    resource_bounds: String::new(),
+                    compatibility: String::new(),
+                });
+            }),
+            mutate_bytes: identity_bytes,
+        },
     ]
 }
 
 fn appendix_source_manifest_laws() -> Vec<CatalogLaw> {
-    vec![CatalogLaw {
-        code: "source_manifest_pin_invalid",
-        fact: "the manifest byte_count pin becomes non-positive",
-        mutate: |c| c.source_manifest.byte_count = 0,
-    }]
+    vec![
+        CatalogLaw {
+            code: "source_manifest_pin_invalid",
+            fact: "the manifest byte_count pin becomes non-positive",
+            mutate: |c| c.source_manifest.byte_count = 0,
+        },
+        CatalogLaw {
+            code: "reference_manifest_mismatch",
+            fact: "the reference manifest target count leaves the reservation-symbol census",
+            mutate: |c| c.reference_manifest.target_count += 1,
+        },
+    ]
 }
 
 /// File-surface laws: the public loaders over scratch roots. Each pairs a
@@ -2203,8 +2255,7 @@ fn appendix_tsfs_file_surface_laws_are_seen_to_fire() {
     let control = appendix_a::load_catalog_file(&repo_root().join(appendix_a::CATALOG_PATH));
     assert!(control.is_ok(), "clean catalog must load for the control");
     let fired = appendix_a::load_catalog_file(&absent_root.join(appendix_a::CATALOG_PATH))
-        .err()
-        .expect("missing catalog file must fail")
+        .expect_err("missing catalog file must fail")
         .into_iter()
         .map(|violation| violation.code)
         .collect::<Vec<_>>();
@@ -2217,8 +2268,7 @@ fn appendix_tsfs_file_surface_laws_are_seen_to_fire() {
     std::fs::create_dir_all(encoding_root.join("registries")).expect("fixture dir");
     std::fs::write(encoding_root.join(appendix_a::CATALOG_PATH), &bad).expect("fixture write");
     let fired = appendix_a::load_catalog_file(&encoding_root.join(appendix_a::CATALOG_PATH))
-        .err()
-        .expect("invalid UTF-8 must fail")
+        .expect_err("invalid UTF-8 must fail")
         .into_iter()
         .map(|violation| violation.code)
         .collect::<Vec<_>>();
@@ -2232,8 +2282,7 @@ fn appendix_tsfs_file_surface_laws_are_seen_to_fire() {
         &appendix_catalog_text(),
     );
     let fired = appendix_a::load_and_verify(&bare_root)
-        .err()
-        .expect("missing plan source must fail")
+        .expect_err("missing plan source must fail")
         .into_iter()
         .map(|violation| violation.code)
         .collect::<Vec<_>>();
@@ -2570,7 +2619,11 @@ fn appendix_projection_laws() -> Vec<CatalogLaw> {
         CatalogLaw {
             code: "slice_projection_invalid",
             fact: "a slice expects an unknown projection class",
-            mutate: |c| c.slices[0].expected_projection_classes.push("bogus_class".into()),
+            mutate: |c| {
+                c.slices[0]
+                    .expected_projection_classes
+                    .push("bogus_class".into())
+            },
         },
         CatalogLaw {
             code: "slice_census_duplicate",
@@ -2642,9 +2695,7 @@ fn appendix_dag_law() -> Vec<SourceLaw> {
 
 fn appendix_epoch_text_laws() -> Vec<TextLaw> {
     fn append_bogus(text: &str) -> String {
-        format!(
-            "{text}\n[[projection_epoch]]\nregistry = \"bogus_registry\"\nregistry_epoch = 1\n"
-        )
+        format!("{text}\n[[projection_epoch]]\nregistry = \"bogus_registry\"\nregistry_epoch = 1\n")
     }
     vec![
         TextLaw {
@@ -2671,8 +2722,12 @@ fn appendix_epoch_text_laws() -> Vec<TextLaw> {
             code: "projection_epoch_invalid",
             fact: "the first epoch value arrives non-positive",
             munge: |text| {
-                let h = text.find("[[projection_epoch]]").expect("epoch block exists");
-                let p = h + text[h..].find("registry_epoch = ").expect("epoch key exists");
+                let h = text
+                    .find("[[projection_epoch]]")
+                    .expect("epoch block exists");
+                let p = h + text[h..]
+                    .find("registry_epoch = ")
+                    .expect("epoch key exists");
                 let end = p + text[p..].find('\n').expect("key line ends");
                 let mut out = String::with_capacity(text.len());
                 out.push_str(&text[..p]);
@@ -2703,12 +2758,18 @@ fn appendix_tsfs_tables_are_seen_to_fire() {
     run_catalog_laws("appendix_expansions", &appendix_expansion_laws());
     run_catalog_laws("appendix_source_manifest", &appendix_source_manifest_laws());
     run_catalog_laws("appendix_projections", &appendix_projection_laws());
-    run_source_laws("appendix_source_ambiguity", &appendix_source_ambiguity_laws());
+    run_source_laws(
+        "appendix_source_ambiguity",
+        &appendix_source_ambiguity_laws(),
+    );
     run_source_laws("appendix_resource_bucket", &appendix_resource_bucket_laws());
     run_source_laws("appendix_source_census", &appendix_source_census_laws());
     run_source_laws("appendix_source_unions", &appendix_source_union_laws());
     run_source_laws("appendix_dag_cycle", &appendix_dag_law());
-    run_root_laws("appendix_citation_registry", &appendix_citation_registry_law());
+    run_root_laws(
+        "appendix_citation_registry",
+        &appendix_citation_registry_law(),
+    );
     run_root_laws("appendix_bindings", &appendix_bindings_laws());
     run_root_laws(
         "appendix_generated_family",
@@ -2755,6 +2816,11 @@ fn appendix_tsfs_scratch_recipes_are_seen_to_fire() {
         );
         root
     };
+
+    // catalog_repository_workspace_unavailable: no root Cargo.toml.
+    let root = make_base("bindings-no-workspace");
+    let fired = codes_of(&root, &base);
+    assert_code(&fired, "catalog_repository_workspace_unavailable");
 
     // Minimal workspace fixture builder: base + root/member Cargo.tomls plus
     // an optionally mutated checker index.
@@ -2888,7 +2954,7 @@ fn every_witness_row_names_a_distinct_law() {
     codes.extend(appendix_dag_law().iter().map(|row| row.code));
     codes.extend(appendix_epoch_text_laws().iter().map(|row| row.code));
 
-    assert_eq!(codes.len(), 219, "table row count moved");
+    assert_eq!(codes.len(), 221, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
     // `active_not_a_member`/`active_manifest_missing` are two laws reached by
     // one fact. The island rows above deliberately use separate scan facts.
