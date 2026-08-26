@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 4000;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 4023;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "e8cb6c818e470918cedb2a4b3ed5f1060206f40e92dd3f3f77f2746c285ffc80";
-pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 341;
+    "10dec35260e9307803008944140f7d7546011de52e12febba05b1d21784af385";
+pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 364;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "e2bd879e3fa1a9a79cc8f99e4f576f22eb88007ba80eb21a80c6b841e1ed6e0c";
+    "0cdd2038f6b9c903a6ab2ec1f08a8fb29104279389328dd5dd6a5d3b9c36272d";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -64,11 +64,11 @@ pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 455;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "53f282596c615b683d9112a3b35a97bf8cb665a606b686c926fd4f5cbdf3c3c2";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
-pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 459;
-pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 354;
+pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 482;
+pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 331;
 pub const EXPECTED_RESERVATION_HIGH_WATER: u16 = 0x051d;
 pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
-    "963ff99fcfa7453fbe4abe46b6d2a366e8775c645fc3ab6f4c6cb45f01df626c";
+    "0bad3d712daf2607eb98286686c3665c099452d0f6c09d7125ed28bd2951d896";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_454;
@@ -6987,7 +6987,7 @@ pub fn appendix_a_catalog_projection_diff(repo_root: &Path, catalog: &Catalog) -
 /// contract rows — one arm per distinct outer tag, named by the member root —
 /// on every run. Hand-edited or stale arm sets fail closed here instead of
 /// drifting into a second allowlist.
-
+///
 /// The law-citation vocabulary extractor (fgdb-2ngl): longest-match scan of
 /// the closed surface vocabulary — every `name` plus every `cited_as` alias
 /// in registries/laws.toml, canonicalizing aliases to their law's name. A
@@ -7020,9 +7020,8 @@ fn extract_cited_law_names(text: &str, laws_registry: &laws::LawRegistry) -> Vec
             }
             let before = if begin == 0 { b' ' } else { bytes[begin - 1] };
             let after = if end == bytes.len() { b' ' } else { bytes[end] };
-            let boundary = |byte: u8| {
-                !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-            };
+            let boundary =
+                |byte: u8| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
             if boundary(before) && boundary(after) {
                 for occupied in &mut used[begin..end] {
                     *occupied = true;
@@ -7043,7 +7042,7 @@ fn extract_cited_law_names(text: &str, laws_registry: &laws::LawRegistry) -> Vec
 /// more than prose, and exact set equality is what makes semantic drift (an
 /// adjudication silently re-homing onto a different registered law) visible
 /// even though every resolution still succeeds.
-pub fn verify_adjudication_law_allowlists_with(
+fn verify_adjudication_law_allowlists_with(
     pins: &[AmbiguityAdjudicationContractPin],
     laws_registry: &laws::LawRegistry,
     rows: &[AmbiguityAdjudication],
@@ -7061,7 +7060,7 @@ pub fn verify_adjudication_law_allowlists_with(
         let Some(pin) = pin_map.get(row.row_id.as_str()).copied() else {
             continue; // rows without pins are flagged by the closure battery
         };
-        let extracted = extract_cited_law_names(&row.rationale, &laws_registry);
+        let extracted = extract_cited_law_names(row.rationale.as_str(), laws_registry);
         let pinned: BTreeSet<&str> = pin.cited_laws.iter().copied().collect();
         for name in &extracted {
             if !pinned.contains(name.as_str()) {
@@ -7115,10 +7114,7 @@ pub fn verify_adjudication_law_allowlists_with(
 
 /// Live-gate wrapper: loads the law registry from the repository under test
 /// and runs the allowlist resolver over the released pin table.
-fn verify_adjudication_law_allowlists(
-    repo_root: &Path,
-    catalog: &Catalog,
-) -> Vec<Violation> {
+fn verify_adjudication_law_allowlists(repo_root: &Path, catalog: &Catalog) -> Vec<Violation> {
     let laws_registry = match laws::load_from_repo(repo_root) {
         Ok(registry) => registry,
         Err(error) => {
@@ -17653,6 +17649,7 @@ name = "Probe"
             // the tree still building the pin with a `rationale` field. It was
             // caught by that leg and by nothing else (fgdb-n061).
             rationale_sha256: Box::leak(sha256_hex(rationale.as_bytes()).into_boxed_str()),
+            cited_laws: &[],
         }];
         let keys = approved_final_ambiguity_keys_with(&pin, &catalog, "a20");
         let raw_count = 1;
@@ -19145,6 +19142,7 @@ mod adjudication_law_allowlist_tests {
             laws: vec![
                 law("FG-LAW-A", "alpha", "registered"),
                 law("FG-LAW-B", "beta", "registered"),
+                law("FG-LAW-S", "shorthand", "registered"),
                 law("FG-LAW-G", "gamma-struck", "struck"),
             ],
         }
@@ -19162,7 +19160,10 @@ mod adjudication_law_allowlist_tests {
         }
     }
 
-    fn pin(row_id: &str, cited: &[&str]) -> AmbiguityAdjudicationContractPin {
+    fn pin(
+        row_id: &'static str,
+        cited: &'static [&'static str],
+    ) -> AmbiguityAdjudicationContractPin {
         AmbiguityAdjudicationContractPin {
             row_id,
             slice_id: "a01",
@@ -19175,10 +19176,11 @@ mod adjudication_law_allowlist_tests {
     }
 
     fn codes(
+        registry: &laws::LawRegistry,
         pins: &[AmbiguityAdjudicationContractPin],
         rows: &[AmbiguityAdjudication],
     ) -> Vec<String> {
-        verify_adjudication_law_allowlists_with(pins, &registry(), rows)
+        verify_adjudication_law_allowlists_with(pins, registry, rows)
             .into_iter()
             .map(|violation| violation.code)
             .collect()
@@ -19186,9 +19188,12 @@ mod adjudication_law_allowlist_tests {
 
     #[test]
     fn a_clean_allowlist_is_silent() {
-        let rows = [row("r1", "the rationale leans on the alpha rule and the shorthand phrasing.")];
+        let rows = [row(
+            "r1",
+            "the rationale leans on the alpha rule and the shorthand phrasing.",
+        )];
         let pins = [pin("r1", &["alpha", "shorthand"])];
-        assert!(codes(&pins, &rows).is_empty());
+        assert!(codes(&registry(), &pins, &rows).is_empty());
     }
 
     #[test]
@@ -19196,7 +19201,7 @@ mod adjudication_law_allowlist_tests {
         let rows = [row("r1", "leans on alpha and quietly adds beta.")];
         let pins = [pin("r1", &["alpha"])]; // beta cited but not licensed
         assert_eq!(
-            codes(&pins, &rows),
+            codes(&registry(), &pins, &rows),
             vec!["catalog_ambiguity_citation_unpinned".to_owned()]
         );
     }
@@ -19206,7 +19211,7 @@ mod adjudication_law_allowlist_tests {
         let rows = [row("r1", "now cites only alpha.")];
         let pins = [pin("r1", &["alpha", "shorthand"])]; // shorthand no longer cited
         assert_eq!(
-            codes(&pins, &rows),
+            codes(&registry(), &pins, &rows),
             vec!["catalog_ambiguity_citation_drift".to_owned()]
         );
     }
@@ -19218,7 +19223,7 @@ mod adjudication_law_allowlist_tests {
         let rows = [row("r1", "leans on gamma-struck alone.")];
         let pins = [pin("r1", &["gamma-struck"])];
         assert_eq!(
-            codes(&pins, &rows),
+            codes(&registry(), &pins, &rows),
             vec!["catalog_ambiguity_citation_unregistered".to_owned()]
         );
     }
@@ -19228,18 +19233,19 @@ mod adjudication_law_allowlist_tests {
         // "SequenceNeutralSpec wrapper" is FG-LAW-04's cited_as alias; the pin
         // stores the canonical name and the row must stay silent.
         let mut registry = registry();
-        registry.laws.push(law("FG-LAW-W", "wrapper-target", "registered"));
-        let rows = [row("r1", "the SequenceNeutralSpec wrapper law governs this row.")];
-        let _ = registry;
-        let pins = [pin("r1", &["SequenceNeutralSpec wrapper"])];
-        // The extractor canonicalizes the alias to the aliased LAW's own name,
-        // so a pin carrying the alias surface form drifts by construction.
-        assert_eq!(
-            codes(&pins, &rows),
-            vec![
-                "catalog_ambiguity_citation_unpinned".to_owned(),
-                "catalog_ambiguity_citation_drift".to_owned()
-            ]
+        let mut wrapper = law("FG-LAW-W", "wrapper-target", "registered");
+        wrapper.cited_as = vec!["SequenceNeutralSpec wrapper".to_owned()];
+        registry.laws.push(wrapper);
+        let rows = [row(
+            "r1",
+            "the SequenceNeutralSpec wrapper law governs this row.",
+        )];
+        // The extractor canonicalizes the alias to the aliased LAW's own
+        // name, so the pin licenses the canonical form and stays silent.
+        let pins = [pin("r1", &["wrapper-target"])];
+        assert!(
+            codes(&registry, &pins, &rows).is_empty(),
+            "alias must resolve through its canonical pin"
         );
     }
 }

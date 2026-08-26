@@ -1309,6 +1309,1532 @@ fn the_liveness_self_test_guard_can_be_false() {
 }
 
 // ===========================================================================
+// fgdb-tsfs: the Appendix A closure
+// ===========================================================================
+//
+// The census behind `fgdb-tsfs` measured the Appendix A share of the
+// never-witnessed laws at claim time (2026-08-25, worktree during the a06/atke
+// mint program): 234 distinct codes in `src/appendix_a.rs`, of which 115 were
+// production-reachable and named nowhere. The tables below close that set.
+// Four runner shapes cover the four surfaces the emitters sit behind:
+//
+// * `CatalogLaw`   -- rows reached through `validate_catalog(&Catalog)`;
+// * `RootLaw`      -- rows reached through a repo-root entry
+//                     (`verify_projections`, `verify_repository_bindings`);
+// * `TextLaw`      -- rows reached through catalog-text parsing
+//                     (`parse_catalog` on munged real catalog text);
+// * `SourceLaw`    -- rows reached through plan-source verification
+//                     (`verify_source(&Catalog, &[u8])` over the real plan
+//                     bytes and/or a mutated manifest).
+//
+// Every runner is differential, per row: the code must be ABSENT from the
+// unmutated control and PRESENT after the mutation adds exactly one defect.
+// A validator that silently returns nothing therefore cannot pass a witness,
+// and a pre-existing violation elsewhere in the control cannot mask one.
+//
+// Laws no input can reach are declared CANNOT_FIRE in the bead comment trail
+// with their reason; they deliberately have no row here.
+
+fn appendix_catalog_text() -> String {
+    fs::read_to_string(repo_root().join(appendix_a::CATALOG_PATH))
+        .expect("Appendix A catalog text is readable")
+}
+
+fn appendix_plan_source() -> Vec<u8> {
+    let catalog = appendix_catalog();
+    fs::read(repo_root().join(&catalog.source_manifest.plan_path))
+        .expect("plan source bytes are readable")
+}
+
+/// A law fired or silenced by mutating ONLY the parsed catalog.
+struct CatalogLaw {
+    code: &'static str,
+    fact: &'static str,
+    mutate: fn(&mut appendix_a::Catalog),
+}
+
+/// A law whose public owner also takes the repository root.
+struct RootLaw {
+    code: &'static str,
+    fact: &'static str,
+    entry: RootEntry,
+    mutate: fn(&mut appendix_a::Catalog),
+}
+
+enum RootEntry {
+    Projections,
+    Bindings,
+    /// The aggregate projection gate over the REAL repository: projections +
+    /// generated-family unions + adjudication law allowlists.
+    ProjectionDiff,
+    /// The live type/owner/evidence closure (validate_catalog_metadata's own
+    /// gate), which `validate_catalog` does not reach.
+    Closure,
+    /// The aggregate gate over a throwaway root, for fail-closed *_unavailable
+    /// legs; per-row fixtures live in dedicated tests, not table rows.
+    ProjectionDiffScratch,
+}
+
+impl RootEntry {
+    fn run(&self, catalog: &appendix_a::Catalog) -> Vec<String> {
+        let violations = match self {
+            RootEntry::Projections => appendix_a::verify_projections(&repo_root(), catalog),
+            RootEntry::Bindings => appendix_a::verify_repository_bindings(&repo_root(), catalog),
+            RootEntry::ProjectionDiff | RootEntry::ProjectionDiffScratch => {
+                let root = match self {
+                    RootEntry::ProjectionDiffScratch => scratch_root("law"),
+                    _ => repo_root(),
+                };
+                appendix_a::appendix_a_catalog_projection_diff(&root, catalog)
+            }
+            RootEntry::Closure => appendix_a::appendix_a_catalog_closure(catalog),
+        };
+        violations
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect()
+    }
+
+    /// The control always reads the REAL repository, even for scratch-root
+    /// entries: a law that already fires on the clean tree proves nothing.
+    fn run_control(&self, catalog: &appendix_a::Catalog) -> Vec<String> {
+        match self {
+            RootEntry::ProjectionDiffScratch => {
+                appendix_a::appendix_a_catalog_projection_diff(&repo_root(), catalog)
+                    .into_iter()
+                    .map(|violation| violation.code)
+                    .collect()
+            }
+            other => other.run(catalog),
+        }
+    }
+}
+
+/// A law fired by feeding munged catalog TEXT to the parser.
+struct TextLaw {
+    code: &'static str,
+    fact: &'static str,
+    munge: fn(&str) -> String,
+}
+
+/// A law fired through `verify_source`: mutate the manifest pins, the source
+/// bytes, or both.
+struct SourceLaw {
+    code: &'static str,
+    fact: &'static str,
+    mutate_catalog: Option<fn(&mut appendix_a::Catalog)>,
+    mutate_bytes: fn(Vec<u8>) -> Vec<u8>,
+}
+
+fn run_catalog_laws(name: &str, laws: &[CatalogLaw]) {
+    let base = appendix_catalog();
+    let control: BTreeSet<String> = appendix_a::validate_catalog(&base)
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect();
+    let mut silent = Vec::new();
+    for row in laws {
+        if control.contains(row.code) {
+            let code = row.code;
+            let fact = row.fact;
+            panic!(
+                "{name}: {code} [{fact}] is already present in the clean control, so its \
+                 mutation proves nothing"
+            );
+        }
+        let mut mutated = base.clone();
+        (row.mutate)(&mut mutated);
+        let fired: BTreeSet<String> = appendix_a::validate_catalog(&mutated)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect();
+        if !fired.contains(row.code) {
+            silent.push(format!("{} [{}] -> {:?}", row.code, row.fact, fired));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "{name}: {} of {} laws stopped firing: {silent:?}",
+        silent.len(),
+        laws.len()
+    );
+}
+
+fn run_root_laws(name: &str, laws: &[RootLaw]) {
+    let base = appendix_catalog();
+    let mut silent = Vec::new();
+    for row in laws {
+        if row
+            .entry
+            .run_control(&base)
+            .iter()
+            .any(|code| code == row.code)
+        {
+            let code = row.code;
+            let fact = row.fact;
+            panic!("{name}: {code} [{fact}] is already present without the mutation");
+        }
+        let mut mutated = base.clone();
+        (row.mutate)(&mut mutated);
+        if !row.entry.run(&mutated).iter().any(|code| code == row.code) {
+            silent.push(format!("{} [{}]", row.code, row.fact));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "{name}: {} of {} laws stopped firing: {silent:?}",
+        silent.len(),
+        laws.len()
+    );
+}
+
+fn run_text_laws(name: &str, laws: &[TextLaw]) {
+    let base_text = appendix_catalog_text();
+    let control_codes: Vec<String> = match appendix_a::parse_catalog(&base_text) {
+        Ok(_) => Vec::new(),
+        Err(violations) => violations.into_iter().map(|v| v.code).collect(),
+    };
+    let mut silent = Vec::new();
+    for row in laws {
+        if control_codes.iter().any(|code| code == row.code) {
+            let code = row.code;
+            let fact = row.fact;
+            panic!("{name}: {code} [{fact}] fires on unmutated text");
+        }
+        let munged = (row.munge)(&base_text);
+        let fired: Vec<String> = match appendix_a::parse_catalog(&munged) {
+            Ok(_) => Vec::new(),
+            Err(violations) => violations.into_iter().map(|v| v.code).collect(),
+        };
+        if !fired.iter().any(|code| code == row.code) {
+            silent.push(format!("{} [{}] -> {fired:?}", row.code, row.fact));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "{name}: {} of {} laws stopped firing: {silent:?}",
+        silent.len(),
+        laws.len()
+    );
+}
+
+fn run_source_laws(name: &str, laws: &[SourceLaw]) {
+    let base = appendix_catalog();
+    let base_bytes = appendix_plan_source();
+    let control: BTreeSet<String> = appendix_a::verify_source(&base, &base_bytes)
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect();
+    let mut silent = Vec::new();
+    for row in laws {
+        if control.contains(row.code) {
+            let code = row.code;
+            let fact = row.fact;
+            panic!("{name}: {code} [{fact}] is already present without the mutation");
+        }
+        let mut catalog = base.clone();
+        if let Some(mutate_catalog) = row.mutate_catalog {
+            (mutate_catalog)(&mut catalog);
+        }
+        let bytes = (row.mutate_bytes)(base_bytes.clone());
+        let fired: BTreeSet<String> = appendix_a::verify_source(&catalog, &bytes)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect();
+        if !fired.contains(row.code) {
+            silent.push(format!("{} [{}] -> {:?}", row.code, row.fact, fired));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "{name}: {} of {} laws stopped firing: {silent:?}",
+        silent.len(),
+        laws.len()
+    );
+}
+
+// --- fgdb-tsfs family tables -------------------------------------------------
+// Each row was derived from its emitter in src/appendix_a.rs and is proven by
+// execution: the runner asserts the exact code is ABSENT from the clean
+// control and PRESENT after the mutation. Benign collateral violations from
+// cross-pinned laws never suppress a target code.
+
+/// Expansion bindings are empty in the clean catalog, so every expansion law
+/// pushes a synthetic row; the row_id mirrors the derivation law
+/// (`{scope}:expansion-binding:{kind}-{suffix}-parameter-{ordinal}-{kebab}`),
+/// keeping collateral noise to unrelated laws.
+fn eb_row(
+    target_row_id: &str,
+    ordinal: i64,
+    formal: &str,
+    formal_class: &str,
+    values: &[&str],
+) -> appendix_a::ExpansionBinding {
+    let parts: Vec<&str> = target_row_id.split(':').collect();
+    appendix_a::ExpansionBinding {
+        row_id: format!(
+            "{}:expansion-binding:{}-{}-parameter-{}-{}",
+            parts[0],
+            parts[1],
+            parts[2],
+            ordinal,
+            formal.to_ascii_lowercase()
+        ),
+        target_row_id: target_row_id.to_string(),
+        parameter_ordinal: ordinal,
+        formal: formal.to_string(),
+        formal_class: formal_class.to_string(),
+        values: values.iter().map(|v| v.to_string()).collect(),
+        rationale: "fgdb-tsfs witness".into(),
+    }
+}
+
+fn tsfs_annotation(
+    suffix: &str,
+    target_row_id: String,
+    exact_type: &str,
+    generic_expansions: Vec<String>,
+) -> appendix_a::Annotation {
+    appendix_a::Annotation {
+        row_id: format!("a03:annotation:witness-{suffix}"),
+        target_row_id,
+        exact_type: exact_type.into(),
+        cardinality: "one".into(),
+        layout: "inline".into(),
+        role: "row-store".into(),
+        posture: "static".into(),
+        authority: "local".into(),
+        locality: "resident".into(),
+        generic_expansions,
+        role_expansions: vec![],
+        reference_semantics: "owned-value".into(),
+        target_schema_ids: vec![],
+        construction_order: "direct".into(),
+        retention_and_cut_rule: "retain-all".into(),
+        digest_recipe: "sha256-payload".into(),
+        redaction_class: "none-redacted".into(),
+        resource_bounds: "bounded-small".into(),
+        compatibility: "stable-additive".into(),
+    }
+}
+
+fn appendix_ambiguity_laws() -> Vec<CatalogLaw> {
+    vec![
+        CatalogLaw {
+            code: "catalog_ambiguity_adjudication_contract_unapproved",
+            fact: "an adjudication row carries a row_id absent from the readable pin table",
+            mutate: |c| {
+                let row = c
+                    .ambiguity_adjudications
+                    .first_mut()
+                    .expect("adjudication row exists");
+                row.row_id.push_str("-unapproved");
+            },
+        },
+        CatalogLaw {
+            code: "catalog_ambiguity_adjudication_duplicate",
+            fact: "two adjudication rows share one ambiguity_source_key",
+            mutate: |c| {
+                let duplicate = c.ambiguity_adjudications[0].clone();
+                c.ambiguity_adjudications.push(duplicate);
+            },
+        },
+        CatalogLaw {
+            code: "catalog_ambiguity_adjudication_invalid",
+            fact: "an adjudication's resolution leaves the closed four-value vocabulary",
+            mutate: |c| c.ambiguity_adjudications[0].resolution = "deferred".into(),
+        },
+        CatalogLaw {
+            code: "catalog_ambiguity_resolution_target_invalid",
+            fact: "a non-final adjudication still names resolved source keys",
+            mutate: |c| c.ambiguity_adjudications[1].resolution = "needs-source-fix".into(),
+        },
+        CatalogLaw {
+            code: "catalog_ambiguity_adjudication_contract_mismatch",
+            fact: "an adjudication's resolved_source_keys stop byte-matching its readable pin",
+            mutate: |c| {
+                c.ambiguity_adjudications[0]
+                    .resolved_source_keys
+                    .push("zzz".into())
+            },
+        },
+        CatalogLaw {
+            code: "catalog_ambiguity_adjudication_contract_missing",
+            fact: "the catalog drops an adjudication row its readable contract still pins",
+            mutate: |c| {
+                c.ambiguity_adjudications.remove(0);
+            },
+        },
+        CatalogLaw {
+            code: "catalog_ambiguity_rationale_digest_mismatch",
+            fact: "an adjudication's rationale prose stops hashing to its pinned digest",
+            mutate: |c| c.ambiguity_adjudications[0].rationale.push(' '),
+        },
+    ]
+}
+
+fn appendix_metadata_laws() -> Vec<CatalogLaw> {
+    vec![
+        CatalogLaw {
+            code: "catalog_definition_status_invalid",
+            fact: "a target's definition_status leaves declared|complete",
+            mutate: |c| c.targets[0].definition_status = "halfway".into(),
+        },
+        CatalogLaw {
+            code: "catalog_metadata_blank",
+            fact: "a candidate's source_locations becomes empty",
+            mutate: |c| c.top_level_candidates[0].source_locations.clear(),
+        },
+        CatalogLaw {
+            code: "catalog_target_source_unresolved",
+            fact: "a top-level source_key matches no candidate or known prefix",
+            mutate: |c| c.targets[0].source_key = "top|NoSuchWitnessSymbol".into(),
+        },
+        CatalogLaw {
+            code: "catalog_target_reference_incomplete",
+            fact: "a reference-backed source_key ships as complete while its symbol stays reserved",
+            mutate: |c| {
+                c.targets
+                    .iter_mut()
+                    .find(|t| t.source_key == "reference|DeltaBlockVersion")
+                    .expect("reserved-reference target exists")
+                    .definition_status = "complete".into();
+            },
+        },
+        CatalogLaw {
+            code: "catalog_target_source_owner_mismatch",
+            fact: "a completed top-keyed target moves off its candidate's canonical slice",
+            mutate: |c| {
+                let t = &mut c.targets[0];
+                t.definition_status = "complete".into();
+                t.slice_id = "a01".into();
+            },
+        },
+        CatalogLaw {
+            code: "catalog_target_class_mismatch",
+            fact: "a candidate's identity_class stops matching its projected logical kind",
+            mutate: |c| {
+                c.top_level_candidates
+                    .iter_mut()
+                    .find(|r| r.symbol == "RecoveryCheckpoint")
+                    .expect("RecoveryCheckpoint candidate exists")
+                    .identity_class = "physical".into();
+            },
+        },
+        CatalogLaw {
+            code: "complete_slice_target_missing",
+            fact: "a slice promoted to complete loses both its targets and coverage candidates",
+            mutate: |c| {
+                c.slices
+                    .iter_mut()
+                    .find(|s| s.id == "a01")
+                    .expect("slice a01 exists")
+                    .definition_status = "complete".into();
+                c.targets.retain(|t| t.slice_id != "a01");
+                c.top_level_candidates.retain(|t| t.slice_id != "a01");
+            },
+        },
+        CatalogLaw {
+            code: "catalog_annotation_duplicate",
+            fact: "two annotation rows share one target_row_id",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.annotations
+                    .push(tsfs_annotation("dup-1", t.clone(), "u64", vec![]));
+                c.annotations
+                    .push(tsfs_annotation("dup-2", t, "u64", vec![]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_missing",
+            fact: "a generic exact_type carries no expansion vectors at all",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.annotations
+                    .push(tsfs_annotation("exp-missing", t, "Vec<u8>", vec![]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_evidence_duplicate",
+            fact: "two evidence rows share the (target_row_id, evidence_id) key",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                for i in 0..2 {
+                    c.evidence.push(appendix_a::EvidenceBinding {
+                        row_id: format!("{}:evidence:witness-dup-{i}", t.replace(':', "-")),
+                        target_row_id: t.clone(),
+                        evidence_id: "witness".into(),
+                        phase: "static".into(),
+                        status: "live".into(),
+                        owner_bead_id: "fgdb-witness-0".into(),
+                        checker_ids: vec!["checker-a".into()],
+                        scenario_ids: vec!["scenario-a".into()],
+                        event_ids: vec!["event-a".into()],
+                        gate_ids: vec!["G0".into()],
+                    });
+                }
+            },
+        },
+    ]
+}
+
+fn appendix_reservation_laws() -> Vec<CatalogLaw> {
+    vec![
+        CatalogLaw {
+            code: "catalog_reservation_symbol_invalid",
+            fact: "a reservation symbol stops being a type-family name",
+            mutate: |c| c.reservations[0].symbol = "bad-symbol".into(),
+        },
+        CatalogLaw {
+            code: "catalog_reservation_duplicate",
+            fact: "two reservations claim one symbol",
+            mutate: |c| c.reservations[1].symbol = c.reservations[0].symbol.clone(),
+        },
+        CatalogLaw {
+            code: "catalog_reservation_class_invalid",
+            fact: "a reservation's row_kind leaves the logical-kind class",
+            mutate: |c| c.reservations[0].row_kind = "physical-kind".into(),
+        },
+        CatalogLaw {
+            code: "catalog_reservation_disposition_invalid",
+            fact: "an unprojected reservation's disposition leaves reserved",
+            mutate: |c| {
+                c.reservations
+                    .iter_mut()
+                    .find(|r| r.disposition == "reserved")
+                    .expect("reserved row exists")
+                    .disposition = "existing".into();
+            },
+        },
+        CatalogLaw {
+            code: "catalog_reservation_code_collision",
+            fact: "a reserved symbol is re-assigned a code owned by a projected kind",
+            mutate: |c| {
+                let code = c.identity.logical[0].object_kind;
+                c.reservations
+                    .iter_mut()
+                    .find(|r| r.disposition == "reserved")
+                    .expect("reserved row exists")
+                    .code_reservation = format!("0x{code:04x}");
+            },
+        },
+    ]
+}
+
+fn appendix_disposition_laws() -> Vec<CatalogLaw> {
+    vec![
+        CatalogLaw {
+            code: "catalog_source_disposition_count",
+            fact: "the disposition census shrinks below its pinned size",
+            mutate: |c| {
+                c.source_symbol_dispositions.pop();
+            },
+        },
+        CatalogLaw {
+            code: "catalog_reservation_disposition_missing",
+            fact: "the census row covering a reservation symbol is deleted",
+            mutate: |c| {
+                let sym = c.reservations[0].symbol.clone();
+                c.source_symbol_dispositions.retain(|d| d.symbol != sym);
+            },
+        },
+        CatalogLaw {
+            code: "catalog_reservation_owner_mismatch",
+            fact: "a non-g0 disposition moves to a different slice than its reservation",
+            mutate: |c| {
+                c.source_symbol_dispositions
+                    .iter_mut()
+                    .find(|d| d.slice_id == "a03")
+                    .expect("a03 disposition exists")
+                    .slice_id = "a04".into();
+            },
+        },
+        CatalogLaw {
+            code: "catalog_source_disposition_duplicate",
+            fact: "a cloned census row keeps its symbol so the key set collapses",
+            mutate: |c| {
+                let mut d = c
+                    .source_symbol_dispositions
+                    .iter()
+                    .find(|d| d.slice_id != "g0")
+                    .expect("non-g0 disposition exists")
+                    .clone();
+                d.row_id = format!("{}-witness-dup", d.row_id);
+                c.source_symbol_dispositions.push(d);
+            },
+        },
+        CatalogLaw {
+            code: "catalog_source_disposition_orphan",
+            fact: "a non-g0 disposition names a symbol no reservation claims",
+            mutate: |c| {
+                c.source_symbol_dispositions
+                    .iter_mut()
+                    .find(|d| d.slice_id != "g0")
+                    .expect("non-g0 disposition exists")
+                    .symbol = "ZzOrphanWitness".into();
+            },
+        },
+        CatalogLaw {
+            code: "g0_projection_disposition_count",
+            fact: "one g0 disposition row is removed from the pinned 35",
+            mutate: |c| {
+                let i = c
+                    .source_symbol_dispositions
+                    .iter()
+                    .position(|d| d.slice_id == "g0")
+                    .expect("g0 row exists");
+                c.source_symbol_dispositions.remove(i);
+            },
+        },
+        CatalogLaw {
+            code: "g0_projection_disposition_mismatch",
+            fact: "a g0 row keeps its pinned id but names the wrong symbol",
+            mutate: |c| {
+                c.source_symbol_dispositions
+                    .iter_mut()
+                    .find(|d| d.slice_id == "g0")
+                    .expect("g0 row exists")
+                    .symbol = "WrongWitnessSymbol".into();
+            },
+        },
+        CatalogLaw {
+            code: "g0_projection_disposition_missing",
+            fact: "a g0 row_id leaves its derived key so the lookup misses",
+            mutate: |c| {
+                c.source_symbol_dispositions
+                    .iter_mut()
+                    .find(|d| d.slice_id == "g0")
+                    .expect("g0 row exists")
+                    .row_id = "g0:source-symbol-disposition:witness-missing".into();
+            },
+        },
+    ]
+}
+
+fn appendix_expansion_laws() -> Vec<CatalogLaw> {
+    vec![
+        CatalogLaw {
+            code: "catalog_expansion_parameter_ordinal_invalid",
+            fact: "an expansion binding claims ordinal zero",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.expansion_bindings
+                    .push(eb_row(&t, 0, "Role", "role", &["Owner"]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_parameter_ordinal_duplicate",
+            fact: "two bindings share one (target, ordinal)",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.expansion_bindings
+                    .push(eb_row(&t, 1, "Role", "role", &["Owner"]));
+                c.expansion_bindings
+                    .push(eb_row(&t, 1, "Realm", "role", &["Owner"]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_formal_invalid",
+            fact: "a role-class binding carries a generic formal",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.expansion_bindings
+                    .push(eb_row(&t, 1, "Role", "generic", &["Owner"]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_contract_invalid",
+            fact: "a bound value leaves the identifier byte class",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.expansion_bindings
+                    .push(eb_row(&t, 1, "Role", "role", &["alpha-beta"]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_binding_contract_unapproved",
+            fact: "a live expansion binding has no readable contract pin",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.expansion_bindings
+                    .push(eb_row(&t, 1, "Role", "role", &["Owner"]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_binding_contract_drift",
+            fact: "the live expansion-binding table drifts from its compiled-in pin",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.expansion_bindings
+                    .push(eb_row(&t, 1, "Role", "role", &["Owner"]));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_ambiguity_adjudication_contract_drift",
+            fact: "the live adjudication table drifts from its pinned count and sha",
+            mutate: |c| {
+                c.ambiguity_adjudications.pop();
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_invalid",
+            fact: "a generic expansion list arrives unsorted",
+            mutate: |c| {
+                let t = c.projection_rows[0].row_id.clone();
+                c.annotations.push(tsfs_annotation(
+                    "unsorted",
+                    t,
+                    "Vec<u8>",
+                    vec!["Zeta".into(), "Alpha".into()],
+                ));
+            },
+        },
+        CatalogLaw {
+            code: "catalog_expansion_source_coverage_mismatch",
+            fact: "bindings never cover the source family's declared dimensions",
+            mutate: |c| {
+                c.expansion_bindings.push(eb_row(
+                    "a17:logical-kind:canonical-pre-bootstrap-evidence-reencryption-owner",
+                    99,
+                    "Role",
+                    "role",
+                    &["Owner"],
+                ));
+            },
+        },
+    ]
+}
+
+fn appendix_source_ambiguity_laws() -> Vec<SourceLaw> {
+    vec![
+        SourceLaw {
+            code: "source_ambiguity_adjudication_orphan",
+            fact: "an adjudication key names no ambiguity in the raw source census",
+            mutate_catalog: Some(|c| {
+                c.ambiguity_adjudications[0]
+                    .ambiguity_source_key
+                    .push_str("-drift");
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_ambiguity_adjudication_mismatch",
+            fact: "an adjudication's source_locations stop matching the raw census",
+            mutate_catalog: Some(|c| {
+                c.ambiguity_adjudications[0]
+                    .source_locations
+                    .push("a14:99999".into());
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_ambiguity_resolution_relation_mismatch",
+            fact: "a final adjudication's resolved set stops matching the parser-owned set",
+            mutate_catalog: Some(|c| {
+                c.ambiguity_adjudications[0].resolved_source_keys.pop();
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_complete_slice_ambiguity_unresolved",
+            fact: "a slice with zero adjudicated ambiguities is promoted to complete",
+            mutate_catalog: Some(|c| {
+                c.slices
+                    .iter_mut()
+                    .find(|s| s.id == "a04")
+                    .expect("slice a04 exists")
+                    .definition_status = "complete".into();
+            }),
+            mutate_bytes: identity_bytes,
+        },
+    ]
+}
+
+fn identity_bytes(bytes: Vec<u8>) -> Vec<u8> {
+    bytes
+}
+
+fn appendix_resource_bucket_laws() -> Vec<SourceLaw> {
+    vec![SourceLaw {
+        code: "resource_bucket_contract_cardinality",
+        fact: "the ResourceLedgerState paragraph splits into zero charge-bearing paragraphs",
+        mutate_catalog: None,
+        mutate_bytes: |mut bytes| {
+            let marker = b"`ResourceLedgerState` is ";
+            let pos = bytes
+                .windows(marker.len())
+                .position(|w| w == marker)
+                .expect("ResourceLedgerState line exists");
+            bytes.splice(pos..pos + 1, b"The ".iter().copied());
+            bytes
+        },
+    }]
+}
+
+fn appendix_citation_registry_law() -> Vec<RootLaw> {
+    vec![RootLaw {
+        code: "catalog_ambiguity_citation_registry_unavailable",
+        fact: "the repository under test lacks registries/laws.toml so the gate fails closed",
+        entry: RootEntry::ProjectionDiffScratch,
+        mutate: |_| {},
+    }]
+}
+
+fn appendix_source_census_laws() -> Vec<SourceLaw> {
+    vec![
+        SourceLaw {
+            code: "source_concatenation_mismatch",
+            fact: "catalog slice order no longer reconstructs the Appendix byte sequence",
+            mutate_catalog: Some(|c| c.slices.reverse()),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_heading_mismatch",
+            fact: "the pinned heading text no longer byte-matches the start_line content",
+            mutate_catalog: Some(|c| c.source_manifest.heading.push('!')),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_byte_count_mismatch",
+            fact: "the pinned byte_count no longer equals the extracted Appendix length",
+            mutate_catalog: Some(|c| c.source_manifest.byte_count += 1),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_heading_missing",
+            fact: "the line after the Appendix range (next_heading pin) does not exist",
+            mutate_catalog: None,
+            mutate_bytes: |mut bytes| {
+                let end = appendix_catalog().source_manifest.end_line as usize;
+                let mut seen = 0usize;
+                let mut cut = bytes.len();
+                for (i, byte) in bytes.iter().enumerate() {
+                    if *byte == b'\n' {
+                        seen += 1;
+                        if seen == end {
+                            cut = i + 1;
+                            break;
+                        }
+                    }
+                }
+                bytes.truncate(cut);
+                bytes
+            },
+        },
+        SourceLaw {
+            code: "source_census_range_invalid",
+            fact: "a declared slice's start_line is negative so its coordinates do not fit usize",
+            mutate_catalog: Some(|c| c.slices[0].start_line = -1),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_structural_census_error",
+            fact: "two declared slices claim overlapping line ranges so the partition is not disjoint",
+            mutate_catalog: Some(|c| c.slices[1].start_line = c.slices[0].start_line),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_top_level_candidate_orphan",
+            fact: "a catalog top-level candidate's source_key is absent from the source census",
+            mutate_catalog: Some(|c| {
+                let mut orphan = c.top_level_candidates[0].clone();
+                orphan.source_key = format!("zz-orphan-witness|{}", orphan.symbol);
+                c.top_level_candidates.push(orphan);
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "reference_source_reservation_orphan",
+            fact: "a permanent reservation's symbol never appears as a plan-derived reference family",
+            mutate_catalog: Some(|c| {
+                c.reservations.push(appendix_a::Reservation {
+                    row_id: "zz:witness:reservation-orphan".into(),
+                    slice_id: "a01".into(),
+                    symbol: "ZzWitnessOrphanType".into(),
+                    row_kind: "logical-kind".into(),
+                    identity_class: "identity".into(),
+                    code_reservation: String::new(),
+                    disposition: "permanent".into(),
+                });
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "reference_source_disposition_missing",
+            fact: "a plan-derived reference family has no non-g0 source-symbol disposition row",
+            mutate_catalog: Some(|c| {
+                c.source_symbol_dispositions
+                    .retain(|row| row.slice_id == "g0" || row.symbol != "ConfigurationState");
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "reference_source_disposition_orphan",
+            fact: "a catalog disposition row names a symbol absent from the plan-derived reference census",
+            mutate_catalog: Some(|c| {
+                c.source_symbol_dispositions
+                    .push(appendix_a::SourceSymbolDisposition {
+                        row_id: "zz:witness:disposition-orphan".into(),
+                        slice_id: "a01".into(),
+                        symbol: "ZzWitnessOrphanType".into(),
+                        disposition: "permanent".into(),
+                        source_locations: vec!["a01:1".into()],
+                    });
+            }),
+            mutate_bytes: identity_bytes,
+        },
+    ]
+}
+
+fn appendix_source_manifest_laws() -> Vec<CatalogLaw> {
+    vec![CatalogLaw {
+        code: "source_manifest_pin_invalid",
+        fact: "the manifest byte_count pin becomes non-positive",
+        mutate: |c| c.source_manifest.byte_count = 0,
+    }]
+}
+
+/// File-surface laws: the public loaders over scratch roots. Each pairs a
+/// clean control (real catalog loads) with a corrupted fixture.
+#[test]
+fn appendix_tsfs_file_surface_laws_are_seen_to_fire() {
+    // catalog_read: the catalog file does not exist at all.
+    let absent_root = scratch_root("catalog-read");
+    let control = appendix_a::load_catalog_file(&repo_root().join(appendix_a::CATALOG_PATH));
+    assert!(control.is_ok(), "clean catalog must load for the control");
+    let fired = appendix_a::load_catalog_file(&absent_root.join(appendix_a::CATALOG_PATH))
+        .err()
+        .expect("missing catalog file must fail")
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect::<Vec<_>>();
+    assert_code(&fired, "catalog_read");
+
+    // catalog_encoding: one invalid UTF-8 byte appended to the real text.
+    let encoding_root = scratch_root("catalog-encoding");
+    let mut bad = appendix_catalog_text().into_bytes();
+    bad.push(0xFF);
+    std::fs::create_dir_all(encoding_root.join("registries")).expect("fixture dir");
+    std::fs::write(encoding_root.join(appendix_a::CATALOG_PATH), &bad).expect("fixture write");
+    let fired = appendix_a::load_catalog_file(&encoding_root.join(appendix_a::CATALOG_PATH))
+        .err()
+        .expect("invalid UTF-8 must fail")
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect::<Vec<_>>();
+    assert_code(&fired, "catalog_encoding");
+
+    // source_read: valid catalog, but the pinned plan source is absent.
+    let bare_root = scratch_root("source-read");
+    write_fixture(
+        &bare_root,
+        appendix_a::CATALOG_PATH,
+        &appendix_catalog_text(),
+    );
+    let fired = appendix_a::load_and_verify(&bare_root)
+        .err()
+        .expect("missing plan source must fail")
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect::<Vec<_>>();
+    assert_code(&fired, "source_read");
+}
+
+fn appendix_bindings_laws() -> Vec<RootLaw> {
+    vec![
+        RootLaw {
+            code: "catalog_maintenance_owner_crate_unresolved",
+            fact: "maintenance_proof.owner_crate does not resolve to a workspace package",
+            entry: RootEntry::Bindings,
+            mutate: |c| c.maintenance_proof.owner_crate = "fgdb-ghost-crate".to_owned(),
+        },
+        RootLaw {
+            code: "catalog_scenario_target_scope_drift",
+            fact: "the manifest-pinned scenario's sha no longer equals the catalog pin",
+            entry: RootEntry::Bindings,
+            mutate: |c| c.target_manifest.target_source_assignment_sha256 = "0".repeat(64),
+        },
+        RootLaw {
+            code: "catalog_evidence_scenario_target_uncovered",
+            fact: "an evidence row references a live scenario that does not cover its target",
+            entry: RootEntry::Bindings,
+            mutate: |c| {
+                c.evidence.push(appendix_a::EvidenceBinding {
+                    row_id: "a10:evidence:union-witness-target-witness".into(),
+                    target_row_id: "a10:union:no-such-witness-target".into(),
+                    evidence_id: "witness".into(),
+                    phase: "static".into(),
+                    status: "planned".into(),
+                    owner_bead_id: "fgdb-appendix-a-catalog-scaffold-gvvf".into(),
+                    checker_ids: vec![],
+                    scenario_ids: vec!["g0_identity_e2e".into()],
+                    event_ids: vec!["appendix_closure_checked".into()],
+                    gate_ids: vec!["G0".into()],
+                });
+            },
+        },
+        RootLaw {
+            code: "catalog_evidence_scenario_uncovered",
+            fact: "the referenced scenario contributes none of the maintenance event ids",
+            entry: RootEntry::Bindings,
+            mutate: |c| c.maintenance_proof.event_ids.clear(),
+        },
+    ]
+}
+
+fn appendix_generated_family_laws() -> Vec<RootLaw> {
+    vec![
+        RootLaw {
+            code: "generated_family_union_missing",
+            fact: "a projected ordinary union carrying a generated family name is renamed away",
+            entry: RootEntry::ProjectionDiff,
+            mutate: |c| {
+                if let Some(u) = c
+                    .identity
+                    .ordinary_unions
+                    .iter_mut()
+                    .find(|u| u.union_name == "GlobalSequenceNeutralSpec<Tag>")
+                {
+                    u.union_name = "UnprojectedFamilyUnion".into();
+                }
+            },
+        },
+        RootLaw {
+            code: "generated_family_arm_set_mismatch",
+            fact: "one projected family arm's source_arm_name diverges from the derived set",
+            entry: RootEntry::ProjectionDiff,
+            mutate: |c| {
+                let u = c
+                    .identity
+                    .ordinary_unions
+                    .iter_mut()
+                    .find(|u| u.union_name == "SequenceNeutralSpec<Tag>")
+                    .expect("SequenceNeutralSpec union is projected");
+                u.arms[0].source_arm_name = "drifted-arm".into();
+            },
+        },
+        RootLaw {
+            code: "generated_family_payload_drift",
+            fact: "one projected family arm's payload digest diverges from the derived digest",
+            entry: RootEntry::ProjectionDiff,
+            mutate: |c| {
+                let u = c
+                    .identity
+                    .ordinary_unions
+                    .iter_mut()
+                    .find(|u| u.union_name == "SequenceNeutralSpec<Tag>")
+                    .expect("SequenceNeutralSpec union is projected");
+                u.arms[0].payload_sha256 = Some("0".repeat(64));
+            },
+        },
+        RootLaw {
+            code: "generated_family_name_squatting",
+            fact: "a non-derived ordinary union claims a generated wrapper name",
+            entry: RootEntry::ProjectionDiff,
+            mutate: |c| {
+                if let Some(u) = c
+                    .identity
+                    .ordinary_unions
+                    .iter_mut()
+                    .find(|u| u.union_name == "TrustTransition")
+                {
+                    u.union_name = "TrustTransitionSequenceNeutralSpec".into();
+                }
+            },
+        },
+    ]
+}
+
+fn appendix_closure_laws() -> Vec<RootLaw> {
+    vec![
+        RootLaw {
+            code: "catalog_evidence_contract_invalid",
+            fact: "an evidence binding's phase leaves static|runtime",
+            entry: RootEntry::Closure,
+            mutate: |c| {
+                c.evidence.push(appendix_a::EvidenceBinding {
+                    row_id: "a10:evidence:witness-target-witness".into(),
+                    target_row_id: "a10:union:witness-target".into(),
+                    evidence_id: "witness".into(),
+                    phase: "quantum".into(),
+                    status: "planned".into(),
+                    owner_bead_id: "fgdb-appendix-a-catalog-scaffold-gvvf".into(),
+                    checker_ids: vec![],
+                    scenario_ids: vec![],
+                    event_ids: vec![],
+                    gate_ids: vec![],
+                });
+            },
+        },
+        RootLaw {
+            code: "catalog_semantic_consumer_invalid",
+            fact: "a semantic binding names the maintenance crate as a consumer",
+            entry: RootEntry::Closure,
+            mutate: |c| {
+                c.semantic_bindings.push(appendix_a::SemanticBinding {
+                    row_id: "catalog:semantic-binding:witness-consumer".into(),
+                    target_row_id: "a10:union:witness-target".into(),
+                    owner_bead_id: "fgdb-witness-owner-zz".into(),
+                    owner_crate: "fgdb-witness".into(),
+                    owner_status: "planned".into(),
+                    consumer_crates: vec!["appendix-a-catalog".into()],
+                });
+            },
+        },
+        RootLaw {
+            code: "catalog_annotation_field_contract_unresolved",
+            fact: "a field annotation's authoritative durable-field row no longer resolves",
+            entry: RootEntry::Closure,
+            mutate: |c| {
+                let proj = c
+                    .projection_rows
+                    .iter()
+                    .find(|p| p.projection == "durable_fields" && p.row_kind == "field")
+                    .expect("projected field row exists")
+                    .clone();
+                let f = c
+                    .identity
+                    .fields
+                    .iter_mut()
+                    .find(|f| {
+                        format!("{}.{}", f.containing_schema, f.stable_name)
+                            == proj.canonical_symbol
+                    })
+                    .expect("annotated field exists");
+                f.stable_name.push_str("_unresolved");
+                c.annotations.push(appendix_a::Annotation {
+                    row_id: "catalog:annotation:witness-unresolved".into(),
+                    target_row_id: proj.row_id,
+                    exact_type: "Witness".into(),
+                    cardinality: "one".into(),
+                    layout: "unit".into(),
+                    role: String::new(),
+                    posture: String::new(),
+                    authority: String::new(),
+                    locality: String::new(),
+                    generic_expansions: Vec::new(),
+                    role_expansions: Vec::new(),
+                    reference_semantics: String::new(),
+                    target_schema_ids: Vec::new(),
+                    construction_order: String::new(),
+                    retention_and_cut_rule: String::new(),
+                    digest_recipe: String::new(),
+                    redaction_class: String::new(),
+                    resource_bounds: String::new(),
+                    compatibility: String::new(),
+                });
+            },
+        },
+    ]
+}
+
+fn appendix_source_union_laws() -> Vec<SourceLaw> {
+    vec![
+        SourceLaw {
+            code: "source_union_annotation_mismatch",
+            fact: "a complete union target has no matching annotation (annotations are empty)",
+            mutate_catalog: Some(|c| {
+                let mut symbols: Vec<String> = c
+                    .identity
+                    .ordinary_unions
+                    .iter()
+                    .map(|u| format!("{}.{}", u.containing_schema, u.union_path))
+                    .collect();
+                symbols.sort();
+                symbols.dedup();
+                let row_id = c
+                    .projection_rows
+                    .iter()
+                    .find(|p| p.row_kind == "union" && symbols.contains(&p.canonical_symbol))
+                    .expect("projected union row exists")
+                    .row_id
+                    .clone();
+                c.targets
+                    .iter_mut()
+                    .find(|t| t.target_row_id == row_id)
+                    .expect("union target exists")
+                    .definition_status = "complete".into();
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_union_arm_annotation_mismatch",
+            fact: "a complete union-arm target has no matching annotation",
+            mutate_catalog: Some(|c| {
+                let mut symbols: Vec<String> = c
+                    .identity
+                    .ordinary_unions
+                    .iter()
+                    .flat_map(|u| {
+                        u.arms.iter().map(move |a| {
+                            format!(
+                                "{}.{}.{}",
+                                a.containing_schema, a.union_path, a.source_arm_name
+                            )
+                        })
+                    })
+                    .collect();
+                symbols.sort();
+                symbols.dedup();
+                let row_id = c
+                    .projection_rows
+                    .iter()
+                    .find(|p| p.row_kind == "union-arm" && symbols.contains(&p.canonical_symbol))
+                    .expect("projected union-arm row exists")
+                    .row_id
+                    .clone();
+                c.targets
+                    .iter_mut()
+                    .find(|t| t.target_row_id == row_id)
+                    .expect("union-arm target exists")
+                    .definition_status = "complete".into();
+            }),
+            mutate_bytes: identity_bytes,
+        },
+        SourceLaw {
+            code: "source_union_contract_mismatch",
+            fact: "a union target resolves to a different census union candidate",
+            mutate_catalog: Some(|c| {
+                let mut keys: Vec<String> = Vec::new();
+                for p in &c.projection_rows {
+                    if p.row_kind != "union" {
+                        continue;
+                    }
+                    if let Some(t) = c.targets.iter().find(|t| t.target_row_id == p.row_id) {
+                        // Generated-family wrapper unions are checked by
+                        // verify_generated_family_unions, not here; swapping
+                        // their keys is invisible to this law.
+                        if t.source_key.contains("SequenceNeutralSpec") {
+                            continue;
+                        }
+                        keys.push(t.source_key.clone());
+                    }
+                }
+                keys.sort();
+                keys.dedup();
+                assert!(
+                    keys.len() >= 2,
+                    "witness needs two distinct union source keys"
+                );
+                let victim = c
+                    .targets
+                    .iter_mut()
+                    .find(|t| t.source_key == keys[0] && t.target_kind == "union")
+                    .expect("union target exists");
+                victim.source_key = keys[1].clone();
+            }),
+            mutate_bytes: identity_bytes,
+        },
+    ]
+}
+
+fn appendix_text_laws() -> Vec<TextLaw> {
+    vec![TextLaw {
+        code: "catalog_toml_parse",
+        fact: "catalog text stops being parseable TOML",
+        munge: |text| format!("@@@ not toml @@@\n{text}"),
+    }]
+}
+
+fn appendix_projection_laws() -> Vec<CatalogLaw> {
+    vec![
+        CatalogLaw {
+            code: "projection_epoch_mismatch",
+            fact: "the logical registry epoch desyncs from its projection_epochs pin",
+            mutate: |c| c.identity.logical_epoch += 1,
+        },
+        CatalogLaw {
+            code: "projection_row_count",
+            fact: "one projection row is removed so the count leaves its pinned size",
+            mutate: |c| {
+                let i = c
+                    .projection_rows
+                    .iter()
+                    .position(|r| r.slice_id != "g0")
+                    .expect("non-g0 projection row exists");
+                c.projection_rows.remove(i);
+            },
+        },
+        CatalogLaw {
+            code: "projection_owner_assignment_drift",
+            fact: "the released sorted row-id transcript sha no longer matches its pin",
+            mutate: |c| {
+                let i = c
+                    .projection_rows
+                    .iter()
+                    .position(|r| r.slice_id != "g0")
+                    .expect("non-g0 projection row exists");
+                c.projection_rows.remove(i);
+            },
+        },
+        CatalogLaw {
+            code: "slice_projection_invalid",
+            fact: "a slice expects an unknown projection class",
+            mutate: |c| c.slices[0].expected_projection_classes.push("bogus_class".into()),
+        },
+        CatalogLaw {
+            code: "slice_census_duplicate",
+            fact: "a cloned candidate duplicates a source key inside one slice census",
+            mutate: |c| {
+                let clone = c.top_level_candidates[0].clone();
+                c.top_level_candidates.push(clone);
+            },
+        },
+        CatalogLaw {
+            code: "catalog_slice_unknown",
+            fact: "a projection row names a slice id that does not resolve",
+            mutate: |c| {
+                let i = c
+                    .projection_rows
+                    .iter()
+                    .position(|r| r.slice_id != "g0")
+                    .expect("non-g0 projection row exists");
+                c.projection_rows[i].slice_id = "zz_unknown_zz".into();
+            },
+        },
+        CatalogLaw {
+            code: "slice_adjacency_mismatch",
+            fact: "slice 2 claims slice 0 as its predecessor",
+            mutate: |c| c.slices[2].predecessor = c.slices[0].id.clone(),
+        },
+        CatalogLaw {
+            code: "slice_count_mismatch",
+            fact: "the slice table shrinks below the pinned SLICE_PINS length",
+            mutate: |c| {
+                c.slices.pop();
+            },
+        },
+        CatalogLaw {
+            code: "slice_endpoint_mismatch",
+            fact: "the manifest end_line moves and strands the last slice endpoint",
+            mutate: |c| c.source_manifest.end_line += 1,
+        },
+        CatalogLaw {
+            code: "slice_enum_invalid",
+            fact: "a slice's definition_status leaves declared|complete",
+            mutate: |c| c.slices[0].definition_status = "draft".into(),
+        },
+        CatalogLaw {
+            code: "slice_pin_invalid",
+            fact: "a slice's byte_count becomes non-positive",
+            mutate: |c| c.slices[0].byte_count = 0,
+        },
+    ]
+}
+
+fn appendix_dag_law() -> Vec<SourceLaw> {
+    vec![SourceLaw {
+        code: "census_dag_cycle",
+        fact: "one inserted reverse strong ref closes a genuine construction-order 2-cycle",
+        mutate_catalog: None,
+        mutate_bytes: |mut bytes| {
+            let needle = b"`AuthorizationDecisionRecord<Role>` is `{authority_binding:AuthorityBindingFor<Role>,decision_body}`";
+            let pos = bytes
+                .windows(needle.len())
+                .position(|w| w == needle)
+                .expect("AuthorizationDecisionRecord record body exists");
+            let inserted = b"`AuthorizationDecisionRecord<Role>` is `{authority_binding:AuthorityBindingFor<Role>,witness_lpas_ref:StrongRef<LocalPrepareAdmissionSpec>,decision_body}`";
+            bytes.splice(pos..pos + needle.len(), inserted.iter().copied());
+            bytes
+        },
+    }]
+}
+
+fn appendix_epoch_text_laws() -> Vec<TextLaw> {
+    fn append_bogus(text: &str) -> String {
+        format!(
+            "{text}\n[[projection_epoch]]\nregistry = \"bogus_registry\"\nregistry_epoch = 1\n"
+        )
+    }
+    vec![
+        TextLaw {
+            code: "projection_epoch_count",
+            fact: "a seventh epoch table exceeds the six registered projection classes",
+            munge: append_bogus,
+        },
+        TextLaw {
+            code: "projection_epoch_unknown",
+            fact: "an epoch table names an unregistered projection class",
+            munge: append_bogus,
+        },
+        TextLaw {
+            code: "projection_epoch_duplicate",
+            fact: "the final epoch block repeats its registry name verbatim",
+            munge: |text| {
+                let header = text
+                    .rfind("[[projection_epoch]]")
+                    .expect("epoch block exists");
+                format!("{text}{}", &text[header..])
+            },
+        },
+        TextLaw {
+            code: "projection_epoch_invalid",
+            fact: "the first epoch value arrives non-positive",
+            munge: |text| {
+                let h = text.find("[[projection_epoch]]").expect("epoch block exists");
+                let p = h + text[h..].find("registry_epoch = ").expect("epoch key exists");
+                let end = p + text[p..].find('\n').expect("key line ends");
+                let mut out = String::with_capacity(text.len());
+                out.push_str(&text[..p]);
+                out.push_str("registry_epoch = -5");
+                out.push_str(&text[end..]);
+                out
+            },
+        },
+        TextLaw {
+            code: "projection_epoch_missing",
+            fact: "the durable_fields epoch table is deleted while projections still parse for it",
+            munge: |text| {
+                let header = text
+                    .rfind("[[projection_epoch]]")
+                    .expect("epoch block exists");
+                text[..header].to_string()
+            },
+        },
+    ]
+}
+
+#[test]
+fn appendix_tsfs_tables_are_seen_to_fire() {
+    run_catalog_laws("appendix_ambiguity", &appendix_ambiguity_laws());
+    run_catalog_laws("appendix_metadata", &appendix_metadata_laws());
+    run_catalog_laws("appendix_reservations", &appendix_reservation_laws());
+    run_catalog_laws("appendix_dispositions", &appendix_disposition_laws());
+    run_catalog_laws("appendix_expansions", &appendix_expansion_laws());
+    run_catalog_laws("appendix_source_manifest", &appendix_source_manifest_laws());
+    run_catalog_laws("appendix_projections", &appendix_projection_laws());
+    run_source_laws("appendix_source_ambiguity", &appendix_source_ambiguity_laws());
+    run_source_laws("appendix_resource_bucket", &appendix_resource_bucket_laws());
+    run_source_laws("appendix_source_census", &appendix_source_census_laws());
+    run_source_laws("appendix_source_unions", &appendix_source_union_laws());
+    run_source_laws("appendix_dag_cycle", &appendix_dag_law());
+    run_root_laws("appendix_citation_registry", &appendix_citation_registry_law());
+    run_root_laws("appendix_bindings", &appendix_bindings_laws());
+    run_root_laws(
+        "appendix_generated_family",
+        &appendix_generated_family_laws(),
+    );
+    run_root_laws("appendix_closure", &appendix_closure_laws());
+    run_text_laws("appendix_text", &appendix_text_laws());
+    run_text_laws("appendix_epoch_text", &appendix_epoch_text_laws());
+}
+
+/// Scratch-root recipes for the fail-closed repository-binding legs and the
+/// generated-family contract loader. Each fixture is the minimal tree whose
+/// only defect is the named one; the control is the same reader over the real
+/// repository, where the code must be absent.
+#[test]
+fn appendix_tsfs_scratch_recipes_are_seen_to_fire() {
+    fn codes_of(root: &Path, catalog: &appendix_a::Catalog) -> Vec<String> {
+        appendix_a::verify_repository_bindings(root, catalog)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect()
+    }
+    let base = appendix_catalog();
+
+    // catalog_repository_registry_unavailable: an empty root has no
+    // architecture registry at all.
+    let fired = codes_of(&scratch_root("bindings-empty"), &base);
+    assert_code(&fired, "catalog_repository_registry_unavailable");
+
+    // Shared base: registries the binding reader loads before the workspace.
+    let make_base = |tag: &str| {
+        let root = scratch_root(tag);
+        write_fixture(
+            &root,
+            "registries/architecture_decisions.toml",
+            &fs::read_to_string(repo_root().join("registries/architecture_decisions.toml"))
+                .expect("architecture decisions readable"),
+        );
+        write_fixture(
+            &root,
+            ".beads/issues.jsonl",
+            &fs::read_to_string(repo_root().join(".beads/issues.jsonl"))
+                .unwrap_or_else(|_| String::new()),
+        );
+        root
+    };
+
+    // Minimal workspace fixture builder: base + root/member Cargo.tomls plus
+    // an optionally mutated checker index.
+    let with_workspace = |tag: &str, index: Option<&str>| {
+        let root = make_base(tag);
+        write_fixture(&root, "Cargo.toml", "[workspace]\nmembers = [\"m\"]\n");
+        write_fixture(
+            &root,
+            "m/Cargo.toml",
+            "[package]\nname = \"registry-check\"\n",
+        );
+        if let Some(index) = index {
+            write_fixture(&root, "registries/checker_index.toml", index);
+        }
+        root
+    };
+
+    // catalog_repository_checker_index_unavailable: workspace present, no
+    // checker_index.toml.
+    let fired = codes_of(&with_workspace("bindings-no-index", None), &base);
+    assert_code(&fired, "catalog_repository_checker_index_unavailable");
+
+    // catalog_repository_checker_index_ambiguous: one identical duplicate row.
+    // Anchor the marker at line start: the file's header comments mention
+    // `[[checker]]` too, and a mid-comment match would duplicate prose and
+    // break the TOML parse into the unavailable code instead.
+    let duplicate = |index: &mut String| {
+        let marker = "\n[[checker]]";
+        let start = index
+            .find(marker)
+            .expect("checker table exists in the real index")
+            + 1;
+        let end = index[start + marker.len() - 1..]
+            .find("\n[[checker]]")
+            .map(|offset| start + marker.len() - 1 + offset)
+            .unwrap_or(index.len());
+        let block: String = index[start..end].to_owned();
+        index.insert_str(end, &block);
+    };
+    let mut duplicated = fs::read_to_string(repo_root().join("registries/checker_index.toml"))
+        .expect("checker index readable");
+    duplicate(&mut duplicated);
+    let root = with_workspace("bindings-dup-index", Some(&duplicated));
+    let fired = codes_of(&root, &base);
+    assert_code(&fired, "catalog_repository_checker_index_ambiguous");
+
+    // catalog_scenario_registry_drift: the scenario's checker is renamed.
+    let renamed = fs::read_to_string(repo_root().join("registries/checker_index.toml"))
+        .expect("checker index readable")
+        .replace("g0_identity_e2e", "g0_identity_e2e_renamed");
+    let root = with_workspace("bindings-renamed-checker", Some(&renamed));
+    let fired = codes_of(&root, &base);
+    assert_code(&fired, "catalog_scenario_registry_drift");
+
+    // generated_family_contracts_unavailable / _derivation_invalid via the
+    // aggregate projection gate over scratch roots.
+    let diff_codes = |root: &Path| {
+        appendix_a::appendix_a_catalog_projection_diff(root, &base)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect::<Vec<_>>()
+    };
+
+    let fired = diff_codes(&scratch_root("genfam-empty"));
+    assert_code(&fired, "generated_family_contracts_unavailable");
+
+    let contracts_root = scratch_root("genfam-broken-contract");
+    let contracts = fs::read_to_string(repo_root().join("registries/command_contracts.toml"))
+        .expect("command contracts readable");
+    let broken = contracts.replacen("cc:local:recovery-bridge-spec", "broken-id", 1);
+    write_fixture(
+        &contracts_root,
+        "registries/command_contracts.toml",
+        &broken,
+    );
+    let fired = diff_codes(&contracts_root);
+    assert_code(&fired, "generated_family_derivation_invalid");
+}
+
+// ===========================================================================
 // The suite's own guard
 // ===========================================================================
 
@@ -1343,8 +2869,26 @@ fn every_witness_row_names_a_distinct_law() {
     codes.extend(registry_witnesses().iter().map(|row| row.code));
     codes.extend(architecture_registry_witnesses().iter().map(|row| row.code));
     codes.extend(architecture_tree_witnesses().iter().map(|row| row.code));
+    codes.extend(appendix_ambiguity_laws().iter().map(|row| row.code));
+    codes.extend(appendix_metadata_laws().iter().map(|row| row.code));
+    codes.extend(appendix_reservation_laws().iter().map(|row| row.code));
+    codes.extend(appendix_disposition_laws().iter().map(|row| row.code));
+    codes.extend(appendix_expansion_laws().iter().map(|row| row.code));
+    codes.extend(appendix_source_ambiguity_laws().iter().map(|row| row.code));
+    codes.extend(appendix_resource_bucket_laws().iter().map(|row| row.code));
+    codes.extend(appendix_citation_registry_law().iter().map(|row| row.code));
+    codes.extend(appendix_bindings_laws().iter().map(|row| row.code));
+    codes.extend(appendix_generated_family_laws().iter().map(|row| row.code));
+    codes.extend(appendix_closure_laws().iter().map(|row| row.code));
+    codes.extend(appendix_source_census_laws().iter().map(|row| row.code));
+    codes.extend(appendix_source_manifest_laws().iter().map(|row| row.code));
+    codes.extend(appendix_source_union_laws().iter().map(|row| row.code));
+    codes.extend(appendix_text_laws().iter().map(|row| row.code));
+    codes.extend(appendix_projection_laws().iter().map(|row| row.code));
+    codes.extend(appendix_dag_law().iter().map(|row| row.code));
+    codes.extend(appendix_epoch_text_laws().iter().map(|row| row.code));
 
-    assert_eq!(codes.len(), 131, "table row count moved");
+    assert_eq!(codes.len(), 219, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
     // `active_not_a_member`/`active_manifest_missing` are two laws reached by
     // one fact. The island rows above deliberately use separate scan facts.
