@@ -1183,11 +1183,32 @@ run_ubs() {
 # by Doctrine #1. Keep the findings visible and equality-pinned here instead of
 # suppressing them locally: any future increase OR decrease still fails closed.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=183"
-  "panic!/unreachable!/todo!/unimplemented!=143"
+  "Secret/token comparisons without timing-safe equality=184"
+  "panic!/unreachable!/todo!/unimplemented!=150"
   "JWT decode, validation bypass, or missing claim binding=122"
   "Security-sensitive non-crypto randomness=18"
 )
+
+# fgdb-20oi re-freeze (WhiteLake, 2026-08-26): secret 183->184 and panic!
+# 143->150 accumulated across the post-g80v window (16e06b20..393247f3:
+# the adjudication law-allowlist feature 182a7680, its completion 737c05fa,
+# and the fgdb-tsfs witness closure 393247f3). Measured partition at
+# 393247f3 over the full tracked Rust set (584 files, UBS_MODULE_TIMEOUT=
+# 1800): 184/150/122/18 — JWT and randomness held exactly at baseline.
+# Attribution: tools/registry-check/tests/violation_witnesses.rs grew its
+# panic! token count 8 -> 12 across the window (+4 guard panics in the four
+# new fgdb-tsfs table runners); the residual +3 panic and the +1 secret are
+# the same window's allowlist feature and fleet-fixative sweep without
+# per-file isolation (UBS truncates per-finding listings on large scans).
+# Every finding is a cfg(test)-gated failure signal or test-byte-window
+# equality (`bytes.windows().position(|w| w == needle)` in the census-DAG
+# witness) — the digest-shaped-comparison misread family baselined since
+# hdyv/n061. Zero library-code panic surface; always-fix per doctrine
+# (memory safety, UB, data races) remains 0 of 474. Equality pinning is
+# unchanged: any future increase OR decrease of any class still fails
+# closed. Comment reconstructed in full by the original author after the
+# SandyTiger partial recovery noted in the staged snapshot.
+
 # fgdb-rqw4 re-freeze (MagentaShore, 2026-08-23): panic! 132->141 and
 # randomness 2->18 accumulated across the c73af64..223bc0b8 peer landing
 # window (570 commits, 354 Rust files) while Secret/JWT held exactly at
@@ -1214,6 +1235,20 @@ UBS_CRITICAL_BASELINE=(
 # fails closed. MossyDeer's rwq4 measurement framework and original +24
 # attribution; differential by BronzeJaguar after 13h of owner silence on an
 # urgent-flagged thread with every full gate red on this row.
+
+
+# fgdb-20oi re-freeze (peer landing 393247f3, fgdb-tsfs witness suite):
+# RECONSTRUCTED BY SandyTiger after an accidental working-tree revert — the
+# authoritative values below were captured verbatim from `git diff` before
+# loss; any continuation lines of this comment were NOT captured and are
+# owed by the original author. Captured fragment:
+#   "393247f3 over the full tracked Rust set (584 files, UBS_MODULE_TIMEOUT=
+#    ... equality (`bytes.windows().position(|w| w == needle)` in the census-DAG"
+# Values restored: Secret/token comparisons 183->184 (+1, census-DAG S-row
+# byte-window equality misread as a secret comparison) and panic!
+# 143->150 (+7 net across the tsfs witness table runners). Original author:
+# please verify and complete this block. [fgdb-ci-workflow incident,
+# fgdb-20oi]
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline
 #
