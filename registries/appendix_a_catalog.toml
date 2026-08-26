@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4000
-projection_fallback_count = 341
-target_source_assignment_sha256 = "e2bd879e3fa1a9a79cc8f99e4f576f22eb88007ba80eb21a80c6b841e1ed6e0c"
+target_count = 4023
+projection_fallback_count = 364
+target_source_assignment_sha256 = "0cdd2038f6b9c903a6ab2ec1f08a8fb29104279389328dd5dd6a5d3b9c36272d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -2075,6 +2075,259 @@ construction_order = 84
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_statement_classification/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:gc-participant-cancellation-evidence"
+object_kind = 0x029e
+name = "GcParticipantCancellationEvidence"
+status = "reserved"
+construction_order = 61
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc-participant-cancellation-evidence/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:global-backup-abort-authorization-certificate"
+object_kind = 0x02a6
+name = "GlobalBackupAbortAuthorizationCertificate"
+status = "reserved"
+construction_order = 62
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global-backup-abort-authorization-certificate/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:global-backup-intent-certificate"
+object_kind = 0x02a7
+name = "GlobalBackupIntentCertificate"
+status = "reserved"
+construction_order = 63
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global-backup-intent-certificate/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:global-backup-release-authorization-certificate"
+object_kind = 0x02a9
+name = "GlobalBackupReleaseAuthorizationCertificate"
+status = "reserved"
+construction_order = 64
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global-backup-release-authorization-certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-decision-certificate"
+object_kind = 0x02b3
+name = "GlobalDecisionCertificate"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global-decision-certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-gc-authorization-record"
+object_kind = 0x02ba
+name = "GlobalGcAuthorizationRecord"
+status = "reserved"
+construction_order = 66
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global-gc-authorization-record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-gc-cancellation-authorization-certificate"
+object_kind = 0x02bb
+name = "GlobalGcCancellationAuthorizationCertificate"
+status = "reserved"
+construction_order = 67
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global-gc-cancellation-authorization-certificate/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:graph-intent-batch-projection"
+object_kind = 0x02d3
+name = "GraphIntentBatchProjection"
+status = "reserved"
+construction_order = 68
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/graph-intent-batch-projection/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:legacy-promise-terminal-ack"
+object_kind = 0x02ed
+name = "LegacyPromiseTerminalAck"
+status = "reserved"
+construction_order = 69
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy-promise-terminal-ack/"
+
+[[logical_kind]]
+slice_id = "a10"
+row_id = "a10:logical-kind:logical-delta-batch"
+object_kind = 0x0330
+name = "LogicalDeltaBatch"
+status = "reserved"
+construction_order = 70
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/logical-delta-batch/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:meta-id-range-grant-certificate"
+object_kind = 0x034c
+name = "MetaIdRangeGrantCertificate"
+status = "reserved"
+construction_order = 9
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta-id-range-grant-certificate/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:meta-security-projection-certificate"
+object_kind = 0x04ea
+name = "MetaSecurityProjectionCertificate"
+status = "reserved"
+construction_order = 72
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta-security-projection-certificate/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:role-transition-service-final-certificate"
+object_kind = 0x0427
+name = "RoleTransitionServiceFinalCertificate"
+status = "reserved"
+construction_order = 73
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role-transition-service-final-certificate/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:shard-activated-cut-ack"
+object_kind = 0x0435
+name = "ShardActivatedCutAck"
+status = "reserved"
+construction_order = 74
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-activated-cut-ack/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:shard-backup-abort-ack"
+object_kind = 0x0439
+name = "ShardBackupAbortAck"
+status = "reserved"
+construction_order = 75
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-backup-abort-ack/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:shard-backup-release-ack"
+object_kind = 0x043e
+name = "ShardBackupReleaseAck"
+status = "reserved"
+construction_order = 76
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-backup-release-ack/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-constraint-release-ack"
+object_kind = 0x0444
+name = "ShardConstraintReleaseAck"
+status = "reserved"
+construction_order = 77
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-constraint-release-ack/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:shard-derived-component-certificate"
+object_kind = 0x0449
+name = "ShardDerivedComponentCertificate"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-derived-component-certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-gc-cancelled-ack"
+object_kind = 0x0452
+name = "ShardGcCancelledAck"
+status = "reserved"
+construction_order = 79
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-gc-cancelled-ack/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:shard-operational-bootstrap-barrier"
+object_kind = 0x0462
+name = "ShardOperationalBootstrapBarrier"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-operational-bootstrap-barrier/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-prepare-certificate"
+object_kind = 0x0464
+name = "ShardPrepareCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-prepare-certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-reconfiguration-authorization-record"
+object_kind = 0x046e
+name = "ShardReconfigurationAuthorizationRecord"
+status = "reserved"
+construction_order = 82
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-reconfiguration-authorization-record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:shard-statement-workspace-certificate"
+object_kind = 0x047b
+name = "ShardStatementWorkspaceCertificate"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard-statement-workspace-certificate/"
 
 [[logical_kind]]
 slice_id = "a07"
@@ -43474,7 +43727,7 @@ symbol = "GcParticipantCancellationEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x029e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:gc-proposal"
@@ -43546,7 +43799,7 @@ symbol = "GlobalBackupAbortAuthorizationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02a6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:global-backup-intent-certificate"
@@ -43555,7 +43808,7 @@ symbol = "GlobalBackupIntentCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02a7"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:global-backup-intent-record"
@@ -43573,7 +43826,7 @@ symbol = "GlobalBackupReleaseAuthorizationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02a9"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-begin-idempotency-index"
@@ -43663,7 +43916,7 @@ symbol = "GlobalDecisionCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02b3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a10:reservation:global-delta-batch-index"
@@ -43726,7 +43979,7 @@ symbol = "GlobalGcAuthorizationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ba"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-gc-cancellation-authorization-certificate"
@@ -43735,7 +43988,7 @@ symbol = "GlobalGcCancellationAuthorizationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02bb"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-gc-cancellation-authorization-record"
@@ -43960,7 +44213,7 @@ symbol = "GraphIntentBatchProjection"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02d3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:group-time-issuance-quiescence-certificate"
@@ -44194,7 +44447,7 @@ symbol = "LegacyPromiseTerminalAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ed"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:legacy-promise-terminal-record"
@@ -44806,7 +45059,7 @@ symbol = "LogicalDeltaBatch"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0330"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a10:reservation:logical-delta-template"
@@ -45094,7 +45347,7 @@ symbol = "MetaIdRangeGrantCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x034c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-key-lifecycle-floor"
@@ -45238,7 +45491,7 @@ symbol = "MetaSecurityProjectionCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04ea"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-shard-apply-ack-directory-floor"
@@ -47371,7 +47624,7 @@ symbol = "RoleTransitionServiceFinalCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0427"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:role-transition-service-promotion-manifest"
@@ -47533,7 +47786,7 @@ symbol = "ShardActivatedCutAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0435"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-active-meta-projection-floor"
@@ -47569,7 +47822,7 @@ symbol = "ShardBackupAbortAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0439"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:shard-backup-closure-certificate"
@@ -47614,7 +47867,7 @@ symbol = "ShardBackupReleaseAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x043e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-certificate-floor"
@@ -47668,7 +47921,7 @@ symbol = "ShardConstraintReleaseAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0444"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:shard-continuity-authority-projection"
@@ -47713,7 +47966,7 @@ symbol = "ShardDerivedComponentCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0449"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-derived-component-floor"
@@ -47794,7 +48047,7 @@ symbol = "ShardGcCancelledAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0452"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-gc-preflight-evidence"
@@ -47947,7 +48200,7 @@ symbol = "ShardOperationalBootstrapBarrier"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0462"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:shard-policy-projection-root"
@@ -47974,7 +48227,7 @@ symbol = "ShardPrepareCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0464"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-prepare-command"
@@ -48064,7 +48317,7 @@ symbol = "ShardReconfigurationAuthorizationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x046e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-recovery-checkpoint"
@@ -48190,7 +48443,7 @@ symbol = "ShardStatementWorkspaceCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x047b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:shard-time-authority-projection"
@@ -52338,7 +52591,7 @@ symbol = "GlobalBackupIntentCertificate"
 generic_signature = ""
 source_key = "top|GlobalBackupIntentCertificate"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2127"]
 
 [[top_level_candidate]]
@@ -53588,7 +53841,7 @@ symbol = "LegacyPromiseTerminalAck"
 generic_signature = ""
 source_key = "top|LegacyPromiseTerminalAck"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1612"]
 
 [[top_level_candidate]]
@@ -54448,7 +54701,7 @@ symbol = "LogicalDeltaBatch"
 generic_signature = "<LocalCommitted>"
 source_key = "top|LogicalDeltaBatch<LocalCommitted>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a10:1926"]
 
 [[top_level_candidate]]
@@ -54458,7 +54711,7 @@ symbol = "LogicalDeltaBatch"
 generic_signature = "<Role>"
 source_key = "top|LogicalDeltaBatch<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a10:1926"]
 
 [[top_level_candidate]]
@@ -54468,7 +54721,7 @@ symbol = "LogicalDeltaBatch"
 generic_signature = "<ShardFragment>"
 source_key = "top|LogicalDeltaBatch<ShardFragment>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a10:1926"]
 
 [[top_level_candidate]]
@@ -59068,7 +59321,7 @@ symbol = "RoleTransitionServiceFinalCertificate"
 generic_signature = ""
 source_key = "top|RoleTransitionServiceFinalCertificate"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1632"]
 
 [[top_level_candidate]]
@@ -59508,7 +59761,7 @@ symbol = "ShardDerivedComponentCertificate"
 generic_signature = ""
 source_key = "top|ShardDerivedComponentCertificate"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1542"]
 
 [[top_level_candidate]]
@@ -105394,6 +105647,190 @@ source_key = "projection|logical_object_kinds|CanonicalStatementClassification"
 target_kind = "logical-kind"
 definition_status = "declared"
 
+
+[[target]]
+row_id = "a08:target:logical-kind-gc-participant-cancellation-evidence"
+target_row_id = "a08:logical-kind:gc-participant-cancellation-evidence"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|GcParticipantCancellationEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-global-backup-abort-authorization-certificate"
+target_row_id = "a15:logical-kind:global-backup-abort-authorization-certificate"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|GlobalBackupAbortAuthorizationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-global-backup-intent-certificate"
+target_row_id = "a15:logical-kind:global-backup-intent-certificate"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|GlobalBackupIntentCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-global-backup-release-authorization-certificate"
+target_row_id = "a15:logical-kind:global-backup-release-authorization-certificate"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|GlobalBackupReleaseAuthorizationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-decision-certificate"
+target_row_id = "a08:logical-kind:global-decision-certificate"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|GlobalDecisionCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-gc-authorization-record"
+target_row_id = "a08:logical-kind:global-gc-authorization-record"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|GlobalGcAuthorizationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-gc-cancellation-authorization-certificate"
+target_row_id = "a08:logical-kind:global-gc-cancellation-authorization-certificate"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|GlobalGcCancellationAuthorizationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-graph-intent-batch-projection"
+target_row_id = "a07:logical-kind:graph-intent-batch-projection"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|GraphIntentBatchProjection"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-legacy-promise-terminal-ack"
+target_row_id = "a05:logical-kind:legacy-promise-terminal-ack"
+slice_id = "a05"
+source_key = "projection|logical_object_kinds|LegacyPromiseTerminalAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:logical-kind-logical-delta-batch"
+target_row_id = "a10:logical-kind:logical-delta-batch"
+slice_id = "a10"
+source_key = "projection|logical_object_kinds|LogicalDeltaBatch"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-meta-id-range-grant-certificate"
+target_row_id = "a09:logical-kind:meta-id-range-grant-certificate"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|MetaIdRangeGrantCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-meta-security-projection-certificate"
+target_row_id = "a03:logical-kind:meta-security-projection-certificate"
+slice_id = "a03"
+source_key = "projection|logical_object_kinds|MetaSecurityProjectionCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-role-transition-service-final-certificate"
+target_row_id = "a05:logical-kind:role-transition-service-final-certificate"
+slice_id = "a05"
+source_key = "projection|logical_object_kinds|RoleTransitionServiceFinalCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-shard-activated-cut-ack"
+target_row_id = "a05:logical-kind:shard-activated-cut-ack"
+slice_id = "a05"
+source_key = "projection|logical_object_kinds|ShardActivatedCutAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-shard-backup-abort-ack"
+target_row_id = "a15:logical-kind:shard-backup-abort-ack"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|ShardBackupAbortAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-shard-backup-release-ack"
+target_row_id = "a15:logical-kind:shard-backup-release-ack"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|ShardBackupReleaseAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-constraint-release-ack"
+target_row_id = "a08:logical-kind:shard-constraint-release-ack"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|ShardConstraintReleaseAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-shard-derived-component-certificate"
+target_row_id = "a03:logical-kind:shard-derived-component-certificate"
+slice_id = "a03"
+source_key = "projection|logical_object_kinds|ShardDerivedComponentCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-gc-cancelled-ack"
+target_row_id = "a08:logical-kind:shard-gc-cancelled-ack"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|ShardGcCancelledAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-shard-operational-bootstrap-barrier"
+target_row_id = "a07:logical-kind:shard-operational-bootstrap-barrier"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|ShardOperationalBootstrapBarrier"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-prepare-certificate"
+target_row_id = "a08:logical-kind:shard-prepare-certificate"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|ShardPrepareCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-reconfiguration-authorization-record"
+target_row_id = "a08:logical-kind:shard-reconfiguration-authorization-record"
+slice_id = "a08"
+source_key = "projection|logical_object_kinds|ShardReconfigurationAuthorizationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-shard-statement-workspace-certificate"
+target_row_id = "a07:logical-kind:shard-statement-workspace-certificate"
+slice_id = "a07"
+source_key = "projection|logical_object_kinds|ShardStatementWorkspaceCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
 
 [[target]]
 row_id = "a07:target:logical-kind-cumulative-read-witness-root"
