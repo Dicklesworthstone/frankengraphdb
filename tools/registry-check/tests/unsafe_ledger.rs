@@ -1603,3 +1603,404 @@ fn the_safe_facing_self_test_guard_is_a_live_predicate() {
         "the safe-facing reader's answer must depend on its input, or its self-test licenses nothing"
     );
 }
+// ===========================================================================
+// fgdb-wi4f: seeded witnesses for the remaining lane and boundary laws.
+//
+// Fixture is the minimal EMPTY_VERIFICATION_LANES manifest: three lanes
+// (miri checked, asan declared, tsan declared) and one site
+// simd-kernel-1 with miri=checked / asan=candidate / tsan=candidate cells.
+// Every test makes ONE anchored mutation and asserts the exact code;
+// collateral codes from cross-coupled laws are expected.
+// ===========================================================================
+
+fn replace_first(root: &Path, rel: &str, from: &str, to: &str) {
+    let path = root.join(rel);
+    let text = fs::read_to_string(&path).expect("fixture file readable");
+    assert_eq!(
+        text.matches(from).count(),
+        1,
+        "mutation anchor {from:?} must occur exactly once in {rel}"
+    );
+    fs::write(&path, text.replacen(from, to, 1)).expect("fixture rewrite");
+}
+
+fn lane_block_span(text: &str, tool: &str) -> (usize, usize) {
+    let anchor = format!("[[lane]]\ntool = \"{tool}\"");
+    let start = text
+        .find(&anchor)
+        .unwrap_or_else(|| panic!("lane {tool} exists"));
+    let end = text[start..]
+        .find("\n[[")
+        .map(|o| start + o + 1)
+        .unwrap_or(text.len());
+    (start, end)
+}
+
+fn cell_block_span(text: &str, tool: &str) -> (usize, usize) {
+    let anchor = format!("[[cell]]\nsite_row_id = \"simd-kernel-1\"\ntool = \"{tool}\"");
+    let start = text
+        .find(&anchor)
+        .unwrap_or_else(|| panic!("cell for {tool} exists"));
+    let end = text[start..]
+        .find("\n[[cell]]")
+        .map(|o| start + o + 1)
+        .unwrap_or(text.len());
+    (start, end)
+}
+
+fn replace_span(path: &Path, text: &str, span: (usize, usize), insert: &str) {
+    fs::write(
+        path,
+        format!("{}{}{}", &text[..span.0], insert, &text[span.1..]),
+    )
+    .expect("fixture rewrite");
+}
+
+#[test]
+fn wi4f_lane_schema_version_unknown_fires() {
+    let root = clean_workspace("wi4f-schema-version");
+    replace_first(
+        &root,
+        "registries/unsafe_verification_lanes.toml",
+        "schema_version = 1",
+        "schema_version = 99",
+    );
+    assert!(codes(&root).contains(&"unsafe_lane_schema_version_unknown".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_status_unknown_fires() {
+    let root = clean_workspace("wi4f-status-unknown");
+    replace_first(
+        &root,
+        "registries/unsafe_verification_lanes.toml",
+        "status = \"checked\"",
+        "status = \"vibes\"",
+    );
+    assert!(codes(&root).contains(&"unsafe_lane_status_unknown".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_tool_duplicate_fires() {
+    let root = clean_workspace("wi4f-tool-duplicate");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = lane_block_span(&text, "tsan");
+    let block = text[s..e].replacen("tool = \"tsan\"", "tool = \"miri\"", 1);
+    replace_span(&path, &text, (s, e), &block);
+    assert!(codes(&root).contains(&"unsafe_lane_tool_duplicate".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_tool_missing_fires() {
+    let root = clean_workspace("wi4f-tool-missing");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = lane_block_span(&text, "tsan");
+    replace_span(&path, &text, (s, e), "");
+    assert!(codes(&root).contains(&"unsafe_lane_tool_missing".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_tool_unknown_fires() {
+    let root = clean_workspace("wi4f-tool-unknown");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = lane_block_span(&text, "tsan");
+    let block = text[s..e].replacen("tool = \"tsan\"", "tool = \"sancov\"", 1);
+    replace_span(&path, &text, (s, e), &block);
+    assert!(codes(&root).contains(&"unsafe_lane_tool_unknown".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_runner_mismatch_fires() {
+    let root = clean_workspace("wi4f-runner-mismatch");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = lane_block_span(&text, "miri");
+    let runner = text[s..]
+        .find("runner = \"scripts/w1_unsafe_tool_lanes.sh\"")
+        .expect("runner line")
+        + s;
+    let end = runner + text[runner..].find('\n').expect("line ends");
+    replace_span(&path, &text, (runner, end), "runner = \"scripts/token.sh\"");
+    assert!(codes(&root).contains(&"unsafe_lane_runner_mismatch".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_runner_missing_fires() {
+    let root = clean_workspace("wi4f-runner-missing");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = lane_block_span(&text, "miri");
+    let runner = text[s..]
+        .find("runner = \"scripts/w1_unsafe_tool_lanes.sh\"")
+        .expect("runner line")
+        + s;
+    let end = runner + text[runner..].find('\n').expect("line ends");
+    replace_span(
+        &path,
+        &text,
+        (runner, end),
+        "runner = \"scripts/no_such_lane_runner.sh\"",
+    );
+    assert!(codes(&root).contains(&"unsafe_lane_runner_missing".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_runner_path_unsafe_fires() {
+    let root = clean_workspace("wi4f-runner-unsafe");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = lane_block_span(&text, "miri");
+    let runner = text[s..]
+        .find("runner = \"scripts/w1_unsafe_tool_lanes.sh\"")
+        .expect("runner line")
+        + s;
+    let end = runner + text[runner..].find('\n').expect("line ends");
+    replace_span(&path, &text, (runner, end), "runner = \"/usr/bin/env\"");
+    assert!(codes(&root).contains(&"unsafe_lane_runner_path_unsafe".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_runner_unregistered_fires() {
+    let root = clean_workspace("wi4f-runner-unregistered");
+    fs::write(
+        root.join("scripts/w1_unsafe_tool_lanes2.sh"),
+        "#!/usr/bin/env bash\nexit 1\n",
+    )
+    .unwrap();
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = lane_block_span(&text, "miri");
+    let runner = text[s..]
+        .find("runner = \"scripts/w1_unsafe_tool_lanes.sh\"")
+        .expect("runner line")
+        + s;
+    let end = runner + text[runner..].find('\n').expect("line ends");
+    replace_span(
+        &path,
+        &text,
+        (runner, end),
+        "runner = \"scripts/w1_unsafe_tool_lanes2.sh\"",
+    );
+    assert!(codes(&root).contains(&"unsafe_lane_runner_unregistered".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_field_vacuous_fires() {
+    let root = clean_workspace("wi4f-field-vacuous");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = lane_block_span(&text, "miri");
+    let ncb = s + text[s..]
+        .find("no_claim_boundary = ")
+        .expect("boundary line");
+    let end = ncb + text[ncb..].find('\n').expect("line ends");
+    replace_span(&path, &text, (ncb, end), "");
+    assert!(codes(&root).contains(&"unsafe_lane_field_vacuous".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_component_contract_mismatch_fires() {
+    let root = clean_workspace("wi4f-component-contract");
+    replace_first(
+        &root,
+        "registries/unsafe_verification_lanes.toml",
+        "required_components = [\"miri\", \"rust-src\"]",
+        "required_components = [\"miri\", \"rust-src\", \"llvm-tools-preview\"]",
+    );
+    assert!(codes(&root).contains(&"unsafe_lane_component_contract_mismatch".to_owned()));
+}
+
+#[test]
+fn wi4f_lane_component_unpinned_fires() {
+    let root = clean_workspace("wi4f-component-unpinned");
+    replace_first(
+        &root,
+        "registries/unsafe_verification_lanes.toml",
+        "required_components = [\"miri\", \"rust-src\"]",
+        "required_components = [\"miri\", \"rust-docs\"]",
+    );
+    assert!(codes(&root).contains(&"unsafe_lane_component_unpinned".to_owned()));
+}
+
+#[test]
+fn wi4f_cell_duplicate_fires() {
+    let root = clean_workspace("wi4f-cell-duplicate");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = cell_block_span(&text, "miri");
+    let block = text[s..e].to_owned();
+    fs::write(&path, format!("{}{}{}", &text[..e], block, &text[e..])).unwrap();
+    assert!(codes(&root).contains(&"unsafe_lane_cell_duplicate".to_owned()));
+}
+
+#[test]
+fn wi4f_cell_orphaned_fires() {
+    let root = clean_workspace("wi4f-cell-orphaned");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = cell_block_span(&text, "miri");
+    let rid = text[s..]
+        .find("site_row_id = \"simd-kernel-1\"")
+        .expect("site id line")
+        + s;
+    let rend = rid + text[rid..].find('\n').expect("line ends");
+    replace_span(
+        &path,
+        &text,
+        (rid, rend),
+        "site_row_id = \"nonexistent-site-zz\"",
+    );
+    assert!(codes(&root).contains(&"unsafe_lane_cell_orphaned".to_owned()));
+}
+
+#[test]
+fn wi4f_cell_tool_unresolved_fires() {
+    let root = clean_workspace("wi4f-cell-tool");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = cell_block_span(&text, "miri");
+    let block = text[s..e].replacen("tool = \"miri\"", "tool = \"sancov\"", 1);
+    replace_span(&path, &text, (s, e), &block);
+    assert!(codes(&root).contains(&"unsafe_lane_cell_tool_unresolved".to_owned()));
+}
+
+#[test]
+fn wi4f_cell_disposition_unknown_fires() {
+    let root = clean_workspace("wi4f-cell-disposition");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = cell_block_span(&text, "miri");
+    let disp = text[s..]
+        .find("disposition = \"checked\"")
+        .expect("checked disposition")
+        + s;
+    let dend = disp + text[disp..].find('\n').expect("line ends");
+    replace_span(&path, &text, (disp, dend), "disposition = \"vibes\"");
+    assert!(codes(&root).contains(&"unsafe_lane_cell_disposition_unknown".to_owned()));
+}
+
+#[test]
+fn wi4f_cell_rationale_vacuous_fires() {
+    let root = clean_workspace("wi4f-rationale-vacuous");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = cell_block_span(&text, "asan");
+    let rat = text[s..]
+        .find("rationale = \"fixture ASAN rationale\"")
+        .expect("rationale line")
+        + s;
+    let rend = rat + text[rat..].find('\n').expect("line ends");
+    replace_span(&path, &text, (rat, rend), "rationale = \"\"");
+    assert!(codes(&root).contains(&"unsafe_lane_cell_rationale_vacuous".to_owned()));
+}
+
+#[test]
+fn wi4f_checked_cell_without_workload_fires() {
+    let root = clean_workspace("wi4f-checked-no-workload");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = cell_block_span(&text, "miri");
+    let wl = text[s..]
+        .find("workload = \"cargo miri test fixture\"")
+        .expect("workload line")
+        + s;
+    let wend = wl + text[wl..].find('\n').expect("line ends");
+    replace_span(&path, &text, (wl, wend), "workload = \"\"");
+    assert!(codes(&root).contains(&"unsafe_lane_checked_cell_without_workload".to_owned()));
+}
+
+#[test]
+fn wi4f_unchecked_cell_with_workload_fires() {
+    let root = clean_workspace("wi4f-unchecked-workload");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = cell_block_span(&text, "asan");
+    let block = text[s..e].replacen(
+        "workload = \"\"",
+        "workload = \"cargo test -p fgdb-ordinary\"",
+        1,
+    );
+    replace_span(&path, &text, (s, e), &block);
+    assert!(codes(&root).contains(&"unsafe_lane_unchecked_cell_with_workload".to_owned()));
+}
+
+#[test]
+fn wi4f_checked_without_cell_fires() {
+    let root = clean_workspace("wi4f-checked-no-cell");
+    // The asan lane owns only a candidate cell; promoting the lane itself to
+    // checked leaves it with zero checked cells.
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, _) = lane_block_span(&text, "asan");
+    let stat = text[s..]
+        .find("status = \"declared\"")
+        .expect("declared status")
+        + s;
+    let send = stat + text[stat..].find('\n').expect("line ends");
+    replace_span(&path, &text, (stat, send), "status = \"checked\"");
+    assert!(codes(&root).contains(&"unsafe_lane_checked_without_cell".to_owned()));
+}
+
+#[test]
+fn wi4f_declared_with_checked_cell_fires() {
+    let root = clean_workspace("wi4f-declared-checked");
+    // The asan cell flips to checked while its lane stays declared.
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = cell_block_span(&text, "asan");
+    let block = text[s..e].replacen(
+        "disposition = \"candidate\"",
+        "disposition = \"checked\"",
+        1,
+    );
+    replace_span(&path, &text, (s, e), &block);
+    assert!(codes(&root).contains(&"unsafe_lane_declared_with_checked_cell".to_owned()));
+}
+
+#[test]
+fn wi4f_declared_without_candidate_fires() {
+    let root = clean_workspace("wi4f-declared-no-candidate");
+    // The tsan cell flips to excluded so the declared tsan lane owns zero
+    // candidates.
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = cell_block_span(&text, "tsan");
+    let block = text[s..e].replacen(
+        "disposition = \"candidate\"",
+        "disposition = \"excluded\"",
+        1,
+    );
+    replace_span(&path, &text, (s, e), &block);
+    assert!(codes(&root).contains(&"unsafe_lane_declared_without_candidate".to_owned()));
+}
+
+#[test]
+fn wi4f_checker_index_unreadable_fires() {
+    let root = clean_workspace("wi4f-index-unreadable");
+    fs::write(
+        root.join("registries/checker_index.toml"),
+        "@@@ not toml @@@\n",
+    )
+    .unwrap();
+    assert!(codes(&root).contains(&"unsafe_lane_checker_index_unreadable".to_owned()));
+}
+
+#[test]
+fn wi4f_cell_mismatch_fires() {
+    let root = workspace_with_landed_island("wi4f-cell-mismatch", ISLAND_SITE_ROW);
+    // The ledger boundary says asan|candidate; flip only the manifest cell's
+    // disposition so the byte-match fails.
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let (s, e) = cell_block_span(&text, "asan");
+    let block = text[s..e].replacen(
+        "disposition = \"candidate\"",
+        "disposition = \"excluded\"",
+        1,
+    );
+    replace_span(&path, &text, (s, e), &block);
+    assert!(codes(&root).contains(&"unsafe_lane_cell_mismatch".to_owned()));
+}
