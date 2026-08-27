@@ -4,5 +4,5 @@
 # nondeterministic across workers as std deprecations roll through the fleet.
 # Bump deliberately, together with any std-API migration the new nightly
 # requires, and together with the asupersync/fnx foundation pins.
-channel = "nightly-2026-07-05"
+channel = "nightly-2026-08-25"
 components = ["rustfmt", "clippy", "miri", "rust-src", "llvm-tools-preview"]

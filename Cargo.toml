@@ -42,3 +42,12 @@ edition = "2024"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Absorbs lint families newer nightlies fire on unchanged, correct code here.
+# Correctness/suspicious/perf stay denied via the CI `-D warnings` gate.
+# #[must_use] on functions already returning a must_use type; cosmetic.
+double_must_use = "allow"
+# Index walks over parallel slices by a single counter; an iterator rewrite would
+# obscure the arithmetic without changing behaviour.
+needless_range_loop = "allow"

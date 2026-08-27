@@ -1,3 +1,7 @@
+// Raised for the trait solver: proving Send for the nested async blocks in this
+// differential test overflows the default limit on newer rustc.
+#![recursion_limit = "512"]
+
 //! **The spine, differentially tested against the oracle** (`fgdb-j0vu`).
 //!
 //! `crates/fgdb/tests/spine.rs` proves the engine agrees with ITSELF across a

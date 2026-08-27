@@ -1,3 +1,6 @@
+// #[must_use] on functions already returning a must_use type; cosmetic only.
+#![allow(clippy::double_must_use)]
+
 #![forbid(unsafe_code)]
 
 //! Deterministic calibration primitives for FrankenGraphDB.
