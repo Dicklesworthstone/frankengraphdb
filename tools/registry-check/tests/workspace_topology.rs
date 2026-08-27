@@ -779,6 +779,7 @@ fn topology_crate_graph_cycle_detection() {
     ]);
     let cycle = crate_graph_cycle(&cyclic);
     assert_eq!(cycle.len(), 3, "{cycle:?}");
+    assert_reports(&["crate_graph_cycle".to_string()], "crate_graph_cycle");
 }
 
 #[test]

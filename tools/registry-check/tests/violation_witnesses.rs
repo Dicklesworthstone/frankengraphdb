@@ -754,6 +754,7 @@ fn topology_derivation_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "design_phrase_ambiguous", fact: "a design capability's source phrase matches every donor row", mutate: |r| capability_mut(r, "design-ssi").source_phrase = String::new() },
     TopologyWitness { code: "island_roster_unreadable", fact: "the island roster path points at a file that does not exist", mutate: |r| r.registry.unsafe_ledger_registry = "registries/no-such-ledger.toml".into() },
     TopologyWitness { code: "island_roster_unparsable", fact: "the island roster path points at a file that is not TOML", mutate: |r| r.registry.unsafe_ledger_registry = "AGENTS.md".into() },
+    TopologyWitness { code: "inventory_coverage_incomplete", fact: "the §18.2 build-inventory source block points to a prose line with residue outside the alphabet", mutate: |r| { let block = source_block_mut(r, "plan-build-inventory-v1"); block.plan_start_line = 1; block.plan_end_line = 1; } },
     ]
 }
 
@@ -778,6 +779,9 @@ fn unsafe_island_live_tree_witnesses() -> Vec<LiveTreeWitness> {
     vec![
     LiveTreeWitness { code: "island_inherits_forbid", fact: "an unsafe island grows [lints] workspace = true", mutate: |scan| scanned_crate_mut(scan, "fgdb-unsafe-simd").lints_workspace = true },
     LiveTreeWitness { code: "island_root_missing_deny", fact: "an unsafe island loses #![deny(unsafe_code)] at its crate root", mutate: |scan| scanned_crate_mut(scan, "fgdb-unsafe-simd").root_denies_unsafe = false },
+    LiveTreeWitness { code: "lints_not_inherited", fact: "an active crate loses [lints] workspace = true", mutate: |scan| scanned_crate_mut(scan, "fgdb-types").lints_workspace = false },
+    LiveTreeWitness { code: "root_missing_forbid", fact: "an ordinary crate root loses #![forbid(unsafe_code)]", mutate: |scan| scanned_crate_mut(scan, "fgdb-types").root_forbids_unsafe = false },
+    LiveTreeWitness { code: "external_dependency", fact: "an active crate adds a dependency outside the closed universe", mutate: |scan| scanned_crate_mut(scan, "fgdb-types").dependencies.push(topology::ManifestDependency { key: "serde".into(), package: "serde".into(), table: "dependencies".into(), path: String::new(), git: String::new(), rev: String::new(), default_features_disabled: false }) },
     ]
 }
 
