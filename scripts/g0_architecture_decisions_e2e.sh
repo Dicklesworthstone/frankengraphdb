@@ -357,7 +357,7 @@ PY
 
 echo "==> run the complete typed mutation and property suite"
 ADR_SUITE_RC=0
-cargo test -p registry-check --test architecture_decisions \
+RCH_CARGO_WRAPPER_BYPASS=1 cargo test -p registry-check --test architecture_decisions \
   >"$EVIDENCE_DIR/cargo-mutation-suite.log" 2>&1 || ADR_SUITE_RC=$?
 if [ "$ADR_SUITE_RC" -eq 0 ]; then
   :

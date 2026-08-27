@@ -4509,13 +4509,10 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                         // authorization is trivially satisfied.
                         None => true,
                         Some(roles) => {
-                            // Legacy path: the arm's own singular predicate
+                            // Legacy path: the target's own predicate
                             // authorizes via the containing plane...
                             let legacy = arm.role_predicates.len() == 1
-                                && predicate_allows_role(
-                                    &arm.role_predicates[0],
-                                    &u.role,
-                                );
+                                && predicate_allows_role(&target_kind.role_predicate, &u.role);
                             // ...or every matrix entry names a role the
                             // target itself admits (cross-group reference,
                             // fgdb-bbqq option (a)).

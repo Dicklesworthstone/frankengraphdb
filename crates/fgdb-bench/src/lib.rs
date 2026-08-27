@@ -843,3 +843,14 @@ pub async fn run_shape(name: &str, cx: &CommitCx) -> Result<(), String> {
         other => Err(format!("unknown shape {other:?}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bench_harness_constants_are_valid() {
+        assert_eq!(KNOWS, RelationId(1));
+        assert_eq!(WEIGHT, PropertyKeyId(7));
+    }
+}

@@ -140,6 +140,7 @@ while IFS=$'\t' read -r tool site workload; do
         if cargo miri test --locked -p fgdb-unsafe-arena \
           --test edit_path_differential >"$MIRI_ARENA_LOG" 2>&1; then
           MIRI_ARENA_RC=0
+          MIRI_ARENA_STATUS="passed"
         else
           MIRI_ARENA_RC=$?
           case "$(gate_env_failure_class "$MIRI_ARENA_LOG")" in

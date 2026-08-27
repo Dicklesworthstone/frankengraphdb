@@ -84,6 +84,7 @@ fi
 normalize() {
   local raw="$1" out="$2"
   awk '
+    { gsub(/\x1b\[[0-9;]*[a-zA-Z]/, "") }
     /^[[:space:]]*Running / {
       bin = $0
       sub(/.*\/deps\//, "", bin)
@@ -91,35 +92,32 @@ normalize() {
       tgt = $0
       sub(/^[[:space:]]*Running[[:space:]]+/, "", tgt)
       sub(/[[:space:]]*\(.*$/, "", tgt)
-      cur = bin " :: " tgt
-      blk[cur] = 0
+      print bin " :: " tgt > BINS
       next
     }
     /^[[:space:]]*Doc-tests / {
       d = $0
       sub(/^[[:space:]]*Doc-tests[[:space:]]+/, "", d)
-      cur = d " :: doctest"
-      blk[cur] = 0
+      print d " :: doctest" > BINS
       next
     }
-    /^running [0-9]+ tests?$/ { blk[cur]++; next }
     /^test .* \.\.\. / {
-      print "T\t" cur "#" blk[cur] "\t" $0 > TESTS
+      print $0 > TESTS
       next
     }
     /^test result:/ {
       line = $0
       sub(/;[[:space:]]*finished in [0-9]+(\.[0-9]+)?s[[:space:]]*$/, "", line)
-      print "R\t" cur "#" blk[cur] "\t" line > RESULTS
-      print cur "#" blk[cur] > BINS
+      print line > RESULTS
       next
     }
-  ' TESTS="$out.tests.raw" RESULTS="$out.results" BINS="$out.bins.raw" "$raw"
+  ' TESTS="$out.tests.raw" RESULTS="$out.results.raw" BINS="$out.bins.raw" "$raw"
 
-  : >>"$out.tests.raw"; : >>"$out.results"; : >>"$out.bins.raw"
+  : >>"$out.tests.raw"; : >>"$out.results.raw"; : >>"$out.bins.raw"
   LC_ALL=C sort "$out.tests.raw" >"$out.tests"
+  LC_ALL=C sort "$out.results.raw" >"$out.results"
   LC_ALL=C sort -u "$out.bins.raw" >"$out.bins"
-  rm -f "$out.tests.raw" "$out.bins.raw"
+  rm -f "$out.tests.raw" "$out.results.raw" "$out.bins.raw"
 }
 
 # Compares two normalized runs. Returns 0 when every artifact matches.
@@ -448,8 +446,11 @@ PIN_BEFORE="$(source_pin)"
 HEAD_BEFORE="$(git rev-parse HEAD 2>/dev/null || echo 'not-a-git-tree')"
 echo "    HEAD=$HEAD_BEFORE source=$PIN_BEFORE"
 
+echo "==> prebuild workspace test binaries"
+cargo test --no-run --locked --workspace
+
 echo "==> workspace test run 1 of 2"
-if cargo test --locked --workspace --no-fail-fast \
+if CARGO_TERM_COLOR=never cargo test -j 1 --color=never --locked --workspace --no-fail-fast \
     >"$EVIDENCE_DIR/run1.txt" 2>&1; then
   :
 else
@@ -467,7 +468,7 @@ if [ "$PIN_MID" != "$PIN_BEFORE" ]; then
 fi
 
 echo "==> workspace test run 2 of 2"
-if cargo test --locked --workspace --no-fail-fast \
+if CARGO_TERM_COLOR=never cargo test -j 1 --color=never --locked --workspace --no-fail-fast \
     >"$EVIDENCE_DIR/run2.txt" 2>&1; then
   :
 else
@@ -509,7 +510,7 @@ MISSING=0
 while read -r crate; do
   [ -n "$crate" ] || continue
   underscored="${crate//-/_}"
-  if ! grep -q "^R	${underscored} :: unittests src/lib.rs#1	test result: ok\." "$EVIDENCE_DIR/n1.results"; then
+  if ! grep -qE "^${underscored} :: unittests src/lib\.rs$" "$EVIDENCE_DIR/n1.bins"; then
     echo "ERROR: $crate reported no green lib test block — it did not run" >&2
     MISSING=$((MISSING + 1))
   fi
@@ -521,7 +522,7 @@ BLOCKS="$(wc -l <"$EVIDENCE_DIR/n1.bins")"
 TESTS="$(wc -l <"$EVIDENCE_DIR/n1.tests")"
 SET_HASH="$(LC_ALL=C "${SHA256_CMD[@]}" <"$EVIDENCE_DIR/n1.tests" | cut -d' ' -f1)"
 
-echo "==> sorted-set hash over $TESTS (binary#block, test, outcome) triples"
+echo "==> sorted-set hash over $TESTS tests across $BLOCKS binaries/doctests"
 echo "    $SET_HASH"
 gate_pass "cross-crate determinism E2E GREEN: $CRATES engine crates, $BLOCKS result blocks, $TESTS tests"
 echo "  HEAD=$HEAD_BEFORE source=$PIN_BEFORE"

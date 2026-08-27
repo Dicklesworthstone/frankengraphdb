@@ -1626,9 +1626,7 @@ fn replace_first(root: &Path, rel: &str, from: &str, to: &str) {
 
 fn lane_block_span(text: &str, tool: &str) -> (usize, usize) {
     let anchor = format!("[[lane]]\ntool = \"{tool}\"");
-    let start = text
-        .find(&anchor)
-        .unwrap_or_else(|| panic!("lane {tool} exists"));
+    let start = text.find(&anchor).expect("lane tool exists");
     let end = text[start..]
         .find("\n[[")
         .map(|o| start + o + 1)
@@ -1638,9 +1636,7 @@ fn lane_block_span(text: &str, tool: &str) -> (usize, usize) {
 
 fn cell_block_span(text: &str, tool: &str) -> (usize, usize) {
     let anchor = format!("[[cell]]\nsite_row_id = \"simd-kernel-1\"\ntool = \"{tool}\"");
-    let start = text
-        .find(&anchor)
-        .unwrap_or_else(|| panic!("cell for {tool} exists"));
+    let start = text.find(&anchor).expect("cell for tool exists");
     let end = text[start..]
         .find("\n[[cell]]")
         .map(|o| start + o + 1)
@@ -1670,7 +1666,7 @@ fn wi4f_lane_schema_version_unknown_fires() {
 
 #[test]
 fn wi4f_lane_status_unknown_fires() {
-    let root = clean_workspace("wi4f-status-unknown");
+    let root = workspace_with_landed_island("wi4f-status-unknown", ISLAND_SITE_ROW);
     replace_first(
         &root,
         "registries/unsafe_verification_lanes.toml",
@@ -1797,7 +1793,7 @@ fn wi4f_lane_field_vacuous_fires() {
         .find("no_claim_boundary = ")
         .expect("boundary line");
     let end = ncb + text[ncb..].find('\n').expect("line ends");
-    replace_span(&path, &text, (ncb, end), "");
+    replace_span(&path, &text, (ncb, end), "no_claim_boundary = \"\"");
     assert!(codes(&root).contains(&"unsafe_lane_field_vacuous".to_owned()));
 }
 
@@ -1827,7 +1823,7 @@ fn wi4f_lane_component_unpinned_fires() {
 
 #[test]
 fn wi4f_cell_duplicate_fires() {
-    let root = clean_workspace("wi4f-cell-duplicate");
+    let root = workspace_with_landed_island("wi4f-cell-duplicate", ISLAND_SITE_ROW);
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
     let (s, e) = cell_block_span(&text, "miri");
@@ -1838,7 +1834,7 @@ fn wi4f_cell_duplicate_fires() {
 
 #[test]
 fn wi4f_cell_orphaned_fires() {
-    let root = clean_workspace("wi4f-cell-orphaned");
+    let root = workspace_with_landed_island("wi4f-cell-orphaned", ISLAND_SITE_ROW);
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
     let (s, _) = cell_block_span(&text, "miri");
@@ -1858,7 +1854,7 @@ fn wi4f_cell_orphaned_fires() {
 
 #[test]
 fn wi4f_cell_tool_unresolved_fires() {
-    let root = clean_workspace("wi4f-cell-tool");
+    let root = workspace_with_landed_island("wi4f-cell-tool", ISLAND_SITE_ROW);
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
     let (s, e) = cell_block_span(&text, "miri");
@@ -1869,7 +1865,7 @@ fn wi4f_cell_tool_unresolved_fires() {
 
 #[test]
 fn wi4f_cell_disposition_unknown_fires() {
-    let root = clean_workspace("wi4f-cell-disposition");
+    let root = workspace_with_landed_island("wi4f-cell-disposition", ISLAND_SITE_ROW);
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
     let (s, _) = cell_block_span(&text, "miri");
@@ -1884,7 +1880,7 @@ fn wi4f_cell_disposition_unknown_fires() {
 
 #[test]
 fn wi4f_cell_rationale_vacuous_fires() {
-    let root = clean_workspace("wi4f-rationale-vacuous");
+    let root = workspace_with_landed_island("wi4f-rationale-vacuous", ISLAND_SITE_ROW);
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
     let (s, _) = cell_block_span(&text, "asan");
@@ -1899,7 +1895,7 @@ fn wi4f_cell_rationale_vacuous_fires() {
 
 #[test]
 fn wi4f_checked_cell_without_workload_fires() {
-    let root = clean_workspace("wi4f-checked-no-workload");
+    let root = workspace_with_landed_island("wi4f-checked-no-workload", ISLAND_SITE_ROW);
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
     let (s, _) = cell_block_span(&text, "miri");
@@ -1914,7 +1910,7 @@ fn wi4f_checked_cell_without_workload_fires() {
 
 #[test]
 fn wi4f_unchecked_cell_with_workload_fires() {
-    let root = clean_workspace("wi4f-unchecked-workload");
+    let root = workspace_with_landed_island("wi4f-unchecked-workload", ISLAND_SITE_ROW);
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
     let (s, e) = cell_block_span(&text, "asan");
@@ -1929,7 +1925,7 @@ fn wi4f_unchecked_cell_with_workload_fires() {
 
 #[test]
 fn wi4f_checked_without_cell_fires() {
-    let root = clean_workspace("wi4f-checked-no-cell");
+    let root = workspace_with_landed_island("wi4f-checked-no-cell", ISLAND_SITE_ROW);
     // The asan lane owns only a candidate cell; promoting the lane itself to
     // checked leaves it with zero checked cells.
     let path = root.join("registries/unsafe_verification_lanes.toml");
@@ -1946,7 +1942,7 @@ fn wi4f_checked_without_cell_fires() {
 
 #[test]
 fn wi4f_declared_with_checked_cell_fires() {
-    let root = clean_workspace("wi4f-declared-checked");
+    let root = workspace_with_landed_island("wi4f-declared-checked", ISLAND_SITE_ROW);
     // The asan cell flips to checked while its lane stays declared.
     let path = root.join("registries/unsafe_verification_lanes.toml");
     let text = fs::read_to_string(&path).unwrap();
@@ -1962,7 +1958,7 @@ fn wi4f_declared_with_checked_cell_fires() {
 
 #[test]
 fn wi4f_declared_without_candidate_fires() {
-    let root = clean_workspace("wi4f-declared-no-candidate");
+    let root = workspace_with_landed_island("wi4f-declared-no-candidate", ISLAND_SITE_ROW);
     // The tsan cell flips to excluded so the declared tsan lane owns zero
     // candidates.
     let path = root.join("registries/unsafe_verification_lanes.toml");

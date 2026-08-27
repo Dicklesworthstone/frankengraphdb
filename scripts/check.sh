@@ -320,6 +320,14 @@ run_core_gate() {
     else
       gate_rc=${PIPESTATUS[0]}
     fi
+    if [ "$gate_rc" -ne 0 ] && [ "$(gate_env_failure_class "$core_log")" != "none" ]; then
+      printf '    core retry 1/1: attempt 1 hit %s; retrying once\n' "$(gate_env_failure_class "$core_log")"
+      if "$@" 2>&1 | tee -- "$core_log"; then
+        gate_rc=0
+      else
+        gate_rc=${PIPESTATUS[0]}
+      fi
+    fi
   else
     if "$@"; then
       gate_rc=0
@@ -1721,9 +1729,9 @@ run_cargo_test_once() { # log
 
   if [ "$CARGO_TEST_MODE" = "catalog" ]; then
     : >"$log" || return 1
-    cargo test -p registry-check --no-fail-fast 2>&1 | tee -a "$log"
+    CARGO_TERM_COLOR=never cargo test --color=never -p registry-check --no-fail-fast 2>&1 | tee -a "$log"
     registry_check_rc="${PIPESTATUS[0]}"
-    cargo test -p fgdb-codec --test generated_durable_roundtrip 2>&1 | tee -a "$log"
+    CARGO_TERM_COLOR=never cargo test --color=never -p fgdb-codec --test generated_durable_roundtrip 2>&1 | tee -a "$log"
     codec_rc="${PIPESTATUS[0]}"
     if [ "$registry_check_rc" -ne 0 ]; then
       return "$registry_check_rc"
@@ -1731,7 +1739,7 @@ run_cargo_test_once() { # log
     return "$codec_rc"
   fi
 
-  cargo test --workspace --no-fail-fast 2>&1 | tee "$log"
+  CARGO_TERM_COLOR=never cargo test --color=never --workspace --no-fail-fast 2>&1 | tee "$log"
 }
 
 run_cargo_test_workspace() {
@@ -1798,7 +1806,7 @@ cargo_test_artifact_outcome() { # log artifact cargo_test_rc
       ;;
   esac
 
-  runs=$(grep -cE "^ *Running $target \(" "$log")
+  runs=$(sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$log" | grep -cE "^ *Running $target \(")
   if [ "$runs" -eq 0 ]; then
     printf 'unrun\tits test binary never ran; cargo test --workspace exited %s\n' "$rc"
     return 0
@@ -1810,7 +1818,7 @@ cargo_test_artifact_outcome() { # log artifact cargo_test_rc
       "$target" "$runs"
     return 0
   fi
-  awk -v needle="Running $target (" '
+  sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$log" | awk -v needle="Running $target (" '
     index($0, needle) { seen = 1; next }
     seen && /^ *Running .* \(/ { exit }
     seen && /^test result:/ {
@@ -1823,7 +1831,7 @@ cargo_test_artifact_outcome() { # log artifact cargo_test_rc
         print "unrun\tits binary was launched but reported no test result"
       }
     }
-  ' "$log"
+  '
 }
 
 run_registered_gates() {
