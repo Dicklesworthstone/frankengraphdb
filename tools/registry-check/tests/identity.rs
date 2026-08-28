@@ -12585,12 +12585,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // MandatoryInventoryEntryValue, fold into the same reconstruction
             // with the union its filter claims. current_ordinary_arm_count
             // carries both (1_146 -> 1_148).
-            // 1_126 -> 1_256 (fgdb-5ekk): the 130 contract-derived family
-            // arms of the two generated wrapper unions, each carrying its
-            // member's contract-transcript payload digest; claimed whole by
-            // post_erratum_5ekk_generated_family_union.
-            // 1_256 -> 1_259 (fgdb-d2ax): +3 Meta arms for GlobalSequenceNeutralSpec<Tag>
-            + 1_259,
+                // 1_126 -> 1_256 (fgdb-5ekk): the 130 contract-derived family
+                // arms of the two generated wrapper unions, each carrying its
+                // member's contract-transcript payload digest; claimed whole by
+                // post_erratum_5ekk_generated_family_union.
+                // 1_256 -> 1_260 (fgdb-2b94eef0 [d2ax residue]): the four
+                // source-ordered arms of the two a06 host-gated ordinary
+                // unions (None/Some on GlobalKeyDestructionAuthorizationSpec
+                // .exact_target_plan.record.meta_local; Active/Retiring on
+                // ShardKeyZeroReferenceSpec.expected_local_key_registry_state),
+                // claimed by post_erratum_union. This is the residue the
+                // 470da664 host-Spec kind mint unblocked.
+                + 1_263,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
