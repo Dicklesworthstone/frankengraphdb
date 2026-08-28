@@ -4404,8 +4404,10 @@ fn a06_ordinary_unions_are_exact() {
         .expect("tools/")
         .parent()
         .expect("repo root");
-    let catalog = registry_check::appendix_a::load_catalog_file(&repo_root.join("registries/appendix_a_catalog.toml"))
-        .expect("catalog load");
+    let catalog = registry_check::appendix_a::load_catalog_file(
+        &repo_root.join("registries/appendix_a_catalog.toml"),
+    )
+    .expect("catalog load");
     let a06_unions: Vec<_> = catalog
         .projection_rows
         .iter()
@@ -4426,5 +4428,22 @@ fn a06_ordinary_unions_are_exact() {
         51,
         "a06 must contain exactly 51 ordinary union arms across its 15 unions"
     );
+    let names: Vec<&str> = catalog
+        .identity
+        .ordinary_unions
+        .iter()
+        .filter(|union| {
+            union.containing_schema == "GlobalKeyDestructionAuthorizationSpec"
+                || union.containing_schema == "ShardKeyZeroReferenceSpec"
+        })
+        .map(|union| union.union_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal",
+            "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState",
+        ],
+        "the two remaining a06 ordinary unions must be the d2ax-released field unions"
+    );
 }
-

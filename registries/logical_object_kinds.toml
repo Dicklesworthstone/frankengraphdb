@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 65
+registry_epoch = 66
 
 [[kind]]
 object_kind = 0x0001
@@ -5371,3 +5371,21 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 131543
 golden_corpus = "corpus/logical/decision_policy_epoch/"
+
+[[kind]]
+object_kind = 0x0583
+name = "GlobalKeyDestructionAuthorizationSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_destruction_authorization_spec/"
+
+[[kind]]
+object_kind = 0x0584
+name = "ShardKeyZeroReferenceSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_zero_reference_spec/"

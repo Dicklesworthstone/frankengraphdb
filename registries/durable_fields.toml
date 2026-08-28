@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 89
+registry_epoch = 90
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -17636,6 +17636,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+union_path = "GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalKeyDestructionAuthorizationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "GlobalOutcomeDirectoryValue"
 containing_schema = "GlobalOutcomeDirectoryValue"
 union_path = "GlobalOutcomeDirectoryValue"
@@ -20340,6 +20351,17 @@ union_path = "ShardCommandOrigin"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ShardCommandOrigin"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState"
+containing_schema = "ShardKeyZeroReferenceSpec"
+union_path = "ShardKeyZeroReferenceSpec.expected_local_key_registry_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardKeyZeroReferenceSpec"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -24809,6 +24831,31 @@ source_arm_name = "RemoteConsumer"
 stable_name = "remote_consumer"
 payload_kind = "inline-record"
 payload_sha256 = "9173544b408ec4201373b1227160c6ae768b69351628159383d5b313b4b458a0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+union_path = "GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+union_path = "GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local"
+arm_tag = 0x0002
+source_arm_name = "Some"
+stable_name = "some"
+payload_kind = "inline-record"
+payload_sha256 = "c545f7f9ac0b5f44cf91c90e98f518736054c6a94559003651493a7182eacf48"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -35232,6 +35279,30 @@ payload_sha256 = "79989519b48154f0c9887ee7f430c5b0edb449c882a360115668225455e55b
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState"
+containing_schema = "ShardKeyZeroReferenceSpec"
+union_path = "ShardKeyZeroReferenceSpec.expected_local_key_registry_state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState"
+containing_schema = "ShardKeyZeroReferenceSpec"
+union_path = "ShardKeyZeroReferenceSpec.expected_local_key_registry_state"
+arm_tag = 0x0002
+source_arm_name = "Retiring"
+stable_name = "retiring"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "ShardPrepareRecordState"

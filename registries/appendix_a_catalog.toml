@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4026
+target_count = 4034
 projection_fallback_count = 367
-target_source_assignment_sha256 = "80d0a5a16f19e3908918bb334404747e9b22dd992a226cba7894b43af9247358"
+target_source_assignment_sha256 = "41a6ecbb52097fbad7da55431938c79d04b4aa22ce9b6a2609db75e3b1147cf6"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 65
+registry_epoch = 66
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 89
+registry_epoch = 90
 
 [[logical_kind]]
 slice_id = "a03"
@@ -3440,6 +3440,28 @@ construction_order = 115
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_checkpoint_certificate/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:global-key-destruction-authorization-spec"
+object_kind = 0x0583
+name = "GlobalKeyDestructionAuthorizationSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_destruction_authorization_spec/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-key-zero-reference-spec"
+object_kind = 0x0584
+name = "ShardKeyZeroReferenceSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_zero_reference_spec/"
 
 [[logical_kind]]
 slice_id = "a05"
@@ -53014,7 +53036,7 @@ symbol = "GlobalKeyDestructionAuthorizationSpec"
 generic_signature = ""
 source_key = "top|GlobalKeyDestructionAuthorizationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1670"]
 
 [[top_level_candidate]]
@@ -60074,7 +60096,7 @@ symbol = "ShardKeyZeroReferenceSpec"
 generic_signature = ""
 source_key = "top|ShardKeyZeroReferenceSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1672", "a08:1874"]
 
 [[top_level_candidate]]
@@ -73168,6 +73190,22 @@ row_id = "a06:target:logical-kind-meta-checkpoint-certificate"
 target_row_id = "a06:logical-kind:meta-checkpoint-certificate"
 slice_id = "a06"
 source_key = "top|MetaCheckpointCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-global-key-destruction-authorization-spec"
+target_row_id = "a06:logical-kind:global-key-destruction-authorization-spec"
+slice_id = "a06"
+source_key = "top|GlobalKeyDestructionAuthorizationSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-key-zero-reference-spec"
+target_row_id = "a06:logical-kind:shard-key-zero-reference-spec"
+slice_id = "a06"
+source_key = "top|ShardKeyZeroReferenceSpec"
 target_kind = "logical-kind"
 definition_status = "declared"
 
