@@ -4468,6 +4468,7 @@ fn a06_source_exact_spec_fields_are_present() {
                 || field.containing_schema == "ShardKeyZeroReferenceSpec"
                 || field.containing_schema == "ShardKeyDestroyApplySpec"
                 || field.containing_schema == "GlobalKeyDestructionCompletionSpec"
+                || field.containing_schema == "ShardKeyPhysicalDestructionCompletionSpec"
         })
         .map(|field| format!("{}.{}", field.containing_schema, field.stable_name))
         .collect();
@@ -4494,6 +4495,9 @@ fn a06_source_exact_spec_fields_are_present() {
             "ShardKeyDestroyApplySpec.expected_configuration_ref".to_owned(),
             "ShardKeyDestroyApplySpec.expected_current_shard_state".to_owned(),
             "ShardKeyDestroyApplySpec.zero_reference_certificate_ref".to_owned(),
+            "ShardKeyPhysicalDestructionCompletionSpec.authorization_ref".to_owned(),
+            "ShardKeyPhysicalDestructionCompletionSpec.destroy_apply_record_ref".to_owned(),
+            "ShardKeyPhysicalDestructionCompletionSpec.expected_destroying_state".to_owned(),
             "ShardKeyZeroReferenceSpec.authorization_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.current_complete_generated_root_inventory_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.current_zero_reference_proof_ref".to_owned(),

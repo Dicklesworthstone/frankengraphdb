@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4058
+target_count = 4062
 projection_fallback_count = 367
-target_source_assignment_sha256 = "b91c61cf75176b5626dafcb41c5f7986b3e99aa5aba1fd586ec00f18886bb215"
+target_source_assignment_sha256 = "9fcdb1993f0f7eddce4379689f83a28cdd10c6a12661b9b06dd49507c6c687a5"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 68
+registry_epoch = 69
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 96
+registry_epoch = 97
 
 [[logical_kind]]
 slice_id = "a03"
@@ -3484,6 +3484,17 @@ construction_order = 60
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_key_destruction_completion_spec/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-key-physical-destruction-completion-spec"
+object_kind = 0x0587
+name = "ShardKeyPhysicalDestructionCompletionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_physical_destruction_completion_spec/"
 
 [[logical_kind]]
 slice_id = "a05"
@@ -21023,6 +21034,56 @@ reference_semantics = "none"
 construction_order = 60
 role_predicate = "role-meta"
 retention_and_cut_rule = "shared closed terminal-audit gate carried by the completion spec; embedded by value and retained/cut with GlobalKeyDestructionCompletionSpec, with no independent reachability edge (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-authorization-ref"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0001
+stable_name = "authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "certified-remote strong reference to the GlobalKeyDestructionAuthorizationCertificate this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-destroy-apply-record-ref"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0002
+stable_name = "destroy_apply_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardCommandRecord"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ShardCommandRecord this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-expected-destroying-state"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0003
+stable_name = "expected_destroying_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -60464,7 +60525,7 @@ symbol = "ShardKeyPhysicalDestructionCompletionSpec"
 generic_signature = ""
 source_key = "top|ShardKeyPhysicalDestructionCompletionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1674", "a08:1874"]
 
 [[top_level_candidate]]
@@ -73614,6 +73675,14 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:logical-kind-shard-key-physical-destruction-completion-spec"
+target_row_id = "a06:logical-kind:shard-key-physical-destruction-completion-spec"
+slice_id = "a06"
+source_key = "top|ShardKeyPhysicalDestructionCompletionSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a05:target:logical-kind-activation-meta-projection-payload"
 target_row_id = "a05:logical-kind:activation-meta-projection-payload"
 slice_id = "a05"
@@ -85833,6 +85902,30 @@ row_id = "a06:target:field-global-key-destruction-completion-spec-terminal-audit
 target_row_id = "a06:field:global-key-destruction-completion-spec-terminal-audit-gate"
 slice_id = "a06"
 source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.terminal_audit_gate|terminal_audit_gate"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-authorization-ref"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-authorization-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.authorization_ref|authorization_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-destroy-apply-record-ref"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-destroy-apply-record-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.destroy_apply_record_ref|destroy_apply_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-expected-destroying-state"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-expected-destroying-state"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.expected_destroying_state|expected_destroying_state"
 target_kind = "field"
 definition_status = "declared"
 

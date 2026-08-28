@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 96
+registry_epoch = 97
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -14996,6 +14996,50 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the ConfigurationState this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0001
+stable_name = "authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "certified-remote strong reference to the GlobalKeyDestructionAuthorizationCertificate this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0002
+stable_name = "destroy_apply_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardCommandRecord"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ShardCommandRecord this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0003
+stable_name = "expected_destroying_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "ShardKeyZeroReferenceSpec"
