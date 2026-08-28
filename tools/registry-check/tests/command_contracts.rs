@@ -4466,6 +4466,7 @@ fn a06_source_exact_spec_fields_are_present() {
         .filter(|field| {
             field.containing_schema == "GlobalKeyDestructionAuthorizationSpec"
                 || field.containing_schema == "ShardKeyZeroReferenceSpec"
+                || field.containing_schema == "ShardKeyDestroyApplySpec"
         })
         .map(|field| format!("{}.{}", field.containing_schema, field.stable_name))
         .collect();
@@ -4480,12 +4481,16 @@ fn a06_source_exact_spec_fields_are_present() {
             "GlobalKeyDestructionAuthorizationSpec.meta_configuration_ref".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.terminal_audit_gate".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.topology_state_ref".to_owned(),
+            "ShardKeyDestroyApplySpec.authorization_ref".to_owned(),
+            "ShardKeyDestroyApplySpec.expected_configuration_ref".to_owned(),
+            "ShardKeyDestroyApplySpec.expected_current_shard_state".to_owned(),
+            "ShardKeyDestroyApplySpec.zero_reference_certificate_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.authorization_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.current_complete_generated_root_inventory_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.current_zero_reference_proof_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.expected_configuration_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.expected_shard_state".to_owned(),
         ],
-        "source-exact fields on the two minted a06 Specs must stay named"
+        "source-exact fields on the minted a06 Specs must stay named"
     );
 }

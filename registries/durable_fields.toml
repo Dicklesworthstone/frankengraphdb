@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 94
+registry_epoch = 95
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -14834,6 +14834,65 @@ bd_schema_major = 1
 bd_included_field_tags = []
 bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:7f652e0dd29a56aa"
+
+[[field]]
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0001
+stable_name = "authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "certified-remote strong reference to the GlobalKeyDestructionAuthorizationCertificate this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0002
+stable_name = "zero_reference_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardKeyZeroReferenceCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ShardKeyZeroReferenceCertificate this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 40 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0003
+stable_name = "expected_current_shard_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the destroy-apply spec (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0004
+stable_name = "expected_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardKeyZeroReferenceSpec"

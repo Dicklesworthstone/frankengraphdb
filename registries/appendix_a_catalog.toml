@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4045
+target_count = 4050
 projection_fallback_count = 367
-target_source_assignment_sha256 = "2b1916ab98def7b38f4386e87c29bd62a4c443efb053c1c5cb9b7ea1dea34209"
+target_source_assignment_sha256 = "a2c128dabbb5591316ecbf835c35953e594d540b566b8f465a2c49d5fed76563"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 66
+registry_epoch = 67
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 94
+registry_epoch = 95
 
 [[logical_kind]]
 slice_id = "a03"
@@ -3462,6 +3462,17 @@ construction_order = 60
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_key_zero_reference_spec/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-key-destroy-apply-spec"
+object_kind = 0x0585
+name = "ShardKeyDestroyApplySpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_destroy_apply_spec/"
 
 [[logical_kind]]
 slice_id = "a05"
@@ -20817,6 +20828,73 @@ target_schema_id = "ZeroReferenceProof"
 construction_order = 60
 role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the ZeroReferenceProof this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-destroy-apply-spec-authorization-ref"
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0001
+stable_name = "authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "certified-remote strong reference to the GlobalKeyDestructionAuthorizationCertificate this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-destroy-apply-spec-zero-reference-certificate-ref"
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0002
+stable_name = "zero_reference_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardKeyZeroReferenceCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ShardKeyZeroReferenceCertificate this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 40 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-destroy-apply-spec-expected-current-shard-state"
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0003
+stable_name = "expected_current_shard_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the destroy-apply spec (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-destroy-apply-spec-expected-configuration-ref"
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0004
+stable_name = "expected_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -60198,7 +60276,7 @@ symbol = "ShardKeyDestroyApplySpec"
 generic_signature = ""
 source_key = "top|ShardKeyDestroyApplySpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1674", "a08:1874"]
 
 [[top_level_candidate]]
@@ -73392,6 +73470,14 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:logical-kind-shard-key-destroy-apply-spec"
+target_row_id = "a06:logical-kind:shard-key-destroy-apply-spec"
+slice_id = "a06"
+source_key = "top|ShardKeyDestroyApplySpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a05:target:logical-kind-activation-meta-projection-payload"
 target_row_id = "a05:logical-kind:activation-meta-projection-payload"
 slice_id = "a05"
@@ -85523,6 +85609,38 @@ row_id = "a06:target:field-shard-key-zero-reference-spec-current-zero-reference-
 target_row_id = "a06:field:shard-key-zero-reference-spec-current-zero-reference-proof-ref"
 slice_id = "a06"
 source_key = "field|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.current_zero_reference_proof_ref|current_zero_reference_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-destroy-apply-spec-authorization-ref"
+target_row_id = "a06:field:shard-key-destroy-apply-spec-authorization-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyDestroyApplySpec|ShardKeyDestroyApplySpec.authorization_ref|authorization_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-destroy-apply-spec-zero-reference-certificate-ref"
+target_row_id = "a06:field:shard-key-destroy-apply-spec-zero-reference-certificate-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyDestroyApplySpec|ShardKeyDestroyApplySpec.zero_reference_certificate_ref|zero_reference_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-destroy-apply-spec-expected-current-shard-state"
+target_row_id = "a06:field:shard-key-destroy-apply-spec-expected-current-shard-state"
+slice_id = "a06"
+source_key = "field|ShardKeyDestroyApplySpec|ShardKeyDestroyApplySpec.expected_current_shard_state|expected_current_shard_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-destroy-apply-spec-expected-configuration-ref"
+target_row_id = "a06:field:shard-key-destroy-apply-spec-expected-configuration-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyDestroyApplySpec|ShardKeyDestroyApplySpec.expected_configuration_ref|expected_configuration_ref"
 target_kind = "field"
 definition_status = "declared"
 

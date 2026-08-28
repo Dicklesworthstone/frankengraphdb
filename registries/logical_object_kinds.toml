@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 66
+registry_epoch = 67
 
 [[kind]]
 object_kind = 0x0001
@@ -5389,3 +5389,12 @@ construction_order = 60
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_key_zero_reference_spec/"
+
+[[kind]]
+object_kind = 0x0585
+name = "ShardKeyDestroyApplySpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_destroy_apply_spec/"
