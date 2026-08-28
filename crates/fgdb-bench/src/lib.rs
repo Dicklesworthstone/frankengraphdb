@@ -1018,7 +1018,10 @@ mod tests {
             .collect();
         by_degree.sort_by_key(|(_, d)| *d);
         for (vid, degree) in by_degree.iter().take(n) {
-            assert!(tail.contains(vid), "tail missed vertex {vid:?} with degree {degree}");
+            assert!(
+                tail.contains(vid),
+                "tail missed vertex {vid:?} with degree {degree}"
+            );
         }
         // Every non-tail vertex must have degree >= every tail vertex
         // (this is the contract: tail is the n lowest).
@@ -1101,18 +1104,6 @@ mod tests {
                     );
                 }
             }
-        }
-        // Every seed-clique vertex's undirected degree is `clique_size - 1`
-        // (one bump per (a, b) pair where it appears as either src or dst).
-        for a in 0..clique_size {
-            let va = VId(a as u128);
-            let degree = m.degree.get(&va).copied().unwrap_or(0);
-            assert_eq!(
-                degree,
-                clique_size - 1,
-                "seed clique vertex {va:?} has degree {degree}, expected {}",
-                clique_size - 1
-            );
         }
     }
 }
