@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 93
+registry_epoch = 94
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4125,6 +4125,20 @@ reference_semantics = "none"
 construction_order = 60
 role_predicate = "role-meta"
 retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the authorization spec is retained (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0009
+stable_name = "expected_state_conditions"
+exact_wire_type = "ExpectedStateCondition"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "source-ordered comparison-only CAS conditions embedded by value; every arm is nonretaining and the collection is retained and cut with the authorization spec (a06:1670, a10:1912-1913)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -17555,7 +17569,7 @@ containing_schema = "ExpectedStateCondition"
 union_path = "ExpectedStateCondition"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ControlCommand", "KeyDestroyProposal"]
+allowed_containing_schemas = ["ControlCommand", "GlobalKeyDestructionAuthorizationSpec", "KeyDestroyProposal"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

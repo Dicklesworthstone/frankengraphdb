@@ -4091,7 +4091,7 @@ name = "ExpectedStateCondition"
 kind = "union"
 status = "reserved"
 encoding_context = "shared closed u8-tagged comparison-only union WeakStateIdentity | WeakMarkerIdentity | ExpectedEpoch | ExpectedIndex in source order; no arm creates a reachability edge (a10:1912-1913)"
-allowed_containing_schemas = ["ControlCommand", "KeyDestroyProposal"]
+allowed_containing_schemas = ["ControlCommand", "GlobalKeyDestructionAuthorizationSpec", "KeyDestroyProposal"]
 max_size_bytes = 16777216
 
 [[type]]

@@ -3852,7 +3852,9 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // 625 -> 626 / 441 -> 442 (fgdb-a06-w12-core-zdzx): TerminalAuditGate
         // admits GlobalKeyDestructionAuthorizationSpec as a thirteenth consumer
         // on both the wire-type row and the ordinary-union row.
-        (626, 442),
+        // 626 -> 627 / 442 -> 443 (fgdb-a06-w12-core-zdzx): ExpectedStateCondition
+        // admits GlobalKeyDestructionAuthorizationSpec as a third consumer.
+        (627, 443),
     );
 
     let baseline = appendix_a::validate_catalog(&catalog);
@@ -7950,7 +7952,11 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     };
     assert_shared_union(
         "ExpectedStateCondition",
-        &["ControlCommand", "KeyDestroyProposal"],
+        &[
+            "ControlCommand",
+            "GlobalKeyDestructionAuthorizationSpec",
+            "KeyDestroyProposal",
+        ],
         &[
             (
                 "WeakStateIdentity",
@@ -10865,6 +10871,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             ) | (
                 "GlobalKeyDestructionAuthorizationSpec",
                 "backup_legal_hold_remote_consumer_ack_refs"
+            ) | (
+                "GlobalKeyDestructionAuthorizationSpec",
+                "expected_state_conditions"
             ) | ("ShardKeyZeroReferenceSpec", "authorization_ref")
                 | ("ShardKeyZeroReferenceSpec", "expected_shard_state")
                 | ("ShardKeyZeroReferenceSpec", "expected_configuration_ref")
@@ -12798,7 +12807,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // GlobalKeyDestroyAckRef (KeyDestroyExternalAckRef / KeyDestroyProposal
         // precedent). Claimed by post_erratum_a06_field and by
         // post_erratum_union via exact_wire_type GlobalKeyDestroyAckRef.
-        pre_erratum.fields.len() + 911,
+        // 911 -> 912 (fgdb-a06-w12-core-zdzx): GlobalKeyDestructionAuthorizationSpec
+        // .expected_state_conditions maps to the shared ExpectedStateCondition
+        // union (a10:1912-1913), same as KeyDestroyProposal. Claimed by
+        // post_erratum_a06_field and by post_erratum_union via exact_wire_type.
+        pre_erratum.fields.len() + 912,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
