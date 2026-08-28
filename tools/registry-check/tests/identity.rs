@@ -3846,7 +3846,10 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // 437 -> 439 (fgdb-5ekk): each generated family union names its own
         // wrapper as the single concrete containing schema (self-rooted
         // closure; no external embedder exists).
-        (625, 439),
+        // 439 -> 441 (fgdb-2b94eef0 / fgdb-juqa): each of the two a06 host-gated
+        // ordinary unions names its own embedding Spec as the single concrete
+        // containing schema.
+        (625, 441),
     );
 
     let baseline = appendix_a::validate_catalog(&catalog);
