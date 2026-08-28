@@ -33,7 +33,7 @@ const BIN_SHAPES: &[&str] = &[
     "compaction-under-load",
 ];
 
-fn runtime_cx() -> asupersync::Cx {
+fn runtime_cx() -> fgdb_types::context::CommitCx {
     let runtime = RuntimeBuilder::new()
         .build()
         .expect("production runtime builds for bench witness");
