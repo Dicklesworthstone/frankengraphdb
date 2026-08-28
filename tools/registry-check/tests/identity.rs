@@ -10889,14 +10889,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "current_zero_reference_proof_ref"
                 )
                 | ("ShardKeyDestroyApplySpec", "authorization_ref")
-                | (
-                    "ShardKeyDestroyApplySpec",
-                    "zero_reference_certificate_ref"
-                )
-                | (
-                    "ShardKeyDestroyApplySpec",
-                    "expected_current_shard_state"
-                )
+                | ("ShardKeyDestroyApplySpec", "zero_reference_certificate_ref")
+                | ("ShardKeyDestroyApplySpec", "expected_current_shard_state")
                 | ("ShardKeyDestroyApplySpec", "expected_configuration_ref")
                 | (
                     "GlobalKeyDestructionCompletionSpec",
@@ -10922,10 +10916,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "GlobalKeyDestructionCompletionSpec",
                     "exact_sorted_shard_completion_refs"
                 )
-                | (
-                    "GlobalKeyDestructionCompletionSpec",
-                    "terminal_audit_gate"
-                )
+                | ("GlobalKeyDestructionCompletionSpec", "terminal_audit_gate")
         )
     };
     // The a04 StrongRef field tranche. Every row is a post-erratum
