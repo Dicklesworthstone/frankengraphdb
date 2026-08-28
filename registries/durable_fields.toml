@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 91
+registry_epoch = 92
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4113,6 +4113,20 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1670)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x000a
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the authorization spec; embedded by value and retained/cut with GlobalKeyDestructionAuthorizationSpec, with no independent reachability edge (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "GlobalKeyEnvelopeManifest"
@@ -20655,7 +20669,7 @@ containing_schema = "TerminalAuditGate"
 union_path = "TerminalAuditGate"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

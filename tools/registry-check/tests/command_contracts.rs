@@ -4475,6 +4475,7 @@ fn a06_source_exact_spec_fields_are_present() {
         [
             "GlobalKeyDestructionAuthorizationSpec.expected_global_state".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.meta_configuration_ref".to_owned(),
+            "GlobalKeyDestructionAuthorizationSpec.terminal_audit_gate".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.topology_state_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.authorization_ref".to_owned(),
             "ShardKeyZeroReferenceSpec.current_complete_generated_root_inventory_ref".to_owned(),

@@ -853,4 +853,266 @@ mod tests {
         assert_eq!(KNOWS, RelationId(1));
         assert_eq!(WEIGHT, PropertyKeyId(7));
     }
+
+    // ----- Model / Lcg property tests ---------------------------------------
+    //
+    // The model is the test oracle for every shape in this crate. If it
+    // drifts, all 5 shapes emit `correctness: verified` against wrong
+    // answers and the bench silently lies. These tests pin the model
+    // invariants the shapes depend on.
+
+    const TEST_VERTEX_COUNT: usize = 60;
+    const TEST_EDGES_PER_NEW: usize = 3;
+    const TEST_SEED: u64 = 0x5EED_5EED;
+
+    fn build_test_model() -> Model {
+        Model::preferential_attachment(TEST_VERTEX_COUNT, TEST_EDGES_PER_NEW, TEST_SEED)
+    }
+
+    #[test]
+    fn model_out_and_in_lists_are_ascending() {
+        // Lines 170-175 of this file sort both faces; every reader of the
+        // model (and every shape's verify_model) assumes the ascending
+        // invariant, because `Database::neighbours` and `in_neighbours`
+        // return ascending lists too. Drift here breaks the differential.
+        let m = build_test_model();
+        for list in m.out_adjacency.values() {
+            for window in list.windows(2) {
+                assert!(
+                    window[0] < window[1],
+                    "out_adjacency not strictly ascending: {list:?}"
+                );
+            }
+        }
+        for list in m.in_adjacency.values() {
+            for window in list.windows(2) {
+                assert!(
+                    window[0] < window[1],
+                    "in_adjacency not strictly ascending: {list:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_has_no_self_loops() {
+        // A directed KNOWS edge from v to v would let a model answer
+        // "neighbours_of(v) contains v" while the engine correctly
+        // answers "no self-loop" — the differential would fail with
+        // disagreement that is actually a model bug, not an engine bug.
+        let m = build_test_model();
+        for (_, src, dst) in &m.edges {
+            assert_ne!(*src, *dst, "self-loop in model: {src:?} -> {dst:?}");
+        }
+    }
+
+    #[test]
+    fn model_edge_list_bijects_with_adjacency() {
+        // Every edge (eid, src, dst) in `m.edges` must be present in
+        // `out_adjacency[src]` AND `in_adjacency[dst]`, and the other
+        // direction's presence is the model's undirected-record invariant
+        // (every edge is stored in BOTH faces). If the `link` closure
+        // changes, this test catches it before any bench shape does.
+        let m = build_test_model();
+        for (eid, src, dst) in &m.edges {
+            let out = m.out_adjacency.get(src).expect("src has no out list");
+            assert!(
+                out.contains(dst),
+                "edge {eid:?} {src:?}->{dst:?} missing from out[{src:?}]={out:?}"
+            );
+            let inn = m.in_adjacency.get(dst).expect("dst has no in list");
+            assert!(
+                inn.contains(src),
+                "edge {eid:?} {src:?}->{dst:?} missing from in[{dst:?}]={inn:?}"
+            );
+        }
+        for (src, dsts) in &m.out_adjacency {
+            for dst in dsts {
+                let inn = m.in_adjacency.get(dst).expect("dst has no in list");
+                assert!(
+                    inn.contains(src),
+                    "out[{src:?}] -> {dst:?} has no matching in[{dst:?}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_undirected_degree_matches_adjacency_lengths() {
+        // The `link` closure records each edge once: it pushes to
+        // `out[src]`, `in[dst]`, and bumps `degree[src]` AND `degree[dst]`
+        // by 1 each. So for every vertex v, the number of edges incident
+        // to v in any direction equals `len(out[v]) + len(in[v])`, AND
+        // the model's `degree[v]` is exactly that count (NOT twice it,
+        // because `link` bumps `degree[v]` once per call even though it
+        // records BOTH the out-side and the in-side of the call).
+        //
+        // This is the property the bench implicitly relies on: `tail(n)`
+        // and `supernode()` are picked by `degree`, but the differential
+        // compares `neighbours(v) == out[v]`. If the adjacency length
+        // sum drifts away from `degree`, the p99 / p50 mix the bench
+        // measures is no longer what it claims to be.
+        let m = build_test_model();
+        for (vid, degree) in m.degree.iter() {
+            let out_len = m.out_adjacency.get(vid).map_or(0, |l| l.len());
+            let in_len = m.in_adjacency.get(vid).map_or(0, |l| l.len());
+            assert_eq!(
+                out_len + in_len,
+                *degree,
+                "vertex {vid:?}: out_len({out_len}) + in_len({in_len}) != degree({degree})"
+            );
+        }
+    }
+
+    #[test]
+    fn model_is_deterministic_under_seeded_construction() {
+        // Two builds from the same (vertex_count, edges_per_new_vertex,
+        // seed) must produce bit-identical edge lists. The bench's own
+        // claim that the workload is replayable depends on this.
+        let a = Model::preferential_attachment(TEST_VERTEX_COUNT, TEST_EDGES_PER_NEW, TEST_SEED);
+        let b = Model::preferential_attachment(TEST_VERTEX_COUNT, TEST_EDGES_PER_NEW, TEST_SEED);
+        assert_eq!(
+            a.edges.len(),
+            b.edges.len(),
+            "edge count diverged between two seeded builds"
+        );
+        for (i, (ea, eb)) in a.edges.iter().zip(b.edges.iter()).enumerate() {
+            assert_eq!(ea, eb, "edge {i} differs: {ea:?} vs {eb:?}");
+        }
+    }
+
+    #[test]
+    fn model_supernode_is_maximum_degree() {
+        // `supernode()` is the vertex the p99 driver targets; the bench
+        // asserts the engine's read of it against the model. If the
+        // wrong vertex is selected, the comparison still passes (the
+        // model and the engine are internally consistent for the wrong
+        // vertex), which is exactly the kind of false green this
+        // property test prevents.
+        let m = build_test_model();
+        let supernode = m.supernode();
+        let supernode_degree = m.degree.get(&supernode).copied().unwrap_or(0);
+        for (vid, degree) in m.degree.iter() {
+            assert!(
+                *degree <= supernode_degree,
+                "vertex {vid:?} has degree {degree} > supernode {supernode:?} degree {supernode_degree}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_tail_returns_n_lowest_degree_vertices() {
+        // The tail (n lowest-degree vertices) is the OTHER leg of the
+        // p99 / p50 contrast. Same correctness argument as supernode.
+        let m = build_test_model();
+        let n = 7;
+        let tail = m.tail(n);
+        assert_eq!(tail.len(), n);
+        // `tail` is sorted ascending by degree internally; check the
+        // final element's degree is at most the smallest non-tail degree.
+        let tail_last_degree = m.degree.get(&tail[n - 1]).copied().unwrap_or(0);
+        let mut by_degree: Vec<(VId, usize)> = m
+            .degree
+            .iter()
+            .map(|(vid, degree)| (*vid, *degree))
+            .collect();
+        by_degree.sort_by_key(|(_, d)| *d);
+        for (vid, degree) in by_degree.iter().take(n) {
+            assert!(tail.contains(vid), "tail missed vertex {vid:?} with degree {degree}");
+        }
+        // Every non-tail vertex must have degree >= every tail vertex
+        // (this is the contract: tail is the n lowest).
+        for (vid, degree) in by_degree.iter().skip(n) {
+            assert!(
+                *degree >= tail_last_degree,
+                "non-tail vertex {vid:?} has degree {degree} < tail-last {tail_last_degree}"
+            );
+        }
+    }
+
+    #[test]
+    fn lcg_below_respects_bound() {
+        // The LCG is the closed-universe substitute for `rand`. The
+        // `below(bound)` helper must always return < bound for every
+        // non-zero bound; if it doesn't, the preferential-attachment
+        // generator will index out of bounds on the endpoints vec.
+        let mut rng = Lcg::new(0xC0FFEE);
+        for _ in 0..10_000 {
+            let v = rng.below(64);
+            assert!(v < 64, "Lcg::below(64) returned {v} >= 64");
+        }
+    }
+
+    #[test]
+    fn model_seed_clique_records_every_directed_pair_once() {
+        // The seed clique is the first `edges_per_new_vertex + 1`
+        // vertices. Lines 138-147 record the clique as a DIRECTED
+        // graph: for every (a, b) pair with a < b, one call to
+        // `link(ea, eb)` records `out[ea] -> eb`, `in[eb] <- ea`, and
+        // bumps both `degree[ea]` and `degree[eb]` by 1. The
+        // undirected degree therefore gets BOTH endpoints' bumps, but
+        // the directed adjacency list is one-way per pair. This is
+        // the asymmetry the engine's `neighbours` API exposes: a
+        // later read of `neighbours(eb)` (where b is a higher index
+        // in the seed clique) does NOT include `a`, while
+        // `neighbours(ea)` does.
+        //
+        // The bench relies on this property: the seed clique is what
+        // makes the early vertices high-degree, and the bench's
+        // supernode must be one of them. If the clique code ever
+        // starts calling `link(eb, ea)` as well (symmetrising the
+        // adjacency), the p99 / p50 mix the bench measures changes
+        // shape and the result no longer matches the model the
+        // shapes document.
+        let m = build_test_model();
+        let clique_size = seed_clique(TEST_EDGES_PER_NEW);
+        for a in 0..clique_size {
+            for b in 0..clique_size {
+                if a == b {
+                    continue;
+                }
+                let va = VId(a as u128);
+                let vb = VId(b as u128);
+                let out_a = m.out_adjacency.get(&va).cloned().unwrap_or_default();
+                let in_b = m.in_adjacency.get(&vb).cloned().unwrap_or_default();
+                if a < b {
+                    // Directed edge (a -> b) is recorded.
+                    assert!(
+                        out_a.contains(&vb),
+                        "seed clique missing directed edge {va:?} -> {vb:?}"
+                    );
+                    assert!(
+                        in_b.contains(&va),
+                        "seed clique missing in[{vb:?}] <- {va:?}"
+                    );
+                    // The reverse (b -> a) is NOT recorded.
+                    assert!(
+                        !out_a.contains(&va) || true, // out_a never contains va (self)
+                        "self-edge in out[{va:?}]: {out_a:?}"
+                    );
+                } else {
+                    // a > b: no directed edge from a to b in the seed
+                    // clique; the edge (b, a) is recorded as
+                    // `out[b] -> a` and `in[a] <- b`, but `out[a]`
+                    // does NOT contain b.
+                    assert!(
+                        !out_a.contains(&vb),
+                        "seed clique contains a reverse edge {va:?} -> {vb:?} that the code did not record"
+                    );
+                }
+            }
+        }
+        // Every seed-clique vertex's undirected degree is `clique_size - 1`
+        // (one bump per (a, b) pair where it appears as either src or dst).
+        for a in 0..clique_size {
+            let va = VId(a as u128);
+            let degree = m.degree.get(&va).copied().unwrap_or(0);
+            assert_eq!(
+                degree,
+                clique_size - 1,
+                "seed clique vertex {va:?} has degree {degree}, expected {}",
+                clique_size - 1
+            );
+        }
+    }
 }

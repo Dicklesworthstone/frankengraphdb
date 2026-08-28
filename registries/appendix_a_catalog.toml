@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4042
+target_count = 4043
 projection_fallback_count = 367
-target_source_assignment_sha256 = "7766cecee28bec78c4baec36240ad941669c335e2c2e6978c3bb15e8b0e8d86d"
+target_source_assignment_sha256 = "d9329c9f17dddf55a9171e2105b4f723a8c7d6ddfb34364b3912afa75748aa9c"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 91
+registry_epoch = 92
 
 [[logical_kind]]
 slice_id = "a03"
@@ -12008,7 +12008,7 @@ name = "TerminalAuditGate"
 kind = "union"
 status = "reserved"
 encoding_context = "shared closed u8-tagged terminal audit union StructurallyInapplicable | NotRequired | Required in source order; the Required payload carries the exact ticket, event, and terminal-resolution strong-reference triple (a21:2699)"
-allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -20687,6 +20687,22 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1670)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-authorization-spec-terminal-audit-gate"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x000a
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the authorization spec; embedded by value and retained/cut with GlobalKeyDestructionAuthorizationSpec, with no independent reachability edge (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a06"
@@ -40156,7 +40172,7 @@ containing_schema = "TerminalAuditGate"
 union_path = "TerminalAuditGate"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -85411,6 +85427,14 @@ row_id = "a06:target:field-global-key-destruction-authorization-spec-topology-st
 target_row_id = "a06:field:global-key-destruction-authorization-spec-topology-state-ref"
 slice_id = "a06"
 source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-authorization-spec-terminal-audit-gate"
+target_row_id = "a06:field:global-key-destruction-authorization-spec-terminal-audit-gate"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.terminal_audit_gate|terminal_audit_gate"
 target_kind = "field"
 definition_status = "declared"
 

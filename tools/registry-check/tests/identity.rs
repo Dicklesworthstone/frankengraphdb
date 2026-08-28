@@ -3849,7 +3849,10 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // 439 -> 441 (fgdb-2b94eef0 / fgdb-juqa): each of the two a06 host-gated
         // ordinary unions names its own embedding Spec as the single concrete
         // containing schema.
-        (625, 441),
+        // 625 -> 626 / 441 -> 442 (fgdb-a06-w12-core-zdzx): TerminalAuditGate
+        // admits GlobalKeyDestructionAuthorizationSpec as a thirteenth consumer
+        // on both the wire-type row and the ordinary-union row.
+        (626, 442),
     );
 
     let baseline = appendix_a::validate_catalog(&catalog);
@@ -7980,6 +7983,7 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         "TerminalAuditGate",
         &[
             "ConfigurationTransitionSpec",
+            "GlobalKeyDestructionAuthorizationSpec",
             "GlobalRestoreServiceCompletionSpec",
             "GlobalRestoreServiceFinalizeSpec",
             "HistoryCutActivationSpec",
@@ -10837,11 +10841,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // source-exact StrongRef / CertifiedRemoteStrongRef / WeakStateIdentity
     // rows on the two minted a06 Specs (GlobalKeyDestructionAuthorizationSpec
     // and ShardKeyZeroReferenceSpec); fgdb-8d5cef9c dropped the 9th that
-    // couldn't load. Both unions are already removed by post_erratum_union
-    // (see the d2ax entry above). Remove the eight field rows from the
-    // historical witness so its pre-erratum width stays frozen at 225
-    // (fgdb-juqa; matches the fgdb-a20-historical-witness-red-opc5
-    // pattern).
+    // couldn't load. The ninth kept row is terminal_audit_gate, the source-
+    // required TerminalAuditGate on GlobalKeyDestructionAuthorizationSpec
+    // (a06:1670 / command_contracts terminal_audit_gate_arm). Both unions
+    // are already removed by post_erratum_union (see the d2ax entry above).
+    // Remove the nine field rows from the historical witness so its
+    // pre-erratum width stays frozen at 225.
     let post_erratum_a06_field = |schema: &str, name: &str| {
         matches!(
             (schema, name),
@@ -10854,6 +10859,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             ) | (
                 "GlobalKeyDestructionAuthorizationSpec",
                 "topology_state_ref"
+            ) | (
+                "GlobalKeyDestructionAuthorizationSpec",
+                "terminal_audit_gate"
             ) | ("ShardKeyZeroReferenceSpec", "authorization_ref")
                 | ("ShardKeyZeroReferenceSpec", "expected_shard_state")
                 | ("ShardKeyZeroReferenceSpec", "expected_configuration_ref")
@@ -12777,7 +12785,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // f8c4b6f9 first landed was removed in 8d5cef9c (top-level closed union
         // GlobalKeyDestroyAckRef cannot load as a field wire type on
         // GlobalKeyDestructionAuthorizationSpec).
-        pre_erratum.fields.len() + 909,
+        // 909 -> 910 (fgdb-a06-w12-core-zdzx): GlobalKeyDestructionAuthorizationSpec
+        // .terminal_audit_gate, the source-required TerminalAuditGate already
+        // named by command_contracts. Claimed by post_erratum_a06_field (and
+        // also by post_erratum_union via exact_wire_type TerminalAuditGate).
+        pre_erratum.fields.len() + 910,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
