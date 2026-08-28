@@ -27991,6 +27991,89 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+slice_id = "a06"
+row_id = "a06:union:global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-efeb245d4f472feb"
+union_name = "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+union_path = "GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalKeyDestructionAuthorizationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-none-a22c85133d4d5fae"
+union_name = "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+union_path = "GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-some-62f2fa0da8b015ad"
+union_name = "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+union_path = "GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local"
+arm_tag = 0x0002
+source_arm_name = "Some"
+stable_name = "some"
+payload_kind = "inline-record"
+payload_sha256 = "c545f7f9ac0b5f44cf91c90e98f518736054c6a94559003651493a7182eacf48"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a06"
+row_id = "a06:union:shard-key-zero-reference-spec-expected-local-key-registry-state-31097fdd396fae1f"
+union_name = "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState"
+containing_schema = "ShardKeyZeroReferenceSpec"
+union_path = "ShardKeyZeroReferenceSpec.expected_local_key_registry_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardKeyZeroReferenceSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:shard-key-zero-reference-spec-expected-local-key-registry-state-active-02e06ac4dfebb9d0"
+union_name = "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState"
+containing_schema = "ShardKeyZeroReferenceSpec"
+union_path = "ShardKeyZeroReferenceSpec.expected_local_key_registry_state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:shard-key-zero-reference-spec-expected-local-key-registry-state-retiring-a4cae842f7e566ec"
+union_name = "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState"
+containing_schema = "ShardKeyZeroReferenceSpec"
+union_path = "ShardKeyZeroReferenceSpec.expected_local_key_registry_state"
+arm_tag = 0x0002
+source_arm_name = "Retiring"
+stable_name = "retiring"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
 slice_id = "a04"
 row_id = "a04:union:weak-authority-applied-identity-8f52cac0fe558262"
 union_name = "WeakAuthorityAppliedIdentity"
@@ -73716,6 +73799,54 @@ row_id = "a06:target:union-arm-shard-recovery-checkpoint-basis-local-activation-
 target_row_id = "a06:union-arm:shard-recovery-checkpoint-basis-local-activation-projection-831c2c7b469c26d5"
 slice_id = "a06"
 source_key = "arm|ShardRecoveryCheckpoint|ShardRecoveryCheckpoint.basis|LocalActivationProjection"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-efeb245d4f472feb"
+target_row_id = "a06:union:global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-efeb245d4f472feb"
+slice_id = "a06"
+source_key = "union|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-none-a22c85133d4d5fae"
+target_row_id = "a06:union-arm:global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-none-a22c85133d4d5fae"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-some-62f2fa0da8b015ad"
+target_row_id = "a06:union-arm:global-key-destruction-authorization-spec-exact-target-plan-record-meta-local-some-62f2fa0da8b015ad"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.exact_target_plan.record.meta_local|Some"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-shard-key-zero-reference-spec-expected-local-key-registry-state-31097fdd396fae1f"
+target_row_id = "a06:union:shard-key-zero-reference-spec-expected-local-key-registry-state-31097fdd396fae1f"
+slice_id = "a06"
+source_key = "union|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.expected_local_key_registry_state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-shard-key-zero-reference-spec-expected-local-key-registry-state-active-02e06ac4dfebb9d0"
+target_row_id = "a06:union-arm:shard-key-zero-reference-spec-expected-local-key-registry-state-active-02e06ac4dfebb9d0"
+slice_id = "a06"
+source_key = "arm|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.expected_local_key_registry_state|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-shard-key-zero-reference-spec-expected-local-key-registry-state-retiring-a4cae842f7e566ec"
+target_row_id = "a06:union-arm:shard-key-zero-reference-spec-expected-local-key-registry-state-retiring-a4cae842f7e566ec"
+slice_id = "a06"
+source_key = "arm|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.expected_local_key_registry_state|Retiring"
 target_kind = "union-arm"
 definition_status = "declared"
 

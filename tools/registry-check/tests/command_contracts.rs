@@ -4396,3 +4396,35 @@ mod generated_family_unions {
         }
     }
 }
+
+#[test]
+fn a06_ordinary_unions_are_exact() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tools/")
+        .parent()
+        .expect("repo root");
+    let catalog = registry_check::appendix_a::load_catalog_file(&repo_root.join("registries/appendix_a_catalog.toml"))
+        .expect("catalog load");
+    let a06_unions: Vec<_> = catalog
+        .projection_rows
+        .iter()
+        .filter(|r| r.slice_id == "a06" && r.row_kind == "union")
+        .collect();
+    assert_eq!(
+        a06_unions.len(),
+        15,
+        "a06 must contain exactly 15 ordinary unions"
+    );
+    let a06_arms: Vec<_> = catalog
+        .projection_rows
+        .iter()
+        .filter(|r| r.slice_id == "a06" && r.row_kind == "union-arm")
+        .collect();
+    assert_eq!(
+        a06_arms.len(),
+        51,
+        "a06 must contain exactly 51 ordinary union arms across its 15 unions"
+    );
+}
+
