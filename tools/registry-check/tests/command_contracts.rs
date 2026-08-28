@@ -4473,6 +4473,8 @@ fn a06_source_exact_spec_fields_are_present() {
     assert_eq!(
         names,
         [
+            "GlobalKeyDestructionAuthorizationSpec.backup_legal_hold_remote_consumer_ack_refs"
+                .to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.expected_global_state".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.meta_configuration_ref".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.terminal_audit_gate".to_owned(),

@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4043
+target_count = 4044
 projection_fallback_count = 367
-target_source_assignment_sha256 = "d9329c9f17dddf55a9171e2105b4f723a8c7d6ddfb34364b3912afa75748aa9c"
+target_source_assignment_sha256 = "55f63cc2062e4190ca1ae5a4bc08140d4c868f0bd937f73a5fce8a29375d8f27"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 92
+registry_epoch = 93
 
 [[logical_kind]]
 slice_id = "a03"
@@ -9382,7 +9382,7 @@ name = "GlobalKeyDestroyAckRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: Backup | LegalHold | RemoteConsumer"
-allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+allowed_containing_schemas = ["GlobalKeyDestructionAuthorizationSpec"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -20690,6 +20690,22 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a06"
+row_id = "a06:field:global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0008
+stable_name = "backup_legal_hold_remote_consumer_ack_refs"
+exact_wire_type = "GlobalKeyDestroyAckRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the authorization spec is retained (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
 row_id = "a06:field:global-key-destruction-authorization-spec-terminal-audit-gate"
 containing_schema = "GlobalKeyDestructionAuthorizationSpec"
 field_tag = 0x000a
@@ -27235,7 +27251,7 @@ containing_schema = "GlobalKeyDestroyAckRef"
 union_path = "GlobalKeyDestroyAckRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+allowed_containing_schemas = ["GlobalKeyDestructionAuthorizationSpec"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -85427,6 +85443,14 @@ row_id = "a06:target:field-global-key-destruction-authorization-spec-topology-st
 target_row_id = "a06:field:global-key-destruction-authorization-spec-topology-state-ref"
 slice_id = "a06"
 source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
+target_row_id = "a06:field:global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.backup_legal_hold_remote_consumer_ack_refs|backup_legal_hold_remote_consumer_ack_refs"
 target_kind = "field"
 definition_status = "declared"
 

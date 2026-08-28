@@ -1942,7 +1942,7 @@ name = "GlobalKeyDestroyAckRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: Backup | LegalHold | RemoteConsumer"
-allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+allowed_containing_schemas = ["GlobalKeyDestructionAuthorizationSpec"]
 max_size_bytes = 16777216
 
 [[type]]

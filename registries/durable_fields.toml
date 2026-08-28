@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 92
+registry_epoch = 93
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4113,6 +4113,20 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1670)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0008
+stable_name = "backup_legal_hold_remote_consumer_ack_refs"
+exact_wire_type = "GlobalKeyDestroyAckRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the authorization spec is retained (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "GlobalKeyDestructionAuthorizationSpec"
@@ -17762,7 +17776,7 @@ containing_schema = "GlobalKeyDestroyAckRef"
 union_path = "GlobalKeyDestroyAckRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+allowed_containing_schemas = ["GlobalKeyDestructionAuthorizationSpec"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

@@ -10845,7 +10845,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // required TerminalAuditGate on GlobalKeyDestructionAuthorizationSpec
     // (a06:1670 / command_contracts terminal_audit_gate_arm). Both unions
     // are already removed by post_erratum_union (see the d2ax entry above).
-    // Remove the nine field rows from the historical witness so its
+    // Remove the ten field rows from the historical witness so its
     // pre-erratum width stays frozen at 225.
     let post_erratum_a06_field = |schema: &str, name: &str| {
         matches!(
@@ -10862,6 +10862,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             ) | (
                 "GlobalKeyDestructionAuthorizationSpec",
                 "terminal_audit_gate"
+            ) | (
+                "GlobalKeyDestructionAuthorizationSpec",
+                "backup_legal_hold_remote_consumer_ack_refs"
             ) | ("ShardKeyZeroReferenceSpec", "authorization_ref")
                 | ("ShardKeyZeroReferenceSpec", "expected_shard_state")
                 | ("ShardKeyZeroReferenceSpec", "expected_configuration_ref")
@@ -12789,7 +12792,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // .terminal_audit_gate, the source-required TerminalAuditGate already
         // named by command_contracts. Claimed by post_erratum_a06_field (and
         // also by post_erratum_union via exact_wire_type TerminalAuditGate).
-        pre_erratum.fields.len() + 910,
+        // 910 -> 911 (fgdb-a06-w12-core-zdzx): restore
+        // backup_legal_hold_remote_consumer_ack_refs after admitting
+        // GlobalKeyDestructionAuthorizationSpec as the field consumer of
+        // GlobalKeyDestroyAckRef (KeyDestroyExternalAckRef / KeyDestroyProposal
+        // precedent). Claimed by post_erratum_a06_field and by
+        // post_erratum_union via exact_wire_type GlobalKeyDestroyAckRef.
+        pre_erratum.fields.len() + 911,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
