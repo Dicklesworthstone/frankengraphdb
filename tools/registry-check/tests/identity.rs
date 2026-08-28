@@ -10833,6 +10833,40 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("MandatoryInventory", "body_digest")
         )
     };
+    // The a06 d2ax residue field tranche. fgdb-f8c4b6f9 registered the eight
+    // source-exact StrongRef / CertifiedRemoteStrongRef / WeakStateIdentity
+    // rows on the two minted a06 Specs (GlobalKeyDestructionAuthorizationSpec
+    // and ShardKeyZeroReferenceSpec); fgdb-8d5cef9c dropped the 9th that
+    // couldn't load. Both unions are already removed by post_erratum_union
+    // (see the d2ax entry above). Remove the eight field rows from the
+    // historical witness so its pre-erratum width stays frozen at 225
+    // (fgdb-juqa; matches the fgdb-a20-historical-witness-red-opc5
+    // pattern).
+    let post_erratum_a06_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            (
+                "GlobalKeyDestructionAuthorizationSpec",
+                "expected_global_state"
+            ) | (
+                "GlobalKeyDestructionAuthorizationSpec",
+                "meta_configuration_ref"
+            ) | (
+                "GlobalKeyDestructionAuthorizationSpec",
+                "topology_state_ref"
+            ) | ("ShardKeyZeroReferenceSpec", "authorization_ref")
+                | ("ShardKeyZeroReferenceSpec", "expected_shard_state")
+                | ("ShardKeyZeroReferenceSpec", "expected_configuration_ref")
+                | (
+                    "ShardKeyZeroReferenceSpec",
+                    "current_complete_generated_root_inventory_ref"
+                )
+                | (
+                    "ShardKeyZeroReferenceSpec",
+                    "current_zero_reference_proof_ref"
+                )
+        )
+    };
     // The a04 StrongRef field tranche. Every row is a post-erratum
     // addition, so the historical witness must reconstruct the namespace
     // that predates it.
@@ -12410,6 +12444,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a05_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a06_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a19_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a18_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a20_promotion_field_tranche(
@@ -12588,18 +12623,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // MandatoryInventoryEntryValue, fold into the same reconstruction
             // with the union its filter claims. current_ordinary_arm_count
             // carries both (1_146 -> 1_148).
-                // 1_126 -> 1_256 (fgdb-5ekk): the 130 contract-derived family
-                // arms of the two generated wrapper unions, each carrying its
-                // member's contract-transcript payload digest; claimed whole by
-                // post_erratum_5ekk_generated_family_union.
-                // 1_256 -> 1_260 (fgdb-2b94eef0 [d2ax residue]): the four
-                // source-ordered arms of the two a06 host-gated ordinary
-                // unions (None/Some on GlobalKeyDestructionAuthorizationSpec
-                // .exact_target_plan.record.meta_local; Active/Retiring on
-                // ShardKeyZeroReferenceSpec.expected_local_key_registry_state),
-                // claimed by post_erratum_union. This is the residue the
-                // 470da664 host-Spec kind mint unblocked.
-                + 1_263,
+            // 1_126 -> 1_256 (fgdb-5ekk): the 130 contract-derived family
+            // arms of the two generated wrapper unions, each carrying its
+            // member's contract-transcript payload digest; claimed whole by
+            // post_erratum_5ekk_generated_family_union.
+            // 1_256 -> 1_259 (fgdb-d2ax): +3 Meta arms for
+            // GlobalSequenceNeutralSpec<Tag>.
+            // 1_259 -> 1_263 (fgdb-2b94eef0 / fgdb-juqa): the four
+            // source-ordered arms of the two a06 host-gated ordinary unions
+            // (None/Some, Active/Retiring), claimed by post_erratum_union.
+            + 1_263,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
@@ -12732,7 +12765,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // SequenceNeutralSpec<Tag>, a07 GlobalSequenceNeutralSpec<Tag> twin),
         // claimed by post_erratum_a10_wrapper_field. The current field count
         // carries both and the reconstruction stays frozen at 225.
-        pre_erratum.fields.len() + 901,
+        // 901 -> 909 (fgdb-f8c4b6f9 / fgdb-8d5cef9c / fgdb-juqa): the eight
+        // source-exact StrongRef / CertifiedRemoteStrongRef / WeakStateIdentity
+        // field rows on the two minted a06 Specs (GlobalKeyDestruction
+        // AuthorizationSpec: expected_global_state, meta_configuration_ref,
+        // topology_state_ref; ShardKeyZeroReferenceSpec: authorization_ref,
+        // expected_shard_state, expected_configuration_ref,
+        // current_complete_generated_root_inventory_ref,
+        // current_zero_reference_proof_ref). Claimed by post_erratum_a06_field
+        // above; the 9th backup_legal_hold_remote_consumer_ack_refs row that
+        // f8c4b6f9 first landed was removed in 8d5cef9c (top-level closed union
+        // GlobalKeyDestroyAckRef cannot load as a field wire type on
+        // GlobalKeyDestructionAuthorizationSpec).
+        pre_erratum.fields.len() + 909,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
