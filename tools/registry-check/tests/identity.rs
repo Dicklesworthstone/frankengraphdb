@@ -3854,7 +3854,9 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // on both the wire-type row and the ordinary-union row.
         // 626 -> 627 / 442 -> 443 (fgdb-a06-w12-core-zdzx): ExpectedStateCondition
         // admits GlobalKeyDestructionAuthorizationSpec as a third consumer.
-        (627, 443),
+        // 627 -> 628 / 443 -> 444 (fgdb-a06-w12-core-zdzx): TerminalAuditGate
+        // admits GlobalKeyDestructionCompletionSpec as a fourteenth consumer.
+        (628, 444),
     );
 
     let baseline = appendix_a::validate_catalog(&catalog);
@@ -7990,6 +7992,7 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         &[
             "ConfigurationTransitionSpec",
             "GlobalKeyDestructionAuthorizationSpec",
+            "GlobalKeyDestructionCompletionSpec",
             "GlobalRestoreServiceCompletionSpec",
             "GlobalRestoreServiceFinalizeSpec",
             "HistoryCutActivationSpec",
@@ -10895,6 +10898,34 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "expected_current_shard_state"
                 )
                 | ("ShardKeyDestroyApplySpec", "expected_configuration_ref")
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "authorization_record_ref"
+                )
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "authorization_certificate_ref"
+                )
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "expected_global_destroy_authorized_state"
+                )
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "current_meta_configuration_ref"
+                )
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "current_topology_state_ref"
+                )
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "exact_sorted_shard_completion_refs"
+                )
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "terminal_audit_gate"
+                )
         )
     };
     // The a04 StrongRef field tranche. Every row is a post-erratum
@@ -12825,7 +12856,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // minted ShardKeyDestroyApplySpec (authorization_ref,
         // zero_reference_certificate_ref, expected_current_shard_state,
         // expected_configuration_ref). Claimed by post_erratum_a06_field.
-        pre_erratum.fields.len() + 916,
+        // 916 -> 923 (fgdb-a06-w12-core-zdzx): seven source-exact fields on
+        // minted GlobalKeyDestructionCompletionSpec. Claimed by
+        // post_erratum_a06_field.
+        pre_erratum.fields.len() + 923,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

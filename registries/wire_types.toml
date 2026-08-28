@@ -4144,7 +4144,7 @@ name = "TerminalAuditGate"
 kind = "union"
 status = "reserved"
 encoding_context = "shared closed u8-tagged terminal audit union StructurallyInapplicable | NotRequired | Required in source order; the Required payload carries the exact ticket, event, and terminal-resolution strong-reference triple (a21:2699)"
-allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalKeyDestructionCompletionSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 max_size_bytes = 16777216
 
 [[type]]

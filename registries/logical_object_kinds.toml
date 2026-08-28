@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 67
+registry_epoch = 68
 
 [[kind]]
 object_kind = 0x0001
@@ -5398,3 +5398,12 @@ construction_order = 60
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_key_destroy_apply_spec/"
+
+[[kind]]
+object_kind = 0x0586
+name = "GlobalKeyDestructionCompletionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_destruction_completion_spec/"

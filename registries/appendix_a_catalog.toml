@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4050
+target_count = 4058
 projection_fallback_count = 367
-target_source_assignment_sha256 = "a2c128dabbb5591316ecbf835c35953e594d540b566b8f465a2c49d5fed76563"
+target_source_assignment_sha256 = "b91c61cf75176b5626dafcb41c5f7986b3e99aa5aba1fd586ec00f18886bb215"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 67
+registry_epoch = 68
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 95
+registry_epoch = 96
 
 [[logical_kind]]
 slice_id = "a03"
@@ -3473,6 +3473,17 @@ construction_order = 60
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_key_destroy_apply_spec/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:global-key-destruction-completion-spec"
+object_kind = 0x0586
+name = "GlobalKeyDestructionCompletionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_destruction_completion_spec/"
 
 [[logical_kind]]
 slice_id = "a05"
@@ -12019,7 +12030,7 @@ name = "TerminalAuditGate"
 kind = "union"
 status = "reserved"
 encoding_context = "shared closed u8-tagged terminal audit union StructurallyInapplicable | NotRequired | Required in source order; the Required payload carries the exact ticket, event, and terminal-resolution strong-reference triple (a21:2699)"
-allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalKeyDestructionCompletionSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -20897,6 +20908,123 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the ConfigurationState this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-authorization-record-ref"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0001
+stable_name = "authorization_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 24 <= 60 keeps the reference backward-only (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-authorization-certificate-ref"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0002
+stable_name = "authorization_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the GlobalKeyDestructionAuthorizationCertificate this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-expected-global-destroy-authorized-state"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0003
+stable_name = "expected_global_destroy_authorized_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "comparison-only Meta WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the completion spec (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-current-meta-configuration-ref"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0004
+stable_name = "current_meta_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the ConfigurationState this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-current-topology-state-ref"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0005
+stable_name = "current_topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-exact-sorted-shard-completion-refs"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0008
+stable_name = "exact_sorted_shard_completion_refs"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardKeyPhysicalDestructionCompletionCertificate"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "complete sorted certified-remote retention set for every planned shard physical-destruction completion certificate; retained while the completion spec is retained and cut only with that spec (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-terminal-audit-gate"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x000a
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "shared closed terminal-audit gate carried by the completion spec; embedded by value and retained/cut with GlobalKeyDestructionCompletionSpec, with no independent reachability edge (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a10"
@@ -40282,7 +40410,7 @@ containing_schema = "TerminalAuditGate"
 union_path = "TerminalAuditGate"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "GlobalKeyDestructionAuthorizationSpec", "GlobalKeyDestructionCompletionSpec", "GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "LocalRestoreActivationSpec", "LocalRestoreServiceCompletionSpec", "LocalRestoreServicePrepareSpec", "LocalRestoreServicePromotionSpec", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -53306,7 +53434,7 @@ symbol = "GlobalKeyDestructionCompletionSpec"
 generic_signature = ""
 source_key = "top|GlobalKeyDestructionCompletionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1676"]
 
 [[top_level_candidate]]
@@ -73478,6 +73606,14 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:logical-kind-global-key-destruction-completion-spec"
+target_row_id = "a06:logical-kind:global-key-destruction-completion-spec"
+slice_id = "a06"
+source_key = "top|GlobalKeyDestructionCompletionSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a05:target:logical-kind-activation-meta-projection-payload"
 target_row_id = "a05:logical-kind:activation-meta-projection-payload"
 slice_id = "a05"
@@ -85641,6 +85777,62 @@ row_id = "a06:target:field-shard-key-destroy-apply-spec-expected-configuration-r
 target_row_id = "a06:field:shard-key-destroy-apply-spec-expected-configuration-ref"
 slice_id = "a06"
 source_key = "field|ShardKeyDestroyApplySpec|ShardKeyDestroyApplySpec.expected_configuration_ref|expected_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-authorization-record-ref"
+target_row_id = "a06:field:global-key-destruction-completion-spec-authorization-record-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.authorization_record_ref|authorization_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-authorization-certificate-ref"
+target_row_id = "a06:field:global-key-destruction-completion-spec-authorization-certificate-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.authorization_certificate_ref|authorization_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-expected-global-destroy-authorized-state"
+target_row_id = "a06:field:global-key-destruction-completion-spec-expected-global-destroy-authorized-state"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.expected_global_destroy_authorized_state|expected_global_destroy_authorized_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-current-meta-configuration-ref"
+target_row_id = "a06:field:global-key-destruction-completion-spec-current-meta-configuration-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.current_meta_configuration_ref|current_meta_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-current-topology-state-ref"
+target_row_id = "a06:field:global-key-destruction-completion-spec-current-topology-state-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.current_topology_state_ref|current_topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-exact-sorted-shard-completion-refs"
+target_row_id = "a06:field:global-key-destruction-completion-spec-exact-sorted-shard-completion-refs"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.exact_sorted_shard_completion_refs|exact_sorted_shard_completion_refs"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-terminal-audit-gate"
+target_row_id = "a06:field:global-key-destruction-completion-spec-terminal-audit-gate"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.terminal_audit_gate|terminal_audit_gate"
 target_kind = "field"
 definition_status = "declared"
 

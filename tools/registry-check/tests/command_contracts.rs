@@ -4467,6 +4467,7 @@ fn a06_source_exact_spec_fields_are_present() {
             field.containing_schema == "GlobalKeyDestructionAuthorizationSpec"
                 || field.containing_schema == "ShardKeyZeroReferenceSpec"
                 || field.containing_schema == "ShardKeyDestroyApplySpec"
+                || field.containing_schema == "GlobalKeyDestructionCompletionSpec"
         })
         .map(|field| format!("{}.{}", field.containing_schema, field.stable_name))
         .collect();
@@ -4481,6 +4482,14 @@ fn a06_source_exact_spec_fields_are_present() {
             "GlobalKeyDestructionAuthorizationSpec.meta_configuration_ref".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.terminal_audit_gate".to_owned(),
             "GlobalKeyDestructionAuthorizationSpec.topology_state_ref".to_owned(),
+            "GlobalKeyDestructionCompletionSpec.authorization_certificate_ref".to_owned(),
+            "GlobalKeyDestructionCompletionSpec.authorization_record_ref".to_owned(),
+            "GlobalKeyDestructionCompletionSpec.current_meta_configuration_ref".to_owned(),
+            "GlobalKeyDestructionCompletionSpec.current_topology_state_ref".to_owned(),
+            "GlobalKeyDestructionCompletionSpec.exact_sorted_shard_completion_refs".to_owned(),
+            "GlobalKeyDestructionCompletionSpec.expected_global_destroy_authorized_state"
+                .to_owned(),
+            "GlobalKeyDestructionCompletionSpec.terminal_audit_gate".to_owned(),
             "ShardKeyDestroyApplySpec.authorization_ref".to_owned(),
             "ShardKeyDestroyApplySpec.expected_configuration_ref".to_owned(),
             "ShardKeyDestroyApplySpec.expected_current_shard_state".to_owned(),
