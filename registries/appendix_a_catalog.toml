@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4062
-projection_fallback_count = 367
-target_source_assignment_sha256 = "9fcdb1993f0f7eddce4379689f83a28cdd10c6a12661b9b06dd49507c6c687a5"
+target_count = 4066
+projection_fallback_count = 368
+target_source_assignment_sha256 = "34170164d066d13596093c7b141da50cb35478001ab336db00058921b6733122"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 69
+registry_epoch = 70
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 97
+registry_epoch = 98
 
 [[logical_kind]]
 slice_id = "a03"
@@ -2396,6 +2396,17 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/zero_reference_proof/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:no-new-key-reference-proof"
+object_kind = 0x036f
+name = "NoNewKeyReferenceProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_new_key_reference_proof/"
 
 [[logical_kind]]
 slice_id = "a15"
@@ -20922,6 +20933,23 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a06"
+row_id = "a06:field:shard-key-destroy-apply-spec-current-inventory-equality-and-no-new-reference-proof-ref"
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0007
+stable_name = "current_inventory_equality_and_no_new_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoNewKeyReferenceProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
 row_id = "a06:field:global-key-destruction-completion-spec-authorization-record-ref"
 containing_schema = "GlobalKeyDestructionCompletionSpec"
 field_tag = 0x0001
@@ -21001,6 +21029,23 @@ target_schema_id = "TopologyState"
 construction_order = 60
 role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-current-global-inventory-and-no-new-reference-proof-ref"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0006
+stable_name = "current_global_inventory_and_no_new_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoNewKeyReferenceProof"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1676)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -21086,6 +21131,23 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-current-inventory-equality-and-no-new-reference-proof-ref"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0009
+stable_name = "current_inventory_equality_and_no_new_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoNewKeyReferenceProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 slice_id = "a10"
@@ -46225,7 +46287,7 @@ symbol = "NoNewKeyReferenceProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x036f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:no-open-statement-proof"
@@ -71907,6 +71969,14 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:logical-kind-no-new-key-reference-proof"
+target_row_id = "a06:logical-kind:no-new-key-reference-proof"
+slice_id = "a06"
+source_key = "projection|logical_object_kinds|NoNewKeyReferenceProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a15:target:logical-kind-key-destruction-authorization"
 target_row_id = "a15:logical-kind:key-destruction-authorization"
 slice_id = "a15"
@@ -85850,6 +85920,14 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:field-shard-key-destroy-apply-spec-current-inventory-equality-and-no-new-reference-proof-ref"
+target_row_id = "a06:field:shard-key-destroy-apply-spec-current-inventory-equality-and-no-new-reference-proof-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyDestroyApplySpec|ShardKeyDestroyApplySpec.current_inventory_equality_and_no_new_reference_proof_ref|current_inventory_equality_and_no_new_reference_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
 row_id = "a06:target:field-global-key-destruction-completion-spec-authorization-record-ref"
 target_row_id = "a06:field:global-key-destruction-completion-spec-authorization-record-ref"
 slice_id = "a06"
@@ -85890,6 +85968,14 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-current-global-inventory-and-no-new-reference-proof-ref"
+target_row_id = "a06:field:global-key-destruction-completion-spec-current-global-inventory-and-no-new-reference-proof-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.current_global_inventory_and_no_new_reference_proof_ref|current_global_inventory_and_no_new_reference_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
 row_id = "a06:target:field-global-key-destruction-completion-spec-exact-sorted-shard-completion-refs"
 target_row_id = "a06:field:global-key-destruction-completion-spec-exact-sorted-shard-completion-refs"
 slice_id = "a06"
@@ -85926,6 +86012,14 @@ row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-expect
 target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-expected-destroying-state"
 slice_id = "a06"
 source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.expected_destroying_state|expected_destroying_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-current-inventory-equality-and-no-new-reference-proof-ref"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-current-inventory-equality-and-no-new-reference-proof-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.current_inventory_equality_and_no_new_reference_proof_ref|current_inventory_equality_and_no_new_reference_proof_ref"
 target_kind = "field"
 definition_status = "declared"
 

@@ -4485,6 +4485,8 @@ fn a06_source_exact_spec_fields_are_present() {
             "GlobalKeyDestructionAuthorizationSpec.topology_state_ref".to_owned(),
             "GlobalKeyDestructionCompletionSpec.authorization_certificate_ref".to_owned(),
             "GlobalKeyDestructionCompletionSpec.authorization_record_ref".to_owned(),
+            "GlobalKeyDestructionCompletionSpec.current_global_inventory_and_no_new_reference_proof_ref"
+                .to_owned(),
             "GlobalKeyDestructionCompletionSpec.current_meta_configuration_ref".to_owned(),
             "GlobalKeyDestructionCompletionSpec.current_topology_state_ref".to_owned(),
             "GlobalKeyDestructionCompletionSpec.exact_sorted_shard_completion_refs".to_owned(),
@@ -4492,10 +4494,14 @@ fn a06_source_exact_spec_fields_are_present() {
                 .to_owned(),
             "GlobalKeyDestructionCompletionSpec.terminal_audit_gate".to_owned(),
             "ShardKeyDestroyApplySpec.authorization_ref".to_owned(),
+            "ShardKeyDestroyApplySpec.current_inventory_equality_and_no_new_reference_proof_ref"
+                .to_owned(),
             "ShardKeyDestroyApplySpec.expected_configuration_ref".to_owned(),
             "ShardKeyDestroyApplySpec.expected_current_shard_state".to_owned(),
             "ShardKeyDestroyApplySpec.zero_reference_certificate_ref".to_owned(),
             "ShardKeyPhysicalDestructionCompletionSpec.authorization_ref".to_owned(),
+            "ShardKeyPhysicalDestructionCompletionSpec.current_inventory_equality_and_no_new_reference_proof_ref"
+                .to_owned(),
             "ShardKeyPhysicalDestructionCompletionSpec.destroy_apply_record_ref".to_owned(),
             "ShardKeyPhysicalDestructionCompletionSpec.expected_destroying_state".to_owned(),
             "ShardKeyZeroReferenceSpec.authorization_ref".to_owned(),

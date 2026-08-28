@@ -10929,6 +10929,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "ShardKeyPhysicalDestructionCompletionSpec",
                     "expected_destroying_state"
                 )
+                | (
+                    "ShardKeyDestroyApplySpec",
+                    "current_inventory_equality_and_no_new_reference_proof_ref"
+                )
+                | (
+                    "GlobalKeyDestructionCompletionSpec",
+                    "current_global_inventory_and_no_new_reference_proof_ref"
+                )
+                | (
+                    "ShardKeyPhysicalDestructionCompletionSpec",
+                    "current_inventory_equality_and_no_new_reference_proof_ref"
+                )
         )
     };
     // The a04 StrongRef field tranche. Every row is a post-erratum
@@ -12866,7 +12878,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // minted ShardKeyPhysicalDestructionCompletionSpec (authorization_ref,
         // destroy_apply_record_ref, expected_destroying_state). Claimed by
         // post_erratum_a06_field.
-        pre_erratum.fields.len() + 926,
+        // 926 -> 929 (fgdb-a06-w12-core-zdzx): three StrongRef
+        // NoNewKeyReferenceProof fields after minting the reserved 0x036f
+        // shell (KeyReferenceInventory / ZeroReferenceProof precedent).
+        // Claimed by post_erratum_a06_field.
+        pre_erratum.fields.len() + 929,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

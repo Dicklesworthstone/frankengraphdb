@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 97
+registry_epoch = 98
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4227,6 +4227,21 @@ target_schema_id = "TopologyState"
 construction_order = 60
 role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0006
+stable_name = "current_global_inventory_and_no_new_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoNewKeyReferenceProof"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1676)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -14998,6 +15013,21 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ShardKeyDestroyApplySpec"
+field_tag = 0x0007
+stable_name = "current_inventory_equality_and_no_new_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoNewKeyReferenceProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this ShardKeyDestroyApplySpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
 field_tag = 0x0001
 stable_name = "authorization_ref"
@@ -15040,6 +15070,21 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0009
+stable_name = "current_inventory_equality_and_no_new_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoNewKeyReferenceProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardKeyZeroReferenceSpec"
