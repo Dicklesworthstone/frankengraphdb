@@ -10460,6 +10460,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "SequenceNeutralSpec<Tag>"
                 | "GlobalSequenceNeutralSpec<Tag>"
                 | "MandatoryInventoryEntryValue"
+                // fgdb-2b94eef0 [d2ax residue]: the two a06 host-gated
+                // ordinary unions from the d2ax closure, each with its own
+                // embedding spec as the single concrete consumer. They are
+                // younger than the frozen A10 witness, and their 4 source-
+                // ordered arms fold into the same arm-width pin below.
+                | "GlobalKeyDestructionAuthorizationSpecExactTargetPlanRecordMetaLocal"
+                | "ShardKeyZeroReferenceSpecExpectedLocalKeyRegistryState"
         )
     };
     pre_erratum
@@ -12467,10 +12474,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // value union on the wire host, claimed by post_erratum_union; both of
         // its arms fold into the same reconstruction the arm-width pins freeze.
         // current_union_count carries it (391 -> 392).
-        pre_erratum.ordinary_unions.len() + 387,
+        // 387 -> 389 (fgdb-2b94eef0 [d2ax residue]): the two a06 host-gated
+        // ordinary unions (each with its own embedding spec as the single
+        // concrete consumer) are younger than the witness. Both are claimed
+        // by post_erratum_union; their 4 source-ordered arms fold into the
+        // same arm-width pin the existing annotation already freezes.
+        pre_erratum.ordinary_unions.len() + 389,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
-         removed a number of unions other than 378. This assert compares a \
+        removed a number of unions other than 389. This assert compares a \
          DIFFERENCE and so it sees the OVER-filter direction only — a union removed \
          that should have stayed. It is blind to the under-filter direction, because \
          a newly landed union that no filter names increments both of its sides \

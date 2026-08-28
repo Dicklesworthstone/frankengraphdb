@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4034
+target_count = 4042
 projection_fallback_count = 367
-target_source_assignment_sha256 = "41a6ecbb52097fbad7da55431938c79d04b4aa22ce9b6a2609db75e3b1147cf6"
+target_source_assignment_sha256 = "7766cecee28bec78c4baec36240ad941669c335e2c2e6978c3bb15e8b0e8d86d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -20687,22 +20687,6 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1670)"
 version_status = "reserved"
 max_size_bytes = 40
-
-[[field]]
-slice_id = "a06"
-row_id = "a06:field:global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
-containing_schema = "GlobalKeyDestructionAuthorizationSpec"
-field_tag = 0x0008
-stable_name = "backup_legal_hold_remote_consumer_ack_refs"
-exact_wire_type = "GlobalKeyDestroyAckRef"
-cardinality = "many"
-identity_class = "inline"
-reference_semantics = "none"
-construction_order = 60
-role_predicate = "role-meta"
-retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the authorization spec is retained (a06:1670)"
-version_status = "reserved"
-max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a06"
@@ -85427,14 +85411,6 @@ row_id = "a06:target:field-global-key-destruction-authorization-spec-topology-st
 target_row_id = "a06:field:global-key-destruction-authorization-spec-topology-state-ref"
 slice_id = "a06"
 source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.topology_state_ref|topology_state_ref"
-target_kind = "field"
-definition_status = "declared"
-
-[[target]]
-row_id = "a06:target:field-global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
-target_row_id = "a06:field:global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
-slice_id = "a06"
-source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.backup_legal_hold_remote_consumer_ack_refs|backup_legal_hold_remote_consumer_ack_refs"
 target_kind = "field"
 definition_status = "declared"
 

@@ -4115,20 +4115,6 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
-containing_schema = "GlobalKeyDestructionAuthorizationSpec"
-field_tag = 0x0008
-stable_name = "backup_legal_hold_remote_consumer_ack_refs"
-exact_wire_type = "GlobalKeyDestroyAckRef"
-cardinality = "many"
-identity_class = "inline"
-reference_semantics = "none"
-construction_order = 60
-role_predicate = "role-meta"
-retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the authorization spec is retained (a06:1670)"
-version_status = "reserved"
-max_size_bytes = 16777216
-
-[[field]]
 containing_schema = "GlobalKeyEnvelopeManifest"
 field_tag = 0x0001
 stable_name = "body_digest"
