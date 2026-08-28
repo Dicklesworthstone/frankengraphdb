@@ -701,6 +701,10 @@ fn topology_header_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "reciprocal_pair_drift", fact: "layer_law.reciprocal_pair is repointed", mutate: |r| r.layer_law.reciprocal_pair = vec!["chronicle".into(), "strata".into()] },
     TopologyWitness { code: "layer_position_not_dense", fact: "one crate's layer_position leaves the dense range", mutate: |r| crate_row_mut(r, "fgdb-types").layer_position = 99 },
     TopologyWitness { code: "crate_duplicate", fact: "a crate row is repeated", mutate: |r| { let duplicate = r.crates[0].clone(); r.crates.push(duplicate); } },
+    TopologyWitness { code: "layer_titles_drift", fact: "layer titles are reordered or renamed away from §18.1", mutate: |r| layer_mut(r, "foundation").title = "Not Foundation".into() },
+    TopologyWitness { code: "layer_allowed_edges_drift", fact: "a layer's allowed_outgoing_layers is cleared", mutate: |r| layer_mut(r, "foundation").allowed_outgoing_layers.clear() },
+    TopologyWitness { code: "acyclicity_disabled", fact: "the crate_graph_must_be_acyclic flag is disabled", mutate: |r| r.layer_law.crate_graph_must_be_acyclic = false },
+    TopologyWitness { code: "semantic_contract_hash_drift", fact: "registry.semantic_contract_hash is repinned", mutate: |r| r.registry.semantic_contract_hash = "0000000000000000000000000000000000000000000000000000000000000000".into() },
     ]
 }
 
@@ -717,6 +721,13 @@ fn topology_crate_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "foundation_without_prefix", fact: "a foundation project loses its package prefixes", mutate: |r| project_mut(r, "asupersync").package_prefixes.clear() },
     TopologyWitness { code: "foundation_source_endpoint", fact: "a required edge is sourced from a foundation project", mutate: |r| r.required_dependencies[0].from_kind = "foundation".into() },
     TopologyWitness { code: "required_edge_endpoint_unresolved", fact: "a required edge names an unresolvable source", mutate: |r| r.required_dependencies[0].from = "no-such-layer".into() },
+    TopologyWitness { code: "active_without_manifest_dir", fact: "an active crate loses its manifest_dir", mutate: |r| crate_row_mut(r, "fgdb-types").manifest_dir.clear() },
+    TopologyWitness { code: "inactive_with_manifest_dir", fact: "a planned crate gains a manifest_dir", mutate: |r| crate_row_mut(r, "fgdb-shard").manifest_dir = "crates/fgdb-shard".into() },
+    TopologyWitness { code: "crate_owner_unresolved", fact: "a crate names an unregistered owner workstream", mutate: |r| crate_row_mut(r, "fgdb-types").owner = "W99".into() },
+    TopologyWitness { code: "island_policy_drift", fact: "an unsafe island is relabelled forbid", mutate: |r| crate_row_mut(r, "fgdb-unsafe-simd").unsafe_policy = "forbid".into() },
+    TopologyWitness { code: "unsafe_policy_relaxed", fact: "an ordinary crate adopts deny_ledgered", mutate: |r| crate_row_mut(r, "fgdb-types").unsafe_policy = "deny_ledgered".into() },
+    TopologyWitness { code: "posture_entry_participation_drift", fact: "a posture entry crate declares engine_only participation", mutate: |r| crate_row_mut(r, "fgdb").posture_participation = "engine_only".into() },
+    TopologyWitness { code: "island_status_disagreement", fact: "an active island is demoted to planned in the topology registry", mutate: |r| crate_row_mut(r, "fgdb-unsafe-simd").activation_status = "planned".into() },
     ]
 }
 
@@ -735,6 +746,9 @@ fn topology_capability_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "asset_gap_wrong_disposition", fact: "an evidence gap is moved onto a build_here capability", mutate: |r| r.asset_evidence_gaps[0].capability_id = "compression-codecs".into() },
     TopologyWitness { code: "asset_gap_with_asset", fact: "the gapped capability gains an asset row", mutate: |r| capability_mut(r, "queue-clients").foundation_asset = "some asset".into() },
     TopologyWitness { code: "asset_gap_block_unresolved", fact: "an evidence gap names an absent source block", mutate: |r| r.asset_evidence_gaps[0].verified_absent_from = "plan-no-such-block-v1".into() },
+    TopologyWitness { code: "build_here_without_owner", fact: "a build_here capability loses its owner crate", mutate: |r| capability_mut(r, "compression-codecs").owner_crate.clear() },
+    TopologyWitness { code: "consume_from_with_owner", fact: "a consume_from capability gains an owner crate", mutate: |r| capability_mut(r, "async-runtime").owner_crate = "fgdb-sim".into() },
+    TopologyWitness { code: "asset_gap_resolvable", fact: "a registered evidence gap names an asset block that actually contains the capability phrase", mutate: |r| { capability_mut(r, "compression-codecs").disposition = "consume_from".into(); capability_mut(r, "compression-codecs").foundation_project = "asupersync".into(); capability_mut(r, "compression-codecs").foundation_asset.clear(); capability_mut(r, "compression-codecs").source_phrase = "asupersync".into(); r.asset_evidence_gaps.push(topology::AssetEvidenceGap { capability_id: "compression-codecs".into(), verified_absent_from: "plan-crate-layer-table-v1".into(), reason: "test reason".into() }); } },
     ]
 }
 
@@ -755,6 +769,13 @@ fn topology_derivation_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "island_roster_unreadable", fact: "the island roster path points at a file that does not exist", mutate: |r| r.registry.unsafe_ledger_registry = "registries/no-such-ledger.toml".into() },
     TopologyWitness { code: "island_roster_unparsable", fact: "the island roster path points at a file that is not TOML", mutate: |r| r.registry.unsafe_ledger_registry = "AGENTS.md".into() },
     TopologyWitness { code: "inventory_coverage_incomplete", fact: "the §18.2 build-inventory source block points to a prose line with residue outside the alphabet", mutate: |r| { let block = source_block_mut(r, "plan-build-inventory-v1"); block.plan_start_line = 1; block.plan_end_line = 1; } },
+    TopologyWitness { code: "capability_phrase_unresolved", fact: "a build_here capability's source_phrase matches no §18.2 inventory line phrase", mutate: |r| capability_mut(r, "compression-codecs").source_phrase = "no-such-phrase-in-inventory".into() },
+    TopologyWitness { code: "crate_unregistered", fact: "a crate named in §18.1 is removed from the registry", mutate: |r| r.crates.retain(|row| row.name != "fgdb-types") },
+    TopologyWitness { code: "layer_membership_drift", fact: "crates within a layer are reordered away from the frozen table", mutate: |r| { crate_row_mut(r, "fgdb-strata").layer_position = 2; crate_row_mut(r, "fgdb-props").layer_position = 1; } },
+    TopologyWitness { code: "role_not_verbatim", fact: "a plan_parenthetical role does not appear in §18.1", mutate: |r| crate_row_mut(r, "fgdb-strata").role = "not the verbatim role from the plan".into() },
+    TopologyWitness { code: "tooling_member_missing", fact: "a registered tooling member does not exist in the workspace", mutate: |r| r.registry.tooling_members.push("tools/no-such-tool".into()) },
+    TopologyWitness { code: "island_roster_extra", fact: "an unsafe island is moved off the unsafe_islands layer while still in the ledger roster", mutate: |r| crate_row_mut(r, "fgdb-unsafe-simd").layer = "chronicle".into() },
+    TopologyWitness { code: "island_roster_missing", fact: "an unsafe_islands crate is absent from the ledger roster", mutate: |r| r.crates.push(topology::CrateRow { name: "fgdb-unsafe-extra-unrostered".into(), layer: "unsafe_islands".into(), activation_status: "planned".into(), unsafe_policy: "deny_ledgered".into(), owner: "W1".into(), ..r.crates[0].clone() }) },
     ]
 }
 
@@ -771,6 +792,9 @@ fn topology_live_tree_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "design_only_linked", fact: "a linked foundation project is relabelled design_only", mutate: |r| project_mut(r, "asupersync").linkage = "design_only".into() },
     TopologyWitness { code: "foundation_source_drift", fact: "a foundation project's git_url is repointed", mutate: |r| project_mut(r, "asupersync").git_url = "https://example.invalid/elsewhere".into() },
     TopologyWitness { code: "default_feature_escape", fact: "franken_networkx is changed to require disabled defaults while fgdb-codec consumes fnx-generators with defaults", mutate: |r| project_mut(r, "franken_networkx").default_features_must_be_disabled = true },
+    TopologyWitness { code: "foundation_rev_drift", fact: "a foundation project's pinned_rev is rewritten away from the Cargo.toml dependency rev", mutate: |r| project_mut(r, "asupersync").pinned_rev = "0000000000000000000000000000000000000000".into() },
+    TopologyWitness { code: "phantom_crate_directory", fact: "a planned crate exists as a directory on disk", mutate: |r| crate_row_mut(r, "fgdb-types").activation_status = "planned".into() },
+    TopologyWitness { code: "crate_undeclared", fact: "an active crate in the workspace is removed from the topology registry", mutate: |r| r.crates.retain(|row| row.name != "fgdb-types") },
     ]
 }
 
@@ -782,6 +806,7 @@ fn unsafe_island_live_tree_witnesses() -> Vec<LiveTreeWitness> {
     LiveTreeWitness { code: "lints_not_inherited", fact: "an active crate loses [lints] workspace = true", mutate: |scan| scanned_crate_mut(scan, "fgdb-types").lints_workspace = false },
     LiveTreeWitness { code: "root_missing_forbid", fact: "an ordinary crate root loses #![forbid(unsafe_code)]", mutate: |scan| scanned_crate_mut(scan, "fgdb-types").root_forbids_unsafe = false },
     LiveTreeWitness { code: "external_dependency", fact: "an active crate adds a dependency outside the closed universe", mutate: |scan| scanned_crate_mut(scan, "fgdb-types").dependencies.push(topology::ManifestDependency { key: "serde".into(), package: "serde".into(), table: "dependencies".into(), path: String::new(), git: String::new(), rev: String::new(), default_features_disabled: false }) },
+    LiveTreeWitness { code: "member_unregistered", fact: "a workspace member is neither an active crate nor registered tooling", mutate: |scan| scan.members.push("crates/unregistered-member".into()) },
     ]
 }
 
@@ -2958,7 +2983,7 @@ fn every_witness_row_names_a_distinct_law() {
     codes.extend(appendix_dag_law().iter().map(|row| row.code));
     codes.extend(appendix_epoch_text_laws().iter().map(|row| row.code));
 
-    assert_eq!(codes.len(), 221, "table row count moved");
+    assert_eq!(codes.len(), 250, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
     // `active_not_a_member`/`active_manifest_missing` are two laws reached by
     // one fact. The island rows above deliberately use separate scan facts.

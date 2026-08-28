@@ -87,8 +87,10 @@ normalize() {
     { gsub(/\x1b\[[0-9;]*[a-zA-Z]/, "") }
     /^[[:space:]]*Running / {
       bin = $0
-      sub(/.*\/deps\//, "", bin)
-      sub(/-[0-9a-f]+\)[[:space:]]*$/, "", bin)
+      sub(/^.*\(/, "", bin)
+      sub(/\)[[:space:]]*$/, "", bin)
+      sub(/.*\//, "", bin)
+      sub(/-[0-9a-f]+$/, "", bin)
       tgt = $0
       sub(/^[[:space:]]*Running[[:space:]]+/, "", tgt)
       sub(/[[:space:]]*\(.*$/, "", tgt)

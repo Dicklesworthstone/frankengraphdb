@@ -42,7 +42,7 @@ const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
 // semantic contract covers activation_status AND posture status, so
 // activating a crate MUST move this — a pin that survived the change would
 // be pinning nothing.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:f8c73256905a48d7";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:5276c61561059e3a";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

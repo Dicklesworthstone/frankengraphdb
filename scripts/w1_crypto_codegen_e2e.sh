@@ -156,7 +156,7 @@ else
 fi
 
 mapfile -t OBJECTS < <(
-  find "$TARGET_DIR/release/deps" -maxdepth 1 -type f \
+  find "$TARGET_DIR/release" -maxdepth 5 -type f \
     -name 'fgdb_crypto-*.o' -print | sort
 )
 if [ "${#OBJECTS[@]}" -eq 1 ]; then
