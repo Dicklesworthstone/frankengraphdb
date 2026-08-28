@@ -1761,3 +1761,99 @@ fn empty_statement_is_rejected() {
         codes(&r)
     );
 }
+
+#[test]
+fn a06_w12_core_classifications_are_exact() {
+    let registry = registry();
+    // 7 RegisteredCommandInput Specs
+    for (type_name, command_contract_id, source_location) in [
+        (
+            "GlobalBranchKeyManifestActivationSpec",
+            "cc:meta:global-branch-key-manifest-activation-spec",
+            "a06:1668",
+        ),
+        (
+            "GlobalKeyDestructionAuthorizationSpec",
+            "cc:meta:global-key-destruction-authorization-spec",
+            "a06:1670",
+        ),
+        (
+            "GlobalKeyDestructionCompletionSpec",
+            "cc:meta:global-key-destruction-completion-spec",
+            "a06:1676",
+        ),
+        (
+            "ShardKeyMaterialStageSpec",
+            "cc:shard:shard-key-material-stage-spec",
+            "a06:1666",
+        ),
+        (
+            "ShardKeyZeroReferenceSpec",
+            "cc:shard:shard-key-zero-reference-spec",
+            "a06:1672",
+        ),
+        (
+            "ShardKeyDestroyApplySpec",
+            "cc:shard:shard-key-destroy-apply-spec",
+            "a06:1674",
+        ),
+        (
+            "ShardKeyPhysicalDestructionCompletionSpec",
+            "cc:shard:shard-key-physical-destruction-completion-spec",
+            "a06:1674",
+        ),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact a06 command classification row must resolve");
+        assert_eq!(row.class, "RegisteredCommandInput");
+        assert_eq!(
+            row.command_contract_id.as_deref(),
+            Some(command_contract_id),
+            "{type_name} command binding drifted"
+        );
+        assert_eq!(row.source_location, source_location);
+        assert_eq!(row.status, "registered");
+    }
+
+    // 3 PreOrderArtifact records/rules
+    for (type_name, source_location) in [
+        ("MetaKeyPhysicalCompletionEvidence", "a06:1676"),
+        ("NoShardEffect", "a06:1660"),
+        ("PreparedRootHeader", "a06:1694"),
+    ] {
+        let row = registry
+            .classifications
+            .iter()
+            .find(|row| row.type_name == type_name)
+            .expect("exact a06 pre-order artifact row must resolve");
+        assert_eq!(row.class, "PreOrderArtifact");
+        assert_eq!(row.command_contract_id, None);
+        assert_eq!(row.source_location, source_location);
+        assert_eq!(row.status, "registered");
+    }
+
+    // 1 ProjectionInput
+    let proj = registry
+        .classifications
+        .iter()
+        .find(|row| row.type_name == "ApplyActivationProjection")
+        .expect("ApplyActivationProjection resolves");
+    assert_eq!(proj.class, "ProjectionInput");
+    assert_eq!(proj.command_contract_id, None);
+    assert_eq!(proj.source_location, "a06:1678");
+    assert_eq!(proj.status, "registered");
+
+    // 1 RuntimeOnly
+    let runtime = registry
+        .classifications
+        .iter()
+        .find(|row| row.type_name == "ShardCertificateLedger")
+        .expect("ShardCertificateLedger resolves");
+    assert_eq!(runtime.class, "RuntimeOnly");
+    assert_eq!(runtime.command_contract_id, None);
+    assert_eq!(runtime.source_location, "a06:1692");
+    assert_eq!(runtime.status, "registered");
+}

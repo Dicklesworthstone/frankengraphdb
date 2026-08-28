@@ -639,7 +639,7 @@ gate_env_failure_class() {
     fi
   done
   for log in "$@"; do
-    if grep -Fq 'you are in the offline mode' "$log" \
+    if { grep -Fq 'you are in the offline mode' "$log" || grep -Fq 'offline mode (via `--offline`)' "$log"; } \
       && ! grep -Eq '^test result:' "$log"; then
       printf 'cargo-offline'
       return 0

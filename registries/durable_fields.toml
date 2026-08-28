@@ -25379,6 +25379,45 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x001b
+source_arm_name = "global-branch-key-manifest-activation-spec"
+stable_name = "global-branch-key-manifest-activation-spec"
+payload_kind = "inline-record"
+payload_sha256 = "62319ca80936a719e2fdf611a89adbecd99fd1cd4cf116f538bc95158c6204c7"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x001c
+source_arm_name = "global-key-destruction-authorization-spec"
+stable_name = "global-key-destruction-authorization-spec"
+payload_kind = "inline-record"
+payload_sha256 = "f008bb12c778e14864f457452f29799ba02e307930014340fc1a7cbf8292b443"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GlobalSequenceNeutralSpec<Tag>"
+containing_schema = "GlobalSequenceNeutralSpec<Tag>"
+union_path = "GlobalSequenceNeutralSpec<Tag>"
+arm_tag = 0x001d
+source_arm_name = "global-key-destruction-completion-spec"
+stable_name = "global-key-destruction-completion-spec"
+payload_kind = "inline-record"
+payload_sha256 = "3b2912ffa21d55186e973266b646509f3843090ccc906a96924f1f578ac95eb4"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "GlobalStatePayloadBootstrapPhase"
 containing_schema = "GlobalStatePayload"
 union_path = "GlobalStatePayload.bootstrap_phase"

@@ -12577,7 +12577,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // arms of the two generated wrapper unions, each carrying its
             // member's contract-transcript payload digest; claimed whole by
             // post_erratum_5ekk_generated_family_union.
-            + 1_256,
+            // 1_256 -> 1_259 (fgdb-d2ax): +3 Meta arms for GlobalSequenceNeutralSpec<Tag>
+            + 1_259,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );

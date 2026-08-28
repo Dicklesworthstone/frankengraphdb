@@ -97,7 +97,7 @@
 #   status               = "registered"
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 38
+registry_epoch = 39
 
 [[classification]]
 type_name = "TxnSubmissionSpec"
@@ -1293,4 +1293,100 @@ class = "RegisteredCommandInput"
 command_contract_id = "cc:local:begin-role-transition-spec"
 source_location = "a04:1598"
 statement = "BeginRoleTransitionSpec is the final old-Local entry: acceptance installs terminal Raft seals and apply selects RoleTransitionLocked plus the old-Local side of every precommitted authority transfer."
+status = "registered"
+
+# =============================================================================
+# a06 key lifecycle and W12 core families (plan lines 1660-1694).
+# Bead: fgdb-d2ax.
+# =============================================================================
+
+[[classification]]
+type_name = "GlobalBranchKeyManifestActivationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-branch-key-manifest-activation-spec"
+source_location = "a06:1668"
+statement = "GlobalBranchKeyManifestActivationSpec verifies one matching certificate for every and only planned shard/range, atomically activates the branch/key epoch, and moves the replaced epoch to Retiring without creating material."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalKeyDestructionAuthorizationSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-key-destruction-authorization-spec"
+source_location = "a06:1670"
+statement = "GlobalKeyDestructionAuthorizationSpec atomically changes the global lifecycle Retiring -> DestroyAuthorized, installs a global no-new-reference quarantine, and creates one immutable MetaExternalKeyDestructionOperationRecord per Meta-local target."
+status = "registered"
+
+[[classification]]
+type_name = "GlobalKeyDestructionCompletionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:meta:global-key-destruction-completion-spec"
+source_location = "a06:1676"
+statement = "GlobalKeyDestructionCompletionSpec reaches global Destroyed only when every planned Meta target and shard/range has physical completion evidence under the current topology/configuration and the global quarantine still forbids references."
+status = "registered"
+
+[[classification]]
+type_name = "ShardKeyMaterialStageSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:shard:shard-key-material-stage-spec"
+source_location = "a06:1666"
+statement = "ShardKeyMaterialStageSpec imports a certified-remote plan/recipe, installs ShardKeyMaterialProjection with status Staged, and creates ShardKeyMaterialAvailabilityCertificate; staged material cannot satisfy reads, effects, prepares, or current lookups."
+status = "registered"
+
+[[classification]]
+type_name = "ShardKeyZeroReferenceSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:shard:shard-key-zero-reference-spec"
+source_location = "a06:1672"
+statement = "ShardKeyZeroReferenceSpec byte-matches the destruction plan, atomically installs the local no-new-reference quarantine and DestroyAuthorized, and creates the local record enabling ShardKeyZeroReferenceCertificate."
+status = "registered"
+
+[[classification]]
+type_name = "ShardKeyDestroyApplySpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:shard:shard-key-destroy-apply-spec"
+source_location = "a06:1674"
+statement = "ShardKeyDestroyApplySpec rechecks the complete current inventory, changes the authorized set DestroyAuthorized -> Destroying, and creates one immutable ShardExternalKeyDestructionOperationRecord per planned target."
+status = "registered"
+
+[[classification]]
+type_name = "ShardKeyPhysicalDestructionCompletionSpec"
+class = "RegisteredCommandInput"
+command_contract_id = "cc:shard:shard-key-physical-destruction-completion-spec"
+source_location = "a06:1674"
+statement = "ShardKeyPhysicalDestructionCompletionSpec verifies the exact authorization-recipe/Protocol-terminal/typed-receipt bijection, rechecks quarantine and inventory, and changes Destroying -> Destroyed."
+status = "registered"
+
+[[classification]]
+type_name = "MetaKeyPhysicalCompletionEvidence"
+class = "PreOrderArtifact"
+source_location = "a06:1676"
+statement = "MetaKeyPhysicalCompletionEvidence is the closed inline record tying operation record, dispatch terminal evidence, terminal receipt, and erasure verification refs."
+status = "registered"
+
+[[classification]]
+type_name = "NoShardEffect"
+class = "PreOrderArtifact"
+source_location = "a06:1660"
+statement = "NoShardEffect is the closed proof rule certifying that a Global control kind produces no targeted slot update or data effect on the given shard."
+status = "registered"
+
+[[classification]]
+type_name = "PreparedRootHeader"
+class = "PreOrderArtifact"
+source_location = "a06:1694"
+statement = "PreparedRootHeader<Role> is the generic inline header record shared by all three role-specialized prepared root kinds."
+status = "registered"
+
+[[classification]]
+type_name = "ApplyActivationProjection"
+class = "ProjectionInput"
+source_location = "a06:1678"
+statement = "ApplyActivationProjection is the CheckpointFieldRecipe closed-union arm legal only under the matching activation basis to classify destination fields without future result OIDs."
+status = "registered"
+
+[[classification]]
+type_name = "ShardCertificateLedger"
+class = "RuntimeOnly"
+source_location = "a06:1692"
+statement = "ShardCertificateLedger is the replica-local immutable map rooted by the shard RaftStateRoot to retain prepare/checkpoint/applied-ack certificates."
 status = "registered"

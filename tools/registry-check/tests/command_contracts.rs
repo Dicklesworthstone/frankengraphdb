@@ -3958,6 +3958,75 @@ fn unregistered_slot_plane_is_rejected() {
     );
 }
 
+#[test]
+fn a06_key_lifecycle_contracts_are_exact() {
+    let registry = registry();
+    for (id, role, union, outer_tag, input_id) in [
+        (
+            "cc:meta:global-branch-key-manifest-activation-spec",
+            "Meta",
+            "GlobalSequenceNeutralSpec<Tag>",
+            0x001b,
+            "GlobalBranchKeyManifestActivationSpec",
+        ),
+        (
+            "cc:meta:global-key-destruction-authorization-spec",
+            "Meta",
+            "GlobalSequenceNeutralSpec<Tag>",
+            0x001c,
+            "GlobalKeyDestructionAuthorizationSpec",
+        ),
+        (
+            "cc:meta:global-key-destruction-completion-spec",
+            "Meta",
+            "GlobalSequenceNeutralSpec<Tag>",
+            0x001d,
+            "GlobalKeyDestructionCompletionSpec",
+        ),
+        (
+            "cc:shard:shard-key-material-stage-spec",
+            "Shard",
+            "ShardControlCommand",
+            0x0001,
+            "ShardKeyMaterialStageSpec",
+        ),
+        (
+            "cc:shard:shard-key-zero-reference-spec",
+            "Shard",
+            "ShardControlCommand",
+            0x0002,
+            "ShardKeyZeroReferenceSpec",
+        ),
+        (
+            "cc:shard:shard-key-destroy-apply-spec",
+            "Shard",
+            "ShardControlCommand",
+            0x0003,
+            "ShardKeyDestroyApplySpec",
+        ),
+        (
+            "cc:shard:shard-key-physical-destruction-completion-spec",
+            "Shard",
+            "ShardControlCommand",
+            0x0004,
+            "ShardKeyPhysicalDestructionCompletionSpec",
+        ),
+    ] {
+        let row = registry
+            .contracts
+            .iter()
+            .find(|c| c.command_contract_id == id)
+            .unwrap_or_else(|| panic!("contract {id} must resolve"));
+        assert_eq!(row.role, role);
+        assert_eq!(row.outer_command_union, union);
+        assert_eq!(row.outer_wire_tag, outer_tag);
+        assert_eq!(row.input_schema_id, input_id);
+        assert_eq!(row.input_wire_tag, outer_tag);
+        assert_eq!(row.transition_class, "Semantic");
+        assert_eq!(row.status, "reserved");
+    }
+}
+
 /// Parse-level closed-key law: a row carrying an unknown key is a load error,
 /// not a violation. Uses a process-unique temp path so a concurrent pane
 /// cannot race this fixture.
@@ -4014,7 +4083,7 @@ mod generated_family_unions {
         // here means the contract corpus moved — update this landing note,
         // not this assertion's meaning.
         assert_eq!(unions[0].arms.len(), 104, "Local family arms");
-        assert_eq!(unions[1].arms.len(), 26, "Global family arms");
+        assert_eq!(unions[1].arms.len(), 29, "Global family arms");
         assert_eq!(
             find_arm(&unions[0], 0x0001).source_arm_name,
             "recovery-bridge-spec"
@@ -4030,6 +4099,18 @@ mod generated_family_unions {
         assert_eq!(
             find_arm(&unions[1], 0x001a).source_arm_name,
             "global-gc-cancellation-prepare-spec"
+        );
+        assert_eq!(
+            find_arm(&unions[1], 0x001b).source_arm_name,
+            "global-branch-key-manifest-activation-spec"
+        );
+        assert_eq!(
+            find_arm(&unions[1], 0x001c).source_arm_name,
+            "global-key-destruction-authorization-spec"
+        );
+        assert_eq!(
+            find_arm(&unions[1], 0x001d).source_arm_name,
+            "global-key-destruction-completion-spec"
         );
         // Armed members share one family arm named by the member root.
         assert_eq!(
@@ -4296,7 +4377,7 @@ mod generated_family_unions {
         );
         assert_eq!(
             printed.matches("[[union_arm]]").count(),
-            130,
+            133,
             "emission must include every family arm"
         );
         assert_eq!(
@@ -4306,7 +4387,7 @@ mod generated_family_unions {
         );
         assert_eq!(
             printed.matches("[[target]]").count(),
-            134,
+            137,
             "emission must include every companion target row"
         );
         if let Ok(path) = &mint_out {

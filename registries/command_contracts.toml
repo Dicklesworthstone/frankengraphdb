@@ -127,7 +127,7 @@
 # audit-lifecycle family never hides an open subcommand." (plan line 294)
 #
 # registry_epoch changes only when rows are added or retired (plan line 290).
-registry_epoch = 40
+registry_epoch = 41
 
 # =============================================================================
 # F1 guarded-recovery-bootstrap — frozen ordinal 1 (L1916 sentence order)
@@ -1153,6 +1153,217 @@ backup_restore_gc_classes = [ "semantic-gc" ]                             # [S] 
 posture_feature_predicate = "sharded"                                      # [S]
 format_epoch_range = "v1.."                                                # [C]
 status = "reserved"                                                        # [S]
+
+# =============================================================================
+# Meta key lifecycle (a06:1664-1676) — frozen Meta ordinals 27-29 (0x001b-0x001d).
+# Distributed branch/key activation and destruction authorization/completion.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:meta:global-branch-key-manifest-activation-spec"    # [C]
+role = "Meta"                                                              # [S] a06:1668 exact Meta branch key activation
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x001b                                                      # [S] frozen dense Meta ordinal 27
+input_schema_id = "GlobalBranchKeyManifestActivationSpec"                  # [S] a06:1668 full body
+input_wire_tag = 0x001b                                                      # [C] = outer (armless)
+body_schema_id = "GlobalBranchKeyManifestActivationSpec"                   # [S]
+result_schema_id = "GlobalBranchKeyManifestActivationRecord"               # [S] a06:1668 exact applied record
+applied_record_schema_id = "GlobalBranchKeyManifestActivationRecord"       # [S]
+handler_symbol = "fgdb_apply::meta::global_branch_key_manifest_activation_spec"  # [C][F]
+transition_class = "Semantic"                                               # [S] a06:1668 key lifecycle semantic family
+sequence_effects = "verifies one matching certificate for every and only planned shard/range, atomically activates the branch/key epoch, and moves the replaced epoch to Retiring without creating material"  # [S] a06:1668
+expected_state_schema_id = "GlobalBranchKeyRegistryState"                  # [S-derived]
+authority_arm = "GlobalBranchKeyDistributionPlan"                          # [S] plan_ref
+authority_evidence_target_schema_id = "GlobalBranchKeyDistributionPlan"    # [S]
+terminal_audit_freeze_arm = "Forbidden"                                   # [S]
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] a06:1668 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-branch-key-manifest-activation-spec"  # [C][F]
+consumed_state_slots = []                                                  # [S]
+written_state_slots = []                                                   # [S]
+checkpoint_floor_classes = [ "key-lifecycle" ]                              # [S]
+backup_restore_gc_classes = [ "key-lifecycle" ]                             # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:global-key-destruction-authorization-spec"  # [C]
+role = "Meta"                                                              # [S] a06:1670 exact Meta key destruction authorization
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x001c                                                      # [S] frozen dense Meta ordinal 28
+input_schema_id = "GlobalKeyDestructionAuthorizationSpec"                  # [S] a06:1670 full body
+input_wire_tag = 0x001c                                                      # [C] = outer (armless)
+body_schema_id = "GlobalKeyDestructionAuthorizationSpec"                   # [S]
+result_schema_id = "GlobalControlRecord"                                   # [S] a06:1670 authorization record
+applied_record_schema_id = "GlobalControlRecord"                           # [S]
+handler_symbol = "fgdb_apply::meta::global_key_destruction_authorization_spec"  # [C][F]
+transition_class = "Semantic"                                               # [S] a06:1670 key lifecycle semantic family
+sequence_effects = "atomically changes the global lifecycle Retiring -> DestroyAuthorized, installs a global no-new-reference quarantine, and creates one immutable MetaExternalKeyDestructionOperationRecord per Meta-local target"  # [S] a06:1670
+expected_state_schema_id = "WeakStateIdentity"                             # [S] expected_global_state
+authority_arm = "ConfigurationState"                                       # [S] meta_configuration_ref
+authority_evidence_target_schema_id = "ConfigurationState"                 # [S]
+terminal_audit_freeze_arm = "Forbidden"                                   # [S]
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] a06:1670 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-key-destruction-authorization-spec"  # [C][F]
+consumed_state_slots = []                                                  # [S]
+written_state_slots = []                                                   # [S]
+checkpoint_floor_classes = [ "key-lifecycle" ]                              # [S]
+backup_restore_gc_classes = [ "key-lifecycle" ]                             # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+[[contract]]
+command_contract_id = "cc:meta:global-key-destruction-completion-spec"     # [C]
+role = "Meta"                                                              # [S] a06:1676 exact Meta key destruction completion
+outer_command_union = "GlobalSequenceNeutralSpec<Tag>"                     # [S] L1770/L1774
+outer_wire_tag = 0x001d                                                      # [S] frozen dense Meta ordinal 29
+input_schema_id = "GlobalKeyDestructionCompletionSpec"                     # [S] a06:1676 full body
+input_wire_tag = 0x001d                                                      # [C] = outer (armless)
+body_schema_id = "GlobalKeyDestructionCompletionSpec"                      # [S]
+result_schema_id = "GlobalKeyDestructionCompletionRecord"                  # [S] a06:1676 exact completion record
+applied_record_schema_id = "GlobalKeyDestructionCompletionRecord"          # [S]
+handler_symbol = "fgdb_apply::meta::global_key_destruction_completion_spec"  # [C][F]
+transition_class = "Semantic"                                               # [S] a06:1676 key lifecycle semantic family
+sequence_effects = "reaches global Destroyed only when every planned Meta target and shard/range has physical completion evidence under the current topology/configuration and the global quarantine still forbids references"  # [S] a06:1676
+expected_state_schema_id = "WeakStateIdentity"                             # [S] expected_global_destroy_authorized_state
+authority_arm = "GlobalKeyDestructionAuthorizationCertificate"             # [S] authorization_certificate_ref
+authority_evidence_target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                   # [S]
+terminal_audit_gate_arm = "TerminalAuditGate"                             # [S] a06:1676 exact member
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                           # [S]
+construction_dag_recipe_id = "dag:cc:meta:global-key-destruction-completion-spec"  # [C][F]
+consumed_state_slots = []                                                  # [S]
+written_state_slots = []                                                   # [S]
+checkpoint_floor_classes = [ "key-lifecycle" ]                              # [S]
+backup_restore_gc_classes = [ "key-lifecycle" ]                             # [S]
+posture_feature_predicate = "sharded"                                      # [S]
+format_epoch_range = "v1.."                                                # [C]
+status = "reserved"                                                        # [S]
+
+# =============================================================================
+# Shard key lifecycle (a06:1666-1674) — frozen Shard ordinals 1-4 (0x0001-0x0004).
+# Stage, zero-reference, destroy-apply, and physical completion on data shards.
+# =============================================================================
+[[contract]]
+command_contract_id = "cc:shard:shard-key-material-stage-spec"             # [C]
+role = "Shard"                                                             # [S] a06:1666 exact Shard key stage input
+outer_command_union = "ShardControlCommand"                                # [S] L1882/L1970
+outer_wire_tag = 0x0001                                                    # [S] frozen dense Shard ordinal 1
+input_schema_id = "ShardKeyMaterialStageSpec"                              # [S] a06:1666 full body
+input_wire_tag = 0x0001                                                    # [C] = outer (armless)
+body_schema_id = "ShardKeyMaterialStageSpec"                               # [S]
+result_schema_id = "ShardKeyMaterialProjection"                            # [S] a06:1666 exact installed projection
+applied_record_schema_id = "ShardKeyMaterialProjection"                    # [S]
+handler_symbol = "fgdb_apply::shard::shard_key_material_stage_spec"        # [C][F]
+transition_class = "Semantic"                                              # [S] a06:1666 key lifecycle semantic family
+sequence_effects = "imports a certified-remote plan/recipe, installs ShardKeyMaterialProjection with status Staged, and creates ShardKeyMaterialAvailabilityCertificate; staged material cannot satisfy reads, effects, prepares, or current lookups"  # [S] a06:1666
+expected_state_schema_id = "ConfigurationState"                            # [S] expected_shard_configuration_ref
+authority_arm = "GlobalBranchKeyDistributionPlan"                         # [S] plan_ref
+authority_evidence_target_schema_id = "GlobalBranchKeyDistributionPlan"   # [S]
+terminal_audit_freeze_arm = "Forbidden"                                  # [S]
+terminal_audit_gate_arm = "Forbidden"                                    # [S] Shard controls do not carry terminal audit gate
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:shard:shard-key-material-stage-spec"  # [C][F]
+consumed_state_slots = []                                                 # [S]
+written_state_slots = []                                                  # [S]
+checkpoint_floor_classes = [ "key-lifecycle" ]                             # [S]
+backup_restore_gc_classes = [ "key-lifecycle" ]                            # [S]
+posture_feature_predicate = "sharded"                                     # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:shard:shard-key-zero-reference-spec"             # [C]
+role = "Shard"                                                             # [S] a06:1672 exact Shard key zero reference input
+outer_command_union = "ShardControlCommand"                                # [S] L1882/L1970
+outer_wire_tag = 0x0002                                                    # [S] frozen dense Shard ordinal 2
+input_schema_id = "ShardKeyZeroReferenceSpec"                              # [S] a06:1672 full body
+input_wire_tag = 0x0002                                                    # [C] = outer (armless)
+body_schema_id = "ShardKeyZeroReferenceSpec"                               # [S]
+result_schema_id = "ShardKeyZeroReferenceRecord"                           # [S] a06:1672 exact applied record
+applied_record_schema_id = "ShardKeyZeroReferenceRecord"                   # [S]
+handler_symbol = "fgdb_apply::shard::shard_key_zero_reference_spec"        # [C][F]
+transition_class = "Semantic"                                              # [S] a06:1672 key lifecycle semantic family
+sequence_effects = "byte-matches the destruction plan, atomically installs the local no-new-reference quarantine and DestroyAuthorized, and creates the local record enabling ShardKeyZeroReferenceCertificate"  # [S] a06:1672
+expected_state_schema_id = "WeakStateIdentity"                            # [S] expected_shard_state
+authority_arm = "GlobalKeyDestructionAuthorizationCertificate"            # [S] authorization_ref
+authority_evidence_target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                  # [S]
+terminal_audit_gate_arm = "Forbidden"                                    # [S]
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:shard:shard-key-zero-reference-spec"  # [C][F]
+consumed_state_slots = []                                                 # [S]
+written_state_slots = []                                                  # [S]
+checkpoint_floor_classes = [ "key-lifecycle" ]                             # [S]
+backup_restore_gc_classes = [ "key-lifecycle" ]                            # [S]
+posture_feature_predicate = "sharded"                                     # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:shard:shard-key-destroy-apply-spec"              # [C]
+role = "Shard"                                                             # [S] a06:1674 exact Shard key destroy apply input
+outer_command_union = "ShardControlCommand"                                # [S] L1882/L1970
+outer_wire_tag = 0x0003                                                    # [S] frozen dense Shard ordinal 3
+input_schema_id = "ShardKeyDestroyApplySpec"                               # [S] a06:1674 full body
+input_wire_tag = 0x0003                                                    # [C] = outer (armless)
+body_schema_id = "ShardKeyDestroyApplySpec"                                # [S]
+result_schema_id = "ShardExternalKeyDestructionOperationRecord"            # [S] a06:1674 exact created record
+applied_record_schema_id = "ShardExternalKeyDestructionOperationRecord"    # [S]
+handler_symbol = "fgdb_apply::shard::shard_key_destroy_apply_spec"         # [C][F]
+transition_class = "Semantic"                                              # [S] a06:1674 key lifecycle semantic family
+sequence_effects = "rechecks the complete current inventory, changes the authorized set DestroyAuthorized -> Destroying, and creates one immutable ShardExternalKeyDestructionOperationRecord per planned target"  # [S] a06:1674
+expected_state_schema_id = "WeakStateIdentity"                            # [S] expected_current_shard_state
+authority_arm = "GlobalKeyDestructionAuthorizationCertificate"            # [S] authorization_ref
+authority_evidence_target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                  # [S]
+terminal_audit_gate_arm = "Forbidden"                                    # [S]
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:shard:shard-key-destroy-apply-spec"  # [C][F]
+consumed_state_slots = []                                                 # [S]
+written_state_slots = []                                                  # [S]
+checkpoint_floor_classes = [ "key-lifecycle" ]                             # [S]
+backup_restore_gc_classes = [ "key-lifecycle" ]                            # [S]
+posture_feature_predicate = "sharded"                                     # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
+
+[[contract]]
+command_contract_id = "cc:shard:shard-key-physical-destruction-completion-spec"  # [C]
+role = "Shard"                                                             # [S] a06:1674 exact Shard key physical destruction completion input
+outer_command_union = "ShardControlCommand"                                # [S] L1882/L1970
+outer_wire_tag = 0x0004                                                    # [S] frozen dense Shard ordinal 4
+input_schema_id = "ShardKeyPhysicalDestructionCompletionSpec"             # [S] a06:1674 full body
+input_wire_tag = 0x0004                                                    # [C] = outer (armless)
+body_schema_id = "ShardKeyPhysicalDestructionCompletionSpec"              # [S]
+result_schema_id = "ShardKeyPhysicalDestructionCompletionRecord"           # [S] a06:1674 exact completion record
+applied_record_schema_id = "ShardKeyPhysicalDestructionCompletionRecord"   # [S]
+handler_symbol = "fgdb_apply::shard::shard_key_physical_destruction_completion_spec"  # [C][F]
+transition_class = "Semantic"                                              # [S] a06:1674 key lifecycle semantic family
+sequence_effects = "verifies the exact authorization-recipe/Protocol-terminal/typed-receipt bijection, rechecks quarantine and inventory, and changes Destroying -> Destroyed"  # [S] a06:1674
+expected_state_schema_id = "WeakStateIdentity"                            # [S] expected_destroying_state
+authority_arm = "GlobalKeyDestructionAuthorizationCertificate"            # [S] authorization_ref
+authority_evidence_target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"  # [S]
+terminal_audit_freeze_arm = "Forbidden"                                  # [S]
+terminal_audit_gate_arm = "Forbidden"                                    # [S]
+payload_availability_rule = "pre-command semantic base closure per plan:392 (FG-LAW-05)"  # [S]
+publication_mode = "SinglePlane"                                          # [S]
+construction_dag_recipe_id = "dag:cc:shard:shard-key-physical-destruction-completion-spec"  # [C][F]
+consumed_state_slots = []                                                 # [S]
+written_state_slots = []                                                  # [S]
+checkpoint_floor_classes = [ "key-lifecycle" ]                             # [S]
+backup_restore_gc_classes = [ "key-lifecycle" ]                            # [S]
+posture_feature_predicate = "sharded"                                     # [S]
+format_epoch_range = "v1.."                                               # [C]
+status = "reserved"                                                       # [S]
 
 # =============================================================================
 # F14 semantic GC authorization — frozen ordinals 66-69. The first three
