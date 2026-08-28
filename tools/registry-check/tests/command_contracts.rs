@@ -4447,3 +4447,43 @@ fn a06_ordinary_unions_are_exact() {
         "the two remaining a06 ordinary unions must be the d2ax-released field unions"
     );
 }
+
+#[test]
+fn a06_source_exact_spec_fields_are_present() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tools/")
+        .parent()
+        .expect("repo root");
+    let catalog = registry_check::appendix_a::load_catalog_file(
+        &repo_root.join("registries/appendix_a_catalog.toml"),
+    )
+    .expect("catalog load");
+    let mut names: Vec<String> = catalog
+        .identity
+        .fields
+        .iter()
+        .filter(|field| {
+            field.containing_schema == "GlobalKeyDestructionAuthorizationSpec"
+                || field.containing_schema == "ShardKeyZeroReferenceSpec"
+        })
+        .map(|field| format!("{}.{}", field.containing_schema, field.stable_name))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "GlobalKeyDestructionAuthorizationSpec.backup_legal_hold_remote_consumer_ack_refs"
+                .to_owned(),
+            "GlobalKeyDestructionAuthorizationSpec.expected_global_state".to_owned(),
+            "GlobalKeyDestructionAuthorizationSpec.meta_configuration_ref".to_owned(),
+            "GlobalKeyDestructionAuthorizationSpec.topology_state_ref".to_owned(),
+            "ShardKeyZeroReferenceSpec.authorization_ref".to_owned(),
+            "ShardKeyZeroReferenceSpec.current_complete_generated_root_inventory_ref".to_owned(),
+            "ShardKeyZeroReferenceSpec.current_zero_reference_proof_ref".to_owned(),
+            "ShardKeyZeroReferenceSpec.expected_configuration_ref".to_owned(),
+            "ShardKeyZeroReferenceSpec.expected_shard_state".to_owned(),
+        ],
+        "source-exact fields on the two minted a06 Specs must stay named"
+    );
+}

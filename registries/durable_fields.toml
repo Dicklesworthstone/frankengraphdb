@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 90
+registry_epoch = 91
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4069,6 +4069,64 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalFinalCertificationReserveSpec names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1748)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0003
+stable_name = "expected_global_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "comparison-only Meta WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the authorization spec (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0004
+stable_name = "meta_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the ConfigurationState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0005
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0008
+stable_name = "backup_legal_hold_remote_consumer_ack_refs"
+exact_wire_type = "GlobalKeyDestroyAckRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the authorization spec is retained (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "GlobalKeyEnvelopeManifest"
@@ -14748,6 +14806,80 @@ bd_schema_major = 1
 bd_included_field_tags = []
 bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:7f652e0dd29a56aa"
+
+[[field]]
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0001
+stable_name = "authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "certified-remote strong reference to the GlobalKeyDestructionAuthorizationCertificate this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0002
+stable_name = "expected_shard_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the zero-reference spec (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0003
+stable_name = "expected_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0007
+stable_name = "current_complete_generated_root_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyReferenceInventory"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the KeyReferenceInventory this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0008
+stable_name = "current_zero_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ZeroReferenceProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ZeroReferenceProof this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardPrepareCommand"

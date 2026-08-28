@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 90
+registry_epoch = 91
 
 [[logical_kind]]
 slice_id = "a03"
@@ -20637,6 +20637,156 @@ retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-o
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-authorization-spec-expected-global-state"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0003
+stable_name = "expected_global_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "comparison-only Meta WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the authorization spec (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-authorization-spec-meta-configuration-ref"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0004
+stable_name = "meta_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the ConfigurationState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-authorization-spec-topology-state-ref"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0005
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the TopologyState this GlobalKeyDestructionAuthorizationSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
+containing_schema = "GlobalKeyDestructionAuthorizationSpec"
+field_tag = 0x0008
+stable_name = "backup_legal_hold_remote_consumer_ack_refs"
+exact_wire_type = "GlobalKeyDestroyAckRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the authorization spec is retained (a06:1670)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-zero-reference-spec-authorization-ref"
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0001
+stable_name = "authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "certified-remote strong reference to the GlobalKeyDestructionAuthorizationCertificate this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-zero-reference-spec-expected-shard-state"
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0002
+stable_name = "expected_shard_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the zero-reference spec (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-zero-reference-spec-expected-configuration-ref"
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0003
+stable_name = "expected_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 5 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-zero-reference-spec-current-complete-generated-root-inventory-ref"
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0007
+stable_name = "current_complete_generated_root_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyReferenceInventory"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the KeyReferenceInventory this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-zero-reference-spec-current-zero-reference-proof-ref"
+containing_schema = "ShardKeyZeroReferenceSpec"
+field_tag = 0x0008
+stable_name = "current_zero_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ZeroReferenceProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the ZeroReferenceProof this ShardKeyZeroReferenceSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1672)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 slice_id = "a10"
@@ -85253,6 +85403,78 @@ row_id = "a06:target:field-shard-prepared-payload-record-nonretaining-predecesso
 target_row_id = "a06:field:shard-prepared-payload-record-nonretaining-predecessor-digest"
 slice_id = "a06"
 source_key = "field|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-authorization-spec-expected-global-state"
+target_row_id = "a06:field:global-key-destruction-authorization-spec-expected-global-state"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.expected_global_state|expected_global_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-authorization-spec-meta-configuration-ref"
+target_row_id = "a06:field:global-key-destruction-authorization-spec-meta-configuration-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.meta_configuration_ref|meta_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-authorization-spec-topology-state-ref"
+target_row_id = "a06:field:global-key-destruction-authorization-spec-topology-state-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
+target_row_id = "a06:field:global-key-destruction-authorization-spec-backup-legal-hold-remote-consumer-ack-refs"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionAuthorizationSpec|GlobalKeyDestructionAuthorizationSpec.backup_legal_hold_remote_consumer_ack_refs|backup_legal_hold_remote_consumer_ack_refs"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-zero-reference-spec-authorization-ref"
+target_row_id = "a06:field:shard-key-zero-reference-spec-authorization-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.authorization_ref|authorization_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-zero-reference-spec-expected-shard-state"
+target_row_id = "a06:field:shard-key-zero-reference-spec-expected-shard-state"
+slice_id = "a06"
+source_key = "field|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.expected_shard_state|expected_shard_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-zero-reference-spec-expected-configuration-ref"
+target_row_id = "a06:field:shard-key-zero-reference-spec-expected-configuration-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.expected_configuration_ref|expected_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-zero-reference-spec-current-complete-generated-root-inventory-ref"
+target_row_id = "a06:field:shard-key-zero-reference-spec-current-complete-generated-root-inventory-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.current_complete_generated_root_inventory_ref|current_complete_generated_root_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-zero-reference-spec-current-zero-reference-proof-ref"
+target_row_id = "a06:field:shard-key-zero-reference-spec-current-zero-reference-proof-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyZeroReferenceSpec|ShardKeyZeroReferenceSpec.current_zero_reference_proof_ref|current_zero_reference_proof_ref"
 target_kind = "field"
 definition_status = "declared"
 
