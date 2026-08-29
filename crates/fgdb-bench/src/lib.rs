@@ -149,6 +149,9 @@ impl Model {
             let vid = VId(newcomer as u128);
             let mut attached: BTreeMap<VId, ()> = BTreeMap::new();
             while attached.len() < edges_per_new_vertex.min(newcomer) {
+                if endpoints.is_empty() {
+                    break;
+                }
                 let target = endpoints[rng.below(endpoints.len())];
                 if target == vid || attached.contains_key(&target) {
                     continue;
@@ -297,26 +300,46 @@ pub fn edge_weight(record: &fgdb::EdgeRecord) -> Result<i64, String> {
 // ---------------------------------------------------------------------------
 
 /// One ingest batch over `range`, creating any vertex the range first touches.
-/// `vertices_seen` is global across batches: identities are permanently spent,
-/// so a create may be emitted exactly once per vertex for the whole load.
+///
+/// `vertices_seen` is the set of identities already known to be durable.
+/// This function does not mutate it: identities are spent only after a
+/// commit actually lands (see [`record_vertices_seen`]). Marking them
+/// spent while building the batch used to drop `create_vertex` from the
+/// post-fence retry when the refused write never published, which then
+/// issued edges against vertices that did not exist.
 pub fn build_batch(
     model: &Model,
-    vertices_seen: &mut BTreeMap<VId, ()>,
+    vertices_seen: &BTreeMap<VId, ()>,
     range: std::ops::Range<usize>,
 ) -> WriteBatch {
     let mut batch = WriteBatch::new(KNOWS);
+    let mut created_this_batch: BTreeMap<VId, ()> = BTreeMap::new();
     for (eid, src, dst) in &model.edges[range] {
-        if !vertices_seen.contains_key(src) {
+        if !vertices_seen.contains_key(src) && !created_this_batch.contains_key(src) {
             batch.create_vertex(*src, vec![], vec![]);
-            vertices_seen.insert(*src, ());
+            created_this_batch.insert(*src, ());
         }
-        if !vertices_seen.contains_key(dst) {
+        if !vertices_seen.contains_key(dst) && !created_this_batch.contains_key(dst) {
             batch.create_vertex(*dst, vec![], vec![]);
-            vertices_seen.insert(*dst, ());
+            created_this_batch.insert(*dst, ());
         }
         batch.add_edge(*eid, *src, *dst, vec![(WEIGHT, CanonicalScalar::Int(0))]);
     }
     batch
+}
+
+/// Records identities from a committed edge range so later batches do not
+/// re-create them. Call only after the matching write is durable, including
+/// the fence-after-commit case where reopen finds the last edge already live.
+fn record_vertices_seen(
+    model: &Model,
+    vertices_seen: &mut BTreeMap<VId, ()>,
+    range: std::ops::Range<usize>,
+) {
+    for (_, src, dst) in &model.edges[range] {
+        vertices_seen.insert(*src, ());
+        vertices_seen.insert(*dst, ());
+    }
 }
 
 /// The measured engine contract this harness documents: a delta block that
@@ -358,10 +381,13 @@ pub async fn load_model_durably(
     let mut index = 0;
     while index < model.edges.len() {
         let end = (index + INGEST_BATCH_EDGES).min(model.edges.len());
-        let batch = build_batch(model, &mut vertices_seen, index..end);
+        let batch = build_batch(model, &vertices_seen, index..end);
         let started = Instant::now();
         match db.write(cx, batch).await {
-            Ok(_) => commit_samples.push(started.elapsed()),
+            Ok(_) => {
+                record_vertices_seen(model, &mut vertices_seen, index..end);
+                commit_samples.push(started.elapsed());
+            }
             Err(error) if is_publish_fence(&error) => {
                 reopens += 1;
                 // fgdb-a7sz instrument: how many sealed blocks had
@@ -394,12 +420,18 @@ pub async fn load_model_durably(
                     .map_err(|error| format!("fence probe read: {error}"))?
                     .is_none()
                 {
-                    // Refused BEFORE the commit: rebuild the same range.
-                    let rebuilt = build_batch(model, &mut vertices_seen, index..end);
+                    // Refused BEFORE the commit: rebuild the same range
+                    // against still-unspent identities.
+                    let rebuilt = build_batch(model, &vertices_seen, index..end);
                     db.write(cx, rebuilt)
                         .await
                         .map_err(|error| format!("post-fence write: {error}"))?;
+                    record_vertices_seen(model, &mut vertices_seen, index..end);
                     commit_samples.push(started.elapsed());
+                } else {
+                    // The refused write had already published: spend the
+                    // identities so the next range does not re-create them.
+                    record_vertices_seen(model, &mut vertices_seen, index..end);
                 }
             }
             Err(error) => return Err(format!("write: {error}")),
@@ -410,7 +442,7 @@ pub async fn load_model_durably(
 }
 
 /// Verify every edge of `model` against an open handle: payload exactness plus
-/// forward-adjacency presence. Runs OUTSIDE measured regions so verification
+/// both adjacency faces. Runs OUTSIDE measured regions so verification
 /// cost never pollutes the numbers.
 pub async fn verify_model(db: &Database, model: &Model) -> Result<(), String> {
     for (eid, src, dst) in &model.edges {
@@ -426,6 +458,12 @@ pub async fn verify_model(db: &Database, model: &Model) -> Result<(), String> {
             .map_err(|error| format!("neighbours read: {error}"))?;
         if !forward.contains(dst) {
             return Err(format!("edge {eid:?} absent from forward adjacency"));
+        }
+        let inbound = db
+            .in_neighbours(*dst, KNOWS)
+            .map_err(|error| format!("in-neighbours read: {error}"))?;
+        if !inbound.contains(src) {
+            return Err(format!("edge {eid:?} absent from inbound adjacency"));
         }
     }
     Ok(())
@@ -962,6 +1000,29 @@ mod tests {
                 "vertex {vid:?}: out_len({out_len}) + in_len({in_len}) != degree({degree})"
             );
         }
+    }
+
+    #[test]
+    fn build_batch_does_not_spend_identities_before_commit() {
+        // Fence recovery rebuilds a refused range against `vertices_seen`.
+        // Spending identities inside `build_batch` used to drop create_vertex
+        // from that retry when the write never published.
+        let m = build_test_model();
+        let mut seen = BTreeMap::new();
+        let end = 3.min(m.edges.len());
+        let _ = build_batch(&m, &seen, 0..end);
+        assert!(
+            seen.is_empty(),
+            "planning a batch must not mark identities durable"
+        );
+        record_vertices_seen(&m, &mut seen, 0..end);
+        assert!(!seen.is_empty(), "a landed range must spend its endpoints");
+        let before = seen.clone();
+        let _ = build_batch(&m, &seen, 0..end);
+        assert_eq!(
+            seen, before,
+            "rebuilding a spent range must not mutate vertices_seen"
+        );
     }
 
     #[test]
