@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 72
+registry_epoch = 73
 
 [[kind]]
 object_kind = 0x0001
@@ -2205,6 +2205,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_continuity_authority_observation/"
 
 [[kind]]
+object_kind = 0x0387
+name = "PortableKeyDestructionDispatchTerminalEvidence"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_key_destruction_dispatch_terminal_evidence/"
+
+[[kind]]
 object_kind = 0x0388
 name = "PortableRemoteReleaseAckEvidence"
 status = "reserved"
@@ -3661,6 +3670,15 @@ construction_order = 10
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_escaping_allocation_reservation_record/"
+
+[[kind]]
+object_kind = 0x044f
+name = "ShardExternalKeyDestructionOperationRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_external_key_destruction_operation_record/"
 
 [[kind]]
 object_kind = 0x0452

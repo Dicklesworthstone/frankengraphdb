@@ -4505,7 +4505,9 @@ fn a06_source_exact_spec_fields_are_present() {
             "ShardKeyPhysicalDestructionCompletionSpec.current_inventory_equality_and_no_new_reference_proof_ref"
                 .to_owned(),
             "ShardKeyPhysicalDestructionCompletionSpec.destroy_apply_record_ref".to_owned(),
+            "ShardKeyPhysicalDestructionCompletionSpec.dispatch_terminal_evidence_ref".to_owned(),
             "ShardKeyPhysicalDestructionCompletionSpec.expected_destroying_state".to_owned(),
+            "ShardKeyPhysicalDestructionCompletionSpec.operation_record_refs".to_owned(),
             "ShardKeyPhysicalDestructionCompletionSpec.replicated_wrap_key_inventory_erasure_verification_ref"
                 .to_owned(),
             "ShardKeyPhysicalDestructionCompletionSpec.storage_member_completion_quorum_ref"

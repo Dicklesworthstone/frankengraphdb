@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4073
-projection_fallback_count = 370
-target_source_assignment_sha256 = "2cf90ac355155d864fbb8102fd443f00eb046144fd37bfdc11f2ff53746b9217"
+target_count = 4077
+projection_fallback_count = 371
+target_source_assignment_sha256 = "43e982f1bc6506f5ca2cd652ccbcec34259d8c27bc24e6163c74f3b6170c099c"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 72
+registry_epoch = 73
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 100
+registry_epoch = 101
 
 [[logical_kind]]
 slice_id = "a03"
@@ -2440,6 +2440,28 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/storage_member_physical_completion_quorum/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-external-key-destruction-operation-record"
+object_kind = 0x044f
+name = "ShardExternalKeyDestructionOperationRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_external_key_destruction_operation_record/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:portable-key-destruction-dispatch-terminal-evidence"
+object_kind = 0x0387
+name = "PortableKeyDestructionDispatchTerminalEvidence"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_key_destruction_dispatch_terminal_evidence/"
 
 [[logical_kind]]
 slice_id = "a15"
@@ -21181,6 +21203,40 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-operation-record-refs"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0005
+stable_name = "operation_record_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardExternalKeyDestructionOperationRecord"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "complete sorted strong retention set for every planned ShardExternalKeyDestructionOperationRecord; retained while the completion spec is retained and cut only with that spec, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-dispatch-terminal-evidence-ref"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0006
+stable_name = "dispatch_terminal_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableKeyDestructionDispatchTerminalEvidence"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the PortableKeyDestructionDispatchTerminalEvidence this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 slice_id = "a06"
@@ -46631,7 +46687,7 @@ symbol = "PortableKeyDestructionDispatchTerminalEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0387"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:portable-privacy-charge-request"
@@ -48737,7 +48793,7 @@ symbol = "ShardExternalKeyDestructionOperationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x044f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-fragment-decision-ack-floor"
@@ -56298,7 +56354,7 @@ symbol = "PortableKeyDestructionDispatchTerminalEvidence"
 generic_signature = ""
 source_key = "top|PortableKeyDestructionDispatchTerminalEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2067"]
 
 [[top_level_candidate]]
@@ -72102,6 +72158,22 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:logical-kind-shard-external-key-destruction-operation-record"
+target_row_id = "a06:logical-kind:shard-external-key-destruction-operation-record"
+slice_id = "a06"
+source_key = "projection|logical_object_kinds|ShardExternalKeyDestructionOperationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-portable-key-destruction-dispatch-terminal-evidence"
+target_row_id = "a15:logical-kind:portable-key-destruction-dispatch-terminal-evidence"
+slice_id = "a15"
+source_key = "top|PortableKeyDestructionDispatchTerminalEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a15:target:logical-kind-key-destruction-authorization"
 target_row_id = "a15:logical-kind:key-destruction-authorization"
 slice_id = "a15"
@@ -86145,6 +86217,22 @@ row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-expect
 target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-expected-destroying-state"
 slice_id = "a06"
 source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.expected_destroying_state|expected_destroying_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-operation-record-refs"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-operation-record-refs"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.operation_record_refs|operation_record_refs"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-dispatch-terminal-evidence-ref"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-dispatch-terminal-evidence-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.dispatch_terminal_evidence_ref|dispatch_terminal_evidence_ref"
 target_kind = "field"
 definition_status = "declared"
 

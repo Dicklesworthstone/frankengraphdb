@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 100
+registry_epoch = 101
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -15085,6 +15085,36 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0005
+stable_name = "operation_record_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardExternalKeyDestructionOperationRecord"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "complete sorted strong retention set for every planned ShardExternalKeyDestructionOperationRecord; retained while the completion spec is retained and cut only with that spec, and the acyclic order 35 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0006
+stable_name = "dispatch_terminal_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableKeyDestructionDispatchTerminalEvidence"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the PortableKeyDestructionDispatchTerminalEvidence this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
