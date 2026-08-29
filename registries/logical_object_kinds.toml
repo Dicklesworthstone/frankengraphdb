@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 71
+registry_epoch = 72
 
 [[kind]]
 object_kind = 0x0001
@@ -1546,6 +1546,15 @@ construction_order = 50
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_envelope_root/"
+
+[[kind]]
+object_kind = 0x02e3
+name = "KeyErasureVerification"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_erasure_verification/"
 
 [[kind]]
 object_kind = 0x02e4
@@ -4012,6 +4021,15 @@ construction_order = 29
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sharding_role_transition_plan/"
+
+[[kind]]
+object_kind = 0x048c
+name = "StorageMemberPhysicalCompletionQuorum"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/storage_member_physical_completion_quorum/"
 
 [[kind]]
 object_kind = 0x048d

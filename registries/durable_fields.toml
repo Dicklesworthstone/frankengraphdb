@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 99
+registry_epoch = 100
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -15113,6 +15113,36 @@ target_schema_id = "NoNewKeyReferenceProof"
 construction_order = 60
 role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x000a
+stable_name = "replicated_wrap_key_inventory_erasure_verification_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyErasureVerification"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the KeyErasureVerification this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x000b
+stable_name = "storage_member_completion_quorum_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "StorageMemberPhysicalCompletionQuorum"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the StorageMemberPhysicalCompletionQuorum this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 40
 

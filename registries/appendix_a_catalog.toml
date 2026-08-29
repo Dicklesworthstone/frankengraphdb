@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4069
-projection_fallback_count = 368
-target_source_assignment_sha256 = "5c9d211cec81a2a8f55016bd39b733196e521c1c487034fcc68811e4c7bd85a0"
+target_count = 4073
+projection_fallback_count = 370
+target_source_assignment_sha256 = "2cf90ac355155d864fbb8102fd443f00eb046144fd37bfdc11f2ff53746b9217"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 71
+registry_epoch = 72
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 99
+registry_epoch = 100
 
 [[logical_kind]]
 slice_id = "a03"
@@ -2418,6 +2418,28 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/target_completion_bijection_proof/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:key-erasure-verification"
+object_kind = 0x02e3
+name = "KeyErasureVerification"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_erasure_verification/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:storage-member-physical-completion-quorum"
+object_kind = 0x048c
+name = "StorageMemberPhysicalCompletionQuorum"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/storage_member_physical_completion_quorum/"
 
 [[logical_kind]]
 slice_id = "a15"
@@ -21191,6 +21213,40 @@ target_schema_id = "NoNewKeyReferenceProof"
 construction_order = 60
 role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the NoNewKeyReferenceProof this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-replicated-wrap-key-inventory-erasure-verification-ref"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x000a
+stable_name = "replicated_wrap_key_inventory_erasure_verification_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyErasureVerification"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the KeyErasureVerification this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-storage-member-completion-quorum-ref"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x000b
+stable_name = "storage_member_completion_quorum_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "StorageMemberPhysicalCompletionQuorum"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the StorageMemberPhysicalCompletionQuorum this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -45018,7 +45074,7 @@ symbol = "KeyErasureVerification"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02e3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:key-grant-registry"
@@ -49257,7 +49313,7 @@ symbol = "StorageMemberPhysicalCompletionQuorum"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x048c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:subscription-cursor-delivery-index"
@@ -72030,6 +72086,22 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:logical-kind-key-erasure-verification"
+target_row_id = "a06:logical-kind:key-erasure-verification"
+slice_id = "a06"
+source_key = "projection|logical_object_kinds|KeyErasureVerification"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-storage-member-physical-completion-quorum"
+target_row_id = "a06:logical-kind:storage-member-physical-completion-quorum"
+slice_id = "a06"
+source_key = "projection|logical_object_kinds|StorageMemberPhysicalCompletionQuorum"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a15:target:logical-kind-key-destruction-authorization"
 target_row_id = "a15:logical-kind:key-destruction-authorization"
 slice_id = "a15"
@@ -86089,6 +86161,22 @@ row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-curren
 target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-current-inventory-equality-and-no-new-reference-proof-ref"
 slice_id = "a06"
 source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.current_inventory_equality_and_no_new_reference_proof_ref|current_inventory_equality_and_no_new_reference_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-replicated-wrap-key-inventory-erasure-verification-ref"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-replicated-wrap-key-inventory-erasure-verification-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.replicated_wrap_key_inventory_erasure_verification_ref|replicated_wrap_key_inventory_erasure_verification_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-storage-member-completion-quorum-ref"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-storage-member-completion-quorum-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.storage_member_completion_quorum_ref|storage_member_completion_quorum_ref"
 target_kind = "field"
 definition_status = "declared"
 
