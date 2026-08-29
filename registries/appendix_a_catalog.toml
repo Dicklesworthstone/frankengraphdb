@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4077
+target_count = 4084
 projection_fallback_count = 371
-target_source_assignment_sha256 = "43e982f1bc6506f5ca2cd652ccbcec34259d8c27bc24e6163c74f3b6170c099c"
+target_source_assignment_sha256 = "eff49472b85039adc9771899d2bea28368865af29a38ed6dfb9e43d248f1168d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 49
+registry_epoch = 50
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 101
+registry_epoch = 102
 
 [[logical_kind]]
 slice_id = "a03"
@@ -7476,6 +7476,43 @@ containing_union = "KeyDestructionTarget"
 wire_tag = 0x0003
 encoding_context = "reserved inline-record payload; exact consensus_domain, member_id, material_class, and material_identity_digest field registration and bound proof remain required before activation"
 allowed_containing_schemas = ["KeyDestructionTarget"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-terminal-receipt-ref"
+wire_type_id = 0x0588
+name = "KeyDestructionTerminalReceiptRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: ExternalProvider | StorageMember (a15:2065)"
+allowed_containing_schemas = ["ShardKeyPhysicalDestructionCompletionSpec"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-terminal-receipt-ref-external-provider"
+wire_type_id = 0x0589
+name = "KeyDestructionTerminalReceiptRef.ExternalProvider"
+kind = "union_variant"
+containing_union = "KeyDestructionTerminalReceiptRef"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm ExternalProvider of closed union KeyDestructionTerminalReceiptRef"
+allowed_containing_schemas = ["KeyDestructionTerminalReceiptRef"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-terminal-receipt-ref-storage-member"
+wire_type_id = 0x058a
+name = "KeyDestructionTerminalReceiptRef.StorageMember"
+kind = "union_variant"
+containing_union = "KeyDestructionTerminalReceiptRef"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm StorageMember of closed union KeyDestructionTerminalReceiptRef"
+allowed_containing_schemas = ["KeyDestructionTerminalReceiptRef"]
 max_size_bytes = 65536
 
 [[wire_type]]
@@ -21240,6 +21277,22 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-typed-terminal-receipt-refs"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0007
+stable_name = "typed_terminal_receipt_refs"
+exact_wire_type = "KeyDestructionTerminalReceiptRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "closed inline typed terminal-receipt inventory; generated union walkers retain each selected target while the physical-destruction completion spec is retained (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
 row_id = "a06:field:shard-key-physical-destruction-completion-spec-target-completion-bijection-proof-ref"
 containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
 field_tag = 0x0008
@@ -21947,6 +22000,49 @@ source_arm_name = "StorageMemberReplica"
 stable_name = "StorageMemberReplica"
 payload_kind = "inline-record"
 payload_sha256 = "f32a84e2865c970ee0bee0b991fe7297b8fd768f7c93200dbf165de2b67914a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
+slice_id = "a15"
+row_id = "a15:union:key-destruction-terminal-receipt-ref-694bb9af570d3940"
+union_name = "KeyDestructionTerminalReceiptRef"
+containing_schema = "KeyDestructionTerminalReceiptRef"
+union_path = "KeyDestructionTerminalReceiptRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardKeyPhysicalDestructionCompletionSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destruction-terminal-receipt-ref-external-provider-2e55a16706431b47"
+union_name = "KeyDestructionTerminalReceiptRef"
+containing_schema = "KeyDestructionTerminalReceiptRef"
+union_path = "KeyDestructionTerminalReceiptRef"
+arm_tag = 0x0001
+source_arm_name = "ExternalProvider"
+stable_name = "ExternalProvider"
+payload_kind = "inline-record"
+payload_sha256 = "e0e0c8dde3ab0069974d1b075ef827dc5783b433939b1814155e992e5f9e1d49"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destruction-terminal-receipt-ref-storage-member-66ba21a7cb80f794"
+union_name = "KeyDestructionTerminalReceiptRef"
+containing_schema = "KeyDestructionTerminalReceiptRef"
+union_path = "KeyDestructionTerminalReceiptRef"
+arm_tag = 0x0002
+source_arm_name = "StorageMember"
+stable_name = "StorageMember"
+payload_kind = "inline-record"
+payload_sha256 = "e0e0c8dde3ab0069974d1b075ef827dc5783b433939b1814155e992e5f9e1d49"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
@@ -54404,7 +54500,7 @@ symbol = "KeyDestructionTerminalReceiptRef"
 generic_signature = ""
 source_key = "top|KeyDestructionTerminalReceiptRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a15:2065"]
 
 [[top_level_candidate]]
@@ -65541,6 +65637,54 @@ row_id = "a15:target:wire-type-key-destruction-target-storage-member-replica"
 target_row_id = "a15:wire-type:key-destruction-target-storage-member-replica"
 slice_id = "a15"
 source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|StorageMemberReplica"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-terminal-receipt-ref"
+target_row_id = "a15:wire-type:key-destruction-terminal-receipt-ref"
+slice_id = "a15"
+source_key = "top|KeyDestructionTerminalReceiptRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-key-destruction-terminal-receipt-ref-694bb9af570d3940"
+target_row_id = "a15:union:key-destruction-terminal-receipt-ref-694bb9af570d3940"
+slice_id = "a15"
+source_key = "union|KeyDestructionTerminalReceiptRef|KeyDestructionTerminalReceiptRef"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destruction-terminal-receipt-ref-external-provider-2e55a16706431b47"
+target_row_id = "a15:union-arm:key-destruction-terminal-receipt-ref-external-provider-2e55a16706431b47"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTerminalReceiptRef|KeyDestructionTerminalReceiptRef|ExternalProvider"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-terminal-receipt-ref-external-provider"
+target_row_id = "a15:wire-type:key-destruction-terminal-receipt-ref-external-provider"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTerminalReceiptRef|KeyDestructionTerminalReceiptRef|ExternalProvider"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destruction-terminal-receipt-ref-storage-member-66ba21a7cb80f794"
+target_row_id = "a15:union-arm:key-destruction-terminal-receipt-ref-storage-member-66ba21a7cb80f794"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTerminalReceiptRef|KeyDestructionTerminalReceiptRef|StorageMember"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-terminal-receipt-ref-storage-member"
+target_row_id = "a15:wire-type:key-destruction-terminal-receipt-ref-storage-member"
+slice_id = "a15"
+source_key = "arm|KeyDestructionTerminalReceiptRef|KeyDestructionTerminalReceiptRef|StorageMember"
 target_kind = "wire-type"
 definition_status = "declared"
 
@@ -86233,6 +86377,14 @@ row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-dispat
 target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-dispatch-terminal-evidence-ref"
 slice_id = "a06"
 source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.dispatch_terminal_evidence_ref|dispatch_terminal_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-typed-terminal-receipt-refs"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-typed-terminal-receipt-refs"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.typed_terminal_receipt_refs|typed_terminal_receipt_refs"
 target_kind = "field"
 definition_status = "declared"
 

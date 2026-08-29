@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 49
+registry_epoch = 50
 
 [[type]]
 wire_type_id = 0x0001
@@ -6128,3 +6128,34 @@ status = "reserved"
 encoding_context = "closed one-arm u8 tag: ReservedHiddenNonexpiring 0x01; rejects every other tag; the source binds exactly this one state value and source silence claims less, never more, so no sibling arms are invented (a20:2581, fgdb-rqw4/5uj5)"
 allowed_containing_schemas = ["ServiceCatalogPromotionReservationReceipt"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0588
+name = "KeyDestructionTerminalReceiptRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: ExternalProvider | StorageMember (a15:2065)"
+allowed_containing_schemas = ["ShardKeyPhysicalDestructionCompletionSpec"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x0589
+name = "KeyDestructionTerminalReceiptRef.ExternalProvider"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestructionTerminalReceiptRef"
+wire_tag = 0x0001
+encoding_context = "arm ExternalProvider of closed union KeyDestructionTerminalReceiptRef"
+allowed_containing_schemas = ["KeyDestructionTerminalReceiptRef"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x058a
+name = "KeyDestructionTerminalReceiptRef.StorageMember"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestructionTerminalReceiptRef"
+wire_tag = 0x0002
+encoding_context = "arm StorageMember of closed union KeyDestructionTerminalReceiptRef"
+allowed_containing_schemas = ["KeyDestructionTerminalReceiptRef"]
+max_size_bytes = 65536

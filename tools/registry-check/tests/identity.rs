@@ -3856,7 +3856,9 @@ fn idr_allowed_containing_schema_catalog_domain_is_nonempty_and_fail_closed() {
         // admits GlobalKeyDestructionAuthorizationSpec as a third consumer.
         // 627 -> 628 / 443 -> 444 (fgdb-a06-w12-core-zdzx): TerminalAuditGate
         // admits GlobalKeyDestructionCompletionSpec as a fourteenth consumer.
-        (628, 444),
+        // 628 -> 631 / 444 -> 445 (fgdb-a06-w12-core-zdzx): KeyDestructionTerminalReceiptRef
+        // parent plus two variants name consumers (Spec on the parent, self on the arms).
+        (631, 445),
     );
 
     let baseline = appendix_a::validate_catalog(&catalog);
@@ -10251,6 +10253,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TerminalPublicOutcomeTerminal"
                 | "ShardCommandOrigin"
                 | "GlobalKeyDestroyAckRef"
+                | "KeyDestructionTerminalReceiptRef"
                 | "CheckpointFieldRecipe"
                 | "LocalPreparedRootEntry"
                 | "CheckpointStateVectorRole"
@@ -10964,6 +10967,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | (
                     "ShardKeyPhysicalDestructionCompletionSpec",
                     "dispatch_terminal_evidence_ref"
+                )
+                | (
+                    "ShardKeyPhysicalDestructionCompletionSpec",
+                    "typed_terminal_receipt_refs"
                 )
         )
     };
@@ -12617,10 +12624,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // concrete consumer) are younger than the witness. Both are claimed
         // by post_erratum_union; their 4 source-ordered arms fold into the
         // same arm-width pin the existing annotation already freezes.
-        pre_erratum.ordinary_unions.len() + 389,
+        // 389 -> 390 (fgdb-a06-w12-core-zdzx): KeyDestructionTerminalReceiptRef
+        // closed union (a15:2065, two inline-record arms) is younger than the
+        // witness. Claimed by post_erratum_union.
+        pre_erratum.ordinary_unions.len() + 390,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
-        removed a number of unions other than 389. This assert compares a \
+        removed a number of unions other than 390. This assert compares a \
          DIFFERENCE and so it sees the OVER-filter direction only — a union removed \
          that should have stayed. It is blind to the under-filter direction, because \
          a newly landed union that no filter names increments both of its sides \
@@ -12732,7 +12742,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // 1_259 -> 1_263 (fgdb-2b94eef0 / fgdb-juqa): the four
             // source-ordered arms of the two a06 host-gated ordinary unions
             // (None/Some, Active/Retiring), claimed by post_erratum_union.
-            + 1_263,
+            // 1_263 -> 1_265 (fgdb-a06-w12-core-zdzx): ExternalProvider and
+            // StorageMember arms of KeyDestructionTerminalReceiptRef.
+            + 1_265,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
@@ -12919,7 +12931,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // ShardExternalKeyDestructionOperationRecord 0x044f and confirmed
         // PortableKeyDestructionDispatchTerminalEvidence 0x0387.
         // Claimed by post_erratum_a06_field.
-        pre_erratum.fields.len() + 935,
+        // 935 -> 936 (fgdb-a06-w12-core-zdzx): typed_terminal_receipt_refs
+        // after minting closed union KeyDestructionTerminalReceiptRef
+        // (GlobalKeyDestroyAckRef / KeyDestructionTarget precedent).
+        // Claimed by post_erratum_a06_field and by post_erratum_union via
+        // exact_wire_type KeyDestructionTerminalReceiptRef.
+        pre_erratum.fields.len() + 936,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 101
+registry_epoch = 102
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -15118,6 +15118,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0007
+stable_name = "typed_terminal_receipt_refs"
+exact_wire_type = "KeyDestructionTerminalReceiptRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "closed inline typed terminal-receipt inventory; generated union walkers retain each selected target while the physical-destruction completion spec is retained (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
 field_tag = 0x0008
 stable_name = "target_completion_bijection_proof_ref"
 exact_wire_type = "StrongRef"
@@ -18407,6 +18421,17 @@ union_path = "KeyDestructionTarget"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ExternalKeyDestructionOperationRecord", "KeyDestructionOperationPlan", "ShardKeyDestroyApplySpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
+union_name = "KeyDestructionTerminalReceiptRef"
+containing_schema = "KeyDestructionTerminalReceiptRef"
+union_path = "KeyDestructionTerminalReceiptRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardKeyPhysicalDestructionCompletionSpec"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
@@ -26587,6 +26612,32 @@ source_arm_name = "StorageMemberReplica"
 stable_name = "StorageMemberReplica"
 payload_kind = "inline-record"
 payload_sha256 = "f32a84e2865c970ee0bee0b991fe7297b8fd768f7c93200dbf165de2b67914a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestructionTerminalReceiptRef"
+containing_schema = "KeyDestructionTerminalReceiptRef"
+union_path = "KeyDestructionTerminalReceiptRef"
+arm_tag = 0x0001
+source_arm_name = "ExternalProvider"
+stable_name = "ExternalProvider"
+payload_kind = "inline-record"
+payload_sha256 = "e0e0c8dde3ab0069974d1b075ef827dc5783b433939b1814155e992e5f9e1d49"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestructionTerminalReceiptRef"
+containing_schema = "KeyDestructionTerminalReceiptRef"
+union_path = "KeyDestructionTerminalReceiptRef"
+arm_tag = 0x0002
+source_arm_name = "StorageMember"
+stable_name = "StorageMember"
+payload_kind = "inline-record"
+payload_sha256 = "e0e0c8dde3ab0069974d1b075ef827dc5783b433939b1814155e992e5f9e1d49"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
