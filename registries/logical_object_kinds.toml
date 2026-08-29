@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 70
+registry_epoch = 71
 
 [[kind]]
 object_kind = 0x0001
@@ -4012,6 +4012,15 @@ construction_order = 29
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sharding_role_transition_plan/"
+
+[[kind]]
+object_kind = 0x048d
+name = "TargetCompletionBijectionProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/target_completion_bijection_proof/"
 
 [[kind]]
 object_kind = 0x048e

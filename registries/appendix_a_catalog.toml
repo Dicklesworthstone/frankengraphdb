@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
 
 [target_manifest]
-target_count = 4066
+target_count = 4069
 projection_fallback_count = 368
-target_source_assignment_sha256 = "34170164d066d13596093c7b141da50cb35478001ab336db00058921b6733122"
+target_source_assignment_sha256 = "5c9d211cec81a2a8f55016bd39b733196e521c1c487034fcc68811e4c7bd85a0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 70
+registry_epoch = 71
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 49
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 98
+registry_epoch = 99
 
 [[logical_kind]]
 slice_id = "a03"
@@ -2407,6 +2407,17 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/no_new_key_reference_proof/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:target-completion-bijection-proof"
+object_kind = 0x048d
+name = "TargetCompletionBijectionProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/target_completion_bijection_proof/"
 
 [[logical_kind]]
 slice_id = "a15"
@@ -21068,6 +21079,23 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a06"
+row_id = "a06:field:global-key-destruction-completion-spec-complete-planned-target-bijection-proof-ref"
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0009
+stable_name = "complete_planned_target_bijection_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TargetCompletionBijectionProof"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the TargetCompletionBijectionProof this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a06"
 row_id = "a06:field:global-key-destruction-completion-spec-terminal-audit-gate"
 containing_schema = "GlobalKeyDestructionCompletionSpec"
 field_tag = 0x000a
@@ -21131,6 +21159,23 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-key-physical-destruction-completion-spec-target-completion-bijection-proof-ref"
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0008
+stable_name = "target_completion_bijection_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TargetCompletionBijectionProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the TargetCompletionBijectionProof this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 slice_id = "a06"
@@ -49302,7 +49347,7 @@ symbol = "TargetCompletionBijectionProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x048d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:terminal-abort-authority"
@@ -61357,7 +61402,7 @@ symbol = "TargetCompletionBijectionProof"
 generic_signature = ""
 source_key = "top|TargetCompletionBijectionProof"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2065"]
 
 [[top_level_candidate]]
@@ -71973,6 +72018,14 @@ row_id = "a06:target:logical-kind-no-new-key-reference-proof"
 target_row_id = "a06:logical-kind:no-new-key-reference-proof"
 slice_id = "a06"
 source_key = "projection|logical_object_kinds|NoNewKeyReferenceProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-target-completion-bijection-proof"
+target_row_id = "a15:logical-kind:target-completion-bijection-proof"
+slice_id = "a15"
+source_key = "top|TargetCompletionBijectionProof"
 target_kind = "logical-kind"
 definition_status = "declared"
 
@@ -85984,6 +86037,14 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
+row_id = "a06:target:field-global-key-destruction-completion-spec-complete-planned-target-bijection-proof-ref"
+target_row_id = "a06:field:global-key-destruction-completion-spec-complete-planned-target-bijection-proof-ref"
+slice_id = "a06"
+source_key = "field|GlobalKeyDestructionCompletionSpec|GlobalKeyDestructionCompletionSpec.complete_planned_target_bijection_proof_ref|complete_planned_target_bijection_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
 row_id = "a06:target:field-global-key-destruction-completion-spec-terminal-audit-gate"
 target_row_id = "a06:field:global-key-destruction-completion-spec-terminal-audit-gate"
 slice_id = "a06"
@@ -86012,6 +86073,14 @@ row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-expect
 target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-expected-destroying-state"
 slice_id = "a06"
 source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.expected_destroying_state|expected_destroying_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-key-physical-destruction-completion-spec-target-completion-bijection-proof-ref"
+target_row_id = "a06:field:shard-key-physical-destruction-completion-spec-target-completion-bijection-proof-ref"
+slice_id = "a06"
+source_key = "field|ShardKeyPhysicalDestructionCompletionSpec|ShardKeyPhysicalDestructionCompletionSpec.target_completion_bijection_proof_ref|target_completion_bijection_proof_ref"
 target_kind = "field"
 definition_status = "declared"
 

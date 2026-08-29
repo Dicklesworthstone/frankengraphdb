@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 98
+registry_epoch = 99
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4257,6 +4257,21 @@ target_schema_id = "ShardKeyPhysicalDestructionCompletionCertificate"
 construction_order = 60
 role_predicate = "role-meta"
 retention_and_cut_rule = "complete sorted certified-remote retention set for every planned shard physical-destruction completion certificate; retained while the completion spec is retained and cut only with that spec (a06:1676)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalKeyDestructionCompletionSpec"
+field_tag = 0x0009
+stable_name = "complete_planned_target_bijection_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TargetCompletionBijectionProof"
+construction_order = 60
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the TargetCompletionBijectionProof this GlobalKeyDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1676)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -15070,6 +15085,21 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "comparison-only shard WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the physical-destruction completion spec (a06:1674)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
+field_tag = 0x0008
+stable_name = "target_completion_bijection_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TargetCompletionBijectionProof"
+construction_order = 60
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the TargetCompletionBijectionProof this ShardKeyPhysicalDestructionCompletionSpec names; retained while the referrer is retained, and the acyclic order 10 <= 60 keeps the reference backward-only (a06:1674)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardKeyPhysicalDestructionCompletionSpec"
