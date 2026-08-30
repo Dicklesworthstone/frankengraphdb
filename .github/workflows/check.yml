@@ -110,6 +110,38 @@ jobs:
           curl -sSfL --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
             https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          # Materialize the pinned toolchain HERE, outside any gate's verdict
+          # path: a first `lean` invocation on a fresh runner downloads the
+          # toolchain and emits elan `info:` lines, which would otherwise
+          # pollute the proof-lanes gate's own `lean --version` pin check
+          # (its red in run 33285320157). After this step the gate's probe is
+          # a clean, already-materialized version query.
+          cd formal/lean && lean --version >/dev/null 2>&1
+
+      # The dependency-policy gate shells out to cargo-deny, which the runner
+      # image does not ship (its absence was the gate's exit-2 UNRUN in run
+      # 33285320157). Pinned to the version the dev fleet runs.
+      - name: Install cargo-deny (pinned v0.19.0)
+        run: |
+          set -euo pipefail
+          cargo install cargo-deny --locked --version 0.19.0
+          cargo deny --version
+
+      # Two more gate-chain tools the runner image lacks (root-caused from
+      # run 33285320157): `rg` — a bare `rg -q` is the threat gate's first
+      # unguarded probe and `rg -c` feeds the architecture gate's count
+      # assertion; and `cargo-audit` — the dependency-policy gate's
+      # command-v guard correctly refuses to run without it. ripgrep comes
+      # from the distro (a grep-class scanner; the gates consume its exit
+      # code and counts, not its exact output); cargo-audit is pinned.
+      - name: Install ripgrep and cargo-audit (pinned v0.22.0)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+          rg --version | head -1
+          cargo install cargo-audit --locked --version 0.22.0
+          cargo audit --version | head -1
 
       # The UBS scanner module of the gate chain invokes `ubs`, a bash
       # meta-runner fetched at its exact release tag; module scripts are

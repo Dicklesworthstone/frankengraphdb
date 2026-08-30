@@ -22,7 +22,15 @@ EOF
 mode=report
 explicit_mode=0
 confirmation_sha256=""
-root=/data/tmp/fgdb_swarm
+# CI run 33285320157: the default inventory root used to be hardcoded under
+# /data/tmp, which exists only on this dev box. Resolve it through the same
+# portable chain the gates now use (TMPDIR, then /tmp) so the report works on a
+# pristine runner; --root remains the explicit operator override. The two
+# authorized_reaper_candidates pools below stay pinned to their literal
+# /data/tmp paths by ruling fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra —
+# a pool whose base moves without a new ruling simply matches nothing and
+# fails closed (candidates become unreapable, never wrongly reapable).
+root="${TMPDIR:-/tmp}/fgdb_swarm"
 root_set=0
 while [ "$#" -gt 0 ]; do
   case "$1" in

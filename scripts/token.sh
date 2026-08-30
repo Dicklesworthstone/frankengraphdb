@@ -67,7 +67,14 @@
 
 set -uo pipefail
 
-DIR="${FGDB_TOKEN_DIR:-/data/tmp/fgdb_swarm/tokens}"
+# CI run 33285320157: the default token dir used to live under /data/tmp, which
+# GitHub runners cannot create, so every gate run under check.sh (which exports
+# FGDB_LANDING_LEASE=1) failed its landing-lease acquire on CI and the
+# prevention layer was permanently inert there. Resolve through the portable
+# chain — explicit FGDB_TOKEN_DIR, then TMPDIR, then /tmp — and keep this
+# default byte-identical to the twin in scripts/lib/landing_lease.sh. On this
+# dev box (TMPDIR=/data/tmp) the resolved directory is unchanged.
+DIR="${FGDB_TOKEN_DIR:-${TMPDIR:-/tmp}/fgdb_swarm/tokens}"
 mkdir -p "$DIR"
 
 cmd="${1:-status}"

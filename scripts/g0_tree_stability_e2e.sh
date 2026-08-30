@@ -89,7 +89,14 @@ CHECK_SH="$ROOT/scripts/check.sh"
 
 gate_init "g0_tree_stability_e2e"
 
-WORK_ROOT="${FGDB_GATE_TMP:-/data/tmp/fgdb_swarm/g0_tree_stability}"
+# CI run 33285320157: this gate went RED (exit 1) in 0.15s on a pristine
+# ubuntu-latest runner because the old default root lived under /data/tmp, and
+# nothing on that image can create /data. The root is therefore resolved
+# through one portable chain — explicit FGDB_GATE_TMP, then TMPDIR, then /tmp —
+# so the gate's environment assumption no longer depends on this dev box's
+# volume layout. On this box (TMPDIR=/data/tmp) the resolved path is
+# byte-identical to the old default; the verdict contract above is untouched.
+WORK_ROOT="${FGDB_GATE_TMP:-${TMPDIR:-/tmp}/fgdb_swarm/g0_tree_stability}"
 CASES_RUN=0
 EXPORT_CASES_RUN=0
 SCOPE_CASES_RUN=0

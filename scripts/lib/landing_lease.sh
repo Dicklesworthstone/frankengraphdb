@@ -106,7 +106,13 @@
 # =============================================================================
 
 FGDB_TOKEN_SH="${FGDB_TOKEN_SH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/token.sh}"
-FGDB_TOKEN_DIR="${FGDB_TOKEN_DIR:-/data/tmp/fgdb_swarm/tokens}"
+# CI run 33285320157: this default must stay byte-identical to scripts/token.sh
+# (the operative one — token.sh is a child process and does not inherit this
+# shell variable). The old /data/tmp default does not exist on GitHub runners,
+# so every leased gate acquire failed there; ${TMPDIR:-/tmp} keeps this box's
+# resolved path unchanged while making the lease obtainable on a pristine
+# runner.
+FGDB_TOKEN_DIR="${FGDB_TOKEN_DIR:-${TMPDIR:-/tmp}/fgdb_swarm/tokens}"
 
 LANDING_LOCK="$FGDB_TOKEN_DIR/landing.lock"
 LANDING_META="$LANDING_LOCK/holder"

@@ -88,7 +88,14 @@ else
   esac
 fi
 
-WORK_ROOT="${FGDB_GATE_TMP:-/data/tmp/fgdb_swarm/dependency_policy}"
+# CI run 33285320157: this root used to default under /data/tmp, which no
+# GitHub runner can create, so the scratch refusal below would have failed the
+# gate UNRUN in every cloud run even with cargo-audit and cargo-deny
+# provisioned. Resolve through the portable chain — explicit FGDB_GATE_TMP,
+# then TMPDIR, then /tmp — exactly as the SCAN_DIR above already does with
+# ${TMPDIR:-/tmp}. On this box (TMPDIR=/data/tmp) the resolved path equals the
+# old default; the negative-control contract is unchanged.
+WORK_ROOT="${FGDB_GATE_TMP:-${TMPDIR:-/tmp}/fgdb_swarm/dependency_policy}"
 if ! mkdir -p "$WORK_ROOT" 2>/dev/null; then
   gate_unrun "cannot create dependency-policy scratch root: $WORK_ROOT"
   gate_verdict

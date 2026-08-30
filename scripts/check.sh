@@ -1190,13 +1190,81 @@ run_ubs() {
 # inapplicable; the scanner's suggested crypto dependencies are also forbidden
 # by Doctrine #1. Keep the findings visible and equality-pinned here instead of
 # suppressing them locally: any future increase OR decrease still fails closed.
+# MOVED 2026-08-29 (CI run 33285320157 — the first completed verdict — at
+# b0c3a77d): panic! 150 -> 134, AND "transmute, uninitialized, zeroed,
+# assume_init, forget" appears at 1, an UNKNOWN class, which fails closed.
+# Both are MEASUREMENT-MODE DRIFT, not tree decay; the tree's honest move is
+# +1, and it is named below.
+#
+# THE MECHANISM, READ OUT OF THE MODULE: the rust module counts every check in
+# this table through ast-grep WHEN IT IS INSTALLED and through a raw line-regex
+# fallback otherwise (ubs-rust.sh count_ast_or_rg; its own banner: "ast-grep
+# not found. Advanced AST checks will be limited."). The CI runner provisions
+# rustup and ubs and nothing else, and the log of this very run carries that
+# banner: the environment the gate's verdict actually runs in is the REGEX
+# FALLBACK. Every pinning above, through fgdb-20oi's 150, was measured with
+# ast-grep present. The module bytes are identical on both sides — the local
+# ubs-rust.sh sha256 equals the v5.3.13 meta-runner's pinned
+# MODULE_CHECKSUMS[rust] (89d2b1e9bad5...), and the workflow installs that same
+# v5.3.13 runner — so the divergence is the helper binary, not the detector.
+#
+# ATTRIBUTED BY TOOL CONTROL (the fgdb-84p2 method): scanning a detached
+# git-archive tree at 393247f3 — the exact commit that set 150 — in the
+# runner's regex mode reports 133/1/18/184/122. Sixteen of the panic delta and
+# the entire new class therefore exist at the baseline root under the runner's
+# counting and none of that is product movement. HEAD (588 tracked sources) in
+# regex mode reports 134/1/18/184/122 — matching CI's 585-file run number for
+# number — and in ast-grep mode 151/-/18/184/122.
+#
+# THE HONEST TREE MOVEMENT, +1: panic 133 -> 134 in the runner's mode,
+# attributed by per-file census (panic! lines 133 -> 134 tree-wide, exactly one
+# file moving) to the single added site in
+# tools/registry-check/tests/command_contracts.rs:
+#     .unwrap_or_else(|| panic!("contract {id} must resolve"))
+# (c39e33fa). A test-only registry lookup assertion — a cfg(test)-gated failure
+# signal, the same adjudicated family as every panic! counted above. ast-grep
+# mode sees the identical +1 (150 -> 151), and it is the only class either mode
+# moved.
+#
+# THE NEW CLASS IS A DEFINITION-LINE MISREAD: the fallback regex for
+# "mem::zeroed usage" matches `zeroed(`, which fires on the CONSTRUCTOR
+#     pub fn zeroed() -> Self {
+# in crates/fgdb-crypto/src/zeroize.rs:68 — a zeroize helper, not mem::zeroed
+# UB. That line has been inside every scan since 2026-08-04
+# (fgdb-w1-crypto-y5o) and ast-grep correctly reports zero call sites; only the
+# fallback's line view flags it. The class listing's other two sites
+# (mem::forget in fgdb-unsafe-arena's region.rs:1221 and
+# tests/edit_path_differential.rs:653, present since July) classify as warnings
+# in BOTH modes and never enter this count.
+#
+# THE SESSION'S OWN FILES CONTRIBUTE ZERO: crates/fgdb/src/memvfs.rs,
+# crates/fgdb/tests/memory_database.rs, crates/fgdb-gql/src/lib.rs and
+# crates/fgdb/tests/gql_undirected_where_both_prop_both_bang_ne.rs each scan at
+# Critical: 0 alone, and the full-tree regex partition is identical to CI's on
+# the 585-file tree that does not contain them.
+#
+# THE PIN NOW TRACKS THE RUNNER'S ENVIRONMENT, and the asymmetry is stated
+# rather than papered over: a developer box with ast-grep on PATH reports
+# panic!=151 and no transmute class and will fail this table in the other
+# direction. Making the two environments agree (provision ast-grep in the
+# workflow, or pin its absence) is a workflow decision and is deliberately NOT
+# absorbed here. Equality pinning is unchanged: any future increase OR decrease
+# of any class still fails closed.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=184"
-  "panic!/unreachable!/todo!/unimplemented!=150"
+  "panic!/unreachable!/todo!/unimplemented!=134"
   "JWT decode, validation bypass, or missing claim binding=122"
   "Security-sensitive non-crypto randomness=18"
+  "transmute, uninitialized, zeroed, assume_init, forget=1"
 )
 
+# fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
+# transmute row =1, both measured in the CI runner's regex-fallback mode (no
+# ast-grep provisioned there); the tool-control attribution lives in the MOVED
+# 2026-08-29 block above the table. Measured partition at HEAD 9ec76706 over
+# 588 tracked sources: 134/1/18/184/122. secret, JWT and randomness held
+# exactly at baseline. Equality pinning is unchanged: any future increase OR
+# decrease of any class still fails closed.
 # fgdb-20oi re-freeze (WhiteLake, 2026-08-26): secret 183->184 and panic!
 # 143->150 accumulated across the post-g80v window (16e06b20..393247f3:
 # the adjudication law-allowlist feature 182a7680, its completion 737c05fa,
