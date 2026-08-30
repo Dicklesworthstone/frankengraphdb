@@ -280,6 +280,34 @@ The wave that turns spine plumbing into product behavior: transactions get a rea
 
 ---
 
+## 10) Sustained-ingest ceiling fix, honest §17 baselines, and CI red-in-practice (2026-08-23 → 2026-08-29)
+
+The week after the product wave: the ingest ceiling the bench found gets fixed, the bench publishes its first honest numbers, CI's verdict contract meets standard-runner reality, and the Appendix-A catalog keeps minting under a pinned-floor ruling.
+
+### Delivered capability
+
+- Ingest: per-family object admission on the write path (fgdb-a7sz, 5f8b9180) — roots admit against `MAX_ENCODED_ROOT_BYTES` (the layout law `get_root` always applied; the frozen root format already declared the larger ceiling, so no format change), while blocks/patches/manifests keep the block-derived bound. Mutation-proven witness `a_root_lawful_under_its_own_format_ceiling_is_admitted` (19,294 B root; the shared-bound mutation fails with `ObjectTooLarge {limit: 16384}`). End to end: `fgdb-bench` full fixture — 5,994 edges / 94 commits / zero fences / 2,349 stored blocks (8× past the old brick point), cold reopen identical, fgdb suite 232/232; previously-bricked directories recover automatically.
+- Bench: first honest §17 numbers published (fgdb-p95p) — point reads p50=122 µs / p99=152 µs under power-law skew; cold partition reopen p50=40.5 ms → 219 ms at full scale; compaction-under-load 104 ms publish under 77–130 verified concurrent pinned traversals; deep branch chains unreachable (no branch API on the spine — documented, not hidden). Machine-local, unpinned, `empirical_gate_activated=false` throughout, correctness asserted inside every measured region.
+- CI, honestly: the gate's verdict is exactly `scripts/check.sh`'s exit code (076552b2), and the chain has never completed on a standard runner — 57 runs / 18 failures / 37 cancelled / 1 success, and that success is the red-proof probe (run 32622995463); every recent failure dies ~29–30 minutes in with runner-host ENOSPC while building the workspace. Making the chain reach a verdict and proving one full green run is owned by fgdb-ci-workflow-check-sh-4csa.1.
+- Appendix A / G0: W12 Meta and Shard semantic-core format rows mint under fgdb-a06-w12-core-zdzx (still open — completion-spec hosts, typed receipt refs); command contracts reach epoch 92 (182 reserved / 1 live, from 175/1 at epoch 40). The remote-retention family re-dates above the global construction-order ceiling (order 80 → one shared order 114: 16 family kinds, 17 transitive referrers, and the co-phased global-delta generation) per the P1 pinned-floor ruling — fgdb-bbqq Decision 2, executed by NobleThrush under recorded operator direction (2026-08-24).
+- Tracker (2026-08-29 refresh measurement): 892 records / 607 closed / 273 open; 37 closures 08-22 → 08-29 (12, 7, 6, 3, 4, 1, 3, 1 per day), net open 277 → 273. That same refresh filed this changelog's staleness (then ending at 076552b2) under fgdb-g0-doc-sync-usq; this wave is that record.
+
+### Closed workstreams
+
+- [`fgdb-a7sz`](https://github.com/Dicklesworthstone/frankengraphdb/blob/main/.beads/issues.jsonl) sustained-ingest ceiling — fixed at 5f8b9180 without a format change.
+- [`fgdb-p95p`](https://github.com/Dicklesworthstone/frankengraphdb/blob/main/.beads/issues.jsonl) adversarial §17 harness — honest numbers published, the filed adversarial shape list dispositioned.
+
+### Representative commits
+
+- [`5f8b9180`](https://github.com/Dicklesworthstone/frankengraphdb/commit/5f8b9180) Admit roots against their own format ceiling — sustained ingest unbricked (fgdb-a7sz).
+- [`e668d169`](https://github.com/Dicklesworthstone/frankengraphdb/commit/e668d169) Directed-faces harness fix and pre-a7sz fixture scale — point-reads/cold-reopen publish instead of fencing (fgdb-p95p).
+- [`a4897f6a`](https://github.com/Dicklesworthstone/frankengraphdb/commit/a4897f6a) Re-date the remote-retention family above the catalog ceiling under the P1 pinned-floor convention (fgdb-bbqq Decision 2).
+- [`c2cfffc0`](https://github.com/Dicklesworthstone/frankengraphdb/commit/c2cfffc0) Mint KeyErasureVerification and StorageMemberPhysicalCompletionQuorum shells (fgdb-a06-w12-core-zdzx).
+- [`c0f0b830`](https://github.com/Dicklesworthstone/frankengraphdb/commit/c0f0b830) Mint KeyDestructionTerminalReceiptRef and land typed receipt refs (fgdb-a06-w12-core-zdzx).
+- [`7a398a27`](https://github.com/Dicklesworthstone/frankengraphdb/commit/7a398a27) Spend vertex identities only after a durable commit — a publish-fence retry can no longer emit edges against vertices that never landed.
+
+---
+
 ## Notes for Agents
 
 - Start with the version timeline if you need chronology. There is no `v0.x` tag and no GitHub Release; HEAD is the only published artifact. Workspace version is `0.0.1`.
