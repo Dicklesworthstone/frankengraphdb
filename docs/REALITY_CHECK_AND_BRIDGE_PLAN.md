@@ -1,12 +1,238 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-08-22** (evidence window 2026-08-23T02:30–03:00Z).
+**Current measurement: 2026-08-29** (evidence window 2026-08-29T22:30–23:59Z).
+Previous: 2026-08-22 (pinned `8dceb212`).
 This document is revised in place. Older commit-bound assessments are retained
 below as superseded historical snapshots because they explain several decisions;
 their counts and statements about missing seams are not current unless the
-2026-08-22 delta repeats them.
+2026-08-29 delta repeats them.
 
 ---
+## Current delta — 2026-08-29
+
+### Product verdict
+
+**FrankenGraphDB still is not the database product the README describes in
+the present tense. The one week since `8dceb212` (91 commits, HEAD
+`7a398a27`) closed the audit's own Gap 0 and landed CI — and broke CI in
+practice.** The compounder gap is gone: the sustained-ingest ceiling
+(`fgdb-a7sz`) is CLOSED with a mutation-proven fix (`5f8b9180`: per-family
+admission — roots against `MAX_ENCODED_ROOT_BYTES`, blocks/patches/manifests
+against the block-derived bound; witness `a_root_lawful_under_its_own_
+format_ceiling_is_admitted`; bench full fixture 5,994 edges / 94 commits /
+zero fences / 2,349 stored blocks = 8× past the old brick point; cold reopen
+identical; suite 232/232). CI exists with exactly the right contract (the
+job's verdict is `scripts/check.sh`'s exit code) — and **has never completed
+on a runner**: 57 runs, 18 failures, 37 cancelled, one success, and that
+success is the red-proof probe (`32622995463`). Every recent failure dies
+~29–30 minutes in with runner-host ENOSPC (`33152868321`, `33203096439`,
+`33203230827`, `33239184716`) while building the workspace — the full-test +
+Miri-lane build graph exceeds the `ubuntu-latest` disk before the chain
+reaches a verdict. A gate that never finishes enforces nothing: "CI-enforced"
+claims are aspirational again in practice, which is precisely the failure
+mode CI was filed to prevent. Bead `fgdb-ci-workflow-check-sh-4csa.1` filed
+this audit (P1 bug, leaf under the CI owner, prerequisite edge wired).
+
+Meanwhile the swarm's center of gravity moved to the W12/Appendix-A semantic
+core: the P0 in-progress pair `fgdb-bbqq` (owner sitting) and
+`fgdb-a06-w12-core-zdzx` (W12 Meta/Shard format catalog) dominate recent
+commits — registry/spec-contract minting, G0-sanctioned sequencing, but zero
+product-surface motion this week. Fleet throughput is decaying: 37 closures
+08-22→08-29 (12, 7, 6, 3, 4, 1, 3, 1 per day), net open 277 → 273.
+
+### The five questions this skill asks
+
+1. **What is working right now.** Everything the 08-22 delta listed as real
+   is still real — two-fsync capsules/markers with named CrashPoints, FCW on
+   the product open path, Tier-D Strata with VFS injection and FGSM chain
+   binding, the bounded GQL MATCH slice with digest certificates, the ~90
+   differential oracle suites, FaultVfs/LDFI/crashpacks — and this week
+   added: (a) the ingest-ceiling fix above, which un-blocks every throughput
+   ambition downstream of it; (b) first honest bench numbers (`fgdb-p95p`
+   CLOSED: point reads p50=122 µs / p99=152 µs under skew; cold reopen
+   p50=40.5 ms → 219 ms at full scale; compaction-under-load 104 ms under
+   77–130 verified concurrent traversals — machine-local, unpinned,
+   `empirical_gate_activated=false` throughout); (c) the CI workflow with
+   the correct verdict contract; (d) W12 Meta/Shard Appendix-A semantic-core
+   format rows minting at epoch 92. Engine `todo!()`/`unimplemented!()`
+   count re-verified at 0. Crypto (from-scratch BLAKE3/Argon2id/
+   ChaCha20-Poly1305, oracle-verified) is real; the open remainder of
+   `fgdb-w1-crypto-y5o` is the external review gate.
+2. **What is not working or not yet implemented.** NEW this audit: CI
+   red-in-practice (above). Unchanged from 08-22: sessions, prepared
+   statements, `:memory:`, sync embedded API; multi-graph/branch/partition
+   coordinates (engine pins `GraphId(1)`/`BranchId(1)`/partition 0); GLA
+   algebra/optimizer/Loom operators (re-swept 08-29: zero operator code;
+   queries run full-scan adjacency rebuilds returning deduped ascending
+   VIds); Tier I/R/A and blocks unsealed/plaintext at rest; retention
+   cooling; Ripple (ZWeight ring laws only), Beacon (resident ART/hash
+   structures, no durable indexes), Prism (no `SnapshotGraphView`), Warden,
+   Fabric, Aegis; CLI/server/Python/installer/releases; 0/20 invariants
+   enforced (expected_enforced honestly pinned 0; fg_inv stub pairs 42→40);
+   `formal/tla` absent (1/10 proof lanes checked: Lean VersionChain).
+3. **What is blocking us.** (a) CI ENOSPC — filed, immediately actionable,
+   and a prerequisite of the CI owner's own closure. (b) The G0 contract
+   freeze chain: 1 live / 182 reserved command contracts (epoch 92; was
+   175/1 at epoch 40), with P0 `fgdb-bbqq` owner-sitting in progress and
+   `fgdb-g0-identity-registries-hrx` behind it — the wall behind 285
+   dependency-blocked beads. (c) Actionable-queue starvation: `br ready`
+   reports 0 while the derived open-without-open-blockers set is 12, and
+   that 12 is ~95% small residue (registry fixups, two GQL binder twins
+   `fgdb-wur5`/`fgdb-ysm0`, marker-chain verify-narrowing fix
+   `fgdb-dcq7` awaiting a landing lease, one decision-card seam `fgdb-yago`,
+   gate W12, one post-1.0 epic). (d) Throughput decay (above) against a
+   critical path that still runs through owner-sitting P0s.
+4. **Would implementing all open beads close the gap?** Yes for tracking —
+   coverage converged further: zero NO_BEAD holes this audit. The 08-22
+   "G2 label oddity" resolved as label absence only (`fgdb-gate-g2-0ko`,
+   `fgdb-w2-local-protected-output-owners-by8v`,
+   `fgdb-risk-review-g2-hyqe` exist). Every subsystem W1–W12, gate G0–G4,
+   conformance, bench, Python, CLI/robot mode, and the installer leaf
+   (`fgdb-epic-w10-mhq.1`, end-of-chain behind CLI+server+python+embedded)
+   has an owner row. Still not automatically for G4: W5–W12 leaves remain
+   whole-subsystem slices, zero invariants are enforced, and certificates
+   are plan digests, not replayable executions. Schedule risk has
+   *increased*: the ready queue is nearly empty, so the critical path
+   concentrates in a handful of owner-sitting P0s while closure rate decays.
+5. **Vision goals with no bead until today.** None. Residual hygiene found,
+   deliberately NOT filed as beads (each has an owner or is observation):
+   CHANGELOG still ends at `076552b2` (08-23) — the ingest fix, the W12
+   catalog wave, and 37 closures are unrecorded (covered by the open
+   `fgdb-g0-doc-sync-usq` parent); `br ready` (0) vs derived ready (12)
+   predicate mismatch plus the over-inclusive `blocked_issues_cache` deserve
+   a tracker-hygiene look before someone trusts either number; root-level
+   untracked build junk (`rc/`, stray `.rlib`s, AppleDouble files) persists.
+
+### Vision checklist — 2026-08-29 refresh
+
+| # | Goal | Status | Δ vs 08-22 |
+|---|------|--------|------------|
+| 1 | Embedded sync `Database::open(path\|:memory:)` | PARTIAL | unchanged |
+| 2 | Durable commit stream, no double-write | PARTIAL+ | unchanged (ingest ceiling FIXED) |
+| 3 | Temperature-tiered Strata (I/D/R/A) | PARTIAL | unchanged (Tier D only) |
+| 4 | GQL + openCypher + FQL | PARTIAL | +2 binder slices queued (wur5/ysm0) |
+| 5 | FreeJoin/WCO/factorized execution | NOT_STARTED | re-swept: zero operator code |
+| 6 | Ripple views/subscriptions | NOT_STARTED | unchanged (ZWeight ring only) |
+| 7 | STRICT determinism + certificates | PARTIAL+ | unchanged (digests, not replay) |
+| 8 | Agent-native B6 | NOT_STARTED | unchanged |
+| 9 | Server `fgdbd` | NOT_STARTED | unchanged |
+| 10 | CLI robot mode | NOT_STARTED | unchanged |
+| 11 | Python wheels | NOT_STARTED | unchanged |
+| 12 | Install script/releases | NOT_STARTED | claims-lint holding |
+| 13 | SSI transactions | PARTIAL | unchanged (FCW + oracle-side) |
+| 14 | Larger-than-memory operators | NOT DEMONSTRATED | ingest un-blocked; spill beads open |
+| 15 | §17 empirical gates | UNPROVEN (harness + first honest numbers) | gates unactivated; CI red |
+| 16 | FG-INV live checkers | STUB | 0/20; stub pairs 42→40 |
+| 17 | Lab VFS before first fsync | WORKING-for-what-exists | unchanged |
+| 18 | Closed dependency universe | WORKING | unchanged |
+| 19 | `unsafe_code="forbid"` + ledger | WORKING | unchanged (3 islands / 7 sites) |
+| 20 | G0 constitutional freeze | PARTIAL+ | 1 live / 182 reserved, epoch 92 |
+
+Vision delivery: still **2 of 20 fully working** (18, 19). The week's gains
+are real (Gap 0 closed, first honest numbers, CI scaffold) but sit in rows
+2/14/15, none of which crossed a status boundary. Everything a README reader
+would type remains NOT_STARTED.
+
+### Inventory
+
+| Measure | 08-22 | 08-29 |
+|---|---|---|
+| HEAD | `8dceb212` | `7a398a27` (+91 commits) |
+| Topology slots | 70: 21 active | unchanged |
+| Binaries | 6 checker/bench tools, no `fgdb`/`fgdbd` | unchanged |
+| Command contracts | 175 reserved / 1 live, epoch 40 | **182 reserved / 1 live, epoch 92** |
+| Invariant enforcement | 0/0 (honest pinned zero) | unchanged |
+| Checker rows | 99 (57 live + 42 stub) | **102 (≈62 live + 40 stub)** |
+| Proof lanes checked | 1/10; `formal/tla` absent | unchanged |
+| CI | absent → landed 08-23 | **57 runs / 18 fail / 37 cancel / 1 success (the probe); 0 chain completions** |
+| Tracker | 879 / 582 closed / 277 open / 2 ready | **892 / 607 / 273 / 0 (`br`) vs 12 (derived)** |
+| Engine `todo!()` | 0 | 0 (re-verified) |
+| Workspace LOC | ~218k | ~270k across 21 crates (tests-dominated) |
+
+### Bridge plan updates (order = vision impact)
+
+**Gap 0 — CLOSED.** Ingest ceiling fixed with mutation proof (above); the
+bench no longer fences at 4–6 commits; throughput-gate activation is no
+longer downstream of a durability bug.
+
+**NEW Gap 0′ — CI must complete.** `fgdb-ci-workflow-check-sh-4csa.1`
+(filed this audit, immediately actionable): fit the chain to the runner
+(larger-disk runner, chain splitting across jobs with per-job
+exit-code-verdict contracts, or honest intermediate cleanup — no gate may be
+skipped) and prove one full green run on `main`. A red-for-a-week CI is
+operationally identical to no CI. Until this lands, every "CI-enforced"
+sentence stays aspirational and the local chain is the only verdict that
+exists.
+
+**Gap 1 — G0 command universe:** 182/1 live at epoch 92; pipeline proven,
+freeze not converging. `fgdb-bbqq` owner-sitting is the current critical
+blocker; do not fork.
+
+**Gap 2 — transactions:** unchanged (session/workspace ownership, SSI at the
+validator seam, purpose-narrowed `TxnCx`).
+
+**Gap 3 — minimum query path:** unchanged (BoundPlan→GLA lowering behind
+`fgdb-5vp9`; the two ready binder twins are legitimate small slices, not a
+substitute).
+
+**Gap 4 — bounded recovery / larger-than-memory:** the durability
+prerequisite is gone; remaining: Tier R seal path, bounded-open suffix
+accounting, first spill-backed operator demonstration.
+
+**Gap 5 — invariant promotion:** unchanged discipline (checker +
+distinct negative test in the same change; 0/20 today).
+
+**Gap 6 — product surface:** CI scaffold done; completion now = Gap 0′.
+CLI/server/Python/installer unchanged (end-of-chain by design).
+
+**Gap 7 — later layers:** unchanged warning; W12 format minting ahead of
+engine slices is sanctioned sequencing, but this week produced zero
+product-surface motion — watch that the ratio holds over the next cycle.
+
+### Ambition rounds applied to this revision
+
+- **Round 1** refused to let "CI landed" read as progress: 57 runs with zero
+  chain completions is an enforcement-surface defect, elevated to Gap 0′.
+- **Round 2** swept second-order seams: pulled the ENOSPC root cause from
+  the runner logs (not guessed); found the `br ready` predicate mismatch and
+  the CHANGELOG staleness; named the W12-minting-vs-product-motion tension
+  explicitly rather than moralizing about it.
+- **Round 3** searched for further structural additions: none — bead
+  coverage converged (zero NO_BEAD holes), and the remaining gaps are the
+  08-22 bridge's own, still valid.
+
+### Refinement passes on the new bead
+
+- **Pass 1** made acceptance observable: one completed green run with its
+  URL recorded; no gate skipped or conditionalized.
+- **Pass 2** added the negative constraints (cache discipline and the
+  verdict contract must survive the disk fix; the probe run remains the
+  red-proof witness) and wired the prerequisite edge into the CI owner so
+  it cannot close green before this lands.
+- **Pass 3** found nothing further — stopping per the convergence rule.
+
+### Beads filed from this measurement (only uncovered seams)
+
+| ID | Seam |
+|---|---|
+| `fgdb-ci-workflow-check-sh-4csa.1` | CI red-in-practice: chain ENOSPCs the `ubuntu-latest` runner ~29 min in; make the chain reach a verdict and prove one full green run (blocks the CI owner's closure) |
+
+### Evidence boundary
+
+Pinned to tracked commit `7a398a27` (2026-08-29), measured
+2026-08-29T22:30–23:59Z. Method: five parallel read-only audits (embedded
+surface; chronicle/strata/codec/crypto; query stack; verification/gates;
+beads+docs) cross-checked against direct measurements: `br`/SQLite-derived
+tracker counts, `bv --robot-triage`/`--robot-insights`, `gh run` logs for
+the four most recent failed runs (ENOSPC confirmed, not inferred), checker/
+contract registry greps, and an engine-wide `todo!()` sweep (0). The full
+local `scripts/check.sh` chain was launched at measurement close on a box
+with 73 GB free (the runner-disk failure mode does not reproduce locally);
+its verdict attaches to the tracker when it completes. Behavioral witness
+from the prior audit (`rch` run of `open_a_database`, exit 0) stands for
+`8dceb212`; no behavioral regression signal observed since (per-commit gate
+discipline plus the in-flight local chain).
+
 
 ## Current delta — 2026-08-22
 
