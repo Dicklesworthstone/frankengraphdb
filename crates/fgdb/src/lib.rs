@@ -118,6 +118,7 @@ pub use fcw::FirstCommitterWinsValidator;
 mod gql_cert;
 mod gql_exec;
 mod write_txn;
+mod memvfs;
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
 /// catalog), and the plan is re-exported so tests can state that the executor
@@ -129,6 +130,11 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 /// byte-identical.
 pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
 pub use write_txn::{WriteTxn, WriteTxnError};
+
+/// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's
+/// `":memory:` surface: RAM file content over a private sparse shadow
+/// namespace. See [`memvfs`] and [`Database::<MemVfs>::open_memory`].
+pub use memvfs::MemVfs;
 
 /// The stable law id [`FirstCommitterWinsValidator`] rejects under, keyed on
 /// by the typed [`WriteError::FirstCommitterWins`] arm. Kept identical to the
@@ -1906,6 +1912,8 @@ impl Database<UnixVfs> {
     /// opening Chronicle or Strata beneath it. Recursively creating missing
     /// ancestors without an inode-to-parent barrier for every component would
     /// let a successful create disappear after a crash.
+    ///
+    /// For the in-memory equivalent, see [`Database::<MemVfs>::open_memory`].
     pub async fn create(
         cx: &CommitCx,
         path: impl AsRef<Path>,
@@ -1915,6 +1923,12 @@ impl Database<UnixVfs> {
     }
 
     /// Open the database in `path`.
+    ///
+    /// There is no `":memory:"` branch here on purpose: this method's `Self`
+    /// is the [`UnixVfs`]-backed database, while a memory database is a
+    /// `Database<MemVfs>` — a different type no path-string branch can
+    /// return. The explicit constructor is the honest shape; see
+    /// [`Database::<MemVfs>::open_memory`].
     ///
     /// Fails closed when `path` does not hold one. See
     /// [`OpenError::NotADatabase`] for why this cannot simply delegate to
@@ -1950,6 +1964,50 @@ impl Database<UnixVfs> {
             });
         }
         Self::bind_with_vfs(cx, UnixVfs::new(), path, keys, true).await
+    }
+}
+
+impl Database<MemVfs> {
+    /// Open a fresh, private, in-memory database — the embedded spine's
+    /// `":memory:"` surface (the README's `Database::open(":memory:")`).
+    ///
+    /// The literal-string form cannot live on [`Database::open`]: that method
+    /// is inherent to `Database<UnixVfs>` and returns `Self`, while a memory
+    /// database is a `Database<MemVfs>` — a different type, so one signature
+    /// cannot branch on the path text and return both. This explicit
+    /// constructor is the honest shape, and it is not a second write path:
+    /// it builds a private [`MemVfs`] and then goes through the SAME
+    /// [`Database::create_with_vfs`] law a disk database obeys (empty-root
+    /// check, directory-durability ordering, Chronicle open, Strata open,
+    /// fold rebuild) over a filesystem whose bytes live in RAM. The two-fsync
+    /// commit protocol runs in full; its barriers are trivially satisfied
+    /// because every reader observes the same memory (the `memvfs` module
+    /// docs say exactly why that is correct and not a lie).
+    ///
+    /// The storage is born empty and dies with the handle: when the returned
+    /// `Database` drops, its `MemVfs` drops with it, and the database is
+    /// gone — a memory database is never recoverable from a path. To reopen
+    /// one within the process, retain a clone of a `MemVfs` you created
+    /// yourself and use the explicit-VFS constructors:
+    ///
+    /// ```ignore
+    /// let vfs = MemVfs::new()?;
+    /// let dir = vfs.database_dir();
+    /// let mut db =
+    ///     Database::<MemVfs>::create_with_vfs(&cx, vfs.clone(), dir.clone(), keys).await?;
+    /// // ... commit work through the real protocol ...
+    /// drop(db);
+    /// let db = Database::<MemVfs>::open_with_vfs(&cx, vfs, dir, keys).await?;
+    /// ```
+    ///
+    /// Private storage is always empty storage, so this constructor carries
+    /// [`Database::create`]'s law (refuse an existing database) under open's
+    /// name: what `open(":memory:")` opens is a database that cannot have a
+    /// prior history.
+    pub async fn open_memory(cx: &CommitCx, keys: DatabaseKeys) -> Result<Self, OpenError> {
+        let vfs = MemVfs::new()?;
+        let dir = vfs.database_dir();
+        Self::create_with_vfs(cx, vfs, dir, keys).await
     }
 }
 
