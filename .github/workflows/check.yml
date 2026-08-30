@@ -110,6 +110,10 @@ jobs:
           curl -sSfL --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
             https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          # GITHUB_PATH only affects LATER steps — within this step the elan
+          # shims must go on PATH explicitly, or the prewarm below dies with
+          # 127 before it ever runs lean (run 33290697221).
+          export PATH="$HOME/.elan/bin:$PATH"
           # Materialize the pinned toolchain HERE, outside any gate's verdict
           # path: a first `lean` invocation on a fresh runner downloads the
           # toolchain and emits elan `info:` lines, which would otherwise
