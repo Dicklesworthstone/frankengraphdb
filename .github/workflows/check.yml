@@ -16,6 +16,27 @@
 # none of them reads target/ or the registry, so cache behavior can never skip
 # a check. If a future gate ever consumes cached bytes, this note and the
 # cache design must be revisited in the same commit.
+#
+# Disk strategy (bead fgdb-ci-workflow-check-sh-4csa.1): the chain's build
+# graph (full workspace test build + the Miri lanes) exhausted the standard
+# runner disk ~29 minutes into compilation — 18 red runs, zero completed
+# verdicts, so the enforcement surface this workflow exists to provide never
+# actually delivered a verdict. Two honest levers, neither of which touches
+# the verdict contract:
+#   1. Reclaim the runner image's preinstalled toolcaches before building
+#      (step below). This deletes only GitHub's own disposable image content,
+#      never repository bytes.
+#   2. Strip debuginfo and incremental artifacts from the cargo profiles via
+#      env (CARGO_PROFILE_*_DEBUG=0, CARGO_INCREMENTAL=0). This changes
+#      artifact size, not semantics; failing-test backtraces lose line
+#      detail, and the verdict remains the exit code.
+#
+# Provisioning: check.sh invokes two external tools the runner image does not
+# ship — `lean` (the proof-lanes gate refuses to report green on an unrun
+# prover) and `ubs` (the UBS scanner module). Both are installed pinned:
+# Lean's version comes solely from formal/lean/lean-toolchain via elan (the
+# gate verifies that pin itself), and UBS is fetched at its exact release
+# tag, whose module checksums are enforced by the runner script itself.
 
 on:
   push:
@@ -33,6 +54,14 @@ concurrency:
 
 permissions:
   contents: read
+
+# Profile env for every cargo invocation check.sh makes (see the disk
+# strategy note above). Caches still hold only build artifacts; no gate
+# reads these values, so no gate can be skipped by them.
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 jobs:
   check:
     name: scripts/check.sh (the whole chain)
@@ -47,6 +76,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Reclaim the runner image's preinstalled toolcaches (~20 GB on
+      # ubuntu-latest). fgdb-ci-workflow-check-sh-4csa.1: without this the
+      # build graph ENOSPCs the runner before check.sh can reach a verdict.
+      # Disposable image content only — the repository checkout is untouched.
+      - name: Reclaim runner disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift \
+            /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/lib/jvm /usr/share/apache-maven* \
+            /usr/share/gradle-* /usr/share/sbt /usr/local/graalvm \
+            /usr/local/aws-cli /opt/microsoft
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
       - name: Install the repo-pinned nightly toolchain
         run: |
           set -euo pipefail
@@ -55,6 +99,30 @@ jobs:
           echo "Installing pinned toolchain: $pin"
           rustup toolchain install "$pin" --profile minimal --component clippy,rustfmt,miri
           rustup default "$pin"
+
+      # The proof-lanes gate refuses to report green on an unrun prover, and
+      # the runner image ships no Lean. elan resolves the toolchain from
+      # formal/lean/lean-toolchain at invocation time — the repository file
+      # stays the single reader of "which Lean".
+      - name: Install Lean via elan (pinned by formal/lean/lean-toolchain)
+        run: |
+          set -euo pipefail
+          curl -sSfL --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+            https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      # The UBS scanner module of the gate chain invokes `ubs`, a bash
+      # meta-runner fetched at its exact release tag; module scripts are
+      # checksum-verified by the runner itself at run time.
+      - name: Install UBS meta-runner (pinned v5.3.13)
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+            -o /usr/local/bin/ubs \
+            "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/v5.3.13/ubs"
+          sudo chmod +x /usr/local/bin/ubs
+          ubs --version
+
 
       - name: Restore cargo registry cache
         uses: actions/cache@v4
@@ -90,3 +158,4 @@ jobs:
             echo "  exit code is the verdict and PASS/FAIL tokens exist only so"
             echo "  a reader who greps anyway gets a true answer."
           } >> "$GITHUB_STEP_SUMMARY"
+          df -h / >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
