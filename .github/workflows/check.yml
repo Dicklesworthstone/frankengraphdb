@@ -138,7 +138,7 @@ jobs:
       - name: Install beads CLI (br, pinned v0.5.7)
         run: |
           set -euo pipefail
-          cargo install --locked --git https://github.com/Dicklesworthstone/beads_rust --tag v0.5.7
+          cargo install --locked --git https://github.com/Dicklesworthstone/beads_rust --tag v0.5.7 beads_rust
           br --version
 
       # Two more gate-chain tools the runner image lacks (root-caused from
