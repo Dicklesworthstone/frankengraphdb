@@ -117,8 +117,8 @@ pub use fcw::FirstCommitterWinsValidator;
 
 mod gql_cert;
 mod gql_exec;
-mod write_txn;
 mod memvfs;
+mod write_txn;
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
 /// catalog), and the plan is re-exported so tests can state that the executor

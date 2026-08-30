@@ -131,6 +131,16 @@ jobs:
           cargo install cargo-deny --locked --version 0.19.0
           cargo deny --version
 
+      # tree_stability's landing-lease cases exercise the `br` (beads) CLI.
+      # The gate's own doctrine treats a missing tool as UNRUN, never FAIL —
+      # but UNRUN still refuses the chain green, so CI must provision it.
+      # Pinned to the tag that matches the fleet's binary (0.5.7).
+      - name: Install beads CLI (br, pinned v0.5.7)
+        run: |
+          set -euo pipefail
+          cargo install --locked --git https://github.com/Dicklesworthstone/beads_rust --tag v0.5.7
+          br --version
+
       # Two more gate-chain tools the runner image lacks (root-caused from
       # run 33285320157): `rg` — a bare `rg -q` is the threat gate's first
       # unguarded probe and `rg -c` feeds the architecture gate's count

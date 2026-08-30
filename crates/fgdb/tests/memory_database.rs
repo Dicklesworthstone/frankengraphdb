@@ -125,10 +125,7 @@ fn memory_databases_are_private_and_lost_on_drop() {
         let mut first = Database::<MemVfs>::open_memory(cx, keys())
             .await
             .expect("opens");
-        first
-            .write(cx, one_edge_batch())
-            .await
-            .expect("commits");
+        first.write(cx, one_edge_batch()).await.expect("commits");
         assert_eq!(
             first.execute_gql(PINNED, &bind_r()).expect("MATCH"),
             vec![VId(2)]
@@ -218,7 +215,9 @@ fn retained_memvfs_reopens_and_writer_lease_still_governs() {
         let mut second_batch = WriteBatch::new(R);
         second_batch.create_vertex(VId(3), vec![], vec![]);
         second_batch.add_edge(EId(11), VId(2), VId(3), vec![]);
-        db.write(cx, second_batch).await.expect("commits after reopen");
+        db.write(cx, second_batch)
+            .await
+            .expect("commits after reopen");
         assert_eq!(
             db.neighbours(VId(2), R).expect("fresh adjacency"),
             vec![VId(3)]

@@ -1412,7 +1412,7 @@ fn aead_forgery_timing_probe_is_bounded_and_detector_is_live() {
     // inputs are identical every screen, so any separation that reproduces
     // across screens belongs to the compiled code, not to the inputs or to a
     // load episode that happened to span one screen.
-    let mut screen = || -> (WelchEvidence, WelchEvidence) {
+    let screen = || -> (WelchEvidence, WelchEvidence) {
         let production = interleaved_welch(
             AEAD_ROUNDS,
             AEAD_BATCH_SIZE,

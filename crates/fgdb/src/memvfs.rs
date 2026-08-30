@@ -83,8 +83,8 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, SeekFrom};
-use std::pin::Pin;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
@@ -324,8 +324,13 @@ pub struct MemVfsFile {
 }
 
 enum Handle {
-    Dir { path: PathBuf },
-    File { shared: Arc<FileShared>, path: PathBuf },
+    Dir {
+        path: PathBuf,
+    },
+    File {
+        shared: Arc<FileShared>,
+        path: PathBuf,
+    },
 }
 
 impl core::fmt::Debug for MemVfsFile {
@@ -601,7 +606,8 @@ impl Vfs for MemVfs {
                     bytes: Mutex::new(Vec::new()),
                     shadow: Mutex::new(std_file),
                 });
-                self.lock_nodes()?.insert(target.clone(), MemNode::File(shared.clone()));
+                self.lock_nodes()?
+                    .insert(target.clone(), MemNode::File(shared.clone()));
                 Ok(MemVfsFile {
                     handle: Handle::File {
                         shared,
@@ -834,7 +840,10 @@ impl Vfs for MemVfs {
     async fn read_to_string(&self, path: &Path) -> io::Result<String> {
         let bytes = self.read(path).await?;
         String::from_utf8(bytes).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )
         })
     }
 
@@ -923,10 +932,7 @@ mod tests {
             let append_truncate = vfs
                 .open(
                     file,
-                    &OpenOptions::new()
-                        .write(true)
-                        .append(true)
-                        .truncate(true),
+                    &OpenOptions::new().write(true).append(true).truncate(true),
                 )
                 .await
                 .expect_err("append and truncate must refuse each other");
@@ -964,13 +970,22 @@ mod tests {
             let metadata = handle.metadata().await.expect("metadata");
             assert_eq!(metadata.len(), 11, "shadow length tracks the write");
 
-            handle.seek(SeekFrom::Start(6)).await.expect("seeks to Start");
+            handle
+                .seek(SeekFrom::Start(6))
+                .await
+                .expect("seeks to Start");
             let mut tail = Vec::new();
             handle.read_to_end(&mut tail).await.expect("reads to EOF");
             assert_eq!(tail, b"world");
 
-            handle.seek(SeekFrom::Current(-5)).await.expect("seeks back");
-            handle.write_all(b"WORLD").await.expect("overwrites in place");
+            handle
+                .seek(SeekFrom::Current(-5))
+                .await
+                .expect("seeks back");
+            handle
+                .write_all(b"WORLD")
+                .await
+                .expect("overwrites in place");
             assert_eq!(
                 vfs.read(file).await.expect("reads back"),
                 b"hello WORLD",
@@ -1106,9 +1121,7 @@ mod tests {
             vfs.create_dir(Path::new("people")).await.expect("re-mkdir");
             vfs.write(Path::new("people/a"), b"1").await.expect("a");
             vfs.write(Path::new("people/b"), b"2").await.expect("b");
-            let mut names = names_of(&vfs, Path::new("people"))
-                .await
-                .expect("lists");
+            let mut names = names_of(&vfs, Path::new("people")).await.expect("lists");
             names.sort();
             assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
         });
@@ -1133,7 +1146,9 @@ mod tests {
                 b"payload"
             );
 
-            vfs.write(Path::new("victim"), b"old").await.expect("victim");
+            vfs.write(Path::new("victim"), b"old")
+                .await
+                .expect("victim");
             vfs.rename(Path::new("dst"), Path::new("victim"))
                 .await
                 .expect("replace");
@@ -1143,7 +1158,9 @@ mod tests {
             );
 
             vfs.create_dir(Path::new("tree")).await.expect("tree");
-            vfs.create_dir(Path::new("tree/inner")).await.expect("inner");
+            vfs.create_dir(Path::new("tree/inner"))
+                .await
+                .expect("inner");
             vfs.write(Path::new("tree/inner/leaf"), b"l")
                 .await
                 .expect("leaf");
@@ -1158,7 +1175,9 @@ mod tests {
             );
 
             vfs.create_dir(Path::new("full")).await.expect("full");
-            vfs.write(Path::new("full/thing"), b"t").await.expect("thing");
+            vfs.write(Path::new("full/thing"), b"t")
+                .await
+                .expect("thing");
             let not_empty = vfs
                 .rename(Path::new("grove"), Path::new("full"))
                 .await
