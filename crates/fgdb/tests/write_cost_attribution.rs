@@ -446,6 +446,11 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
 
     // ---- Instrument 1 + 2: marginal write and rebuild replica per history size.
+    // The marginal write is measured three times per history point (each in its
+    // own batch, so it also exercises the path the application sees). We take the
+    // median over the three samples and use that sample's sentinel. This tames
+    // single-measurement outliers caused by shared-runner scheduling without
+    // changing the 2x bound or the O(history) question the test asks.
     let mut marginal = Vec::new();
     let mut replicas: Vec<(usize, ReplicaStages, Duration)> = Vec::new();
     for &n in &HISTORY_POINTS {
@@ -453,21 +458,31 @@ fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
         let mut db = runtime
             .block_on(Database::create(&commit, &dir, keys()))
             .expect("creates");
-        build_history(&runtime, &commit, &mut db, n);
+        // Leave room for three marginal commits so the labelled history size is
+        // still the final history reached by the last sample.
+        build_history(&runtime, &commit, &mut db, n.saturating_sub(3));
 
         let sentinel_path = dir.join("marginal-write-sentinel");
-        let sentinel_before = fsync_sentinel(&sentinel_path);
-        let start = Instant::now();
-        let mut batch = WriteBatch::new(KNOWS);
-        batch.create_vertex(VId(900_000), vec![], vec![]);
-        batch.add_edge(EId(900_000), VId(1), VId(900_000), vec![]);
-        runtime
-            .block_on(db.write(&commit, batch))
-            .expect("marginal commit");
-        let t_marginal = start.elapsed();
-        let sentinel_after_1 = fsync_sentinel(&sentinel_path);
-        let sentinel_after_2 = fsync_sentinel(&sentinel_path);
-        let sentinel = median_duration([sentinel_before, sentinel_after_1, sentinel_after_2]);
+        let mut samples: Vec<(Duration, Duration)> = Vec::with_capacity(3);
+        for trial in 0..3 {
+            let sentinel_before = fsync_sentinel(&sentinel_path);
+            let start = Instant::now();
+            let mut batch = WriteBatch::new(KNOWS);
+            let vid = VId(900_000 + trial as u128);
+            let eid = EId(900_000u128 + trial as u128);
+            batch.create_vertex(vid, vec![], vec![]);
+            batch.add_edge(eid, VId(1), vid, vec![]);
+            runtime
+                .block_on(db.write(&commit, batch))
+                .expect("marginal commit");
+            let t_marginal = start.elapsed();
+            let sentinel_after_1 = fsync_sentinel(&sentinel_path);
+            let sentinel_after_2 = fsync_sentinel(&sentinel_path);
+            let sentinel = median_duration([sentinel_before, sentinel_after_1, sentinel_after_2]);
+            samples.push((t_marginal, sentinel));
+        }
+        samples.sort_unstable_by_key(|(t, _)| *t);
+        let (t_marginal, sentinel) = samples[samples.len() / 2];
         marginal.push((n, t_marginal, sentinel));
 
         drop(db);
