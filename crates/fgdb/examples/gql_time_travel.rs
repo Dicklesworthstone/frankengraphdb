@@ -26,7 +26,8 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
-    let path = std::env::temp_dir().join(format!("fgdb-time-travel-example-{}", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("fgdb-time-travel-example-{}", std::process::id()));
     let keys = DatabaseKeys::new(
         [0x5a; 32],
         DatabaseSecurityNamespaceId([0x77; 32]),
@@ -64,21 +65,39 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let at_first = db.execute_gql_at(query, &bind, first_seq)?;
         println!("  neighbors of (1) at {first_seq:?}: {at_first:?}");
 
-        assert_eq!(current, vec![VId(2), VId(3)], "current view sees both edges");
-        assert_eq!(at_first, vec![VId(2)], "historical view sees only the first edge");
+        assert_eq!(
+            current,
+            vec![VId(2), VId(3)],
+            "current view sees both edges"
+        );
+        assert_eq!(
+            at_first,
+            vec![VId(2)],
+            "historical view sees only the first edge"
+        );
 
         let certified = db.execute_gql_certified_at(query, &bind, first_seq)?;
-        println!("  certified historical query at snapshot {snapshot:?}: {rows:?}",
-                 snapshot = certified.1.snapshot_seq, rows = certified.0);
-        assert_eq!(certified.1.snapshot_seq, first_seq, "certificate pins the requested seq");
+        println!(
+            "  certified historical query at snapshot {snapshot:?}: {rows:?}",
+            snapshot = certified.1.snapshot_seq,
+            rows = certified.0
+        );
+        assert_eq!(
+            certified.1.snapshot_seq, first_seq,
+            "certificate pins the requested seq"
+        );
 
-        let too_early = CommitSeq(0);
-        match db.execute_gql_at(query, &bind, too_early) {
-            Err(_) => println!("  seq {too_early:?} correctly returns an error (not yet published)"),
-            Ok(rows) => panic!("expected an error at {too_early:?}, got {rows:?}"),
-        }
+        let before_any_commit = CommitSeq(0);
+        let empty = db.execute_gql_at(query, &bind, before_any_commit)?;
+        println!("  neighbors of (1) at {before_any_commit:?}: {empty:?}");
+        assert!(
+            empty.is_empty(),
+            "seq 0 is the empty database before any commit"
+        );
 
-        println!("OK: time-travel reads return the exact adjacency at the requested commit sequence.");
+        println!(
+            "OK: time-travel reads return the exact adjacency at the requested commit sequence."
+        );
         Ok(())
     })
 }
