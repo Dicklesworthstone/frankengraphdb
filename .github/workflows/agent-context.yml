@@ -8,8 +8,8 @@
 # A self-change runs this workflow immediately, manual dispatch remains
 # available for diagnostics, and completion of the authoritative main-branch
 # check produces a capsule for the exact SHA whose verdict completed. The
-# utility job uses the Linux hosted pool and the published, checksum-pinned br
-# binary, so it is independent of the long proof job's build graph.
+# utility job uses the macOS hosted pool and the published, checksum-pinned br
+# binary, so it cannot compete with the long Linux proof lane for a runner.
 
 name: Agent context capsule
 
@@ -37,7 +37,7 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main')
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 15
     env:
       CAPSULE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
@@ -56,24 +56,25 @@ jobs:
           set -euo pipefail
           case "$(uname -m)" in
             x86_64)
-              asset="br-0.5.7-linux_amd64.tar.gz"
-              digest="634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843"
+              asset="br-0.5.7-darwin_amd64.tar.gz"
+              digest="292491d803cdca058c21563322b5becb462a87b3e6ea8a3fed2fdc0a97640a9b"
               ;;
-            aarch64|arm64)
-              asset="br-0.5.7-linux_arm64.tar.gz"
-              digest="7e487cff08964bf6f4aa78981dcab40c35f14b7cd10331c9e603b2c4e443b35a"
+            arm64)
+              asset="br-0.5.7-darwin_arm64.tar.gz"
+              digest="37393209fe778c1907f8d6a799f613ada2f0d34f6dc461d5f67fd0faa3c9a397"
               ;;
             *)
-              echo "unsupported Linux runner architecture: $(uname -m)" >&2
+              echo "unsupported macOS runner architecture: $(uname -m)" >&2
               exit 1
               ;;
           esac
           archive="$RUNNER_TEMP/$asset"
           bindir="$RUNNER_TEMP/br-0.5.7"
-          curl -fsSL --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+          curl -fsSL --retry 3 --retry-all-errors \
+            --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
             -o "$archive" \
             "https://github.com/Dicklesworthstone/beads_rust/releases/download/v0.5.7/$asset"
-          printf '%s  %s\n' "$digest" "$archive" | sha256sum -c -
+          printf '%s  %s\n' "$digest" "$archive" | shasum -a 256 -c -
           mkdir -p "$bindir"
           tar -xzf "$archive" -C "$bindir"
           br_path="$(find "$bindir" -type f -name br -print -quit)"
@@ -138,7 +139,7 @@ jobs:
           git status --short --branch > "$stage/git-status.txt"
           git ls-tree -r --name-only "$CAPSULE_SHA" > "$stage/tracked-files.txt"
 
-          (cd "$stage" && sha256sum * > SHA256SUMS)
+          (cd "$stage" && shasum -a 256 * > SHA256SUMS)
           tar -C "$stage" -czf "$archive" .
           echo "capsule=$archive"
           ls -lh "$archive"
