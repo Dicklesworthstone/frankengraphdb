@@ -34,7 +34,7 @@
 //! are not pinned here.
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
-use fgdb::{Database, DatabaseKeys, WriteBatch};
+use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::RelationId;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -78,9 +78,14 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let seq = db.write(cx, batch).await?;
 
         let before = db.neighbours(VId(1), KNOWS)?;
+        let gql_before = db.execute_gql(
+            "MATCH (a)-[:KNOWS]->(b) RETURN b",
+            &RelationBind::new().with_relation("KNOWS", KNOWS),
+        )?;
         let root_before = db.partition_root()?;
         println!("  committed at seq {seq:?}");
         println!("  neighbours(1) before drop: {before:?}");
+        println!("  GQL MATCH (1)-[:KNOWS]->(b) RETURN b: {gql_before:?}");
 
         // ---- drop everything ------------------------------------------------
         drop(db);
@@ -89,9 +94,18 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         // ---- reopen with nothing but the path and the keys ------------------
         let db = Database::open(cx, &path, keys).await?;
         let after = db.neighbours(VId(1), KNOWS)?;
+        let gql_after = db.execute_gql(
+            "MATCH (a)-[:KNOWS]->(b) RETURN b",
+            &RelationBind::new().with_relation("KNOWS", KNOWS),
+        )?;
         println!("  neighbours(1) after reopen: {after:?}");
+        println!("  GQL MATCH (1)-[:KNOWS]->(b) RETURN b after reopen: {gql_after:?}");
 
         assert_eq!(before, after, "the reopened database must agree");
+        assert_eq!(
+            gql_before, gql_after,
+            "GQL results must survive a full drop-and-reopen cycle"
+        );
         assert_eq!(
             root_before,
             db.partition_root()?,
