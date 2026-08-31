@@ -205,3 +205,21 @@ jobs:
             echo "  a reader who greps anyway gets a true answer."
           } >> "$GITHUB_STEP_SUMMARY"
           df -h / >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+
+      # Preserve the gate transcripts on failure so the next RED is
+      # diagnosable in one cycle. The chain writes per-gate transcript +
+      # diagnostics under a mktemp'd /tmp dir (random suffix) and the core
+      # module logs in $GATE_LOG_DIR; both die with the runner otherwise
+      # (beads fgdb-w1-cross-crate-determinism-ci-flake-ze5e and
+      # fgdb-write-cost-attribution-runner-flake-n7w4).
+      - name: Upload gate transcripts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fgdb-gate-transcripts
+          path: |
+            /tmp/fgdb-check-gates.*/**
+            /tmp/fgdb-det-e2e.*/**
+            /tmp/fgdb-threat-e2e.*/**
+          if-no-files-found: ignore
+          retention-days: 7
