@@ -2,9 +2,10 @@
 #
 # Bead: fgdb-ci-workflow-check-sh-4csa. AGENTS.md: "When CI is added, wire
 # scripts/check.sh as the CI test step rather than duplicating the commands."
-# This workflow does exactly that and nothing else: the job succeeds if and
-# only if `bash scripts/check.sh` exits 0. Per AGENTS.md, the exit code is the
-# verdict — no step here greps for PASS/FAIL tokens or interprets transcripts.
+# The job succeeds if and only if `bash scripts/check.sh` exits 0. Per
+# AGENTS.md, the exit code is the verdict — no step here greps for PASS/FAIL
+# tokens or interprets transcripts. The advisory agent-context capsule is
+# explicitly `continue-on-error`; it can neither certify nor fail the tree.
 #
 # Toolchain: the repository-pinned nightly from rust-toolchain.toml is
 # installed explicitly and re-derived from that file; a stable channel must
@@ -140,6 +141,78 @@ jobs:
           set -euo pipefail
           cargo install --locked --git https://github.com/Dicklesworthstone/beads_rust --tag v0.5.7 beads_rust
           br --version
+
+      # Advisory only. This capsule exists for connector-only agents whose
+      # execution sandbox cannot clone GitHub or read oversized tracked files.
+      # It contains a credential-free Git bundle, the exact tracked bead state,
+      # a generated local bead DB, the pinned br binary, and robot-mode triage.
+      # Canonical authority remains git + the live bead DB; this artifact never
+      # participates in a gate and both steps are continue-on-error.
+      - name: Stage agent context capsule (advisory)
+        continue-on-error: true
+        run: |
+          set -u
+          stage="$(mktemp -d /tmp/fgdb-agent-context.XXXXXX)"
+          archive="/tmp/fgdb-agent-context-${{ github.sha }}.tar.gz"
+          {
+            echo "format_version=1"
+            echo "repository=${{ github.repository }}"
+            echo "commit=${{ github.sha }}"
+            echo "ref=${{ github.ref }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "generated_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "authority=advisory-only; git and the live bead database remain canonical"
+          } > "$stage/manifest.txt"
+
+          git bundle create "$stage/frankengraphdb.bundle" --all \
+            > "$stage/git-bundle.stdout" 2> "$stage/git-bundle.stderr"
+          echo "$?" > "$stage/git-bundle.rc"
+          git bundle verify "$stage/frankengraphdb.bundle" \
+            > "$stage/git-bundle-verify.stdout" 2> "$stage/git-bundle-verify.stderr"
+          echo "$?" > "$stage/git-bundle-verify.rc"
+
+          cp "$(command -v br)" "$stage/br"
+          echo "$?" > "$stage/copy-br.rc"
+          br --version > "$stage/br-version.txt" 2>&1
+
+          RUST_LOG=error br ready --json \
+            > "$stage/br-ready.json" 2> "$stage/br-ready.stderr"
+          echo "$?" > "$stage/br-ready.rc"
+          RUST_LOG=error br list --status=open --json \
+            > "$stage/br-open.json" 2> "$stage/br-open.stderr"
+          echo "$?" > "$stage/br-open.rc"
+
+          if [[ -f .beads/beads.db ]]; then
+            cp .beads/beads.db "$stage/beads.db"
+            echo "$?" > "$stage/copy-beads-db.rc"
+          else
+            echo "beads.db was not materialized" > "$stage/copy-beads-db.stderr"
+            echo "1" > "$stage/copy-beads-db.rc"
+          fi
+          cp .beads/issues.jsonl "$stage/issues.jsonl"
+          echo "$?" > "$stage/copy-issues-jsonl.rc"
+
+          git log -50 --date=iso-strict \
+            --format='%H%x09%aI%x09%an%x09%s' > "$stage/recent-commits.tsv"
+          git status --short --branch > "$stage/git-status.txt"
+          git diff --exit-code -- .beads/issues.jsonl \
+            > "$stage/issues-jsonl-diff.stdout" \
+            2> "$stage/issues-jsonl-diff.stderr"
+          echo "$?" > "$stage/issues-jsonl-diff.rc"
+
+          sha256sum "$stage"/* > "$stage/SHA256SUMS"
+          tar -C "$stage" -czf "$archive" .
+          echo "agent context capsule: $archive"
+          ls -lh "$archive"
+
+      - name: Upload agent context capsule (advisory)
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: fgdb-agent-context-${{ github.sha }}
+          path: /tmp/fgdb-agent-context-${{ github.sha }}.tar.gz
+          if-no-files-found: warn
+          retention-days: 2
 
       # Two more gate-chain tools the runner image lacks (root-caused from
       # run 33285320157): `rg` — a bare `rg -q` is the threat gate's first
