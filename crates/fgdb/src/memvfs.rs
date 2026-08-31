@@ -177,6 +177,7 @@ impl MemVfs {
     /// Fails when a fresh temp directory cannot be claimed (unwritable or
     /// exhausted temp), or when the root cannot be mirrored into the
     /// namespace table.
+    ///
     pub fn new() -> io::Result<Self> {
         let root = fresh_root()?;
         let mut nodes = BTreeMap::new();
