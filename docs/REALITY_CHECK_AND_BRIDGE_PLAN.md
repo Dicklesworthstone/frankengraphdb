@@ -1,6 +1,7 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-08-29** (evidence window 2026-08-29T22:30–23:59Z).
+**Current measurement: 2026-08-31** (evidence window 2026-08-31T00:30–04:00Z).
+Previous: 2026-08-29 (pinned `7a398a27`).
 Previous: 2026-08-22 (pinned `8dceb212`).
 This document is revised in place. Older commit-bound assessments are retained
 below as superseded historical snapshots because they explain several decisions;
