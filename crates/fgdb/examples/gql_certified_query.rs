@@ -59,9 +59,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let (rows_1, cert_1) = db.execute_gql_certified(query, &bind)?;
         println!("  certified rows at snapshot {snapshot:?}: {rows:?}",
                  snapshot = cert_1.snapshot_seq, rows = rows_1);
-        println!("    statement digest: {statement_digest}",
+        println!("    statement digest: {statement_digest:?}",
                  statement_digest = cert_1.statement_digest);
-        println!("    bind digest: {bind_digest}",
+        println!("    bind digest: {bind_digest:?}",
                  bind_digest = cert_1.bind_digest);
 
         let mut second = WriteBatch::new(KNOWS);
