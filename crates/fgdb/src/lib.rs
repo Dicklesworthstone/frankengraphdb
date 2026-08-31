@@ -1990,7 +1990,7 @@ impl Database<MemVfs> {
     /// one within the process, retain a clone of a `MemVfs` you created
     /// yourself and use the explicit-VFS constructors:
     ///
-    /// ```ignore
+    /// ```no_run
     /// let vfs = MemVfs::new()?;
     /// let dir = vfs.database_dir();
     /// let mut db =
