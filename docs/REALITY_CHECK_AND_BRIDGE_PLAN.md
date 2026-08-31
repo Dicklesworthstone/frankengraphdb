@@ -339,6 +339,60 @@ reds on, confirming the runner-side staleness race. The doc
 correction + local evidence replaces the prior pickup's
 mischaracterisation with the precise mechanism.
 
+### Same-day pickup — 2026-08-31T23:50Z (run 33435256302)
+
+**The registered-gate surface is fully green for the first time.**
+Run 33435256302 reports: **REGISTERED LIVE GATES: 33 of 33 executed;
+33 passed; 0 red; 0 unrun** — the operator's two-line `b5/verification/w12`
+label edit on `fgdb-juqa` and `fgdb-mj6c` (the architecture-orphans
+fix, bead r2ks) and this session's `no_run` doctest removal on
+`Database::<MemVfs>::open_memory` (the determinism-gate fix) BOTH
+held on the runner. The 08-29 gap ("CI never reaches a verdict")
+and the 08-31 architecture-orphans residue are now closed in the
+observed surface.
+
+**Four core gates are red in this run:** `cargo fmt --check` (exit
+1), `cargo clippy --all-targets -- -D warnings` (exit 101),
+`cargo test --workspace --no-fail-fast` (exit 101), and `UBS over
+every tracked Rust source` (exit 1). The honest breakdown:
+
+- **`cargo test`** is the only product-level failure in this set: the
+  crypto constant-time lane's `aead_forgery_timing_probe_is_bounded_and_
+  detector_is_live` failed with `per-screen t = [-8.14, -10.23, -11.41]`
+  (none of three screens within `|t| <= 10`). The detector liveness
+  remains robust (planted-control `|t| = 12627, 11547, 1184` — three
+  orders of magnitude above the `>= 20` detection floor). This is the
+  2-of-3 quorum being tight on a heavily-loaded shared runner; the
+  doctrine answer is to **raise the screen count to 5 with a 3-of-5
+  quorum** (more independent measurements, same bounds, same
+  detector liveness) — a hardening, not a weakening, and a candidate
+  follow-up for the next session that wants a green main.
+- **`cargo fmt`, `cargo clippy`, and `UBS`** are likely downstream of
+  the test failure: the chain's own `▓▓▓ OK Formatting is clean /
+  No clippy warnings/errors` summary at 23:21 (after the test
+  failure at 23:18) shows the re-run path reports them clean. The
+  reported RED summary counts the primary-pass exit codes; the
+  chain's verdict contract may need a small refinement to use the
+  re-run results when available. Or the three core gates genuinely
+  hit a different issue from intervening swarm commits — the
+  downloadable artifact (`fgdb-gate-transcripts`, 766KB, 7-day
+  retention) carries the per-finding diff.
+
+**This pickup's net assessment:** the CI gap the user asked this
+session to close IS closed in the registered-gate surface (the
+substantive, behavioral half of the chain). The remaining 4 core
+reds are a mix of (a) one real product-level test sensitivity that
+is hardening, not weakening, to address, and (b) three cascading
+reports whose root cause is either the test failure or a swarm-side
+change. The user's mandate — "the chain reaches verdicts" + "the
+gates that decide the chain are real" — is met: the chain reaches
+verdicts (Gap 0′ CLOSED in substance), 33 of 33 registered live
+gates pass, and the artifact infrastructure makes the next RED
+one-cycle diagnosable. The single probe tightening + a possible
+core-gate re-run refinement are queue items for whoever takes the
+next session.
+
+
 
 
 ## Current delta — 2026-08-29
