@@ -291,6 +291,55 @@ or (c) harden the determinism gate to mask the load sensitivity — the
 last being the path of least resistance and the worst doctrine violation,
 so I will not propose it.
 
+### Same-day pickup — 2026-08-31T12:55Z (runs 33362472899 + 33374000542, local repro)
+
+The same-day pickup above mischaracterised the architecture-orphans
+cause. The two orphan IDs (`fgdb-juqa`, `fgdb-mj6c`) are not in fact
+orphans in the live DB — `architecture-check` reads
+`source_path = ".beads/issues.jsonl"`, and the JSONL on the runner at
+the moment the check ran was 1–2 records behind the live DB. The
+`bead_provenance_not_total: 894 of 896` line is **JSONL staleness at
+check time**, not a missing-row bug. Run 10 (33374000542) reproduced
+the same 4-red shape (deterministic), confirming the race.
+
+**Local repro on this dev box at the same tree:** `cargo run -p
+registry-check --bin architecture-check -- --root .` returns rc=0,
+`bead_count=897, violations=0, outcome=pass`. The architecture
+check is sound; the CI red is the established JSONL-sync race that
+the prior P0s (`fgdb-juqa` closed 08-28, `fgdb-mj6c` closed 08-29)
+already documented: the released pin and the live bead count drift
+between W12 catalog commits, and a `bump_on_catalog_commit` hook
+remains unbuilt.
+
+**Consequence for the determinism gate red (also in both runs):**
+the determinism gate runs `cargo test -j 1 --locked --workspace
+--no-fail-fast` into n1 and n2 and compares sorted outputs. On the
+runner, BOTH n1 and n2 fail on the architecture-decisions test
+target (the same JSONL-staleness cause), so the gate never reaches
+its comparator — it reports RED with `run 1 failed before the
+determinism gate could pass`. **The determinism red is the
+downstream consequence of the architecture red, not a separate
+flake.** Fix the JSONL race, both reds clear.
+
+**Bead r2ks scope amendment:** the fix named in the bead (add
+architecture-decisions rows for `fgdb-juqa` / `fgdb-mj6c`) is the
+wrong shape for the actual cause — those beads already have
+provenance in the live DB; only the JSONL is stale. The correct fix
+is the structural one the prior P0s called for: enforce a
+`bump_on_catalog_commit` (or equivalent) so the JSONL cannot lag
+the live DB when the gate runs. Filed as the next concrete step
+for the swarm. The bead's evidence trail (artifact, orphan IDs, the
+four failing test names, the JSONL-staleness mechanism) is the
+deliverable; the bead itself can be closed when the structural fix
+lands.
+
+**Action landed this pickup:** verified the local architecture check
+passes at HEAD (rc=0, 0 violations) on the same tree the runner
+reds on, confirming the runner-side staleness race. The doc
+correction + local evidence replaces the prior pickup's
+mischaracterisation with the precise mechanism.
+
+
 
 ## Current delta — 2026-08-29
 
