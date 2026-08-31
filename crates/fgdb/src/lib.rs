@@ -1991,14 +1991,18 @@ impl Database<MemVfs> {
     /// yourself and use the explicit-VFS constructors:
     ///
     /// ```no_run
+    /// use fgdb::{Database, DatabaseKeys};
+    /// use fgdb::memvfs::MemVfs;
+    /// # async fn doc(cx: &fgdb::CommitCx, keys: DatabaseKeys) -> Result<(), Box<dyn std::error::Error>> {
     /// let vfs = MemVfs::new()?;
     /// let dir = vfs.database_dir();
     /// let mut db =
-    ///     Database::<MemVfs>::create_with_vfs(&cx, vfs.clone(), dir.clone(), keys).await?;
+    ///     Database::<MemVfs>::create_with_vfs(cx, vfs.clone(), dir.clone(), keys).await?;
     /// // ... commit work through the real protocol ...
     /// drop(db);
-    /// let db = Database::<MemVfs>::open_with_vfs(&cx, vfs, dir, keys).await?;
-    /// ```
+    /// let db = Database::<MemVfs>::open_with_vfs(cx, vfs, dir, keys).await?;
+    /// # Ok(())
+    /// # }
     ///
     /// Private storage is always empty storage, so this constructor carries
     /// [`Database::create`]'s law (refuse an existing database) under open's
