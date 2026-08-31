@@ -87,6 +87,18 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         println!("  neighbours(1) before drop: {before:?}");
         println!("  GQL MATCH (1)-[:KNOWS]->(b) RETURN b: {gql_before:?}");
 
+        // ---- compact republishes tier-D blocks into a sealed CSR run -----------
+        db.compact(cx).await?;
+        let after_compact = db.neighbours(VId(1), KNOWS)?;
+        let gql_after_compact = db.execute_gql(
+            "MATCH (a)-[:KNOWS]->(b) RETURN b",
+            &RelationBind::new().with_relation("KNOWS", KNOWS),
+        )?;
+        println!("  neighbours(1) after compact: {after_compact:?}");
+        println!("  GQL MATCH after compact: {gql_after_compact:?}");
+        assert_eq!(before, after_compact, "compact must not change adjacency");
+        assert_eq!(gql_before, gql_after_compact, "compact must not change GQL");
+
         // ---- drop everything ------------------------------------------------
         drop(db);
         println!("  dropped the database handle");
