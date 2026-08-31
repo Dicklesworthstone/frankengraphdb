@@ -103,7 +103,7 @@ const DATABASE_DIR_NAME: &str = "database.fgdbdir";
 /// mid-mutation. Surfaced as an I/O error instead of unwrapped, so a
 /// poisoned namespace fails every caller closed rather than panicking here.
 fn poisoned_lock() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, "MemVfs internal lock poisoned")
+    io::Error::other("MemVfs internal lock poisoned")
 }
 
 /// One file's authoritative content: the bytes every read serves from, plus
