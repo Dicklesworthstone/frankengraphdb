@@ -16,6 +16,7 @@ pub mod appendix_source;
 pub mod architecture;
 pub mod closure;
 pub mod command_contracts;
+pub mod command_live_payload;
 pub mod command_type_classification;
 pub mod durable_state_slots;
 pub mod hash;
