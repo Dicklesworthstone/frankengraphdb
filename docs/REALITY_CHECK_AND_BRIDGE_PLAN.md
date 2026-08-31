@@ -233,6 +233,65 @@ is the first to exercise the new artifact-upload step on a real RED;
 its artifact will be the first concrete data point for the residue
 hot spots.
 
+### Same-day pickup — 2026-08-31T08:30Z (run 33362472899)
+
+The "one known runner-load hot spot" claim above was incomplete. Run
+`33362472899` (the doc-only push on `c9d9cdb3`) came in RED on **four
+registered live gates** and **one core gate**, not one. Three of the
+four are the same architecture-decisions test surface failing across
+three different invocations:
+
+- `tools/registry-check/src/bin/architecture-check.rs` — exit 1 (binary)
+- `tools/registry-check/tests/architecture_decisions.rs` — 4 of 42
+  tests failed; 38 passed (cargo-test): the four failures are
+  `architecture_bead_provenance_is_total_pinned_and_bidirectional`,
+  `architecture_neg_rule_tables_and_resolution_pins`,
+  `architecture_neg_semantic_change_with_stable_id`, and
+  `architecture_registry_parses_and_validates`. All four are driven by
+  the same root cause.
+- `scripts/g0_architecture_decisions_e2e.sh` — exit 1 (e2e script
+  wrapping the same surface).
+- `scripts/w1_cross_crate_determinism_e2e.sh` — exit 1 (the
+  load-sensitivity residue, unchanged from the 08-29 picture).
+
+And `core: cargo test --workspace --no-fail-fast` RED once on
+`registry-check`'s `architecture_decisions` test target — the same
+four failures.
+
+**Root cause (from the downloadable artifact, name `fgdb-gate-transcripts`,
+7-day retention):** the architecture-decisions registry reports
+`bead_provenance_not_total`: 894 of 896 Beads records resolved. The
+two orphans are `fgdb-juqa` and `fgdb-mj6c` — both lack an owner / bet
+label / exact override / family rule AND carry no labels at all.
+**These are not this session's beads** (mine — `fgdb-memvfs-open-memory-g7j1`,
+`fgdb-w1-cross-crate-determinism-ci-flake-ze5e`,
+`fgdb-write-cost-attribution-runner-flake-n7w4` — all carry labels); the
+orphans are concurrent swarm activity, almost certainly the a06 / W12
+catalog work or other in-flight sessions creating beads faster than the
+architecture-decisions registry can be updated.
+
+**Bridge plan update:** the residue is wider than Pass 3 concluded —
+two distinct hot spots, not one. The determinism flake (load-sensitive)
+and the architecture-orphans surface (concurrent swarm bookkeeping).
+Filed as `fgdb-arch-orphan-beads-ci-red-r2ks`. The fix is not in
+this session's lane: the creating agent (or the operator) must add
+architecture-decisions registry rows for `fgdb-juqa` and `fgdb-mj6c`
+with their proper owner / bet label / `decision_ids`, then re-run.
+The artifact step now on main makes the next RED one-cycle diagnosable
+for whichever surface fires.
+
+**Restating the 2026-08-31 vision / bridge assessment in light of this
+pickup:** row 15's "harness live" status is unchanged (the chain reaches
+verdicts; the artifact landed its first concrete diagnostics). Gap 0′ is
+CLOSED in substance (the chain runs to verdicts); the two named hot
+spots are owned, instrumented, and not this session's work to close. The
+next agent that wants a green main will either (a) add the two missing
+architecture rows, (b) accept the determinism flake as a known bound,
+or (c) harden the determinism gate to mask the load sensitivity — the
+last being the path of least resistance and the worst doctrine violation,
+so I will not propose it.
+
+
 ## Current delta — 2026-08-29
 
 ### Product verdict
