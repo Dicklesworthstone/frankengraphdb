@@ -212,14 +212,33 @@ jobs:
       # module logs in $GATE_LOG_DIR; both die with the runner otherwise
       # (beads fgdb-w1-cross-crate-determinism-ci-flake-ze5e and
       # fgdb-write-cost-attribution-runner-flake-n7w4).
+      #
+      # We stage into a fixed directory first because upload-artifact@v4's glob
+      # behavior over absolute /tmp paths has silently produced no artifact in
+      # earlier runs (the matching directories were present but the glob did
+      # not resolve). `find` copies every matching directory explicitly, then
+      # the upload step archives the fixed staging path.
+      - name: Stage gate transcripts on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          stage="/tmp/fgdb-gate-transcripts-staging"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          find /tmp -maxdepth 1 -type d \( \
+            -name 'fgdb-check-gates.*' -o \
+            -name 'fgdb-det-e2e.*' -o \
+            -name 'fgdb-threat-e2e.*' \
+          \) -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          count="$(find "$stage" -type f 2>/dev/null | wc -l)"
+          echo "staged $count transcript/diagnostic files in $stage"
+          ls -la "$stage" 2>/dev/null || true
+
       - name: Upload gate transcripts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fgdb-gate-transcripts
-          path: |
-            /tmp/fgdb-check-gates.*/**
-            /tmp/fgdb-det-e2e.*/**
-            /tmp/fgdb-threat-e2e.*/**
+          path: /tmp/fgdb-gate-transcripts-staging
           if-no-files-found: ignore
           retention-days: 7
