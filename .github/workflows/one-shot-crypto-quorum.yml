@@ -107,6 +107,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git diff --binary -- \
+            crates/fgdb-crypto/tests/constant_time_audit.rs \
+            tools/registry-check/src/command_live_payload.rs \
+            > /tmp/proof-surface-repair.patch
+          test -s /tmp/proof-surface-repair.patch
+
+          # The user's incremental main commits may advance while this queued
+          # utility waits for a runner. Rebase the already-proved, two-file
+          # source patch onto the then-current main rather than racing it.
+          git fetch origin main
+          git reset --hard origin/main
+          git apply --check /tmp/proof-surface-repair.patch
+          git apply /tmp/proof-surface-repair.patch
           git rm .github/workflows/one-shot-crypto-quorum.yml
           git add crates/fgdb-crypto/tests/constant_time_audit.rs \
             tools/registry-check/src/command_live_payload.rs
