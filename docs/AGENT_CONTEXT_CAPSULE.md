@@ -1,26 +1,14 @@
 # Local Agent Context Capsule
 
-Status: **live advisory tooling** on unreleased `main`.
+Status: **live advisory tooling**, format v2, on unreleased `main`.
 
-This document defines the local, credential-free handoff produced by
-`scripts/agent_context.sh` and independently checked by
-`scripts/agent_context_verify.sh`.
-
-The capsule exists for a practical reason: a coding agent often needs one
-self-contained snapshot containing source, recent history, current Beads views,
-and enough provenance to know exactly what it is looking at. Fetching those
-pieces separately is slower, easier to race, and encourages agents to mistake a
-partial observation for repository truth.
-
-The capsule is deliberately **not** a product gate. Its successful production or
-verification says nothing about formatting, compilation, tests, invariants, or
-runtime behavior. The authoritative repository verdict remains:
+`scripts/agent_context.sh` produces a credential-free repository handoff. `scripts/agent_context_verify.sh` verifies it deeply, and `scripts/agent_context_checkout.sh` materializes a verified detached checkout. None of these scripts is a product gate; the authoritative repository verdict remains:
 
 ```bash
 bash scripts/check.sh
 ```
 
-## Produce and verify
+## Produce, verify, and consume
 
 From a clean checkout:
 
@@ -29,157 +17,127 @@ bash scripts/agent_context.sh \
   --require-br \
   --output /tmp/fgdb-agent-context
 
-bash scripts/agent_context_verify.sh /tmp/fgdb-agent-context
+bash scripts/agent_context_verify.sh \
+  --scratch /tmp/fgdb-agent-context-verify \
+  /tmp/fgdb-agent-context
+
+bash scripts/agent_context_checkout.sh \
+  --verify-scratch /tmp/fgdb-agent-context-checkout-verify \
+  /tmp/fgdb-agent-context \
+  /tmp/fgdb-work
 ```
 
-The output directory:
+The capsule, verifier scratch, and checkout directories must not already exist. They are never removed or overwritten. The resulting checkout is detached at the bundled commit and has no Git remote.
 
-- must be outside the repository worktree;
-- must have an existing parent;
-- must not already exist;
-- is never removed or overwritten by either script.
-
-Run the semantic controls with:
+Run retained mutation-sensitive controls with:
 
 ```bash
 bash scripts/agent_context_selftest.sh
 ```
 
-The self-test retains and prints its clean, dirty, and deliberately corrupted
-fixtures. This matches the repository's no-deletion doctrine and leaves a failed
-control state available for inspection.
-
 ## Clean and dirty trees
 
-Clean export is the default. A dirty worktree is refused because an exact Git
-bundle alone would silently omit the state an agent is actually reviewing.
+Clean export is the default. A dirty tree is refused unless the caller passes `--allow-dirty`.
 
-When dirty export is intentional:
+A dirty format-v2 capsule contains:
 
-```bash
-bash scripts/agent_context.sh \
-  --allow-dirty \
-  --output /tmp/fgdb-agent-context-dirty
-```
-
-The dirty capsule includes:
-
-- `worktree.patch`, produced by `git diff --binary HEAD` and therefore covering
-  staged and unstaged tracked changes;
+- `worktree.patch`, produced by `git diff --binary HEAD`;
 - `untracked-files.txt`, containing names only;
-- `worktree-stability-proof.patch`, recomputed at the end of export and required
-  to be byte-identical to `worktree.patch`.
+- `worktree-stability-proof.patch`, recomputed at the end of export;
+- `git-status-stability-proof.txt`, the complete end-of-export porcelain status.
 
-Untracked file contents are excluded on purpose. Automatically sweeping unknown
-files into an agent handoff can capture credentials, local datasets, generated
-artifacts, or unrelated work. An agent that needs an untracked file should ask
-for that file explicitly.
+The producer requires the start/end tracked patch and status to remain byte-identical. `HEAD` and its committed tree must also remain unchanged.
 
-The producer also rechecks `HEAD` and the complete porcelain status after all
-outputs are written. A moving commit or worktree makes the export fail rather
-than producing a plausible mixed-time snapshot.
+Untracked contents are deliberately excluded. Automatically sweeping unknown files could capture credentials, local datasets, generated artifacts, or unrelated work. `agent_context_checkout.sh --apply-dirty` can reconstruct the tracked patch only; it prints the retained untracked-name inventory when one exists.
 
-## Capsule contract
+## Format-v2 contract
 
 | File | Meaning |
 |---|---|
-| `manifest.txt` | Version, repository, exact commit, ref, dirty state, Beads mode, and authority boundary. |
-| `repository.bundle` | Credential-free Git history rooted at the exact captured `HEAD`. |
-| `git-bundle-verify.txt` | Producer-side Git bundle verification transcript. |
-| `tracked-source.tar.gz` | Deterministic `git archive` of the exact captured commit. |
-| `tracked-files.txt` | Exact tracked path inventory from that commit. |
-| `recent-commits.tsv` | Commit, author time, author, and subject for the requested recent-history window. |
-| `git-status.txt` | Porcelain worktree state captured before export. |
-| `SHA256SUMS` | Strict checksum inventory for every other regular file in the capsule. |
-| `issues.jsonl` | Tracked Beads exchange projection, when present and enabled. |
-| `br-*.json` | Read-only live Beads views when `br` is available. |
-| `worktree.patch` | Dirty tracked state, only with `--allow-dirty`. |
-| `untracked-files.txt` | Dirty untracked names, never their contents. |
-| `worktree-stability-proof.patch` | End-of-export tracked-state control for a dirty capsule. |
+| `manifest.txt` | Exact format, repository, commit, committed tree, bundle ref, dirty state, Beads mode, and authority boundary. |
+| `repository.bundle` | Credential-free Git history advertising exactly the captured commit as `HEAD`. |
+| `tracked-source.tar.gz` | Deterministic `git archive` of that exact commit. |
+| `tracked-files.txt` | Exact tracked-path inventory derived from the commit. |
+| `recent-commits.tsv` | Exact requested history window derived from the bundled commit. |
+| `git-status.txt` | Initial complete porcelain worktree state. |
+| `SHA256SUMS` | Exact checksum inventory for every other regular file. |
+| `issues.jsonl` | Tracked Beads exchange projection, when enabled and present. |
+| `br-*.json` | Read-only live Beads views, when `br` is available. |
+| dirty evidence | Tracked patch, untracked names, and start/end stability witnesses. |
 
-`manifest.txt` format version 1 is line-oriented `key=value`. It is intentionally
-small enough to inspect without a parser dependency. Values are metadata, not
-shell input; consumers must parse keys rather than source the file.
+The manifest is strict line-oriented `key=value`; consumers parse it and never source it as shell input. Format v2 adds `tree` and `bundle_ref=HEAD`. The verifier continues to accept the prior v1 layout for migration, but new exports always use v2.
 
-The declared Beads modes are:
+Declared Beads modes are:
 
 - `br+jsonl`: tracked JSONL plus successful read-only `br` views;
-- `jsonl-only`: tracked JSONL was present but `br` was unavailable;
-- `absent`: no tracked Beads JSONL existed;
+- `br-only`: live read-only `br` views without tracked JSONL;
+- `jsonl-only`: tracked JSONL without a usable `br` binary;
+- `absent`: no `.beads` directory;
+- `unavailable`: `.beads` existed but neither evidence family was available;
 - `disabled`: the caller passed `--no-beads`.
 
-Use `--require-br` when current scheduler views are required. Without it, a
-machine lacking `br` still produces a useful source capsule, but the manifest
-makes the weaker Beads observation explicit.
+Use `--require-br` when scheduler views are mandatory.
 
-## Independent verification
+## Deep independent verification
 
-The verifier does not trust the producer's success token. It independently
-checks:
+Checksum validation alone is not sufficient: a party could replace both an archive and its neighboring checksum. The v2 verifier therefore derives provenance from the Git bundle itself.
 
-1. every required file exists;
-2. the capsule contains no symlinks;
-3. the manifest version, commit syntax, dirty flag, Beads mode, and
-   advisory-only authority statement are valid;
-4. `SHA256SUMS` names the exact regular-file inventory, with no omitted or extra
-   file;
-5. every checksum matches;
-6. the Git bundle can be parsed and advertises the manifest's exact commit;
-7. the tracked-source archive contains no `.git` directory;
-8. clean and dirty evidence have the correct mutually exclusive shape;
-9. dirty start/end patches are identical;
-10. each Beads mode carries exactly its required evidence family.
+It checks:
 
-A successful verifier run emits:
+1. exact manifest keys, exact regular-file inventory, and no symlinks;
+2. exact checksum coverage and every SHA-256 value;
+3. one bundle head, named `HEAD`, at the manifest commit;
+4. bundle import into an isolated retained repository;
+5. manifest tree equality with the bundled commit tree;
+6. byte-identical recomputation of `tracked-source.tar.gz` from `git archive`;
+7. byte-identical recomputation of `tracked-files.txt` and `recent-commits.tsv`;
+8. clean/dirty mutual exclusion and dirty patch applicability;
+9. safe relative untracked paths;
+10. exact Beads evidence closure for the declared mode.
+
+The mutation controls prove rejection of:
+
+- a checksum-invalid capsule;
+- a checksum-consistent source archive unrelated to the bundle;
+- checksum-consistent fabricated history;
+- duplicate manifest keys;
+- an undeclared extra file.
+
+Success emits:
 
 ```text
 AGENT_CONTEXT_VERIFIED
 path=...
+scratch=...
 commit=...
+tree=...
 dirty=...
 beads=...
 ```
 
-The token is anchored and machine-readable, but it is only a capsule verdict.
-It must never be translated into `ALL GATES GREEN` or any claim about database
-correctness.
+This is a capsule verdict only. It must never be translated into `ALL GATES GREEN` or any claim about database correctness.
 
-## Consuming the source
+## Checkout semantics
 
-A Git-aware agent can reconstruct history without repository credentials:
+`agent_context_checkout.sh` always runs the deep verifier first. It then:
 
-```bash
-git clone /tmp/fgdb-agent-context/repository.bundle /tmp/fgdb-work
-```
+1. creates a new repository at the destination;
+2. fetches only `HEAD` from the verified bundle;
+3. checks out the exact manifest commit detached;
+4. proves the checkout has no remotes and is clean;
+5. optionally applies and re-verifies the tracked dirty patch.
 
-A source-only consumer can unpack the exact tracked tree:
-
-```bash
-mkdir /tmp/fgdb-source
-tar -xzf /tmp/fgdb-agent-context/tracked-source.tar.gz \
-  -C /tmp/fgdb-source
-```
-
-For a dirty capsule, apply `worktree.patch` only after checking out the manifest
-commit. The untracked-name list is informational; the capsule intentionally
-contains no bytes to recreate those files.
+The verifier scratch and checkout are retained. No repository credential is copied because no source `.git` directory or remote configuration is exported.
 
 ## Trust and no-claim boundary
 
-The capsule provides internal integrity and exact-state attribution, not
-publisher authenticity. `SHA256SUMS` is stored beside the files it covers, so a
-party capable of replacing the whole capsule can also replace its checksums.
-Future signed distribution belongs to the registered release and external
-verifier workstreams; it must not be improvised here.
+The bundle makes committed source/history self-authenticating by Git object identity and makes the adjacent views internally consistent. It does not authenticate the distributor: a party replacing the entire bundle can produce a different internally valid bundle. Signed distribution belongs to the registered release and external-verifier workstreams.
 
-The canonical authorities remain separate:
+Canonical authorities remain separate:
 
 - Git is authoritative for committed source and history.
-- The live Beads database is authoritative for current tracker state; JSONL and
-  `br-*.json` are exchange views captured at one local instant.
-- `bash scripts/check.sh` is authoritative for the repository's product verdict.
-- The capsule manifest is authoritative only for what this advisory package
-  claims to contain.
+- The live Beads database is authoritative for current tracker state; JSONL and `br-*.json` are captured views.
+- `bash scripts/check.sh` is authoritative for the product verdict.
+- The capsule manifest is authoritative only for the advisory package it describes.
 
-This separation is load-bearing. It lets agents acquire context cheaply without
-turning observability infrastructure into a second source of truth.
+This separation lets agents acquire exact context cheaply without creating a second source of product truth.
