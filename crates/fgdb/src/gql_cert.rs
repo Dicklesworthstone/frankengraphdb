@@ -5,8 +5,6 @@
 //! separately binds the executor-ready `BoundPlan` and snapshot. Neither type
 //! claims to attest result rows, runtime cost, or an operator tree.
 
-use crate::{Database, GqlError, ReadError};
-use asupersync::fs::Vfs;
 use fgdb_crypto::{Digest, Hasher, hash};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
@@ -90,56 +88,6 @@ impl GqlPlanCertificate {
 /// be misread as v2 even when every other field is identical.
 pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate {
     certify_with_domain(plan, snapshot_seq, GQL_PLAN_CERTIFICATE_DOMAIN_V2, true)
-}
-
-fn bind_plan_for_certificate(
-    statement: &str,
-    bind: &RelationBind,
-) -> Result<BoundPlan, GqlError> {
-    bind.bind(statement).map_err(|error| match error {
-        fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
-        unbound => GqlError::Bind(unbound),
-    })
-}
-
-impl<V: Vfs + Clone> Database<V> {
-    /// Bind and certify one statement at the handle's current published frontier.
-    ///
-    /// This is a plan-only operation: it does not execute the plan and makes no
-    /// claim about result rows or runtime work. The handle is still checked for
-    /// read health before a certificate is minted.
-    pub fn gql_plan_certificate(
-        &self,
-        statement: &str,
-        bind: &RelationBind,
-    ) -> Result<GqlPlanCertificate, GqlError> {
-        let plan = bind_plan_for_certificate(statement, bind)?;
-        let snapshot_seq = self.frontier().map_err(GqlError::Read)?;
-        Ok(certify(&plan, snapshot_seq))
-    }
-
-    /// Bind and certify one statement at the exact caller-selected sequence.
-    ///
-    /// A future sequence is refused rather than clamped to the live frontier.
-    /// Historical sequences at or below the published frontier are named
-    /// verbatim in the certificate transcript; the plan is not executed and no
-    /// result-row claim is made.
-    pub fn gql_plan_certificate_at(
-        &self,
-        statement: &str,
-        bind: &RelationBind,
-        as_of: CommitSeq,
-    ) -> Result<GqlPlanCertificate, GqlError> {
-        let plan = bind_plan_for_certificate(statement, bind)?;
-        let frontier = self.frontier().map_err(GqlError::Read)?;
-        if as_of > frontier {
-            return Err(GqlError::Read(ReadError::BeyondFrontier {
-                asked: as_of,
-                frontier,
-            }));
-        }
-        Ok(certify(&plan, as_of))
-    }
 }
 
 /// Recompute the historical v1 transcript for explicit migration checks.
