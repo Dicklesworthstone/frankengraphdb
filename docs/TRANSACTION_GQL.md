@@ -1,103 +1,96 @@
-# Transaction-Overlay GQL
+# Transaction-Overlay GQL Contract
 
-Status: **live bounded subset** on unreleased `main`, introduced by `005a839701d3a9d270c17ab68d5641dc8fa74a48` under `fgdb-w4-g1-txn-core-qpmg.4`.
+Status: **live bounded read-your-own-writes query surface**, not full SSI or the final session transaction protocol.
 
-This document defines the GQL read surface of `WriteTxn`. It is a staged read-your-own-writes overlay over one pinned durable basis. It is not the final SSI transaction engine, session protocol, or portable replay format.
+## One execution body
 
-## One executor, three entry shapes
+`WriteTxn` executes the bounded GQL subset over:
 
-The overlay has one executor whose input is `&BoundPlan`:
+1. the transaction's pinned durable basis;
+2. staged vertex and edge mutations in transaction order;
+3. the shared deterministic projection/order/`SKIP`/`LIMIT` discipline.
 
-```rust
-WriteTxn::execute_prepared_gql(&self, &Database<V>, &BoundPlan)
-```
+`execute_prepared_gql` is the plan-only overlay body. Text execution binds once and delegates to it. Certified text execution also binds once and delegates; it does not call a text path that binds again.
 
-The text and certified APIs are adapters:
-
-```rust
-WriteTxn::execute_gql(&self, &Database<V>, statement, &RelationBind)
-WriteTxn::execute_gql_certified(&self, &Database<V>, statement, &RelationBind)
-WriteTxn::execute_prepared_gql_certified(&self, &Database<V>, &BoundPlan)
-WriteTxn::prepared_gql_plan_certificate(&self, &BoundPlan)
-```
-
-`execute_gql` parses and binds exactly once, then delegates. `execute_gql_certified` also binds exactly once; it does not call the text executor and bind a second time. Evidence is minted only after successful overlay execution.
-
-The expanded `gql_undirected_certified.rs` integration test proves parity among text, prepared, certified-prepared, and plan-only certification. It also proves that a directed plan produces different rows and a different plan digest from the undirected plan.
-
-## Overlay semantics
-
-The executor reads:
-
-1. the transaction's pinned durable `CommitSeq`;
-2. every staged vertex/edge mutation in call order;
-3. staged label and integer-property changes through `WriteTxn::vertex`;
-4. staged edge creates/deletes and vertex-delete cascades;
-5. the same deterministic projection, sort, deduplication, `SKIP`, and `LIMIT` discipline as the bounded database/read-view surface.
-
-It records:
-
-- concrete vertex and edge observations in the transaction read set;
-- MATCH expansion coordinates used by first-committer-wins read-conflict detection;
-- projected vertices as observations even when the expansion already encountered them.
-
-A subsequent commit still goes through the existing prepared-write and FCW validation seam. Query preparation does not publish anything.
+`PreparedGqlQuery` delegates to the same body through `execute_prepared_query`. There is no second transaction parser, binder, or executor.
 
 ## Source ownership
 
-`crates/fgdb/src/write_txn.rs` is the private module map. Its included files divide responsibility without dividing state authority:
+The transaction implementation is decomposed under `crates/fgdb/src/write_txn_parts/` while compiling as one private module with one `WriteTxn` state authority.
 
-| File | Responsibility |
-|---|---|
-| `preamble.rs` | Imports, typed errors, `WriteTxn` state. |
-| `lifecycle.rs` | Begin, basis, staged write preparation. |
-| `vertex_reads.rs` | Vertex and all-vertices staged overlay. |
-| `edge_reads.rs` | Edge, adjacency, and incident staged overlay. |
-| `gql_types.rs` | Internal overlay graph and predicate-set vocabulary. |
-| `gql_entry.rs` | Text binding and the single plan-only dispatch. |
-| `gql_node.rs` | Node-only labeled scan over staged rows. |
-| `gql_overlay_graph.rs` | Durable-plus-staged graph materialization. |
-| `gql_edge_match.rs` | Directional/two-hop/predicate MATCH execution. |
-| `gql_api.rs` | Certified and plan-only public methods. |
-| `finish.rs` | Commit, abort, conflict detection, pin release. |
-| `traits_and_tests.rs` | Diagnostics, drop behavior, focused unit law. |
+Relevant files:
 
-Every file is `include!`d into one private module. The fields of `WriteTxn` remain private, and there is only one transaction state machine.
+- `preamble.rs`: error and state definitions;
+- `lifecycle.rs`: begin and staging;
+- `vertex_reads.rs`: overlay vertex reads;
+- `edge_reads.rs`: overlay edge and adjacency reads;
+- `gql_entry.rs`: text and plan-only dispatch;
+- `gql_node.rs`: node-scan overlay path;
+- `gql_overlay_graph.rs`: staged graph materialization;
+- `gql_edge_match.rs`: edge-pattern evaluation;
+- `gql_api.rs`: plan certification;
+- `owned_prepared.rs`: coherent owned preparation and deterministic budgets;
+- `finish.rs`: commit, conflict checks, abort, and helpers.
+
+## Read dependencies
+
+Transaction query execution records conservative dependencies used by the FCW read-conflict seam:
+
+- observed vertices;
+- observed edges;
+- returned vertices;
+- source/relation MATCH expansions that could be changed by a later inserted edge.
+
+A later commit touching those dependencies after the pinned basis can refuse transaction commit under `FG-LAW-FCW-READ-01`.
+
+This is a bounded FCW read-set mechanism, not full SSI predicate/range tracking.
+
+## Owned preparation
+
+`WriteTxn::prepare_gql_query` creates the same coherent `PreparedGqlQuery` used by durable read surfaces. It retains exact statement bytes, a cloned `RelationBind`, and the bound plan.
+
+`execute_prepared_query` reuses that plan over staged state. The caller's original statement or bind map can change without changing the prepared definition.
+
+Finished transactions refuse preparation and execution through `WriteTxnError::Finished`.
+
+## Deterministic budgets
+
+`execute_prepared_query_budgeted` checks:
+
+- complete overlay edge count for an edge pattern, or complete overlay vertex count for a node scan;
+- final result-row count after deterministic query semantics.
+
+An exact boundary succeeds. An exceeded bound returns `BudgetedGqlError::Budget` with no partial rows.
+
+Counting the overlay is itself a transaction read. A snapshot-record refusal therefore leaves the conservative read set populated, preserving conflict safety rather than pretending that an inspected overlay was never observed.
+
+The current implementation materializes/counts the overlay before executing it again. It does not provide storage-level early cancellation, memory governance, spill, backpressure, or physical runtime-cost evidence.
 
 ## Evidence boundary
 
-A transaction plan certificate binds:
+Transaction query methods may return `GqlPlanCertificate` at the transaction basis. It proves the concrete bound plan and basis sequence.
 
-- the complete bound-plan transcript;
-- the transaction's durable basis sequence.
+It does **not** bind the staged overlay. Therefore transaction methods do not issue the durable-read ordered-result digest for staged rows.
 
-It does **not** bind:
+Required precursor to exact transaction-result evidence:
 
-- the staged mutation sequence or combined write template;
-- the transaction read set or expansion set;
-- exact returned overlay rows;
-- commit outcome;
-- a portable or cross-process transaction identity.
+1. canonical combined staged mutation transcript;
+2. domain-separated overlay identity including order and basis;
+3. result transcript chained to that overlay identity;
+4. mutation-sensitive replay law.
 
-Consequently, database/read-view ordered-result digests must not be reused as transaction replay claims. A staged-overlay identity must be defined first, with an explicit transcript and mutation-sensitive tests.
+## Deliberate limitations
 
-## Refusals
+The current transaction surface does not provide:
 
-All prepared faces retain the existing typed refusals:
+- full SSI or serialization-graph validation;
+- general predicate/range conflict tracking;
+- multi-relation staged writes;
+- savepoints or nested transactions;
+- transaction-owned cursors;
+- typed statement parameters;
+- authorization/session ownership;
+- portable transaction replay artifacts;
+- physical plan or runtime-cost evidence.
 
-- `Finished` when the transaction pin has been released;
-- `Gql(Parse)` or `Gql(Bind)` for text preparation failures;
-- `Read` for a durable-basis read refusal;
-- `Write` for commit/preparation failures outside query execution.
-
-No certificate is returned when execution refuses.
-
-## Remaining work
-
-The next transaction-query increments are dependency-ordered:
-
-1. run the pinned Rust toolchain and preserve the exact-tree verdict;
-2. introduce an owned prepared definition containing statement bytes, canonical bind, and plan;
-3. define staged-overlay identity before exact transaction-result evidence;
-4. bind typed parameter values into preparation and evidence;
-5. integrate full SSI/predicate-range conflict ownership rather than extending the one-batch subset indefinitely.
+These remain dependency-ordered future work rather than implicit claims of the bounded overlay.
