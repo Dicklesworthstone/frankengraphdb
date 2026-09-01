@@ -104,6 +104,12 @@ fn one_prepared_plan_reuses_the_exact_kernel_across_pinned_sessions() {
         assert_eq!(old.execute_gql(QUERY, &bind()).unwrap(), direct_old);
         assert_eq!(old.execute_prepared_gql(&prepared).unwrap(), direct_old);
         assert_eq!(old.execute_prepared_gql(&prepared).unwrap(), direct_old);
+        assert_eq!(db.execute_prepared_gql(&prepared).unwrap(), direct_old);
+        let (live_old_rows, live_old_certificate) = db
+            .execute_prepared_gql_certified(&prepared)
+            .expect("live prepared execution certifies");
+        assert_eq!(live_old_rows, direct_old);
+        assert!(live_old_certificate.verifies_at(&prepared, first_seq));
 
         let (old_rows, old_certificate) = old
             .execute_prepared_gql_certified(&prepared)
@@ -144,6 +150,7 @@ fn one_prepared_plan_reuses_the_exact_kernel_across_pinned_sessions() {
             vec![VId(3)]
         );
         assert_eq!(db.execute_gql(QUERY, &bind()).unwrap(), vec![VId(3)]);
+        assert_eq!(db.execute_prepared_gql(&prepared).unwrap(), vec![VId(3)]);
 
         let (_, current_certificate) = current
             .execute_prepared_gql_certified(&prepared)
