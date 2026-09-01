@@ -1,12 +1,12 @@
-//! **A real `main()` that certifies a GQL result**.
+//! **A real `main()` that certifies GQL execution inputs**.
 //!
 //! The bounded GQL executor can return a replayable certificate alongside the
-//! result rows. The certificate binds the rows to this handle's published
-//! frontier, the exact statement bytes, and the canonical bind encoding. This
-//! example creates a small graph, runs one certified query, commits one more
-//! fact, and shows that the certificate changes when the snapshot advances —
-//! while the same (database state, statement, bind) triple reproduces byte-for-
-//! byte.
+//! result rows. The certificate names this handle's published frontier, the
+//! exact statement bytes, and the canonical bind encoding. It deliberately
+//! does **not** attest the returned rows or runtime behavior; those remain
+//! separate evidence contracts. This example creates a small graph, verifies
+//! one certificate, commits one more fact, and shows that the certificate's
+//! snapshot advances while the same statement and bind digests stay stable.
 //!
 //! ```text
 //! cargo run --example gql_certified_query
@@ -36,7 +36,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         [0x3c; 32],
     );
 
-    println!("fgdb GQL certified-query witness");
+    println!("fgdb GQL certified-input witness");
     println!("  database directory: {}", path.display());
 
     let runtime = RuntimeBuilder::new().build()?;
@@ -57,12 +57,23 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let bind = RelationBind::new().with_relation("KNOWS", KNOWS);
         let query = "MATCH (a)-[:KNOWS]->(b) RETURN b";
         let (rows_1, cert_1) = db.execute_gql_certified(query, &bind)?;
-        println!("  certified rows at snapshot {snapshot:?}: {rows:?}",
-                 snapshot = cert_1.snapshot_seq, rows = rows_1);
-        println!("    statement digest: {statement_digest:?}",
-                 statement_digest = cert_1.statement_digest);
-        println!("    bind digest: {bind_digest:?}",
-                 bind_digest = cert_1.bind_digest);
+        println!(
+            "  rows beside certified inputs at snapshot {snapshot:?}: {rows:?}",
+            snapshot = cert_1.snapshot_seq,
+            rows = rows_1
+        );
+        println!(
+            "    statement digest: {statement_digest:?}",
+            statement_digest = cert_1.statement_digest
+        );
+        println!(
+            "    bind digest: {bind_digest:?}",
+            bind_digest = cert_1.bind_digest
+        );
+        assert!(
+            cert_1.verifies_at(query, &bind, first_seq),
+            "the first certificate verifies its exact statement, bind, and snapshot"
+        );
 
         let mut second = WriteBatch::new(KNOWS);
         second.create_vertex(VId(4), vec![], vec![]);
@@ -71,10 +82,21 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         println!("  committed second batch at seq {second_seq:?}");
 
         let (rows_2, cert_2) = db.execute_gql_certified(query, &bind)?;
-        println!("  certified rows at snapshot {snapshot:?}: {rows:?}",
-                 snapshot = cert_2.snapshot_seq, rows = rows_2);
+        println!(
+            "  rows beside certified inputs at snapshot {snapshot:?}: {rows:?}",
+            snapshot = cert_2.snapshot_seq,
+            rows = rows_2
+        );
         assert!(
-            cert_1.snapshot_seq != cert_2.snapshot_seq,
+            cert_2.verifies_at(query, &bind, second_seq),
+            "the second certificate verifies its exact statement, bind, and snapshot"
+        );
+        assert!(
+            !cert_1.verifies_at(query, &bind, second_seq),
+            "the first certificate cannot be replayed as evidence for the later snapshot"
+        );
+        assert_ne!(
+            cert_1.snapshot_seq, cert_2.snapshot_seq,
             "a later commit must advance the certificate snapshot"
         );
         assert_eq!(
@@ -92,7 +114,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             "rows must include the newly inserted destination"
         );
 
-        println!("OK: certified rows advance with the snapshot and stay byte-identical for the same inputs.");
+        println!(
+            "OK: certificates verify exact execution inputs; result rows remain separate, explicitly uncertified evidence."
+        );
         Ok(())
     })
 }
