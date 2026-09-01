@@ -148,7 +148,7 @@ fn parse_inventory(source: &str) -> Result<Vec<InventoryDeclaration>, String> {
         ));
     }
     let mut declarations = Vec::with_capacity(quoted.len() / 3);
-    for triple in quoted.chunks_exact(3) {
+    for triple in quoted.as_chunks::<3>().0 {
         declarations.push(InventoryDeclaration {
             contract_id: triple[0].clone(),
             arm_name: triple[2].clone(),
@@ -221,9 +221,7 @@ fn find_enum_body(masked: &[u8], enum_name: &str) -> Option<(usize, usize)> {
         if &masked[token_start..token_end] != b"enum" {
             continue;
         }
-        let Some((name_start, name_end)) = next_identifier(masked, cursor) else {
-            return None;
-        };
+        let (name_start, name_end) = next_identifier(masked, cursor)?;
         cursor = name_end;
         if &masked[name_start..name_end] != enum_name.as_bytes() {
             continue;
