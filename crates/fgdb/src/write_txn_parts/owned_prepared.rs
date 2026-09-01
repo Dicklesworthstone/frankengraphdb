@@ -19,6 +19,63 @@ fn prepared_query_input_certificate(
     }
 }
 
+fn count_as_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn snapshot_record_count<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
+    reader: &R,
+    plan: &BoundPlan,
+    as_of: CommitSeq,
+) -> Result<u64, GqlError> {
+    if plan.relation.is_some() {
+        reader
+            .gql_edges_at(as_of)
+            .map(|rows| count_as_u64(rows.len()))
+            .map_err(GqlError::Read)
+    } else {
+        reader
+            .gql_vertices_at(as_of)
+            .map(|rows| count_as_u64(rows.len()))
+            .map_err(GqlError::Read)
+    }
+}
+
+fn execute_budgeted_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
+    reader: &R,
+    query: &fgdb_gql::PreparedGqlQuery,
+    as_of: CommitSeq,
+    budget: fgdb_gql::GqlExecutionBudget,
+) -> Result<
+    fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
+    fgdb_gql::BudgetedGqlError<GqlError>,
+> {
+    let snapshot_records = snapshot_record_count(reader, query.plan(), as_of)
+        .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
+    budget
+        .check(
+            fgdb_gql::GqlBudgetDimension::SnapshotRecords,
+            snapshot_records,
+        )
+        .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
+
+    let rows = crate::gql_exec::execute_at(query.plan(), reader, as_of)
+        .map_err(GqlError::Read)
+        .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
+    let result_rows = count_as_u64(rows.len());
+    budget
+        .check(fgdb_gql::GqlBudgetDimension::ResultRows, result_rows)
+        .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
+
+    Ok(fgdb_gql::BudgetedGqlExecution {
+        value: rows,
+        stats: fgdb_gql::GqlExecutionStats {
+            snapshot_records,
+            result_rows,
+        },
+    })
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Prepare one coherent reusable GQL definition.
     ///
@@ -48,6 +105,37 @@ impl<V: Vfs + Clone> Database<V> {
         as_of: CommitSeq,
     ) -> Result<Vec<VId>, GqlError> {
         self.execute_prepared_gql_at(query.plan(), as_of)
+    }
+
+    /// Execute one owned prepared definition under deterministic admission
+    /// and final-row bounds at the live frontier.
+    pub fn execute_prepared_query_budgeted(
+        &self,
+        query: &fgdb_gql::PreparedGqlQuery,
+        budget: fgdb_gql::GqlExecutionBudget,
+    ) -> Result<
+        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
+        fgdb_gql::BudgetedGqlError<GqlError>,
+    > {
+        let as_of = self
+            .frontier()
+            .map_err(GqlError::Read)
+            .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
+        self.execute_prepared_query_budgeted_at(query, as_of, budget)
+    }
+
+    /// Execute one owned prepared definition under deterministic bounds at one
+    /// exact retained sequence. No partial rows escape a budget refusal.
+    pub fn execute_prepared_query_budgeted_at(
+        &self,
+        query: &fgdb_gql::PreparedGqlQuery,
+        as_of: CommitSeq,
+        budget: fgdb_gql::GqlExecutionBudget,
+    ) -> Result<
+        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
+        fgdb_gql::BudgetedGqlError<GqlError>,
+    > {
+        execute_budgeted_at(self, query, as_of, budget)
     }
 
     /// Execute one owned prepared definition and return input, plan, and exact
@@ -123,6 +211,33 @@ impl crate::EmbeddedReadView {
         self.execute_prepared_gql_at(query.plan(), as_of)
     }
 
+    /// Execute one owned prepared definition under deterministic bounds at this
+    /// immutable view's pinned frontier.
+    pub fn execute_prepared_query_budgeted(
+        &self,
+        query: &fgdb_gql::PreparedGqlQuery,
+        budget: fgdb_gql::GqlExecutionBudget,
+    ) -> Result<
+        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
+        fgdb_gql::BudgetedGqlError<GqlError>,
+    > {
+        self.execute_prepared_query_budgeted_at(query, self.frontier(), budget)
+    }
+
+    /// Execute one owned prepared definition under deterministic bounds at a
+    /// sequence retained by this immutable view.
+    pub fn execute_prepared_query_budgeted_at(
+        &self,
+        query: &fgdb_gql::PreparedGqlQuery,
+        as_of: CommitSeq,
+        budget: fgdb_gql::GqlExecutionBudget,
+    ) -> Result<
+        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
+        fgdb_gql::BudgetedGqlError<GqlError>,
+    > {
+        execute_budgeted_at(self, query, as_of, budget)
+    }
+
     /// Execute one owned prepared definition and return every current evidence
     /// layer aligned to this view's pinned frontier.
     pub fn execute_prepared_query_with_result_digest(
@@ -190,6 +305,53 @@ impl WriteTxn {
         query: &fgdb_gql::PreparedGqlQuery,
     ) -> Result<Vec<VId>, WriteTxnError> {
         self.execute_prepared_gql(database, query.plan())
+    }
+
+    /// Execute one owned prepared definition over the staged overlay under
+    /// deterministic admitted-record and final-row bounds.
+    ///
+    /// Counting the overlay is itself a transaction read. A snapshot-record
+    /// refusal therefore leaves the conservative read set populated even though
+    /// no query rows are returned.
+    pub fn execute_prepared_query_budgeted<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        query: &fgdb_gql::PreparedGqlQuery,
+        budget: fgdb_gql::GqlExecutionBudget,
+    ) -> Result<
+        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
+        fgdb_gql::BudgetedGqlError<WriteTxnError>,
+    > {
+        let snapshot_records = if query.plan().relation.is_some() {
+            self.edges(database)
+                .map(|rows| count_as_u64(rows.len()))
+        } else {
+            self.vertices(database)
+                .map(|rows| count_as_u64(rows.len()))
+        }
+        .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
+        budget
+            .check(
+                fgdb_gql::GqlBudgetDimension::SnapshotRecords,
+                snapshot_records,
+            )
+            .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
+
+        let rows = self
+            .execute_prepared_query(database, query)
+            .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
+        let result_rows = count_as_u64(rows.len());
+        budget
+            .check(fgdb_gql::GqlBudgetDimension::ResultRows, result_rows)
+            .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
+
+        Ok(fgdb_gql::BudgetedGqlExecution {
+            value: rows,
+            stats: fgdb_gql::GqlExecutionStats {
+                snapshot_records,
+                result_rows,
+            },
+        })
     }
 
     /// Execute and plan-certify one owned prepared definition at the durable
