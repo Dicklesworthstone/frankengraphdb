@@ -1,105 +1,129 @@
 # Bounded GQL Result Evidence
 
-Status: live embedded subset on unreleased `main` as of the 2026-09-01 result-evidence continuation.
+Status: **live bounded embedded evidence**, not the final physical-plan or external-verifier protocol.
 
-This document names the exact evidence stack implemented by the bounded GQL surface. It is deliberately narrower than the finished certificate and external-verifier architecture in the comprehensive plan.
+This document defines what the current input, plan, ordered-result, owned-preparation, and deterministic-budget values prove. It also states what they deliberately do not prove.
 
-## The three evidence layers
+## Evidence layers
 
-A successful bounded GQL execution can now produce three aligned layers:
+### Input certificate
 
-1. **`GqlCertificate`** binds the exact statement bytes, canonical `RelationBind`, and MVCC snapshot sequence.
-2. **`GqlPlanCertificate`** binds every current field of the executor-ready `BoundPlan` and the same snapshot sequence under the v2 plan transcript.
-3. **Ordered-result digest** binds the plan-certificate digest, its snapshot sequence, the exact result-row count, and every returned `VId` in order under `fgdb:gql-ordered-result-digest:v1`.
+`GqlCertificate` binds:
 
-The result digest is intentionally chained to the plan certificate rather than only to raw rows. Equal rows produced by different plans or snapshots therefore do not share result identity.
+- exact statement bytes;
+- `RelationBind::canonical_bytes()`;
+- one exact `CommitSeq`.
 
-## Live APIs
+It does not bind the parsed plan or returned rows. Verification is constant-work over the final digest comparison.
 
-Text execution:
+### Plan certificate
 
-```rust
-let (rows, input, plan, result) =
-    db.execute_gql_with_result_digest(statement, &bind)?;
-assert!(input.verifies_at(statement, &bind, plan.snapshot_seq));
-assert!(plan.verifies_result_digest(&rows, result));
-```
+`GqlPlanCertificate` binds:
 
-Historical text execution uses `execute_gql_with_result_digest_at`. The same live and historical pair exists on `EmbeddedReadView`.
+- every current `BoundPlan` field;
+- one exact `CommitSeq`;
+- the v2 plan-transcript domain.
 
-Already-bound execution:
+V2 includes `BoundPlan::neq`, which the historical v1 transcript omitted. Legacy verification is explicitly named; new evidence always uses v2.
 
-```rust
-let plan = db.prepare_gql_plan(statement, &bind)?;
-let (rows, plan_certificate, result) =
-    db.execute_prepared_gql_with_result_digest(&plan)?;
-assert!(plan_certificate.verifies_result_digest(&rows, result));
-```
+The plan certificate does not bind statement spelling. Two statements that bind to an identical plan at an identical snapshot have the same plan identity.
 
-Historical prepared execution uses `execute_prepared_gql_with_result_digest_at`. The same pair exists on `EmbeddedReadView`.
+### Exact ordered-result digest
 
-Every API executes through the existing exact-sequence GQL kernel. Evidence is computed only after the read succeeds. A parse, bind, fenced-handle, or beyond-frontier refusal returns no evidence tuple.
-
-## Transcript definition
-
-The v1 ordered-result transcript is, in order:
+The result transcript uses the domain:
 
 ```text
-"fgdb:gql-ordered-result-digest:v1"
-plan_certificate.digest[32]
-plan_certificate.snapshot_seq as u64 big-endian
-row_count as u64 big-endian
-for each row in result order:
-    VId as u64 big-endian
+fgdb:gql-ordered-result-digest:v1
 ```
 
-Consequences:
+It binds:
 
-- changing one row changes the digest;
-- reordering rows changes the digest;
-- truncating or extending the result changes the digest;
-- changing the bound plan changes the digest through the plan-certificate link;
-- changing the snapshot changes both the plan certificate and the explicit result transcript field;
-- an empty result has a stable identity distinct from every nonempty result.
-
-Final digest comparison uses the same constant-work byte-accumulation helper as the input and plan verifiers.
-
-## Evidence boundary
-
-The ordered-result digest **does attest**:
-
-- one complete `BoundPlan` certificate;
-- one exact MVCC snapshot;
+- the complete plan-certificate digest;
+- the plan certificate's snapshot sequence;
 - exact row count;
-- exact row order;
-- every returned vertex identifier.
+- row order;
+- every returned `VId`.
 
-It **does not attest**:
+Equal row sets in a different order do not verify. Equal rows under a different plan or snapshot have a different identity.
 
-- a physical operator tree or optimizer decision;
-- execution cost, elapsed time, allocation, spill, or resource consumption;
-- transaction-overlay state;
-- authorization or secure-view predicates;
-- catalog epoch or prepared-statement invalidation;
-- a portable, self-describing, durable replay artifact;
-- server cursor, lease, streaming, or backpressure semantics.
+The digest is a transcript layer, not a self-describing portable artifact. Persistence or external verification needs a registered versioned framing under the format constitution.
 
-The result is presently a domain-separated `Digest` returned beside its plan certificate. A portable artifact must be introduced through the repository’s registered format constitution, with versioning, canonical encoding, strict decoding, mutation tests, and an independently usable verifier boundary. An ad hoc `to_bytes()` helper would create an unregistered durable format and is therefore not the next step.
+## Coherent owned preparation
 
-## Tests and executable witness
+`PreparedGqlQuery` owns the exact statement, canonical name-binding map, and derived plan as one immutable definition. Its fields are private. A caller cannot change the original statement or bind map after preparation and thereby alter the retained query.
 
-Focused laws live in:
+`verifies_definition()` reparses and rebinds the retained inputs as an explicit audit. Normal execution uses the retained plan directly and does not reparse or rebind.
 
-- `crates/fgdb/src/gql_cert.rs` unit tests;
-- `crates/fgdb/tests/gql_result_digest.rs` integration tests;
-- `crates/fgdb/examples/gql_result_digest.rs` runnable witness.
+For `Database` and `EmbeddedReadView`, `execute_prepared_query_with_result_digest[_at]` returns:
 
-The tests cover row reorder, replacement, truncation, plan mutation, snapshot mutation, empty results, text/prepared parity, database/read-view parity, historical replay after live advancement, and future-frontier refusal.
+1. rows;
+2. an input certificate derived from the prepared query's retained statement and bind;
+3. a plan certificate derived from its retained plan;
+4. an exact ordered-result digest derived from those rows and that plan certificate.
 
-## Next dependency-ordered work
+All layers name the same successful exact-sequence read. A read refusal returns no evidence tuple.
 
-1. Complete the transaction-overlay prepared-plan refactor so text and prepared transaction reads share one bound-plan body.
-2. Introduce an owned prepared-query definition that keeps source text, canonical bind, and bound plan inseparable.
-3. Add typed parameters at parser/binder level and include canonical parameter values in input, plan, and result evidence.
-4. Register a portable execution-evidence format before adding persistence or external-verifier APIs.
-5. Extend evidence to physical-plan and deterministic resource transcripts only after the corresponding Loom/GLA execution surfaces exist.
+The current owned input certificate has no parameter digest because typed parameters are not yet implemented. When parameters land, canonical values must be bound explicitly rather than inferred from a concrete plan alone.
+
+## Deterministic execution budgets
+
+`GqlExecutionBudget` is adjacent execution metadata, not cryptographic evidence.
+
+Current dimensions:
+
+- `SnapshotRecords`: complete immutable vertex table admitted by a node scan or edge table admitted by an edge pattern.
+- `ResultRows`: final deterministic rows after filtering, projection, sorting, deduplication, `SKIP`, and `LIMIT`.
+
+Exact limits succeed. Exceeded limits return a typed `GqlBudgetExceeded` naming the dimension, configured limit, and observed count. No partial rows escape. Successful calls return `GqlExecutionStats`.
+
+Budget configuration and observed stats are **not** included in `GqlCertificate`, `GqlPlanCertificate`, or the ordered-result digest. Therefore the current evidence stack does not attest that a particular budget was requested or consumed.
+
+The executor currently materializes/counts the relevant immutable table before ordinary execution reads it. These bounds do not prove wall-clock time, allocation count, bytes read, operator work, spill behavior, cancellation latency, or physical cost.
+
+## Historical and immutable-view replay
+
+A `Database` historical call and an `EmbeddedReadView` call over the same retained sequence, prepared definition, and graph state produce equivalent rows and evidence.
+
+An immutable view never observes later database writes. A future sequence is refused through the existing typed read error and produces no certificate.
+
+## Transaction-overlay boundary
+
+`WriteTxn` can execute and plan-certify `BoundPlan` or `PreparedGqlQuery` against its durable basis plus staged read-your-own-writes state.
+
+It does not issue the durable-read ordered-result digest for staged rows. The plan certificate binds the durable basis and plan, not:
+
+- staged mutation order;
+- staged vertex or edge contents;
+- compare-and-set outcomes in the overlay;
+- the exact overlay rows that produced the answer.
+
+Until a canonical staged-overlay identity exists, describing a transaction plan certificate as result replay evidence would be incorrect.
+
+## Mutation-sensitive laws
+
+The focused tests require that:
+
+- statement-byte drift invalidates input evidence;
+- bind drift invalidates input evidence;
+- any `BoundPlan` field mutation changes the v2 plan certificate;
+- snapshot drift invalidates input and plan evidence;
+- row replacement, deletion, insertion, or reorder invalidates the result digest;
+- caller mutation after preparation does not change the owned definition;
+- database and immutable-view execution agree at one exact sequence;
+- exact budget boundaries succeed and one-below boundaries refuse;
+- node scans count admitted vertices while edge patterns count admitted edges;
+- transaction overlays can reuse the owned plan but do not overclaim durable result replay.
+
+## No-claim boundary
+
+The current evidence does not attest:
+
+- physical operator tree or optimizer decision path;
+- wall-clock or deterministic operator cost;
+- I/O, allocation, memory, spill, or network behavior;
+- authorization or capability context;
+- complete ISO GQL semantics;
+- staged transaction-overlay identity;
+- portable artifact framing or publisher authenticity.
+
+Those require separate registered transcripts and verification surfaces.
