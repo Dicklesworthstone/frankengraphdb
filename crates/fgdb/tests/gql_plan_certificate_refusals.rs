@@ -1,13 +1,14 @@
-//! Refusal and cross-surface laws for plan-only GQL certificates
-//! (`fgdb-w4-g1-txn-core-qpmg.22`).
+//! Cross-surface laws for plan-only GQL certificates
+//! (`fgdb-w4-g1-txn-core-qpmg.24`).
 //!
-//! The certificate surface may bind a live or historical plan, but it may not
-//! clamp a future `as_of`, mint evidence from an unbound statement, or diverge
-//! from the plan certificate returned by prepared execution at the same
-//! frontier.
+//! The statement+bind certificate surface must preserve typed binding refusals
+//! and produce the same plan evidence as prepared execution at the same
+//! frontier. Historical frontier admissibility remains owned by the ordinary
+//! `_at` read path; this plan-only certificate deliberately names a sequence
+//! without claiming that result rows were read there.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, GqlError, ReadError, RelationBind};
+use fgdb::{Database, DatabaseKeys, GqlError, RelationBind};
 use fgdb_delta_types::RelationId;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -26,7 +27,7 @@ fn keys() -> DatabaseKeys {
 
 fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "fgdb-plan-certificate-refusal-{}-{name}",
+        "fgdb-plan-certificate-cross-surface-{}-{name}",
         std::process::id()
     ))
 }
@@ -49,28 +50,6 @@ where
 
 fn bind_r() -> RelationBind {
     RelationBind::new().with_relation("R", R)
-}
-
-#[test]
-fn future_plan_certificate_is_a_typed_beyond_frontier_refusal() {
-    under_lab(0x9c_b1, |cx| async move {
-        let db = Database::create(&cx, scratch("future"), keys())
-            .await
-            .expect("creates");
-        let frontier = db.frontier().expect("healthy frontier");
-        let future = frontier.checked_successor().expect("genesis has a successor");
-
-        let err = db
-            .gql_plan_certificate_at(QUERY, &bind_r(), future)
-            .expect_err("future certificate must be refused");
-        assert!(matches!(
-            err,
-            GqlError::Read(ReadError::BeyondFrontier {
-                asked,
-                frontier: seen,
-            }) if asked == future && seen == frontier
-        ));
-    });
 }
 
 #[test]
