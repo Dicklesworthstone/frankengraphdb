@@ -5,6 +5,8 @@
 //! separately binds the executor-ready `BoundPlan` and snapshot. Neither type
 //! claims to attest result rows, runtime cost, or an operator tree.
 
+use crate::{Database, EmbeddedReadView, GqlError};
+use asupersync::fs::Vfs;
 use fgdb_crypto::{Digest, Hasher, hash};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
@@ -88,6 +90,82 @@ impl GqlPlanCertificate {
 /// be misread as v2 even when every other field is identical.
 pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate {
     certify_with_domain(plan, snapshot_seq, GQL_PLAN_CERTIFICATE_DOMAIN_V2, true)
+}
+
+fn execute_with_certificates_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
+    reader: &R,
+    statement: &str,
+    bind: &RelationBind,
+    plan: &BoundPlan,
+    as_of: CommitSeq,
+) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+    let rows = crate::gql_exec::execute_at(plan, reader, as_of).map_err(GqlError::Read)?;
+    let input_certificate = GqlCertificate {
+        snapshot_seq: as_of,
+        statement_digest: digest_statement(statement),
+        bind_digest: digest_bind(bind),
+    };
+    let plan_certificate = certify(plan, as_of);
+    Ok((rows, input_certificate, plan_certificate))
+}
+
+impl<V: Vfs + Clone> Database<V> {
+    /// Execute once and return both existing certificate layers aligned to
+    /// the same live frontier.
+    ///
+    /// Parsing and binding happen once, the shared snapshot kernel executes
+    /// once, and evidence is minted only after that read succeeds. The
+    /// [`GqlCertificate`] binds statement bytes and canonical bind input; the
+    /// [`GqlPlanCertificate`] binds the complete executor-ready plan. Neither
+    /// certificate attests the returned rows.
+    pub fn execute_gql_with_certificates(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+        let plan = self.prepare_gql_plan(statement, bind)?;
+        let as_of = self.frontier().map_err(GqlError::Read)?;
+        execute_with_certificates_at(self, statement, bind, &plan, as_of)
+    }
+
+    /// Execute once at `as_of` and return input and plan certificates naming
+    /// that exact successful read.
+    ///
+    /// A future, fenced, or otherwise refused read returns its existing typed
+    /// error and no evidence tuple.
+    pub fn execute_gql_with_certificates_at(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+        let plan = self.prepare_gql_plan(statement, bind)?;
+        execute_with_certificates_at(self, statement, bind, &plan, as_of)
+    }
+}
+
+impl EmbeddedReadView {
+    /// Execute once and return both certificate layers aligned to this view's
+    /// pinned frontier.
+    pub fn execute_gql_with_certificates(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+        self.execute_gql_with_certificates_at(statement, bind, self.frontier())
+    }
+
+    /// Execute once at a retained sequence and return both certificate layers
+    /// naming that exact successful read.
+    pub fn execute_gql_with_certificates_at(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+        let plan = self.prepare_gql_plan(statement, bind)?;
+        execute_with_certificates_at(self, statement, bind, &plan, as_of)
+    }
 }
 
 /// Recompute the historical v1 transcript for explicit migration checks.
