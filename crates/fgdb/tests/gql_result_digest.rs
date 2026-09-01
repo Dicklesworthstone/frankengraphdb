@@ -74,6 +74,12 @@ fn ordered_result_digest_replays_after_the_live_graph_advances() {
         assert!(first_plan.verifies_at(&plan, first_seq));
         assert!(first_plan.verifies_result_digest(&first_rows, first_result));
         assert!(!first_plan.verifies_result_digest(&[VId(3)], first_result));
+        let (prepared_first_rows, prepared_first_plan, prepared_first_result) = db
+            .execute_prepared_gql_with_result_digest_at(&plan, first_seq)
+            .expect("prepared historical evidence is issued");
+        assert_eq!(prepared_first_rows, first_rows);
+        assert_eq!(prepared_first_plan, first_plan);
+        assert_eq!(prepared_first_result, first_result);
 
         let mut second = WriteBatch::new(R);
         second.create_vertex(VId(3), vec![], vec![]);
@@ -88,6 +94,12 @@ fn ordered_result_digest_replays_after_the_live_graph_advances() {
         assert!(live_plan.verifies_at(&plan, second_seq));
         assert!(live_plan.verifies_result_digest(&live_rows, live_result));
         assert_ne!(first_result, live_result);
+        let (prepared_live_rows, prepared_live_plan, prepared_live_result) = db
+            .execute_prepared_gql_with_result_digest(&plan)
+            .expect("prepared live evidence is issued");
+        assert_eq!(prepared_live_rows, live_rows);
+        assert_eq!(prepared_live_plan, live_plan);
+        assert_eq!(prepared_live_result, live_result);
 
         let (replayed_rows, replayed_input, replayed_plan, replayed_result) = db
             .execute_gql_with_result_digest_at(QUERY, &bind, first_seq)
@@ -105,6 +117,12 @@ fn ordered_result_digest_replays_after_the_live_graph_advances() {
         assert_eq!(view_input, first_input);
         assert_eq!(view_plan, first_plan);
         assert_eq!(view_result, first_result);
+        let (view_prepared_rows, view_prepared_plan, view_prepared_result) = view
+            .execute_prepared_gql_with_result_digest_at(&plan, first_seq)
+            .expect("prepared read-view evidence uses the same historical path");
+        assert_eq!(view_prepared_rows, first_rows);
+        assert_eq!(view_prepared_plan, first_plan);
+        assert_eq!(view_prepared_result, first_result);
 
         let future = second_seq
             .checked_successor()
