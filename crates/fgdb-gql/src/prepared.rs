@@ -205,8 +205,8 @@ pub enum BudgetedGqlError<E> {
 impl<E: core::fmt::Display> core::fmt::Display for BudgetedGqlError<E> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Execution(source) => source.fmt(formatter),
-            Self::Budget(source) => source.fmt(formatter),
+            Self::Execution(source) => core::fmt::Display::fmt(source, formatter),
+            Self::Budget(source) => core::fmt::Display::fmt(source, formatter),
         }
     }
 }
