@@ -30,8 +30,8 @@ impl GqlCertificate {
     /// bytes and canonical bind map are the inputs this value names.
     #[must_use]
     pub fn verifies(&self, statement: &str, bind: &RelationBind) -> bool {
-        self.statement_digest == digest_statement(statement)
-            && self.bind_digest == digest_bind(bind)
+        digest_eq(self.statement_digest, digest_statement(statement))
+            && digest_eq(self.bind_digest, digest_bind(bind))
     }
 
     /// Verify the complete public certificate tuple, including the explicitly
@@ -59,13 +59,14 @@ impl GqlPlanCertificate {
     /// snapshot using the current v2 transcript.
     #[must_use]
     pub fn verifies(&self, plan: &BoundPlan) -> bool {
-        *self == certify(plan, self.snapshot_seq)
+        let expected = certify(plan, self.snapshot_seq);
+        self.snapshot_seq == expected.snapshot_seq && digest_eq(self.digest, expected.digest)
     }
 
     /// Verify this certificate against an explicitly expected snapshot.
     #[must_use]
     pub fn verifies_at(&self, plan: &BoundPlan, snapshot_seq: CommitSeq) -> bool {
-        self.snapshot_seq == snapshot_seq && *self == certify(plan, snapshot_seq)
+        self.snapshot_seq == snapshot_seq && self.verifies(plan)
     }
 
     /// Verify a certificate produced by the historical v1 transcript.
@@ -75,7 +76,8 @@ impl GqlPlanCertificate {
     /// are always produced by [`certify`] under v2.
     #[must_use]
     pub fn verifies_v1_legacy(&self, plan: &BoundPlan) -> bool {
-        *self == certify_v1_legacy(plan, self.snapshot_seq)
+        let expected = certify_v1_legacy(plan, self.snapshot_seq);
+        self.snapshot_seq == expected.snapshot_seq && digest_eq(self.digest, expected.digest)
     }
 }
 
@@ -146,6 +148,16 @@ fn certify_with_domain(
         digest: hasher.finalize(),
         snapshot_seq,
     }
+}
+
+fn digest_eq(left: Digest, right: Digest) -> bool {
+    left.0
+        .iter()
+        .zip(right.0.iter())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (*left ^ *right)
+        })
+        == 0
 }
 
 fn update_relation(hasher: &mut Hasher, relation: Option<RelationId>) {
@@ -313,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn v2_transcript_binds_every_current_bound_plan_field() {
         let base = plan(7);
         let mut variants = Vec::<(&str, BoundPlan)>::new();
