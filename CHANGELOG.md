@@ -68,10 +68,13 @@ Representative commits: `da57fe88`, `7b9bf136`, `2d7559e3`, `67b6bf3e`.
 - Updated the agent-context and local-proof contracts for format v2.
 - Added `docs/TRANSACTION_GQL.md` as the source-ownership and evidence contract for staged overlay reads.
 - Corrected stale documentation that still described transaction prepared execution as absent or the local packages as checksum-only.
+- Added every new hand-written status/contract document to the claims-lint scan; `scripts/check.sh` already assigns those exact paths to the same prose-closure inspector, so file coverage remains fail-closed.
 
 ### Validation status for this continuation
 
 The context/proof scripts passed local `bash -n` and their retained semantic self-tests before landing; the committed blobs match the tested files.
+
+The documentation closure was also checked mechanically: `registries/claims_lint.toml` names all five new prose artifacts, and `scripts/check.sh` maps the same paths to the prose-closure inspector.
 
 The transaction refactor passed:
 
