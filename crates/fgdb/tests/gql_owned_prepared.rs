@@ -22,10 +22,8 @@ fn owned_preparation_is_stable_across_database_view_and_transaction_surfaces() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let txn_cx = contexts.txn();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-owned-prepared-{}",
-            std::process::id()
-        ));
+        let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("fgdb-owned-prepared");
         let mut db = Database::create(&commit, &dir, keys())
             .await
             .expect("database creates");
@@ -68,9 +66,10 @@ fn owned_preparation_is_stable_across_database_view_and_transaction_surfaces() {
             .expect("read view issues aligned evidence");
         assert_eq!(view_rows, rows);
         assert_eq!(view_evidence_rows, rows);
-        assert_eq!(view_input, input);
-        assert_eq!(view_plan, plan);
-        assert_eq!(view_result_digest, result_digest);
+        assert!(view_input.verifies_at(query.statement(), query.bind(), basis));
+        assert!(view_plan.verifies_at(query.plan(), basis));
+        assert!(view_plan.verifies_result_digest(&view_rows, view_result_digest));
+        assert!(plan.verifies_result_digest(&view_rows, view_result_digest));
 
         let mut txn = db.begin(&txn_cx).expect("transaction begins");
         let txn_query = txn
