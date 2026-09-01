@@ -24,10 +24,10 @@ Options:
   --recent N         Number of recent commits to export (default: 100).
   -h, --help         Show this help.
 
-The capsule contains an exact-HEAD Git bundle, a deterministic tracked-source
-archive, recent history, tracked-file inventory, worktree state, optional Beads
-views, a manifest, and SHA-256 checksums. It contains no .git directory and no
-checkout credentials.
+Format v2 contains an exact-HEAD Git bundle, a deterministic tracked-source
+archive, the exact source-tree object id, recent history, tracked-file inventory,
+worktree state, optional Beads views, a strict manifest, and SHA-256 checksums.
+It contains no .git directory, remote credentials, or untracked file contents.
 USAGE
 }
 
@@ -72,9 +72,7 @@ while [ "$#" -gt 0 ]; do
       usage
       exit 0
       ;;
-    *)
-      fail "unknown argument: $1"
-      ;;
+    *) fail "unknown argument: $1" ;;
   esac
 done
 
@@ -84,10 +82,12 @@ case "$recent" in
 esac
 
 command -v git >/dev/null 2>&1 || fail "git is required"
+command -v gzip >/dev/null 2>&1 || fail "gzip is required"
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside a Git worktree"
 cd "$root"
 
 head_sha="$(git rev-parse --verify HEAD)"
+head_tree="$(git rev-parse --verify "${head_sha}^{tree}")"
 short_sha="$(printf '%s' "$head_sha" | cut -c1-12)"
 ref_name="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || printf 'detached')"
 repository="$(basename "$root")"
@@ -110,14 +110,13 @@ output_parent="$(dirname "$output")"
 [ -d "$output_parent" ] || fail "output parent does not exist: $output_parent"
 output_parent="$(cd "$output_parent" && pwd -P)"
 output="$output_parent/$(basename "$output")"
-
 case "$output" in
   "$root"|"$root"/*) fail "output must be outside the repository worktree" ;;
 esac
 [ ! -e "$output" ] || fail "output already exists: $output"
 mkdir "$output"
 
-printf '%s\n' "$initial_status" > "$output/git-status.txt"
+git status --porcelain=v1 --untracked-files=all > "$output/git-status.txt"
 git log -n "$recent" --date=iso-strict \
   --format='%H%x09%aI%x09%an%x09%s' "$head_sha" \
   > "$output/recent-commits.tsv"
@@ -135,43 +134,61 @@ fi
 
 beads_mode="disabled"
 if [ "$export_beads" -eq 1 ]; then
-  if [ -f .beads/issues.jsonl ]; then
-    cp .beads/issues.jsonl "$output/issues.jsonl"
-    beads_mode="jsonl-only"
-  else
+  if [ ! -d .beads ]; then
     beads_mode="absent"
-  fi
+  else
+    have_jsonl=0
+    have_br=0
+    if [ -f .beads/issues.jsonl ]; then
+      cp .beads/issues.jsonl "$output/issues.jsonl"
+      have_jsonl=1
+    fi
+    if command -v br >/dev/null 2>&1; then
+      br --version > "$output/br-version.txt"
+      RUST_LOG=error br ready --json > "$output/br-ready.json"
+      RUST_LOG=error br list --status open --json > "$output/br-open.json"
+      RUST_LOG=error br list --status in_progress --json > "$output/br-in-progress.json"
+      RUST_LOG=error br blocked --json > "$output/br-blocked.json"
+      RUST_LOG=error br stats --json > "$output/br-stats.json"
+      have_br=1
+    elif [ "$require_br" -eq 1 ]; then
+      fail "--require-br was set, but br is unavailable"
+    fi
 
-  if command -v br >/dev/null 2>&1; then
-    br --version > "$output/br-version.txt"
-    RUST_LOG=error br ready --json > "$output/br-ready.json"
-    RUST_LOG=error br list --status open --json > "$output/br-open.json"
-    RUST_LOG=error br list --status in_progress --json > "$output/br-in-progress.json"
-    RUST_LOG=error br blocked --json > "$output/br-blocked.json"
-    RUST_LOG=error br stats --json > "$output/br-stats.json"
-    beads_mode="br+jsonl"
-  elif [ "$require_br" -eq 1 ] && [ -d .beads ]; then
-    fail "--require-br was set, but br is unavailable"
+    if [ "$have_jsonl" -eq 1 ] && [ "$have_br" -eq 1 ]; then
+      beads_mode="br+jsonl"
+    elif [ "$have_jsonl" -eq 1 ]; then
+      beads_mode="jsonl-only"
+    elif [ "$have_br" -eq 1 ]; then
+      beads_mode="br-only"
+    else
+      beads_mode="unavailable"
+    fi
   fi
 fi
 
 final_head="$(git rev-parse --verify HEAD)"
 [ "$final_head" = "$head_sha" ] || fail "HEAD moved during export: $head_sha -> $final_head"
-final_status="$(git status --porcelain=v1 --untracked-files=all)"
-[ "$final_status" = "$initial_status" ] || fail "worktree state changed during export"
+final_tree="$(git rev-parse --verify "${final_head}^{tree}")"
+[ "$final_tree" = "$head_tree" ] || fail "source tree moved during export"
+cmp --silent "$output/git-status.txt" \
+  <(git status --porcelain=v1 --untracked-files=all) \
+  || fail "worktree state changed during export"
 if [ -n "$initial_status" ]; then
-  final_patch="$output/worktree-final.patch"
-  git diff --binary HEAD > "$final_patch"
-  cmp --silent "$output/worktree.patch" "$final_patch" \
+  git status --porcelain=v1 --untracked-files=all \
+    > "$output/git-status-stability-proof.txt"
+  git diff --binary HEAD > "$output/worktree-stability-proof.patch"
+  cmp --silent "$output/worktree.patch" "$output/worktree-stability-proof.patch" \
     || fail "tracked worktree content changed during export"
-  mv "$final_patch" "$output/worktree-stability-proof.patch"
 fi
 
 {
-  printf 'format_version=1\n'
+  printf 'format_version=2\n'
   printf 'repository=%s\n' "$repository"
   printf 'commit=%s\n' "$head_sha"
+  printf 'tree=%s\n' "$head_tree"
   printf 'ref=%s\n' "$ref_name"
+  printf 'bundle_ref=HEAD\n'
   printf 'dirty=%s\n' "$([ -n "$initial_status" ] && printf true || printf false)"
   printf 'beads=%s\n' "$beads_mode"
   printf 'recent_commit_count=%s\n' "$recent"
@@ -190,7 +207,6 @@ hash_file() {
     fail "sha256sum or shasum is required"
   fi
 }
-
 (
   cd "$output"
   : > SHA256SUMS
@@ -202,5 +218,6 @@ hash_file() {
 printf 'AGENT_CONTEXT_OK\n'
 printf 'path=%s\n' "$output"
 printf 'commit=%s\n' "$head_sha"
+printf 'tree=%s\n' "$head_tree"
 printf 'dirty=%s\n' "$([ -n "$initial_status" ] && printf true || printf false)"
 printf 'beads=%s\n' "$beads_mode"
