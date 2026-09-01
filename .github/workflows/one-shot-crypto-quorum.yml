@@ -1,4 +1,4 @@
-name: One-shot crypto timing quorum hardening
+name: One-shot proof-surface repair
 
 on:
   push:
@@ -11,12 +11,12 @@ permissions:
 
 concurrency:
   group: one-shot-crypto-quorum
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  harden:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -25,15 +25,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Replace only the timing quorum policy
+      - name: Apply exact timing-quorum and Clippy repairs
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("crates/fgdb-crypto/tests/constant_time_audit.rs")
-          text = path.read_text()
+          timing = Path("crates/fgdb-crypto/tests/constant_time_audit.rs")
+          text = timing.read_text()
           replacements = [
               (
                   "    /// Three independent, identically-shaped screens are measured under one\n"
@@ -58,31 +58,60 @@ jobs:
           for old, new in replacements:
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f"expected exactly one occurrence, found {count}: {old!r}")
+                  raise SystemExit(f"timing replacement expected once, found {count}: {old!r}")
               text = text.replace(old, new)
-          path.write_text(text)
+          timing.write_text(text)
+
+          live = Path("tools/registry-check/src/command_live_payload.rs")
+          text = live.read_text()
+          replacements = [
+              (
+                  "    for triple in quoted.chunks_exact(3) {",
+                  "    for triple in quoted.as_chunks::<3>().0 {",
+              ),
+              (
+                  "        let Some((name_start, name_end)) = next_identifier(masked, cursor) else {\n"
+                  "            return None;\n"
+                  "        };",
+                  "        let (name_start, name_end) = next_identifier(masked, cursor)?;",
+              ),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"Clippy replacement expected once, found {count}: {old!r}")
+              text = text.replace(old, new)
+          live.write_text(text)
           PY
           git diff --check
-          git diff -- crates/fgdb-crypto/tests/constant_time_audit.rs
+          git diff -- crates/fgdb-crypto/tests/constant_time_audit.rs \
+            tools/registry-check/src/command_live_payload.rs
           grep -F 'const SCREENS: usize = 5;' crates/fgdb-crypto/tests/constant_time_audit.rs
           grep -F 'const PRODUCTION_PASS_QUORUM: usize = 3;' crates/fgdb-crypto/tests/constant_time_audit.rs
+          grep -F 'quoted.as_chunks::<3>().0' tools/registry-check/src/command_live_payload.rs
 
-      - name: Run the strengthened timing detector
+      - name: Prove the focused repairs and the GQL certificate vertical
         shell: bash
         run: |
           set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy -p registry-check --all-targets -- -D warnings
+          cargo test -p registry-check --test command_live_payload
           cargo test -p fgdb-crypto --test constant_time_audit \
             aead_forgery_timing_probe_is_bounded_and_detector_is_live \
             -- --exact --nocapture
+          cargo test -p fgdb --test gql_certificate --test gql_exec_certified_at
+          cargo clippy -p fgdb --all-targets -- -D warnings
 
-      - name: Commit the source edit and remove this one-shot workflow
+      - name: Commit the source repair and remove this one-shot workflow
         shell: bash
         run: |
           set -euo pipefail
           git rm .github/workflows/one-shot-crypto-quorum.yml
-          git add crates/fgdb-crypto/tests/constant_time_audit.rs
-          git config user.name "frankengraphdb quorum hardener"
+          git add crates/fgdb-crypto/tests/constant_time_audit.rs \
+            tools/registry-check/src/command_live_payload.rs
+          git config user.name "frankengraphdb proof-surface repair"
           git config user.email "35050222+Dicklesworthstone@users.noreply.github.com"
-          git commit -m "test(crypto): require a 3-of-5 portable timing quorum [fgdb-w1-cross-crate-determinism-ci-flake-ze5e]" \
-            -m "Keep the production t/mean-ratio bounds and planted detector thresholds unchanged. Five independent screens now require three passes, tolerating two runner-load episodes without letting one lucky screen certify the implementation. The exact replacement script and focused timing test ran before this commit; this workflow deletes itself in the same change."
+          git commit -m "fix(gates): harden timing quorum and clear deterministic Clippy reds" \
+            -m "Require three of five independent forgery-timing screens while leaving every production and planted-detector bound unchanged. Apply Clippy's exact as_chunks and question-mark repairs to the live command-payload verifier. The focused crypto, registry, GQL certificate, fmt, and Clippy gates ran before this commit; this workflow deletes itself in the same source change."
           git push origin HEAD:main
