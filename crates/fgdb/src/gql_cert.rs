@@ -6,7 +6,7 @@
 //! claims to attest result rows, runtime cost, or an operator tree.
 
 use fgdb_crypto::{Digest, Hasher, hash};
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
 use fgdb_types::CommitSeq;
 
@@ -313,7 +313,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::vec_init_then_push)]
     fn v2_transcript_binds_every_current_bound_plan_field() {
         let base = plan(7);
         let mut variants = Vec::<(&str, BoundPlan)>::new();
