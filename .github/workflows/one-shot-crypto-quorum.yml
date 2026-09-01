@@ -25,7 +25,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply exact source and documentation repairs
+      - name: Apply exact source, workflow, and documentation repairs
         shell: bash
         run: |
           set -euo pipefail
@@ -83,6 +83,46 @@ jobs:
               text = text.replace(old, new)
           live.write_text(text)
 
+          check = Path(".github/workflows/check.yml")
+          text = check.read_text()
+          old = """# Deliberately NOT cancel-in-progress: this chain takes hours, and a
+# superseding push would otherwise erase an in-flight verdict before it
+# completes. Per AGENTS.md the evidence is a COMPLETED run's exit code, so
+# concurrent runs are preferred over lost ones; redundant runs are cheap,
+# lost green proofs are not.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: false
+"""
+          new = """# Only the current branch head can become the product tree. A superseding
+# push cancels the obsolete run explicitly (never green) and starts one proof
+# for the new head. This reconciles frequent incremental main commits with the
+# rule that only a COMPLETED run's exit code is a verdict: cancellation is an
+# honest non-verdict, while an unbounded backlog can prevent the current tree
+# from ever receiving a verdict at all.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+"""
+          if text.count(old) != 1:
+              raise SystemExit("unexpected check concurrency block")
+          text = text.replace(old, new)
+          start_marker = "      # Advisory only. This capsule exists for connector-only agents whose\n"
+          end_marker = "      # Two more gate-chain tools the runner image lacks (root-caused from\n"
+          if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+              raise SystemExit("unexpected duplicate capsule block shape")
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          text = text[:start] + text[end:]
+          text = text.replace(
+              "# tokens or interprets transcripts. The advisory agent-context capsule is\n"
+              "# explicitly `continue-on-error`; it can neither certify nor fail the tree.\n",
+              "# tokens or interprets transcripts. The separate agent-context workflow is\n"
+              "# advisory and can neither certify nor fail the tree.\n",
+              1,
+          )
+          check.write_text(text)
+
           changelog = Path("CHANGELOG.md")
           text = changelog.read_text()
           marker = "## 2026-09-01 — Wave 12: verifiable GQL certificates and proof-surface repair"
@@ -101,11 +141,12 @@ jobs:
 - The runnable certified-query example now states the no-claim boundary correctly: result rows are returned beside certified inputs, but are not themselves attested by this certificate type.
 - The portable AEAD forgery timing lane now requires a 3-of-5 quorum with all production and planted-detector bounds unchanged, tolerating two runner-load episodes without allowing one lucky screen to certify the implementation.
 - The live command-payload verifier adopts the exact Clippy-prescribed `as_chunks` and `?` forms, clearing deterministic `-D warnings` failures without weakening its parser.
-- Connector-only agents receive exact-SHA, credential-free source and bead capsules from a separate macOS utility lane, so observability no longer competes with the Linux proof chain.
+- The authoritative proof workflow is latest-tree-only: a superseded run is explicitly cancelled, never green, so incremental main commits cannot build an unbounded queue that prevents the current head from receiving a verdict.
+- Connector-only agents receive exact-SHA, credential-free source and bead capsules from a separate macOS utility lane; the duplicate advisory work was removed from the Linux proof job.
 
 ### Evidence boundary
 
-The focused formatter, registry Clippy/test, crypto timing detector, GQL certificate tests, and `fgdb` Clippy run before the source commit is published. The authoritative full verdict remains `scripts/check.sh`; no result-row, runtime-cost, optimizer, or operator-tree attestation is claimed here.
+The focused formatter, registry Clippy/test, prose lint, crypto timing detector, GQL certificate tests, and `fgdb` Clippy run before the source commit is published. The authoritative full verdict remains `scripts/check.sh`; no result-row, runtime-cost, optimizer, or operator-tree attestation is claimed here.
 
 ---
 
@@ -127,7 +168,7 @@ The bounded GQL certificate vertical moved from digest production to externally 
 
 Recovered CI transcripts also corrected the current gate diagnosis. The historical run was not only load-sensitive: its registry-check Clippy core gate had two deterministic diagnostics in `command_live_payload.rs`. Those are repaired exactly, while the timing screen is strengthened from 2-of-3 to 3-of-5 without changing any statistical bound. Focused formatter, test, and Clippy commands run before publication; `scripts/check.sh` remains the sole full-tree verdict.
 
-The agent context path is now a separate exact-SHA macOS utility workflow. Its capsule is advisory and names the associated gate run and conclusion; it cannot certify the product, but it makes the source, tracked bead state, recent commits, and robot-mode queue legible to connector-only agents without consuming the Linux proof lane.
+The full proof workflow now keeps only the current branch-head run. Superseded runs are explicit cancellations, not verdicts. This is the only coherent composition with frequent incremental main commits: preserving every obsolete multi-hour run had produced an unbounded queue in which the current tree could never start. The exact-SHA agent context path remains separate and advisory on macOS, and duplicate capsule work has been removed from the Linux proof job.
 
 ---
 ## Current delta — 2026-08-31
@@ -140,6 +181,8 @@ The agent context path is now a separate exact-SHA macOS utility workflow. Its c
           grep -F 'const SCREENS: usize = 5;' crates/fgdb-crypto/tests/constant_time_audit.rs
           grep -F 'const PRODUCTION_PASS_QUORUM: usize = 3;' crates/fgdb-crypto/tests/constant_time_audit.rs
           grep -F 'quoted.as_chunks::<3>().0' tools/registry-check/src/command_live_payload.rs
+          grep -F 'cancel-in-progress: true' .github/workflows/check.yml
+          ! grep -F 'Stage agent context capsule (advisory)' .github/workflows/check.yml
           grep -F 'Wave 12: verifiable GQL certificates' CHANGELOG.md
           grep -F 'certificate and proof-surface closure' docs/REALITY_CHECK_AND_BRIDGE_PLAN.md
 
@@ -164,7 +207,8 @@ The agent context path is now a separate exact-SHA macOS utility workflow. Its c
           git diff --binary -- \
             crates/fgdb-crypto/tests/constant_time_audit.rs \
             tools/registry-check/src/command_live_payload.rs \
-            CHANGELOG.md docs/REALITY_CHECK_AND_BRIDGE_PLAN.md \
+            .github/workflows/check.yml CHANGELOG.md \
+            docs/REALITY_CHECK_AND_BRIDGE_PLAN.md \
             > /tmp/proof-surface-repair.patch
           test -s /tmp/proof-surface-repair.patch
 
@@ -178,9 +222,10 @@ The agent context path is now a separate exact-SHA macOS utility workflow. Its c
           git rm .github/workflows/one-shot-crypto-quorum.yml
           git add crates/fgdb-crypto/tests/constant_time_audit.rs \
             tools/registry-check/src/command_live_payload.rs \
-            CHANGELOG.md docs/REALITY_CHECK_AND_BRIDGE_PLAN.md
+            .github/workflows/check.yml CHANGELOG.md \
+            docs/REALITY_CHECK_AND_BRIDGE_PLAN.md
           git config user.name "frankengraphdb proof-surface repair"
           git config user.email "35050222+Dicklesworthstone@users.noreply.github.com"
           git commit -m "fix(gates): close certificate and proof-surface gaps" \
-            -m "Require a 3-of-5 forgery-timing quorum with unchanged bounds, clear two deterministic registry-check Clippy failures, and publish the verified GQL certificate/no-claim state in the changelog and bridge plan. The focused crypto, registry, GQL, prose-lint, formatter, and Clippy gates ran before this self-deleting workflow published the source commit."
+            -m "Require a 3-of-5 forgery-timing quorum with unchanged bounds, clear two deterministic registry-check Clippy failures, make the authoritative proof latest-tree-only, remove duplicate agent-capsule work from that proof, and publish the verified GQL certificate/no-claim state. The focused crypto, registry, GQL, prose-lint, formatter, and Clippy gates ran before this self-deleting workflow published the source commit."
           git push origin HEAD:main
