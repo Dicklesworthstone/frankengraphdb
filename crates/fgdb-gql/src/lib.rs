@@ -13,4 +13,7 @@ pub use parser::{
     BindError, BoundPlan, EdgeDirection, ParseError, ParseErrorKind, RelationBind,
     ReturnProjection,
 };
-pub use prepared::PreparedGqlQuery;
+pub use prepared::{
+    BudgetedGqlError, BudgetedGqlExecution, GqlBudgetDimension, GqlBudgetExceeded,
+    GqlExecutionBudget, GqlExecutionStats, PreparedGqlQuery,
+};
