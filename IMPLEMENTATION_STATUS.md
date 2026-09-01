@@ -1,14 +1,14 @@
 # FrankenGraphDB Implementation Status
 
-Ground-truth snapshot: `main` at `6c5103782bfad39c8da8a02a07bcf0e68cb0a72e` on 2026-09-01 UTC.
+Capability baseline: unreleased `main` through the ordered-result-evidence code commit `65d3d8323432ced15e9255388f8b74e00fae1b5f`, with documentation synchronized on 2026-09-01 UTC.
 
-This document is the concise, agent-facing map of **what the repository can execute now**, **what each evidence object actually proves**, and **what remains architectural target state**. The comprehensive plan remains normative for the finished system; this file records the inhabitable subset at the snapshot above.
+This is the concise, agent-facing map of **what the repository can execute now**, **what each evidence object actually proves**, and **what remains architectural target state**. The comprehensive plan remains normative for the finished system; this file records the inhabitable subset.
 
 ## Product reality
 
 FrankenGraphDB is not yet a released graph-database product. There are no tagged releases, installer, CLI binary, server binary, Python package, or compatibility promise. The working product surface is an embedded Rust composition crate over real Chronicle durability and real Strata tier-D storage, with a deliberately bounded GQL read slice and a one-batch write-transaction subset.
 
-The most important distinction is:
+The important distinction is:
 
 - the repository already contains real durable mechanisms and executable cross-layer paths;
 - it does **not** yet contain the full W10 product surface, the full GQL algebra/planner/executor, or the complete distributed and incremental system described by the plan.
@@ -55,12 +55,12 @@ This is a real read-session subset, not the final W10 session protocol. It has n
 
 `Database::prepare_gql_plan` and `EmbeddedReadView::prepare_gql_plan` expose the immutable executor-ready `BoundPlan`. The same plan can be reused without reparsing or rebinding through:
 
-| Surface | Live/pinned | Exact historical sequence | Plan certificate |
+| Surface | Live/pinned | Exact historical sequence | Plan + result evidence |
 |---|---:|---:|---:|
-| `Database` | `execute_prepared_gql` | `execute_prepared_gql_at` | `execute_prepared_gql_certified[_at]` |
-| `EmbeddedReadView` | `execute_prepared_gql` | `execute_prepared_gql_at` | `execute_prepared_gql_certified[_at]` |
+| `Database` | `execute_prepared_gql` | `execute_prepared_gql_at` | `execute_prepared_gql_with_result_digest[_at]` |
+| `EmbeddedReadView` | `execute_prepared_gql` | `execute_prepared_gql_at` | `execute_prepared_gql_with_result_digest[_at]` |
 
-The exact-sequence methods execute first and mint evidence only after a successful read. A typed refusal therefore returns no certificate.
+The exact-sequence methods execute first and mint evidence only after a successful read. A typed refusal therefore returns no evidence.
 
 `BoundPlan` is the honest prepared form of the current bounded grammar. It is not yet a parameterized `PreparedStatement`: statement parameters, typed parameter schemas, catalog epochs, authorization context, physical-plan selection, result cursors, and invalidation policy remain open.
 
@@ -68,49 +68,49 @@ The exact-sequence methods execute first and mint evidence only after a successf
 
 `WriteTxn` pins one basis sequence, overlays staged vertex and edge mutations for read-your-own-writes behavior, records read dependencies, and commits one prepared same-relation batch through the production FCW seam. It is deliberately not full SSI and must not be described as the finished transaction model.
 
-The source owner is `crates/fgdb/src/write_txn.rs`.
+The source owner is `crates/fgdb/src/write_txn.rs`. Its text and certified GQL paths still need to be refactored so an already-bound plan can execute directly over the overlay without rebinding.
 
-## Evidence and certificate truth table
-
-The current certificate types are useful only when their claim boundaries remain explicit.
+## Evidence truth table
 
 | Evidence | Binds | Does not bind |
 |---|---|---|
-| `GqlCertificate` | exact statement bytes, canonical `RelationBind`, snapshot sequence | parsed/bound plan, returned rows, staged transaction overlay, physical plan, runtime cost |
-| `GqlPlanCertificate` | every current `BoundPlan` field and snapshot sequence under transcript v2 | statement spelling, returned rows, staged transaction overlay, physical plan, runtime cost |
-| `execute_gql_with_certificates[_at]` | returns both certificate layers from one bind and one successful execution at one sequence | result-row attestation |
+| `GqlCertificate` | exact statement bytes, canonical `RelationBind`, snapshot sequence | parsed/bound plan, returned rows, transaction overlay, physical plan, runtime cost |
+| `GqlPlanCertificate` | every current `BoundPlan` field and snapshot sequence under transcript v2 | statement spelling, returned rows, transaction overlay, physical plan, runtime cost |
+| ordered-result digest | plan-certificate digest, snapshot, exact row count, row order, every returned `VId` | physical plan, cost, authorization, transaction overlay, portable artifact framing |
+| `execute_gql_with_result_digest[_at]` | returns all three layers from one bind and one successful execution | portable replay bundle or external-verifier protocol |
 
 The v2 plan transcript includes `BoundPlan::neq`, which the historical v1 transcript omitted. V1 verification is exposed only through an explicitly named legacy method; new certificates use v2.
 
+The ordered-result transcript uses the domain `fgdb:gql-ordered-result-digest:v1` and chains through the plan-certificate digest. Equal rows under different plans or snapshots therefore have different identities. Result evidence is available for text and already-bound execution on both `Database` and `EmbeddedReadView`, live or historical.
+
 Certificate digest comparisons use constant-work byte accumulation rather than direct early-exit equality.
 
-There is **no result certificate yet**. Returned rows sit beside the existing certificates but are not cryptographically committed by either one. There is also no portable canonical certificate serialization or durable replay bundle in the live source at this snapshot.
+There is still **no portable, self-describing execution artifact**. The result digest is returned beside its plan certificate. Persistence and external verification require a registered, versioned canonical format under the repository’s format constitution; an ad hoc serialization helper would be an unregistered durable format.
+
+The detailed contract is in `docs/GQL_RESULT_EVIDENCE.md`.
 
 ## Agent source-ownership map
-
-Use this map before editing the embedded/query vertical:
 
 | Concern | Canonical owner |
 |---|---|
 | durable database composition, open/reopen, writes, temporal graph reads, `EmbeddedReadView`, text GQL entrypoints, plan-only certificate entrypoints | `crates/fgdb/src/lib.rs` |
 | one shared exact-sequence GQL execution kernel; prepared-plan and read-session execution methods | `crates/fgdb/src/gql_exec.rs` |
-| input/plan certificate transcripts, verification, and aligned dual-certificate issuance | `crates/fgdb/src/gql_cert.rs` |
+| input/plan transcripts, ordered-result digest, verification, and aligned execution evidence | `crates/fgdb/src/gql_cert.rs` |
 | staged write overlay, read-set tracking, one-batch transaction commit | `crates/fgdb/src/write_txn.rs` |
 | parser, binder, `RelationBind`, `BoundPlan` | `crates/fgdb-gql/src/lib.rs` |
 | independent semantic oracle | `crates/fgdb-reference` |
 | crash/differential harness | `crates/fgdb-sim` |
 
-Do not add a second execution kernel, a second session type, or a certificate transcript in another crate merely to make a narrow test pass. Extend these owners or deliberately revise the ownership map in the same change.
+Do not add a second execution kernel, session type, or evidence transcript in another crate merely to make a narrow test pass. Extend these owners or deliberately revise the ownership map in the same change.
 
 ## Focused executable witnesses
-
-Useful starting points include:
 
 - `cargo run -p fgdb --example open_a_database`
 - `cargo run -p fgdb --example gql_time_travel`
 - `cargo run -p fgdb --example gql_certified_query`
 - `cargo run -p fgdb --example gql_prepared_read_session`
 - `cargo run -p fgdb --example gql_aligned_certificates`
+- `cargo run -p fgdb --example gql_result_digest`
 
 Focused integration suites for the newest embedded surface include:
 
@@ -119,8 +119,9 @@ Focused integration suites for the newest embedded surface include:
 - `crates/fgdb/tests/gql_plan_certificate_at.rs`
 - `crates/fgdb/tests/gql_plan_certificate_refusals.rs`
 - `crates/fgdb/tests/gql_aligned_certificates.rs`
+- `crates/fgdb/tests/gql_result_digest.rs`
 
-## Validation status at this snapshot
+## Validation status
 
 The repository-wide authority remains:
 
@@ -128,9 +129,9 @@ The repository-wide authority remains:
 bash scripts/check.sh
 ```
 
-This 2026-09-01 delta has been checked by full-file inspection, delimiter-aware Rust lexical validation, duplicate inherent-method ownership scans, call-site-to-method inventory checks, exact blob-identity checks against the committed GitHub files, and `git diff --check` in the recovered source capsule. A current Rust toolchain was not available in the connector execution environment, so this document does **not** claim a fresh compiled or whole-chain green verdict for the snapshot SHA above.
+For the ordered-result-evidence continuation, the committed blobs were checked for exact source identity, balanced Rust delimiters, method-name uniqueness, transcript-field order, and whitespace/diff integrity. The connector execution environment does not contain the repository-pinned Rust toolchain, so this status document does **not** claim a fresh compiled, Clippy, test, or whole-chain green verdict for the new commits.
 
-That distinction is intentional: checked-in tests describe the intended laws, but only an executed toolchain verdict proves they compile and pass.
+Checked-in tests describe the intended laws; only an executed pinned-toolchain verdict proves they compile and pass.
 
 ## Major remaining systems
 
@@ -138,7 +139,7 @@ The following remain incomplete or absent and must not be inferred from the boun
 
 - full session ownership, authorization, reattach/renew/expiry, and synchronous embedded facade;
 - parameterized prepared statements, typed rows/columns, cursor and result-stream lifecycle;
-- full transaction ownership and SSI, predicate/range conflict tracking, and merge ladder integration;
+- transaction prepared-plan execution, full transaction ownership and SSI, predicate/range conflict tracking, and merge-ladder integration;
 - full ISO GQL parsing, GLA lowering, Loom operators, optimizer, morsel-parallel execution, spill, and larger-than-memory query execution;
 - Strata tiers I/R/A and their production compaction/migration policy;
 - Ripple incremental views/subscriptions and recursion;
@@ -147,26 +148,24 @@ The following remain incomplete or absent and must not be inferred from the boun
 - Warden capabilities and secure views;
 - Fabric server protocols and Aegis operational control plane;
 - CLI, robot-mode NDJSON, Python bindings, packaging, signed releases, installer, and upgrade tooling;
-- result-row certificates, physical-plan/runtime-cost evidence, and portable durable replay artifacts.
+- registered portable execution artifacts, physical-plan evidence, and deterministic runtime-cost evidence.
 
 ## Dependency-ordered next work
 
-The most accretive near-term sequence is:
-
-1. make the current embedded prepared/session/evidence slice compile-clean under the pinned nightly and close its focused Beads only with executed evidence;
-2. introduce an owned prepared-query definition that keeps statement bytes, canonical bind, and `BoundPlan` inseparable, without pretending it is the final parameterized statement protocol;
-3. define and version a canonical result-evidence transcript before claiming row attestation or portable replay;
-4. extend the one-kernel discipline into the transaction overlay so text and prepared transaction reads bind once and share one body;
-5. then advance the larger W10 session/transaction contract rather than widening the bounded grammar opportunistically.
+1. Execute the pinned toolchain locally and fix any formatting, compiler, Clippy, or focused-test failures in the current prepared/session/evidence slice.
+2. Refactor `WriteTxn` so text, already-bound, and certified overlay reads bind once and share one body.
+3. Introduce an owned prepared-query definition that keeps statement bytes, canonical bind, and `BoundPlan` inseparable.
+4. Add typed statement parameters in the parser/binder and bind canonical parameter values into every evidence layer.
+5. Register a portable execution-evidence format before adding persistence or external-verifier APIs.
+6. Advance the larger W10 session/transaction contract rather than widening the bounded grammar opportunistically.
 
 ## Recent evolution
-
-The current embedded/evidence wave is anchored by:
 
 - `92e39e59` — one snapshot execution kernel for database and immutable read views;
 - `617bd687`, `2944eba8`, `07352733`, `b91031e8` — initial pinned sessions and reusable plans;
 - `74dc4fe4`, `b276e7ec`, `f4f40d61` — exact historical prepared execution and certification across sessions;
 - `01f28d39`, `4e05d862`, `219d0819`, `3862f9bf`, `f4a617c4` — externally verifiable v2 plan/input certificates and corrected no-claim language;
-- `051b90ba`, `950d7ebe`, `6c510378` — aligned input-plus-plan evidence from one successful execution.
+- `051b90ba`, `950d7ebe`, `6c510378` — aligned input-plus-plan evidence from one successful execution;
+- `1175b620`, `a3714204`, `11b84204`, `2619a17f`, `65d3d832` — exact ordered-row digest, historical replay laws, executable witness, and prepared-plan parity.
 
 Keep this file synchronized when a capability crosses from design or red-bar acceptance test into an inhabitable public path.
