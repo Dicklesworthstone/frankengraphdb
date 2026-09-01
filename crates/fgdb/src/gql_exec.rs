@@ -16,7 +16,8 @@
 //! source reach anything".
 
 use crate::{
-    Database, EdgeRecord, EmbeddedReadView, GqlError, GqlPlanCertificate, ReadError, VertexRow,
+    Database, EdgeRecord, EmbeddedReadView, GqlCertificate, GqlError, GqlPlanCertificate,
+    ReadError, VertexRow,
 };
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{LabelId, RelationId};
@@ -88,7 +89,21 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Execute an already prepared plan at one live frontier read.
     pub fn execute_prepared_gql(&self, plan: &BoundPlan) -> Result<Vec<VId>, GqlError> {
-        execute(plan, self).map_err(GqlError::Read)
+        let as_of = self.frontier().map_err(GqlError::Read)?;
+        self.execute_prepared_gql_at(plan, as_of)
+    }
+
+    /// Execute an already prepared plan at one exact historical sequence.
+    ///
+    /// This is the prepared-plan twin of [`Database::execute_gql_at`]: no
+    /// parsing or binding occurs, and the ordinary `_at` read path owns the
+    /// typed future-frontier and fenced-handle refusals.
+    pub fn execute_prepared_gql_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, GqlError> {
+        execute_at(plan, self, as_of).map_err(GqlError::Read)
     }
 
     /// Execute and certify an already prepared plan at the same live frontier.
@@ -99,9 +114,22 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         plan: &BoundPlan,
     ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
-        let snapshot = self.frontier().map_err(GqlError::Read)?;
-        let rows = execute_at(plan, self, snapshot).map_err(GqlError::Read)?;
-        Ok((rows, crate::gql_cert::certify(plan, snapshot)))
+        let as_of = self.frontier().map_err(GqlError::Read)?;
+        self.execute_prepared_gql_certified_at(plan, as_of)
+    }
+
+    /// Execute and plan-certify one prepared query at `as_of`.
+    ///
+    /// Rows are produced before evidence is minted. A refused read therefore
+    /// returns only its typed [`GqlError::Read`] and no certificate. On success,
+    /// execution and the certificate name the same caller-selected sequence.
+    pub fn execute_prepared_gql_certified_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+        let rows = self.execute_prepared_gql_at(plan, as_of)?;
+        Ok((rows, crate::gql_cert::certify(plan, as_of)))
     }
 
     /// Acquire an immutable read session pinned to the current published root.
@@ -127,7 +155,21 @@ impl EmbeddedReadView {
 
     /// Execute an already prepared plan at this view's pinned frontier.
     pub fn execute_prepared_gql(&self, plan: &BoundPlan) -> Result<Vec<VId>, GqlError> {
-        execute_at(plan, self, self.frontier()).map_err(GqlError::Read)
+        self.execute_prepared_gql_at(plan, self.frontier())
+    }
+
+    /// Execute an already prepared plan at a sequence retained by this view.
+    ///
+    /// The view's immutable generation remains the sole read source; `as_of`
+    /// may select older history within it but can never observe a later
+    /// generation. A sequence beyond the view's frontier is a typed
+    /// [`ReadError::BeyondFrontier`] refusal.
+    pub fn execute_prepared_gql_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, GqlError> {
+        execute_at(plan, self, as_of).map_err(GqlError::Read)
     }
 
     /// Parse, bind, and execute once at this view's pinned frontier.
@@ -136,8 +178,49 @@ impl EmbeddedReadView {
         statement: &str,
         bind: &RelationBind,
     ) -> Result<Vec<VId>, GqlError> {
+        self.execute_gql_at(statement, bind, self.frontier())
+    }
+
+    /// Parse, bind, and execute once at a sequence retained by this view.
+    pub fn execute_gql_at(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, GqlError> {
         let plan = bind_plan(statement, bind)?;
-        self.execute_prepared_gql(&plan)
+        self.execute_prepared_gql_at(&plan, as_of)
+    }
+
+    /// Execute and input-certify one statement at this view's frontier.
+    ///
+    /// This mirrors [`Database::execute_gql_certified`] while making the
+    /// session's immutable frontier explicit. The certificate binds statement
+    /// and canonical bind inputs; it does not attest result rows.
+    pub fn execute_gql_certified(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
+        self.execute_gql_certified_at(statement, bind, self.frontier())
+    }
+
+    /// Execute and input-certify one statement at a retained sequence.
+    pub fn execute_gql_certified_at(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
+        let rows = self.execute_gql_at(statement, bind, as_of)?;
+        Ok((
+            rows,
+            GqlCertificate {
+                snapshot_seq: as_of,
+                statement_digest: crate::gql_cert::digest_statement(statement),
+                bind_digest: crate::gql_cert::digest_bind(bind),
+            },
+        ))
     }
 
     /// Execute and plan-certify at this view's pinned frontier.
@@ -148,8 +231,17 @@ impl EmbeddedReadView {
         &self,
         plan: &BoundPlan,
     ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
-        let rows = self.execute_prepared_gql(plan)?;
-        Ok((rows, crate::gql_cert::certify(plan, self.frontier())))
+        self.execute_prepared_gql_certified_at(plan, self.frontier())
+    }
+
+    /// Execute and plan-certify at a sequence retained by this view.
+    pub fn execute_prepared_gql_certified_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+        let rows = self.execute_prepared_gql_at(plan, as_of)?;
+        Ok((rows, crate::gql_cert::certify(plan, as_of)))
     }
 
     /// Certify one prepared plan at this view's pinned frontier without running it.
