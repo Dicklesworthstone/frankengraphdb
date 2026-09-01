@@ -1,9 +1,11 @@
 //! **A real `main()` with pinned read sessions and one reusable GQL plan**.
 //!
 //! One `BoundPlan` is executed against two immutable `EmbeddedReadView`
-//! sessions. The first session keeps answering from its original frontier
-//! after the writer commits a successor generation; the same prepared plan
-//! executes against the new session without reparsing or rebinding.
+//! sessions and one explicit historical sequence. The first session keeps
+//! answering from its original frontier after the writer commits a successor
+//! generation; the same prepared plan executes against the new session without
+//! reparsing or rebinding, and its `_at` face reproduces the old answer with a
+//! certificate naming the exact historical sequence.
 //!
 //! ```text
 //! cargo run --example gql_prepared_read_session
@@ -61,9 +63,16 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let current = db.read_session()?;
         let (current_rows, current_certificate) =
             current.execute_prepared_gql_certified(&prepared)?;
+        let (replayed_rows, replayed_certificate) =
+            current.execute_prepared_gql_certified_at(&prepared, first_seq)?;
+        let (input_rows, input_certificate) = old.execute_gql_certified(QUERY, &bind)?;
 
         assert_eq!(old.execute_prepared_gql(&prepared)?, vec![VId(2)]);
         assert_eq!(current_rows, vec![VId(2), VId(3)]);
+        assert_eq!(replayed_rows, old_rows);
+        assert_eq!(replayed_certificate, old_certificate);
+        assert_eq!(input_rows, old_rows);
+        assert!(input_certificate.verifies_at(QUERY, &bind, first_seq));
         assert_eq!(old_certificate.snapshot_seq, first_seq);
         assert_eq!(current_certificate.snapshot_seq, successor_seq);
         assert!(current_certificate.verifies_at(&prepared, successor_seq));
@@ -71,7 +80,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
         println!("old session {first_seq:?}: {old_rows:?}");
         println!("new session {successor_seq:?}: {current_rows:?}");
-        println!("OK: one prepared plan executed at two immutable frontiers");
+        println!("historical replay {first_seq:?}: {replayed_rows:?}");
+        println!("OK: one prepared plan crossed live, pinned, and historical reads");
         Ok(())
     })
 }
