@@ -15,10 +15,12 @@
 //! either serves the source projection since the kernel only asks "did this
 //! source reach anything".
 
-use crate::{Database, EdgeRecord, EmbeddedReadView, ReadError, VertexRow};
+use crate::{
+    Database, EdgeRecord, EmbeddedReadView, GqlError, GqlPlanCertificate, ReadError, VertexRow,
+};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
+use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
 use fgdb_types::{CanonicalScalar, CommitSeq, VId};
 use std::collections::BTreeMap;
 
@@ -60,6 +62,100 @@ impl GqlSnapshotReader for EmbeddedReadView {
 
     fn gql_edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
         EmbeddedReadView::edges_at(self, as_of)
+    }
+}
+
+fn bind_plan(statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
+    bind.bind(statement).map_err(|error| match error {
+        fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
+        unbound => GqlError::Bind(unbound),
+    })
+}
+
+impl<V: Vfs + Clone> Database<V> {
+    /// Parse and bind one reusable immutable plan for the bounded GQL slice.
+    ///
+    /// The returned [`BoundPlan`] is the executor-ready prepared form: later
+    /// executions do not parse or bind again. This is deliberately a plan API,
+    /// not W10's final parameterized `PreparedStatement` protocol.
+    pub fn prepare_gql_plan(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<BoundPlan, GqlError> {
+        bind_plan(statement, bind)
+    }
+
+    /// Execute an already prepared plan at one live frontier read.
+    pub fn execute_prepared_gql(&self, plan: &BoundPlan) -> Result<Vec<VId>, GqlError> {
+        execute(plan, self).map_err(GqlError::Read)
+    }
+
+    /// Execute and certify an already prepared plan at the same live frontier.
+    ///
+    /// The certificate binds the complete current `BoundPlan` transcript and
+    /// snapshot. It does not attest result rows or runtime cost.
+    pub fn execute_prepared_gql_certified(
+        &self,
+        plan: &BoundPlan,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+        let snapshot = self.frontier().map_err(GqlError::Read)?;
+        let rows = execute_at(plan, self, snapshot).map_err(GqlError::Read)?;
+        Ok((rows, crate::gql_cert::certify(plan, snapshot)))
+    }
+
+    /// Acquire an immutable read session pinned to the current published root.
+    ///
+    /// The returned [`EmbeddedReadView`] owns its decoded generation and can be
+    /// cloned or retained across later writes. It is a read-only embedded
+    /// session subset, not an authorization, transaction, cursor, or reattach
+    /// protocol.
+    pub fn read_session(&self) -> Result<EmbeddedReadView, ReadError> {
+        self.pinned_read_view()
+    }
+}
+
+impl EmbeddedReadView {
+    /// Parse and bind one reusable immutable plan for this read session.
+    pub fn prepare_gql_plan(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<BoundPlan, GqlError> {
+        bind_plan(statement, bind)
+    }
+
+    /// Execute an already prepared plan at this view's pinned frontier.
+    pub fn execute_prepared_gql(&self, plan: &BoundPlan) -> Result<Vec<VId>, GqlError> {
+        execute_at(plan, self, self.frontier()).map_err(GqlError::Read)
+    }
+
+    /// Parse, bind, and execute once at this view's pinned frontier.
+    pub fn execute_gql(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<Vec<VId>, GqlError> {
+        let plan = bind_plan(statement, bind)?;
+        self.execute_prepared_gql(&plan)
+    }
+
+    /// Execute and plan-certify at this view's pinned frontier.
+    ///
+    /// Reusing the same plan across two sessions therefore preserves plan
+    /// identity while producing different snapshot-bound certificates.
+    pub fn execute_prepared_gql_certified(
+        &self,
+        plan: &BoundPlan,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+        let rows = self.execute_prepared_gql(plan)?;
+        Ok((rows, crate::gql_cert::certify(plan, self.frontier())))
+    }
+
+    /// Certify one prepared plan at this view's pinned frontier without running it.
+    #[must_use]
+    pub fn prepared_gql_plan_certificate(&self, plan: &BoundPlan) -> GqlPlanCertificate {
+        crate::gql_cert::certify(plan, self.frontier())
     }
 }
 
