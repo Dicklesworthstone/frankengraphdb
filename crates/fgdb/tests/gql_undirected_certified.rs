@@ -39,6 +39,18 @@ fn undirected_certified_rows_and_digest_match_the_bound_plan() {
 
         let bind = RelationBind::new().with_relation("R", R);
         let txn = db.begin(&txn_cx).expect("transaction begins");
+        let undirected_plan = bind
+            .bind(UNDIRECTED_B)
+            .expect("undirected statement binds once");
+        let prepared_rows = txn
+            .execute_prepared_gql(&db, &undirected_plan)
+            .expect("prepared undirected MATCH executes");
+        let (prepared_certified_rows, prepared_certificate) = txn
+            .execute_prepared_gql_certified(&db, &undirected_plan)
+            .expect("prepared undirected MATCH certifies");
+        let prepared_plan_certificate = txn
+            .prepared_gql_plan_certificate(&undirected_plan)
+            .expect("prepared plan certifies");
         let (undirected_rows, undirected_certificate) = txn
             .execute_gql_certified(&db, UNDIRECTED_B, &bind)
             .expect("certified undirected MATCH executes");
@@ -53,6 +65,10 @@ fn undirected_certified_rows_and_digest_match_the_bound_plan() {
             .expect("certified directed MATCH executes");
 
         assert_eq!(undirected_rows, vec![VId(1), VId(2), VId(3)]);
+        assert_eq!(prepared_rows, undirected_rows);
+        assert_eq!(prepared_certified_rows, undirected_rows);
+        assert_eq!(prepared_certificate, undirected_certificate);
+        assert_eq!(prepared_plan_certificate, undirected_certificate);
         assert_eq!(undirected_certificate.digest, plan_certificate.digest);
         assert_eq!(repeat_rows, undirected_rows);
         assert_eq!(repeat_certificate, undirected_certificate);
