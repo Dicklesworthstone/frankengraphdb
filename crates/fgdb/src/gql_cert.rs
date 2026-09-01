@@ -198,6 +198,30 @@ impl<V: Vfs + Clone> Database<V> {
         let plan = self.prepare_gql_plan(statement, bind)?;
         execute_with_result_digest_at(self, statement, bind, &plan, as_of)
     }
+
+    /// Execute one already-bound plan at the live frontier and bind its exact
+    /// ordered rows to the plan certificate returned by the same execution.
+    pub fn execute_prepared_gql_with_result_digest(
+        &self,
+        plan: &BoundPlan,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate, Digest), GqlError> {
+        let (rows, plan_certificate) = self.execute_prepared_gql_certified(plan)?;
+        let result_digest = plan_certificate.result_digest(&rows);
+        Ok((rows, plan_certificate, result_digest))
+    }
+
+    /// Execute one already-bound plan at `as_of` and bind its exact ordered
+    /// rows to the plan certificate returned by that historical execution.
+    pub fn execute_prepared_gql_with_result_digest_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate, Digest), GqlError> {
+        let (rows, plan_certificate) =
+            self.execute_prepared_gql_certified_at(plan, as_of)?;
+        let result_digest = plan_certificate.result_digest(&rows);
+        Ok((rows, plan_certificate, result_digest))
+    }
 }
 
 impl EmbeddedReadView {
@@ -243,6 +267,30 @@ impl EmbeddedReadView {
     ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate, Digest), GqlError> {
         let plan = self.prepare_gql_plan(statement, bind)?;
         execute_with_result_digest_at(self, statement, bind, &plan, as_of)
+    }
+
+    /// Execute one already-bound plan at this view's pinned frontier and bind
+    /// its exact ordered rows to the plan certificate from that execution.
+    pub fn execute_prepared_gql_with_result_digest(
+        &self,
+        plan: &BoundPlan,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate, Digest), GqlError> {
+        let (rows, plan_certificate) = self.execute_prepared_gql_certified(plan)?;
+        let result_digest = plan_certificate.result_digest(&rows);
+        Ok((rows, plan_certificate, result_digest))
+    }
+
+    /// Execute one already-bound plan at a retained sequence and bind its
+    /// exact ordered rows to the same historical plan certificate.
+    pub fn execute_prepared_gql_with_result_digest_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate, Digest), GqlError> {
+        let (rows, plan_certificate) =
+            self.execute_prepared_gql_certified_at(plan, as_of)?;
+        let result_digest = plan_certificate.result_digest(&rows);
+        Ok((rows, plan_certificate, result_digest))
     }
 }
 
