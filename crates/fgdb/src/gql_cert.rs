@@ -2,18 +2,20 @@
 //!
 //! `GqlCertificate` binds the exact statement bytes, canonical relation bind,
 //! and MVCC snapshot used by the public execution API. `GqlPlanCertificate`
-//! separately binds the executor-ready `BoundPlan` and snapshot. Neither type
-//! claims to attest result rows, runtime cost, or an operator tree.
+//! separately binds the executor-ready `BoundPlan` and snapshot. Exact ordered
+//! result rows are bound by a domain-separated digest derived from the plan
+//! certificate; no type here claims to attest runtime cost or an operator tree.
 
 use crate::{Database, EmbeddedReadView, GqlError};
 use asupersync::fs::Vfs;
 use fgdb_crypto::{Digest, Hasher, hash};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
-use fgdb_types::CommitSeq;
+use fgdb_types::{CommitSeq, VId};
 
 const GQL_PLAN_CERTIFICATE_DOMAIN_V1: &[u8] = b"fgdb:gql-bound-plan-certificate:v1";
 const GQL_PLAN_CERTIFICATE_DOMAIN_V2: &[u8] = b"fgdb:gql-bound-plan-certificate:v2";
+const GQL_RESULT_DIGEST_DOMAIN_V1: &[u8] = b"fgdb:gql-ordered-result-digest:v1";
 
 /// Replay evidence for the public statement execution surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +83,23 @@ impl GqlPlanCertificate {
         let expected = certify_v1_legacy(plan, self.snapshot_seq);
         self.snapshot_seq == expected.snapshot_seq && digest_eq(self.digest, expected.digest)
     }
+
+    /// Bind one exact ordered result to this plan certificate and snapshot.
+    ///
+    /// The transcript contains this certificate's digest, its snapshot, the
+    /// exact row count, and every returned vertex identifier in order. It is
+    /// deliberately a digest layer rather than a portable artifact format.
+    #[must_use]
+    pub fn result_digest(&self, rows: &[VId]) -> Digest {
+        digest_result(self, rows)
+    }
+
+    /// Verify one exact ordered result digest in constant work over the final
+    /// digest comparison.
+    #[must_use]
+    pub fn verifies_result_digest(&self, rows: &[VId], result_digest: Digest) -> bool {
+        digest_eq(self.result_digest(rows), result_digest)
+    }
 }
 
 /// Certify every field of the executor-ready plan and its MVCC snapshot.
@@ -98,7 +117,7 @@ fn execute_with_certificates_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
     bind: &RelationBind,
     plan: &BoundPlan,
     as_of: CommitSeq,
-) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
     let rows = crate::gql_exec::execute_at(plan, reader, as_of).map_err(GqlError::Read)?;
     let input_certificate = GqlCertificate {
         snapshot_seq: as_of,
@@ -107,6 +126,19 @@ fn execute_with_certificates_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
     };
     let plan_certificate = certify(plan, as_of);
     Ok((rows, input_certificate, plan_certificate))
+}
+
+fn execute_with_result_digest_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
+    reader: &R,
+    statement: &str,
+    bind: &RelationBind,
+    plan: &BoundPlan,
+    as_of: CommitSeq,
+) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate, Digest), GqlError> {
+    let (rows, input_certificate, plan_certificate) =
+        execute_with_certificates_at(reader, statement, bind, plan, as_of)?;
+    let result_digest = plan_certificate.result_digest(&rows);
+    Ok((rows, input_certificate, plan_certificate, result_digest))
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -122,7 +154,7 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         statement: &str,
         bind: &RelationBind,
-    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
         let plan = self.prepare_gql_plan(statement, bind)?;
         let as_of = self.frontier().map_err(GqlError::Read)?;
         execute_with_certificates_at(self, statement, bind, &plan, as_of)
@@ -138,9 +170,33 @@ impl<V: Vfs + Clone> Database<V> {
         statement: &str,
         bind: &RelationBind,
         as_of: CommitSeq,
-    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
         let plan = self.prepare_gql_plan(statement, bind)?;
         execute_with_certificates_at(self, statement, bind, &plan, as_of)
+    }
+
+    /// Execute once and return input, plan, and exact ordered-result evidence
+    /// aligned to the same live frontier.
+    pub fn execute_gql_with_result_digest(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate, Digest), GqlError> {
+        let plan = self.prepare_gql_plan(statement, bind)?;
+        let as_of = self.frontier().map_err(GqlError::Read)?;
+        execute_with_result_digest_at(self, statement, bind, &plan, as_of)
+    }
+
+    /// Execute once at `as_of` and bind the exact ordered rows to the plan
+    /// certificate minted for that same successful read.
+    pub fn execute_gql_with_result_digest_at(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate, Digest), GqlError> {
+        let plan = self.prepare_gql_plan(statement, bind)?;
+        execute_with_result_digest_at(self, statement, bind, &plan, as_of)
     }
 }
 
@@ -151,7 +207,7 @@ impl EmbeddedReadView {
         &self,
         statement: &str,
         bind: &RelationBind,
-    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
         self.execute_gql_with_certificates_at(statement, bind, self.frontier())
     }
 
@@ -162,9 +218,31 @@ impl EmbeddedReadView {
         statement: &str,
         bind: &RelationBind,
         as_of: CommitSeq,
-    ) -> Result<(Vec<fgdb_types::VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate), GqlError> {
         let plan = self.prepare_gql_plan(statement, bind)?;
         execute_with_certificates_at(self, statement, bind, &plan, as_of)
+    }
+
+    /// Execute once and return input, plan, and exact ordered-result evidence
+    /// aligned to this view's pinned frontier.
+    pub fn execute_gql_with_result_digest(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate, Digest), GqlError> {
+        self.execute_gql_with_result_digest_at(statement, bind, self.frontier())
+    }
+
+    /// Execute once at a retained sequence and bind the exact ordered rows to
+    /// the plan certificate minted for that same read.
+    pub fn execute_gql_with_result_digest_at(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<(Vec<VId>, GqlCertificate, GqlPlanCertificate, Digest), GqlError> {
+        let plan = self.prepare_gql_plan(statement, bind)?;
+        execute_with_result_digest_at(self, statement, bind, &plan, as_of)
     }
 }
 
@@ -226,6 +304,18 @@ fn certify_with_domain(
         digest: hasher.finalize(),
         snapshot_seq,
     }
+}
+
+fn digest_result(plan_certificate: &GqlPlanCertificate, rows: &[VId]) -> Digest {
+    let mut hasher = Hasher::new();
+    hasher.update(GQL_RESULT_DIGEST_DOMAIN_V1);
+    hasher.update(&plan_certificate.digest.0);
+    hasher.update(&plan_certificate.snapshot_seq.0.to_be_bytes());
+    hasher.update(&(rows.len() as u64).to_be_bytes());
+    for row in rows {
+        hasher.update(&row.0.to_be_bytes());
+    }
+    hasher.finalize()
 }
 
 fn digest_eq(left: Digest, right: Digest) -> bool {
@@ -337,7 +427,7 @@ mod tests {
     };
     use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
-    use fgdb_types::CommitSeq;
+    use fgdb_types::{CommitSeq, VId};
 
     fn plan(relation: u64) -> BoundPlan {
         BoundPlan {
@@ -505,6 +595,34 @@ mod tests {
             "MATCH (a)-[:KNOWS]->(b) RETURN b",
             &other_bind
         ));
+    }
+
+    #[test]
+    fn result_digest_binds_plan_snapshot_count_order_and_every_row() {
+        let base = plan(7);
+        let certificate = certify(&base, CommitSeq(11));
+        let rows = [VId(2), VId(9)];
+        let digest = certificate.result_digest(&rows);
+
+        assert!(certificate.verifies_result_digest(&rows, digest));
+        assert!(!certificate.verifies_result_digest(&[VId(9), VId(2)], digest));
+        assert!(!certificate.verifies_result_digest(&[VId(2), VId(8)], digest));
+        assert!(!certificate.verifies_result_digest(&[VId(2)], digest));
+
+        let other_plan = certify(&plan(8), CommitSeq(11));
+        assert!(!other_plan.verifies_result_digest(&rows, digest));
+        let other_snapshot = certify(&base, CommitSeq(12));
+        assert!(!other_snapshot.verifies_result_digest(&rows, digest));
+    }
+
+    #[test]
+    fn empty_result_digest_is_stable_and_not_a_nonempty_result() {
+        let certificate = certify(&plan(7), CommitSeq(11));
+        let first = certificate.result_digest(&[]);
+        let second = certificate.result_digest(&[]);
+        assert_eq!(first, second);
+        assert!(certificate.verifies_result_digest(&[], first));
+        assert!(!certificate.verifies_result_digest(&[VId(0)], first));
     }
 
     #[test]
