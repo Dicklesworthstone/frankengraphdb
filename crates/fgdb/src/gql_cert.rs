@@ -82,43 +82,199 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
             update_string(&mut hasher, right);
         }
     }
-    match plan.neq {
+    match plan.src_prop {
         None => {
             hasher.update(&[0]);
         }
-        Some((ref left, ref right)) => {
+        Some((key, value)) => {
             hasher.update(&[1]);
-            update_string(&mut hasher, left);
-            update_string(&mut hasher, right);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
         }
     }
-    update_prop(&mut hasher, plan.src_prop);
-    update_prop(&mut hasher, plan.src_prop_ne);
-    update_prop(&mut hasher, plan.src_prop_gt);
-    update_prop(&mut hasher, plan.src_prop_lt);
-    update_prop(&mut hasher, plan.src_prop_ge);
-    update_prop(&mut hasher, plan.src_prop_le);
-    update_prop(&mut hasher, plan.dst_prop);
-    update_prop(&mut hasher, plan.dst_prop_ne);
-    update_prop(&mut hasher, plan.dst_prop_gt);
-    update_prop(&mut hasher, plan.dst_prop_lt);
-    update_prop(&mut hasher, plan.dst_prop_ge);
-    update_prop(&mut hasher, plan.dst_prop_le);
-    update_prop(&mut hasher, plan.hop2_dst_prop);
-    update_prop(&mut hasher, plan.hop2_dst_prop_ne);
-    update_prop(&mut hasher, plan.hop2_dst_prop_gt);
-    update_prop(&mut hasher, plan.hop2_dst_prop_lt);
-    update_prop(&mut hasher, plan.hop2_dst_prop_ge);
-    update_prop(&mut hasher, plan.hop2_dst_prop_le);
+    match plan.src_prop_ne {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.src_prop_gt {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.src_prop_lt {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.src_prop_ge {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.src_prop_le {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.dst_prop {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.dst_prop_ne {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.dst_prop_gt {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.dst_prop_lt {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.dst_prop_ge {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.dst_prop_le {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.hop2_dst_prop {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.hop2_dst_prop_ne {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.hop2_dst_prop_gt {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.hop2_dst_prop_lt {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.hop2_dst_prop_ge {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    match plan.hop2_dst_prop_le {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some((key, value)) => {
+            hasher.update(&[1]);
+            hasher.update(&key.0.to_be_bytes());
+            hasher.update(&value.to_be_bytes());
+        }
+    }
     match plan.limit {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some(limit) => {
             hasher.update(&[1]);
             hasher.update(&limit.to_be_bytes());
         }
     }
     match plan.skip {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some(skip) => {
             hasher.update(&[1]);
             hasher.update(&skip.to_be_bytes());
@@ -129,17 +285,6 @@ pub fn certify(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate 
     GqlPlanCertificate {
         digest: hasher.finalize(),
         snapshot_seq,
-    }
-}
-
-fn update_prop(hasher: &mut Hasher, prop: Option<(fgdb_delta_types::PropertyKeyId, i64)>) {
-    match prop {
-        None => hasher.update(&[0]),
-        Some((key, value)) => {
-            hasher.update(&[1]);
-            hasher.update(&key.0.to_be_bytes());
-            hasher.update(&value.to_be_bytes());
-        }
     }
 }
 
@@ -171,4 +316,218 @@ pub fn digest_statement(src: &str) -> Digest {
 pub fn digest_bind(bind: &RelationBind) -> Digest {
     let canonical = bind.canonical_bytes();
     hash(&canonical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GqlPlanCertificate, certify, direction_tag, projection_tag};
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_gql::{BoundPlan, EdgeDirection, ReturnProjection};
+    use fgdb_types::CommitSeq;
+
+    fn plan(relation: u64) -> BoundPlan {
+        BoundPlan {
+            relation: Some(RelationId(relation)),
+            src_var: "a".to_owned(),
+            dst_var: "b".to_owned(),
+            src_label: None,
+            dst_label: None,
+            via_var: String::new(),
+            hop2_relation: None,
+            hop2_dst_var: None,
+            projection: ReturnProjection::Destination,
+            direction: EdgeDirection::Outgoing,
+            neq: None,
+            eq: None,
+            src_prop: None,
+            src_prop_ne: None,
+            src_prop_gt: None,
+            src_prop_lt: None,
+            src_prop_ge: None,
+            src_prop_le: None,
+            dst_prop: None,
+            dst_prop_ne: None,
+            dst_prop_gt: None,
+            dst_prop_lt: None,
+            dst_prop_ge: None,
+            dst_prop_le: None,
+            limit: None,
+            skip: None,
+            hop2_dst_prop: None,
+            hop2_dst_prop_ne: None,
+            hop2_dst_prop_gt: None,
+            hop2_dst_prop_lt: None,
+            hop2_dst_prop_ge: None,
+            hop2_dst_prop_le: None,
+        }
+    }
+
+    #[test]
+    fn same_plan_and_snapshot_have_equal_certificates() {
+        let plan = plan(7);
+        let first = certify(&plan, CommitSeq(11));
+        let second = certify(&plan, CommitSeq(11));
+
+        assert_eq!(first, second);
+        let _: GqlPlanCertificate = first;
+    }
+
+    #[test]
+    fn snapshot_sequence_changes_digest() {
+        let plan = plan(7);
+
+        assert_ne!(
+            certify(&plan, CommitSeq(11)).digest,
+            certify(&plan, CommitSeq(12)).digest
+        );
+    }
+
+    #[test]
+    fn relation_id_changes_digest() {
+        assert_ne!(
+            certify(&plan(7), CommitSeq(11)).digest,
+            certify(&plan(8), CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn return_projection_changes_digest() {
+        let destination = plan(7);
+        let mut source = destination.clone();
+        source.projection = ReturnProjection::Source;
+
+        assert_ne!(
+            certify(&destination, CommitSeq(11)).digest,
+            certify(&source, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn destination_label_changes_digest() {
+        let unlabeled = plan(7);
+        let mut labeled = unlabeled.clone();
+        labeled.dst_label = Some(fgdb_delta_types::LabelId(3));
+
+        assert_ne!(
+            certify(&labeled, CommitSeq(11)).digest,
+            certify(&unlabeled, CommitSeq(11)).digest,
+            "a destination label filter changes which rows are returned, \
+             so the certificate must not collide with the unlabeled plan"
+        );
+    }
+
+    #[test]
+    fn return_projection_tags_are_stable() {
+        assert_eq!(projection_tag(ReturnProjection::Destination), 0);
+        assert_eq!(projection_tag(ReturnProjection::Source), 1);
+        assert_eq!(projection_tag(ReturnProjection::Hop2Destination), 2);
+    }
+
+    #[test]
+    fn direction_tags_are_stable_and_change_the_digest() {
+        assert_eq!(direction_tag(EdgeDirection::Outgoing), 0);
+        assert_eq!(direction_tag(EdgeDirection::Incoming), 1);
+        assert_eq!(direction_tag(EdgeDirection::Undirected), 2);
+
+        let outgoing = plan(7);
+        let mut incoming = outgoing.clone();
+        incoming.direction = EdgeDirection::Incoming;
+        let mut undirected = outgoing.clone();
+        undirected.direction = EdgeDirection::Undirected;
+
+        assert_ne!(
+            certify(&outgoing, CommitSeq(11)).digest,
+            certify(&incoming, CommitSeq(11)).digest
+        );
+        assert_ne!(
+            certify(&outgoing, CommitSeq(11)).digest,
+            certify(&undirected, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn second_hop_changes_digest() {
+        let one_hop = plan(7);
+        let mut two_hop = one_hop.clone();
+        two_hop.via_var = "b".to_owned();
+        two_hop.hop2_relation = Some(RelationId(8));
+        two_hop.hop2_dst_var = Some("c".to_owned());
+
+        assert_ne!(
+            certify(&one_hop, CommitSeq(11)).digest,
+            certify(&two_hop, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn hop2_destination_property_changes_digest() {
+        let unfiltered = plan(7);
+        let mut filtered = unfiltered.clone();
+        filtered.hop2_dst_prop = Some((PropertyKeyId(9), 1));
+
+        assert_ne!(
+            certify(&unfiltered, CommitSeq(11)).digest,
+            certify(&filtered, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn hop2_destination_property_inequality_changes_digest() {
+        let unfiltered = plan(7);
+        let mut filtered = unfiltered.clone();
+        filtered.hop2_dst_prop_ne = Some((PropertyKeyId(9), 1));
+
+        assert_ne!(
+            certify(&unfiltered, CommitSeq(11)).digest,
+            certify(&filtered, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn hop2_destination_property_gt_changes_digest() {
+        let unfiltered = plan(7);
+        let mut filtered = unfiltered.clone();
+        filtered.hop2_dst_prop_gt = Some((PropertyKeyId(9), 1));
+
+        assert_ne!(
+            certify(&unfiltered, CommitSeq(11)).digest,
+            certify(&filtered, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn hop2_destination_property_ge_changes_digest() {
+        let unfiltered = plan(7);
+        let mut filtered = unfiltered.clone();
+        filtered.hop2_dst_prop_ge = Some((PropertyKeyId(9), 1));
+
+        assert_ne!(
+            certify(&unfiltered, CommitSeq(11)).digest,
+            certify(&filtered, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn hop2_destination_property_le_changes_digest() {
+        let unfiltered = plan(7);
+        let mut filtered = unfiltered.clone();
+        filtered.hop2_dst_prop_le = Some((PropertyKeyId(9), 1));
+
+        assert_ne!(
+            certify(&unfiltered, CommitSeq(11)).digest,
+            certify(&filtered, CommitSeq(11)).digest
+        );
+    }
+
+    #[test]
+    fn second_hop_projection_changes_digest() {
+        let destination = plan(7);
+        let mut hop2_destination = destination.clone();
+        hop2_destination.projection = ReturnProjection::Hop2Destination;
+
+        assert_ne!(
+            certify(&destination, CommitSeq(11)).digest,
+            certify(&hop2_destination, CommitSeq(11)).digest
+        );
+    }
 }
